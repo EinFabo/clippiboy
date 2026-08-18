@@ -258,6 +258,14 @@ mod win {
     /// Rückstand gegenüber dem Bild und wird verworfen.
     const MAX_AUDIO_BACKLOG_MS: usize = 40;
 
+    /// Wie viel Ton ein normaler Pumpendurchlauf höchstens nachschiebt (200 ms).
+    const AUDIO_CHUNK_FRAMES: u64 = SAMPLE_RATE as u64 / 5;
+
+    /// Deckel fürs Auffüllen kurz vor dem Versiegeln. Steht mehr aus, ist die
+    /// Aufnahme ohnehin aus dem Tritt — und im Ringpuffer liegt längst nur
+    /// noch Stille.
+    const AUDIO_FLUSH_MAX_FRAMES: u64 = 5 * SAMPLE_RATE as u64;
+
     pub struct Flags {
         pub slot: Arc<EncoderSlot>,
     }
@@ -282,19 +290,24 @@ mod win {
         encoder: Mutex<Option<VideoEncoder>>,
         segment: Mutex<SegmentState>,
         next_encoder: Mutex<Option<Receiver<Result<VideoEncoder, String>>>>,
-        /// Bereits gelieferte Audio-Frames über alle Segmente hinweg. Diese
-        /// Zahl ist die Autorität — dadurch bleibt die Gesamtlänge des Tons
-        /// exakt an der Videozeit, auch wenn ein Segmentwechsel mitten in einen
-        /// Tonblock fällt.
-        audio_frames_sent: AtomicU64,
-        /// Zeitpunkt des ersten Bildes, in Millisekunden seit `start`.
+        /// Bereits an den *laufenden* Encoder gelieferte Audio-Frames.
         ///
-        /// Der Encoder stempelt Video relativ zum ersten Bild, Ton dagegen
-        /// relativ zum ersten Tonblock. Bis das erste Bild eintrifft, ist der
-        /// Capture-Stack aber schon einige hundert Millisekunden am Aufbauen.
-        /// Ohne gemeinsamen Nullpunkt wäre der Ton genau um diese Zeit voraus.
-        video_start_ms: AtomicU64,
-        video_started: AtomicBool,
+        /// Jeder Segment-Encoder stempelt seinen Ton als reinen Sample-Zähler
+        /// ab null, sein Bild dagegen relativ zum ersten Bild, das er bekommen
+        /// hat. Beide Nullpunkte müssen deshalb je Segment zusammenfallen. Mit
+        /// einem über die ganze Aufnahme durchlaufenden Zähler taten sie das
+        /// nicht: In jeder Segmentdatei stand der Ton anders zur Uhr als das
+        /// Bild, und beim Aneinanderhängen wurde daraus eine Lücke.
+        segment_audio_frames: AtomicU64,
+        /// Zeitpunkt des ersten Bildes im laufenden Segment, in Millisekunden
+        /// seit `start` — der gemeinsame Nullpunkt von Bild und Ton für dieses
+        /// Segment.
+        segment_video_start_ms: AtomicU64,
+        /// Zeitpunkt des zuletzt angenommenen Bildes im laufenden Segment. Bis
+        /// dorthin wird der Ton vor dem Versiegeln aufgefüllt, damit die
+        /// Segmentdatei in beiden Spuren gleich weit reicht.
+        segment_last_frame_ms: AtomicU64,
+        segment_video_started: AtomicBool,
         running: AtomicBool,
     }
 
@@ -361,9 +374,10 @@ mod win {
                     start_ms: 0,
                 }),
                 next_encoder: Mutex::new(Some(next)),
-                audio_frames_sent: AtomicU64::new(0),
-                video_start_ms: AtomicU64::new(0),
-                video_started: AtomicBool::new(false),
+                segment_audio_frames: AtomicU64::new(0),
+                segment_video_start_ms: AtomicU64::new(0),
+                segment_last_frame_ms: AtomicU64::new(0),
+                segment_video_started: AtomicBool::new(false),
                 running: AtomicBool::new(true),
             }))
         }
@@ -373,12 +387,10 @@ mod win {
         }
 
         fn send_frame(&self, frame: &Frame) {
-            // Das erste Bild setzt den gemeinsamen Nullpunkt für Bild und Ton.
-            if !self.video_started.load(Ordering::Acquire) {
-                self.video_start_ms
-                    .store(self.now_ms(), Ordering::Relaxed);
-                self.video_started.store(true, Ordering::Release);
-            }
+            let now_ms = self.now_ms();
+            // Alles unter der Encoder-Sperre: `rotate` tauscht darunter den
+            // Encoder und setzt den Nullpunkt zurück. Ohne das könnte ein Bild
+            // den Nullpunkt des einen Segments setzen und im anderen landen.
             let mut guard = self.encoder.lock();
             let Some(encoder) = guard.as_mut() else {
                 self.shared.dropped.fetch_add(1, Ordering::Relaxed);
@@ -387,33 +399,29 @@ mod win {
             if let Err(err) = encoder.send_frame(frame) {
                 self.shared.dropped.fetch_add(1, Ordering::Relaxed);
                 *self.shared.error.lock() = Some(format!("Encoder: {err}"));
-            } else {
-                self.shared.frames.fetch_add(1, Ordering::Relaxed);
-                self.shared.segment_frames.fetch_add(1, Ordering::Relaxed);
+                return;
             }
+            // Das erste angenommene Bild ist der Nullpunkt des Segments: Der
+            // Encoder stempelt sein Video relativ dazu, und ab hier — keine
+            // Millisekunde früher — wird Ton eingespeist.
+            if !self.segment_video_started.load(Ordering::Relaxed) {
+                self.segment_video_start_ms.store(now_ms, Ordering::Relaxed);
+                self.segment_video_started.store(true, Ordering::Relaxed);
+            }
+            self.segment_last_frame_ms.store(now_ms, Ordering::Relaxed);
+            self.shared.frames.fetch_add(1, Ordering::Relaxed);
+            self.shared.segment_frames.fetch_add(1, Ordering::Relaxed);
         }
 
         /// Aktuelles Segment abschließen und das nächste beginnen.
         fn rotate(&self, now_ms: u64) {
-            let Some(encoder) = self.encoder.lock().take() else {
-                return;
-            };
-
-            let (finished_path, finished_index, start_ms, next_index) = {
-                let mut segment = self.segment.lock();
-                let finished = segment.path.clone();
-                let finished_index = segment.index;
-                let start = segment.start_ms;
-                segment.index += 1;
-                segment.path = segment_path(&self.shared.dir, segment.index);
-                segment.start_ms = now_ms;
-                self.shared
-                    .current_segment
-                    .store(segment.index, Ordering::Relaxed);
-                self.shared.segment_frames.store(0, Ordering::Relaxed);
-                (finished, finished_index, start, segment.index)
-            };
-
+            // Den Nachfolger zuerst besorgen. Wurde — wie früher — erst der
+            // alte Encoder herausgenommen und der neue danach geholt, verwarf
+            // `send_frame` in der Zwischenzeit jedes ankommende Bild. Genau da
+            // entstanden die Löcher von 60 bis 300 ms an jeder Segmentgrenze:
+            // Der Videostrom verlor diese Zeit, der Ton nicht, und über einen
+            // Clip hinweg summierte sich das zum Versatz.
+            let next_index = self.segment.lock().index + 1;
             // Der vorgebaute Encoder sollte längst fertig sein — nur falls
             // nicht, wird hier gewartet bzw. neu gebaut.
             let next = match self.next_encoder.lock().take() {
@@ -421,13 +429,52 @@ mod win {
                 None => build_encoder(&self.recording, &segment_path(&self.shared.dir, next_index))
                     .map_err(|e| e.to_string()),
             };
-            match next {
-                Ok(fresh) => {
-                    // Beide Uhren des neuen Encoders fangen bei null an.
-                    *self.encoder.lock() = Some(fresh);
+            let fresh = match next {
+                Ok(fresh) => fresh,
+                Err(err) => {
+                    // Ohne Nachfolger nicht rotieren: Das laufende Segment
+                    // wächst dann über seine zehn Sekunden hinaus, aber die
+                    // Aufnahme läuft weiter. Umgekehrt stünde sie still.
+                    *self.shared.error.lock() = Some(format!("Encoder-Neustart: {err}"));
+                    *self.next_encoder.lock() = Some(spawn_encoder(
+                        self.recording.clone(),
+                        segment_path(&self.shared.dir, next_index),
+                    ));
+                    return;
                 }
-                Err(err) => *self.shared.error.lock() = Some(format!("Encoder-Neustart: {err}")),
-            }
+            };
+
+            // Tausch und Nullpunkt des neuen Segments unter einer einzigen
+            // Sperre — dieselbe, die `send_frame` hält. Zwischen beidem darf
+            // kein Bild durchrutschen.
+            let encoder = {
+                let mut guard = self.encoder.lock();
+                let Some(previous) = guard.replace(fresh) else {
+                    // Es wird gerade gestoppt. Den frisch gebauten Encoder
+                    // wieder herausnehmen, sonst schriebe er ins Leere.
+                    guard.take();
+                    return;
+                };
+                self.segment_video_started.store(false, Ordering::Relaxed);
+                self.segment_audio_frames.store(0, Ordering::Relaxed);
+                self.shared.segment_frames.store(0, Ordering::Relaxed);
+                previous
+            };
+
+            let (finished_path, finished_index, start_ms) = {
+                let mut segment = self.segment.lock();
+                let finished = segment.path.clone();
+                let finished_index = segment.index;
+                let start = segment.start_ms;
+                segment.index = next_index;
+                segment.path = segment_path(&self.shared.dir, next_index);
+                segment.start_ms = now_ms;
+                self.shared
+                    .current_segment
+                    .store(next_index, Ordering::Relaxed);
+                (finished, finished_index, start)
+            };
+
             *self.next_encoder.lock() = Some(spawn_encoder(
                 self.recording.clone(),
                 segment_path(&self.shared.dir, next_index + 1),
@@ -516,23 +563,29 @@ mod win {
             self.layout = TrackLayout::from_sources(&self.sources);
         }
 
-        /// So viel Ton nachschieben, wie seit dem letzten Mal vergangen ist.
-        fn feed_audio(&mut self, now_ms: u64) {
-            // Vor dem ersten Bild gibt es keine Zeitachse, an die sich der Ton
-            // hängen könnte — was jetzt käme, läge später vor dem Bild.
-            if !self.slot.video_started.load(Ordering::Acquire) {
+        /// Ton bis `until_ms` nachschieben, höchstens `limit` Frames auf
+        /// einmal. Gerechnet wird gegen den Nullpunkt des *laufenden*
+        /// Segments, nicht gegen den Aufnahmestart: Der Encoder stempelt
+        /// seinen Ton ab Sample null, sein Bild ab dem ersten Bild, das er
+        /// bekommen hat — nur so bedeutet PTS 0 in beiden Spuren derselben
+        /// Segmentdatei denselben Augenblick.
+        fn feed_audio(&mut self, until_ms: u64, limit: u64) {
+            // Vor dem ersten Bild des Segments gibt es keine Zeitachse, an die
+            // sich der Ton hängen könnte — was jetzt käme, läge in der
+            // fertigen Datei vor dem Bild.
+            if !self.slot.segment_video_started.load(Ordering::Relaxed) {
                 return;
             }
             let shared = self.slot.shared.clone();
-            let since_video = now_ms.saturating_sub(self.slot.video_start_ms.load(Ordering::Relaxed));
+            let since_video = until_ms
+                .saturating_sub(self.slot.segment_video_start_ms.load(Ordering::Relaxed));
             let target = since_video * SAMPLE_RATE as u64 / 1000;
-            let sent = self.slot.audio_frames_sent.load(Ordering::Relaxed);
+            let sent = self.slot.segment_audio_frames.load(Ordering::Relaxed);
             let missing = target.saturating_sub(sent);
             if missing == 0 {
                 return;
             }
-            // Nicht mehr als 200 ms auf einmal nachschieben.
-            let frames = missing.min(SAMPLE_RATE as u64 / 5) as usize;
+            let frames = missing.min(limit) as usize;
 
             self.refresh_sources();
 
@@ -583,7 +636,7 @@ mod win {
             }
             drop(guard);
             self.slot
-                .audio_frames_sent
+                .segment_audio_frames
                 .fetch_add(frames as u64, Ordering::Relaxed);
         }
 
@@ -595,9 +648,17 @@ mod win {
                 self.slot.shared.elapsed_ms.store(now_ms, Ordering::Relaxed);
 
                 if self.slot.rotate_due(now_ms) {
+                    // Erst den Ton bis zum letzten Bild dieses Segments
+                    // auffüllen, und dafür den 200-ms-Deckel lüften: Was hier
+                    // noch aussteht, gehört in die Datei, die gleich versiegelt
+                    // wird. Ging es stattdessen ins nächste Segment, fehlte es
+                    // dem Clip am Ende — so entstand der Nachlauf von fast zwei
+                    // Sekunden Bild ohne Ton.
+                    let last_frame_ms = self.slot.segment_last_frame_ms.load(Ordering::Relaxed);
+                    self.feed_audio(last_frame_ms, AUDIO_FLUSH_MAX_FRAMES);
                     self.slot.rotate(now_ms);
                 }
-                self.feed_audio(now_ms);
+                self.feed_audio(now_ms, AUDIO_CHUNK_FRAMES);
             }
         }
     }

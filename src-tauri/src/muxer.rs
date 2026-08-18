@@ -106,9 +106,6 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
     }
     selected.sort_by_key(|segment| segment.index);
 
-    // Wie weit in das erste Segment hinein der Clip beginnt.
-    let offset_ms = window_start.saturating_sub(selected[0].start_ms);
-
     std::fs::create_dir_all(&request.temp_dir).map_err(|e| e.to_string())?;
 
     // Concat-Demuxer statt `concat:`-Protokoll: Jedes Segment kommt aus einem
@@ -147,9 +144,22 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
     // `+genpts` füllt die Zeitstempel auf, die beim Segmentwechsel fehlen.
     command.arg("-fflags").arg("+genpts");
     command.arg("-f").arg("concat").arg("-safe").arg("0");
-    if offset_ms > 0 {
-        command.arg("-ss").arg(format!("{:.3}", offset_ms as f64 / 1000.0));
-    }
+    // Kein `-ss`, um vorne auf die gewünschte Länge zu kürzen. Der
+    // Concat-Demuxer kann nur suchen, wenn in der Liste zu jeder Datei eine
+    // `duration` steht — sonst tut `-ss` *nichts*: Nachgemessen liefern
+    // `-ss 4.5` und `-ss 12` über dieselbe Liste Byte für Byte dieselbe Länge.
+    // Weggeworfen wird trotzdem etwas, nämlich alle Videopakete bis zum
+    // nächsten Keyframe. Der Clip begann dadurch mit bis zu einer Sekunde Ton
+    // ohne Bild (gemessen: `start_time` der Videospur bei 0,98 s bei 1 s
+    // Keyframe-Abstand), ohne dafür auch nur eine Sekunde kürzer zu werden.
+    //
+    // Ohne `-ss` fängt der Clip an einer Segmentgrenze an — also an einem
+    // Keyframe, mit Bild und Ton ab dem ersten Moment. Er ist damit bis zu
+    // einer Segmentlänge länger als angefordert, aber genau das war er vorher
+    // auch schon. Für ein echtes Kürzen bräuchte die Liste die tatsächlichen
+    // Laufzeiten der Segmentdateien; die Marken aus dem Ringpuffer taugen
+    // dafür nicht, weil der Demuxer sie den Zeitstempeln vorzieht und ein paar
+    // Millisekunden Abweichung je Segment die Spuren wieder verschieben würden.
     command.arg("-i").arg(&list_path);
     for (path, _) in &wavs {
         command.arg("-i").arg(path);
