@@ -26,7 +26,8 @@ oder auf einer eigenen Tonspur im Clip.
 | Zusätzliche Tonspuren im Clip | ✅ implementiert, noch ungetestet |
 | Icon, Installer (NSIS), Auto-Update | ✅ fertig |
 | Puffer-Automatik (beim Start / im Spiel) | ✅ fertig |
-| Trim-Editor, Upload | ⏳ offen |
+| Clip bearbeiten: Name, Beschreibung, Spurmischung, Zuschnitt, Export | ✅ fertig |
+| Upload | ⏳ offen |
 
 ## Entwickeln
 
@@ -148,6 +149,8 @@ src/                     React-UI
   store.ts               Zustand-Store, spricht mit dem Kern
   routes/                Übersicht, Clips, Audio-Mixer, Aufnahme, Einstellungen
   components/ClipPlayer.tsx   Player über der Galerie
+  components/ClipEditor.tsx   Bearbeiten-Bereich: Metadaten, Spuren, Export
+  lib/useClipMix.ts      zusätzliche Tonspuren synchron zum Video abspielen
   overlay/               eigenes Fenster: der Banner über dem Spiel
 src-tauri/src/
   model.rs               gemeinsame Datentypen
@@ -166,6 +169,7 @@ src-tauri/src/
   overlay.rs             Overlay-Fenster ansteuern
   encode.rs              Encoder-Erkennung
   clips.rs               SQLite-Clip-Index
+  export.rs              Spuren lesen/entpacken, Clip neu ausgeben (+ Tests)
   config.rs              Konfiguration als JSON
   commands.rs            Tauri-Commands
   updater.rs             Update-Prüfung und Installation
@@ -252,4 +256,36 @@ Drei Quellentypen, beliebig kombinierbar:
 Jede Quelle hat Gain, Mute, Solo und Live-Pegel. Quellen ohne „eigene Spur"
 laufen in den Hauptmix, die anderen werden parallel als PCM mitgeschrieben und
 beim Speichern als zusätzliche Tonspuren ins MP4 gemuxt — so lässt sich
-z.B. Discord im Schnitt nachträglich stummschalten.
+z.B. Discord im Schnitt nachträglich stummschalten. Ohne Schnittprogramm geht
+das ebenso: siehe „Clips bearbeiten".
+
+## Clips bearbeiten
+
+Im Player öffnet **Bearbeiten** (oder `E`) einen Bereich neben dem Bild:
+
+* **Name, Beschreibung, Spiel** — landen in der Clip-Datenbank, nicht im
+  Dateinamen; die Datei bleibt, wo sie ist. Die Suche in der Galerie findet
+  alle drei.
+* **Tonspuren** — je Spur ein Regler von −30 bis +12 dB und ein Stummschalter.
+* **Zuschnitt** — `I` und `O` setzen Anfang und Ende auf die aktuelle Stelle,
+  die Griffe in der Zeitleiste lassen sich auch ziehen. Die Wiedergabe springt
+  am Ende der Auswahl zurück an ihren Anfang.
+* **Exportieren** — schreibt eine neue Datei, in der alle Spuren mit ihren
+  Reglern zu **einer** Tonspur zusammengerechnet sind.
+
+Zwei Dinge, die man dabei wissen sollte:
+
+**Die Vorschau kann nur leiser werden.** WebView2 gibt von einem MP4 immer nur
+die erste Tonspur wieder — an `audioTracks` kommt man nicht heran. Die übrigen
+Spuren entpackt der Kern deshalb einzeln nach `%APPDATA%\ClippiBoy\preview`
+und die UI lässt sie als eigene Audioelemente synchron mitlaufen. Deren
+Lautstärke lässt sich aber nur dämpfen, nie anheben: steht ein Regler über
+0 dB, senkt die Vorschau stattdessen die übrigen Spuren ab. Die Balance stimmt
+damit, nur die Gesamtlautstärke liegt tiefer. Der Export hebt den Pegel wirklich
+an.
+
+**Ohne Schnitt am Anfang bleibt das Bild unangetastet.** Dann wird nur der Ton
+neu gerechnet (`-c:v copy`), und der Export ist in Sekunden fertig. Ein Schnitt
+am Anfang muss bildgenau sitzen, sonst rutschte er auf das nächste Keyframe —
+dafür wird das Bild neu encodiert, mit dem Encoder aus den Einstellungen und
+x264 als Rückfall, falls die Hardware streikt.

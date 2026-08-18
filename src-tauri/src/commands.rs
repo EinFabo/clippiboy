@@ -6,9 +6,10 @@ use crate::audio::devices;
 use crate::capture;
 use crate::clips::Library;
 use crate::encode;
+use crate::export;
 use crate::model::{
-    AppConfig, AudioDevice, AudioProcess, AudioSource, CaptureTarget, Clip, EncoderInfo,
-    EngineStatus,
+    AppConfig, AudioDevice, AudioProcess, AudioSource, CaptureTarget, Clip, ClipTrack, EncoderInfo,
+    EngineStatus, ExportProgress, ExportRequest, ExportResult,
 };
 use crate::state::AppState;
 
@@ -141,6 +142,114 @@ pub fn reveal_clip(
     app.opener()
         .reveal_item_in_dir(&clip.path)
         .map_err(|e| e.to_string())
+}
+
+/// Name, Beschreibung und Spiel eines Clips ändern. Leere Felder löschen den
+/// jeweiligen Eintrag wieder — in der Galerie steht dann wieder der Dateiname.
+#[tauri::command]
+pub fn update_clip(
+    state: State<'_, AppState>,
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    game: Option<String>,
+) -> Result<Clip> {
+    let trimmed = |value: Option<String>| {
+        value
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    let (title, description, game) = (trimmed(title), trimmed(description), trimmed(game));
+
+    with_library(&state, |lib| {
+        lib.update_meta(&id, title.as_deref(), description.as_deref(), game.as_deref())
+            .map_err(|e| e.to_string())?;
+        lib.get(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Clip nicht gefunden".to_string())
+    })
+}
+
+/// Die Tonspuren eines Clips — jede mit einer entpackten Datei für die
+/// Vorschau, damit der Player sie einzeln aussteuern kann.
+///
+/// `async`, weil ffprobe und das Entpacken je nach Länge eine Sekunde brauchen
+/// und der Hauptfaden solange das Fenster nicht zeichnen würde.
+#[tauri::command(async)]
+pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTrack>> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+
+    let mut tracks = export::tracks(&clip)?;
+    for track in tracks.iter_mut().skip(1) {
+        match export::extract_track(&clip, track.index) {
+            Ok(path) => track.preview_path = Some(path.to_string_lossy().to_string()),
+            // Ohne Vorschaudatei bleibt der Regler bedienbar, nur hörbar wird
+            // die Spur erst im Export.
+            Err(err) => log::warn!("Spur {} nicht entpackt: {err}", track.index),
+        }
+    }
+    Ok(tracks)
+}
+
+/// Den Clip mit der eingestellten Mischung und dem Zuschnitt neu ausgeben.
+#[tauri::command(async)]
+pub fn export_clip(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    request: ExportRequest,
+) -> Result<ExportResult> {
+    use tauri::Emitter;
+
+    let clip = with_library(&state, |lib| {
+        lib.get(&request.clip_id).map_err(|e| e.to_string())
+    })?
+    .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+
+    let config = state.config_snapshot();
+    let clip_id = clip.id.clone();
+    let result = export::export(
+        &clip,
+        &request,
+        crate::encode::resolve(config.recording.encoder),
+        config.recording.bitrate_kbps,
+        |progress| {
+            let _ = app.emit(
+                "export-progress",
+                ExportProgress {
+                    clip_id: clip_id.clone(),
+                    progress,
+                },
+            );
+        },
+    );
+    match &result {
+        Ok(export) => crate::notify(
+            &app,
+            "ok",
+            format!("Export fertig · {}", file_name(&export.path)),
+        ),
+        Err(err) => crate::notify(&app, "error", err.clone()),
+    }
+    result
+}
+
+/// Beliebige Datei im Explorer zeigen — für den Export, der auch außerhalb des
+/// Clip-Ordners landen darf und deshalb keine Clip-Kennung hat.
+#[tauri::command]
+pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
+}
+
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn with_library<T>(

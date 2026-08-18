@@ -4,7 +4,7 @@ import { Card, Pill, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
 import { IconArrowUpRight, IconScissors } from "@/components/icons";
-import { formatAgo, formatBufferSeconds, formatDuration } from "@/lib/format";
+import { clipName, formatAgo, formatBufferSeconds, formatDuration } from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
 import { cn } from "@/lib/cn";
@@ -126,7 +126,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 <div className="flex items-center justify-between p-4">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">
-                      {clip.path.split("\\").pop()}
+                      {clipName(clip)}
                     </p>
                     <p className="mt-1 text-xs text-ink-muted">
                       {formatAgo(clip.createdAt)}

@@ -1,30 +1,43 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useEngine } from "@/store";
 import { Card, Pill } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
-import { IconTrash } from "@/components/icons";
+import { IconFolder, IconScissors, IconTrash } from "@/components/icons";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
-import { formatAgo, formatDuration, formatSize } from "@/lib/format";
+import { clipName, fileName, formatAgo, formatDuration, formatSize } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
 export function Clips() {
   const { clips, deleteClip } = useEngine();
   const [query, setQuery] = useState("");
   const [game, setGame] = useState<string | null>(null);
-  const [playing, setPlaying] = useState<number | null>(null);
+  /** Welcher Clip im Player liegt — und ob gleich mit offenem Bearbeiten. */
+  const [open, setOpen] = useState<{ index: number; editing: boolean } | null>(
+    null,
+  );
 
   const games = useMemo(
     () => [...new Set(clips.map((c) => c.game).filter(Boolean) as string[])],
     [clips],
   );
 
+  // Wird das Spiel eines Clips umbenannt oder gelöscht, verschwindet sein
+  // Filter — ohne das bliebe die Galerie leer und niemand wüsste, warum.
+  useEffect(() => {
+    if (game && !games.includes(game)) setGame(null);
+  }, [game, games]);
+
   const visible = clips.filter((c) => {
-    const name = c.path.split("\\").pop() ?? "";
-    const matchesQuery =
-      !query ||
-      name.toLowerCase().includes(query.toLowerCase()) ||
-      (c.game ?? "").toLowerCase().includes(query.toLowerCase());
+    const haystack = [
+      fileName(c.path),
+      c.title ?? "",
+      c.description ?? "",
+      c.game ?? "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    const matchesQuery = !query || haystack.includes(query.toLowerCase());
     return matchesQuery && (!game || c.game === game);
   });
 
@@ -65,7 +78,7 @@ export function Clips() {
             <Card key={clip.id} interactive className="group overflow-hidden">
               <div className="relative">
                 <button
-                  onClick={() => setPlaying(index)}
+                  onClick={() => setOpen({ index, editing: false })}
                   aria-label={`${clip.game ?? "Clip"} abspielen`}
                   className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
                 >
@@ -94,35 +107,53 @@ export function Clips() {
                     <Pill>{formatDuration(clip.durationMs)}</Pill>
                   </span>
                 </button>
-                <button
-                  aria-label="Clip löschen"
-                  onClick={() => deleteClip(clip.id)}
-                  className="absolute top-3 right-3 grid h-8 w-8 place-items-center rounded-pill
-                    bg-black/50 text-white/70 opacity-0 backdrop-blur-md transition-opacity
-                    group-hover:opacity-100 hover:text-live"
+                <div
+                  className="absolute top-3 right-3 flex gap-1.5 opacity-0 transition-opacity
+                    group-hover:opacity-100"
                 >
-                  <IconTrash className="h-4 w-4" />
-                </button>
+                  <IconAction
+                    label="Im Ordner zeigen"
+                    onClick={() => inTauri && api.revealClip(clip.id)}
+                  >
+                    <IconFolder className="h-4 w-4" />
+                  </IconAction>
+                  <IconAction
+                    label="Clip löschen"
+                    danger
+                    onClick={() => deleteClip(clip.id)}
+                  >
+                    <IconTrash className="h-4 w-4" />
+                  </IconAction>
+                </div>
               </div>
               <div className="p-4">
                 <p className="truncate text-sm font-medium">
-                  {clip.path.split("\\").pop()}
+                  {clipName(clip)}
                 </p>
-                <p className="mt-1 text-xs text-ink-muted">
+                <p className="mt-1 truncate text-xs text-ink-muted">
                   {clip.game ? `${clip.game} · ` : ""}
                   {formatAgo(clip.createdAt)} · {clip.height}p ·{" "}
                   {formatSize(clip.sizeBytes)}
                 </p>
+                {clip.description && (
+                  <p className="mt-1 truncate text-xs text-ink-faint">
+                    {clip.description}
+                  </p>
+                )}
                 <div className="mt-3 flex gap-2">
-                  <Button size="sm" onClick={() => setPlaying(index)}>
+                  <Button
+                    size="sm"
+                    onClick={() => setOpen({ index, editing: false })}
+                  >
                     Ansehen
                   </Button>
                   <Button
                     size="sm"
                     variant="secondary"
-                    onClick={() => inTauri && api.revealClip(clip.id)}
+                    icon={<IconScissors className="h-4 w-4" />}
+                    onClick={() => setOpen({ index, editing: true })}
                   >
-                    Im Ordner zeigen
+                    Bearbeiten
                   </Button>
                 </div>
               </div>
@@ -131,16 +162,45 @@ export function Clips() {
         </div>
       )}
 
-      {playing !== null && visible.length > 0 && (
+      {open !== null && visible.length > 0 && (
         <ClipPlayer
           clips={visible}
-          index={Math.min(playing, visible.length - 1)}
-          onIndexChange={setPlaying}
-          onClose={() => setPlaying(null)}
+          index={Math.min(open.index, visible.length - 1)}
+          startEditing={open.editing}
+          onIndexChange={(index) => setOpen({ ...open, index })}
+          onClose={() => setOpen(null)}
           onDelete={deleteClip}
         />
       )}
     </div>
+  );
+}
+
+/** Runder Knopf über dem Vorschaubild. */
+function IconAction({
+  label,
+  danger,
+  onClick,
+  children,
+}: {
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={cn(
+        "grid h-8 w-8 place-items-center rounded-pill bg-black/50 text-white/70",
+        "backdrop-blur-md transition-colors",
+        danger ? "hover:text-live" : "hover:text-white",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

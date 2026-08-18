@@ -5,6 +5,7 @@ pub mod clips;
 pub mod commands;
 pub mod config;
 pub mod encode;
+pub mod export;
 pub mod game;
 pub mod model;
 pub mod muxer;
@@ -28,7 +29,7 @@ struct Notice {
     message: String,
 }
 
-fn notify(app: &tauri::AppHandle, kind: &'static str, message: impl Into<String>) {
+pub fn notify(app: &tauri::AppHandle, kind: &'static str, message: impl Into<String>) {
     let _ = app.emit(
         "notice",
         Notice {
@@ -304,6 +305,11 @@ pub fn run() {
             let handle = app.handle();
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
+            // Die entpackten Tonspuren für die Vorschau im Player: eine alte
+            // Sitzung lässt nur Dateien zurück, die sich in einer Sekunde neu
+            // erzeugen lassen — also erst wegräumen, dann freigeben.
+            export::clear_previews();
+            allow_clip_dir(handle, &export::preview_dir().to_string_lossy());
             // Mitgeliefertes ffmpeg/ffprobe bekannt machen, bevor irgendetwas
             // einen Clip schreiben will.
             if let Ok(dir) = handle.path().resource_dir() {
@@ -352,6 +358,10 @@ pub fn run() {
             commands::list_clips,
             commands::delete_clip,
             commands::reveal_clip,
+            commands::update_clip,
+            commands::clip_tracks,
+            commands::export_clip,
+            commands::reveal_path,
             commands::app_version,
             commands::check_update,
             commands::install_update,

@@ -207,6 +207,64 @@ pub struct Clip {
     pub height: u32,
     pub size_bytes: u64,
     pub thumb_path: Option<String>,
+    /// Selbst vergebener Name. Ohne ihn zeigt die Galerie den Dateinamen.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Eine Tonspur, wie sie in der fertigen MP4-Datei liegt. Spur 0 ist der
+/// Hauptmix, danach folgen die Quellen, die auf eigene Spuren gelegt wurden.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipTrack {
+    /// Index unter den Tonspuren der Datei, nicht der ffmpeg-Streamindex.
+    pub index: u32,
+    pub label: String,
+    pub channels: u32,
+    /// Für die Vorschau entpackte Einzeldatei. Spur 0 braucht keine — die
+    /// spielt das Videoelement ohnehin ab.
+    pub preview_path: Option<String>,
+}
+
+/// Wie eine Spur beim Export gewichtet wird.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMix {
+    pub index: u32,
+    pub gain_db: f32,
+    pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRequest {
+    pub clip_id: String,
+    /// Zuschnitt in Millisekunden ab Clipanfang.
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub tracks: Vec<TrackMix>,
+    /// Zieldatei. Ohne Angabe landet der Export neben dem Ausgangsclip.
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub path: String,
+    pub duration_ms: u64,
+    pub size_bytes: u64,
+}
+
+/// Fortschritt eines laufenden Exports (Event `export-progress`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgress {
+    pub clip_id: String,
+    /// 0 bis 1.
+    pub progress: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,3 +1,5 @@
+import type { Clip } from "./types";
+
 export function formatDuration(ms: number): string {
   const total = Math.round(ms / 1000);
   const m = Math.floor(total / 60);
@@ -28,4 +30,14 @@ export function formatBufferSeconds(s: number): string {
   const m = Math.floor(s / 60);
   const rest = s % 60;
   return rest ? `${m} min ${rest} s` : `${m} min`;
+}
+
+/** Der Dateiname ohne Ordner — Windows- und Unix-Pfade. */
+export function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Wie der Clip überall heißt: der selbst vergebene Name, sonst die Datei. */
+export function clipName(clip: Clip): string {
+  return clip.title ?? fileName(clip.path);
 }

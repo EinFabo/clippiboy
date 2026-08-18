@@ -7,8 +7,12 @@ import type {
   AudioSource,
   CaptureTarget,
   Clip,
+  ClipTrack,
   EncoderInfo,
   EngineStatus,
+  ExportProgress,
+  ExportRequest,
+  ExportResult,
   LevelMap,
   UpdateInfo,
 } from "./types";
@@ -50,6 +54,14 @@ export const api = {
   listClips: () => invoke<Clip[]>("list_clips"),
   deleteClip: (id: string) => invoke<void>("delete_clip", { id }),
   revealClip: (id: string) => invoke<void>("reveal_clip", { id }),
+  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
+  updateClip: (
+    id: string,
+    meta: { title: string | null; description: string | null; game: string | null },
+  ) => invoke<Clip>("update_clip", { id, ...meta }),
+  clipTracks: (id: string) => invoke<ClipTrack[]>("clip_tracks", { id }),
+  exportClip: (request: ExportRequest) =>
+    invoke<ExportResult>("export_clip", { request }),
 };
 
 export const events = {
@@ -61,6 +73,10 @@ export const events = {
     listen<Clip>("clip-saved", (e) => cb(e.payload)),
   onUpdateAvailable: (cb: (info: UpdateInfo) => void): Promise<UnlistenFn> =>
     listen<UpdateInfo>("update-available", (e) => cb(e.payload)),
+  onExportProgress: (
+    cb: (progress: ExportProgress) => void,
+  ): Promise<UnlistenFn> =>
+    listen<ExportProgress>("export-progress", (e) => cb(e.payload)),
   onAudioErrors: (
     cb: (errors: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>
