@@ -26,6 +26,11 @@ use crate::model::{AudioSource, RecordingConfig, TargetKind};
 /// die Segmentwechsel selten sind.
 const SEGMENT_SECONDS: u64 = 10;
 
+/// So lang muss ein Segment mindestens sein, bevor es abgeschlossen werden
+/// darf. Fällt ein erzwungenes Versiegeln direkt hinter eine planmäßige
+/// Rotation, entstünde sonst ein Segment von wenigen Millisekunden.
+const MIN_SEGMENT_MS: u64 = 400;
+
 #[derive(Debug, Clone)]
 pub struct Segment {
     /// Laufende Nummer in der Reihenfolge, in der die Segmente aufgenommen
@@ -113,6 +118,10 @@ pub struct Shared {
     /// darauf, sonst löscht es die Segmentdateien unter ffmpeg weg.
     pub saves_in_flight: AtomicU64,
     pub frames: AtomicU64,
+    /// Bilder, die im *gerade laufenden* Segment gelandet sind. Wird bei jeder
+    /// Rotation zurückgesetzt. Ein Segment ohne ein einziges Bild darf nicht
+    /// abgeschlossen werden — siehe `rotate_due`.
+    pub segment_frames: AtomicU64,
     pub dropped: AtomicU64,
     pub elapsed_ms: AtomicU64,
     pub error: Mutex<Option<String>>,
@@ -164,13 +173,28 @@ impl Shared {
         }
         self.force_rotate.store(true, Ordering::Relaxed);
 
-        let deadline = Instant::now() + timeout;
+        let started = Instant::now();
+        let deadline = started + timeout;
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
             if self.sealed(wanted) {
                 return true;
             }
+            // Steht das Bild still, liefert Windows.Graphics.Capture keine
+            // Frames — das laufende Segment bleibt dann leer und lässt sich
+            // nicht abschließen. Zu holen gibt es aber auch nichts: Alles
+            // Aufgenommene liegt vollständig im vorherigen Segment. Nach einer
+            // Sekunde ohne ein einziges Bild ist das eindeutig (bei 60 fps
+            // wären es 60 gewesen).
+            if started.elapsed() > Duration::from_secs(1)
+                && self.segment_frames.load(Ordering::Relaxed) == 0
+                && !self.segments.lock().is_empty()
+            {
+                self.force_rotate.store(false, Ordering::Relaxed);
+                return true;
+            }
         }
+        self.force_rotate.store(false, Ordering::Relaxed);
         false
     }
 
@@ -192,6 +216,13 @@ impl Shared {
     }
 
     fn prune(&self) {
+        // Während ein Clip geschrieben wird, liest ffmpeg noch aus genau diesen
+        // Dateien. Der `SaveGuard` hält sie deshalb auch hier fest, nicht nur
+        // gegen `Pipeline::stop`. Eine ausgelassene Runde kostet nichts — der
+        // Ring wird dann einmal um ein Segment länger als nötig.
+        if self.saves_in_flight.load(Ordering::SeqCst) > 0 {
+            return;
+        }
         let mut segments = self.segments.lock();
         let elapsed = self.elapsed_ms.load(Ordering::Relaxed);
         let keep_from = elapsed.saturating_sub((self.buffer_seconds as u64 + SEGMENT_SECONDS) * 1000);
@@ -358,6 +389,7 @@ mod win {
                 *self.shared.error.lock() = Some(format!("Encoder: {err}"));
             } else {
                 self.shared.frames.fetch_add(1, Ordering::Relaxed);
+                self.shared.segment_frames.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -378,6 +410,7 @@ mod win {
                 self.shared
                     .current_segment
                     .store(segment.index, Ordering::Relaxed);
+                self.shared.segment_frames.store(0, Ordering::Relaxed);
                 (finished, finished_index, start, segment.index)
             };
 
@@ -421,10 +454,27 @@ mod win {
         }
 
         fn rotate_due(&self, now_ms: u64) -> bool {
-            if self.shared.force_rotate.swap(false, Ordering::Relaxed) {
+            // Ein Segment ohne ein einziges Bild darf nicht abgeschlossen
+            // werden. Windows.Graphics.Capture liefert nur bei Bildänderung
+            // Frames; bei stehendem Bild entstünde eine TS-Datei ganz ohne
+            // Videospur. Der concat-Demuxer verlangt in allen Dateien dasselbe
+            // Stream-Layout und bricht daran ab — und zwar bei *jedem* weiteren
+            // Clip, solange die Datei im Ring liegt. Das Segment wächst dann
+            // eben über seine zehn Sekunden hinaus; es kostet nur den Ton.
+            if self.shared.segment_frames.load(Ordering::Relaxed) == 0 {
+                return false;
+            }
+            let age = now_ms.saturating_sub(self.segment.lock().start_ms);
+            if self.shared.force_rotate.load(Ordering::Relaxed) {
+                // Fällt der Tastendruck direkt hinter eine planmäßige Rotation,
+                // wäre das Segment sonst nur Millisekunden lang.
+                if age < MIN_SEGMENT_MS {
+                    return false;
+                }
+                self.shared.force_rotate.store(false, Ordering::Relaxed);
                 return true;
             }
-            now_ms.saturating_sub(self.segment.lock().start_ms) >= SEGMENT_SECONDS * 1000
+            age >= SEGMENT_SECONDS * 1000
         }
     }
 
@@ -748,6 +798,7 @@ impl Pipeline {
             audio,
             force_rotate: AtomicBool::new(false),
             frames: AtomicU64::new(0),
+            segment_frames: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             elapsed_ms: AtomicU64::new(0),
             error: Mutex::new(None),
@@ -806,5 +857,109 @@ impl Pipeline {
 impl Drop for Pipeline {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Arc<Shared> {
+        Arc::new(Shared {
+            // Existiert nicht: `prune` löscht Segmentdateien, und der Test soll
+            // dabei nichts Echtes erwischen.
+            dir: PathBuf::from("clippiboy-test-nirgendwo"),
+            buffer_seconds: 60,
+            segments: Mutex::new(Vec::new()),
+            tracks: Mutex::new(Vec::new()),
+            sources: Mutex::new(Vec::new()),
+            audio: Arc::new(AudioEngine::new()),
+            force_rotate: AtomicBool::new(false),
+            current_segment: AtomicU64::new(0),
+            saves_in_flight: AtomicU64::new(0),
+            frames: AtomicU64::new(0),
+            segment_frames: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            elapsed_ms: AtomicU64::new(0),
+            error: Mutex::new(None),
+            sources_generation: AtomicU64::new(0),
+        })
+    }
+
+    fn segment(index: u64, start_ms: u64, end_ms: u64) -> Segment {
+        Segment {
+            index,
+            path: PathBuf::from(format!("clippiboy-test-nirgendwo/segment_{index}.ts")),
+            start_ms,
+            end_ms,
+            bytes: 1000,
+        }
+    }
+
+    #[test]
+    fn sealing_returns_at_once_when_the_segment_is_already_in_the_ring() {
+        let shared = shared();
+        shared.current_segment.store(3, Ordering::Relaxed);
+        shared.segments.lock().push(segment(3, 0, 10_000));
+
+        assert!(shared.seal_current_segment(Duration::from_millis(100)));
+    }
+
+    /// Bei stehendem Bild liefert Windows.Graphics.Capture keine Frames, das
+    /// laufende Segment bleibt leer und lässt sich nicht abschließen. Zu holen
+    /// gibt es dann aber auch nichts — das Speichern darf nicht sechs Sekunden
+    /// warten und danach scheitern.
+    #[test]
+    fn a_frozen_picture_does_not_block_saving() {
+        let shared = shared();
+        shared.current_segment.store(2, Ordering::Relaxed);
+        shared.segments.lock().push(segment(1, 0, 10_000));
+
+        let started = Instant::now();
+        assert!(shared.seal_current_segment(Duration::from_secs(6)));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "Aufgeben hat {:?} gedauert",
+            started.elapsed()
+        );
+        assert!(
+            !shared.force_rotate.load(Ordering::Relaxed),
+            "Der Rotationswunsch muss zurückgenommen sein — sonst rotiert das \
+             nächste ankommende Bild sofort ein Segment von Millisekunden."
+        );
+    }
+
+    /// Ohne ein einziges fertiges Segment gibt es wirklich nichts zu speichern.
+    #[test]
+    fn without_any_segment_sealing_gives_up() {
+        let shared = shared();
+        assert!(!shared.seal_current_segment(Duration::from_millis(1200)));
+        assert!(!shared.force_rotate.load(Ordering::Relaxed));
+    }
+
+    /// `prune` läuft im Abschluss-Thread und löscht Segmentdateien — die liest
+    /// ein gerade laufendes ffmpeg aber noch.
+    #[test]
+    fn a_running_save_keeps_its_segments() {
+        let shared = shared();
+        shared.elapsed_ms.store(200_000, Ordering::Relaxed);
+        {
+            let mut segments = shared.segments.lock();
+            segments.push(segment(0, 0, 10_000));
+            segments.push(segment(1, 190_000, 200_000));
+        }
+
+        let guard = shared.begin_save();
+        shared.prune();
+        assert_eq!(
+            shared.segments.lock().len(),
+            2,
+            "Während des Speicherns darf kein Segment verschwinden"
+        );
+
+        drop(guard);
+        shared.prune();
+        assert_eq!(shared.segments.lock().len(), 1, "Danach schon");
     }
 }

@@ -117,12 +117,11 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
     // Segmentgrenze einen Zeitstempel-Rücksprung und würde den Rest verwerfen
     // oder mit kaputtem Timing schreiben. Der Demuxer schiebt die Zeitstempel
     // jeder Datei hinter die vorherige.
-    // Name aus dem Ziel-Clip abgeleitet, damit zwei gleichzeitige Speicherungen
-    // sich nicht dieselbe Liste überschreiben.
-    let list_path = request.temp_dir.join(format!(
-        "concat_{}.txt",
-        sanitize(&request.output.file_stem().unwrap_or_default().to_string_lossy())
-    ));
+    // Aus dem Ziel-Clip abgeleitet und damit eindeutig je Speichervorgang:
+    // Zwei gleichzeitige Speicherungen dürfen sich weder die Segmentliste noch
+    // die Tonspuren unter den Händen wegschreiben.
+    let stem = sanitize(&request.output.file_stem().unwrap_or_default().to_string_lossy());
+    let list_path = request.temp_dir.join(format!("concat_{stem}.txt"));
     let list = selected
         .iter()
         .map(|segment| format!("file '{}'\n", escape_for_list(&segment.path)))
@@ -137,7 +136,7 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
     for track in request.tracks {
         let path = request
             .temp_dir
-            .join(format!("track_{}.wav", sanitize(&track.source_id)));
+            .join(format!("track_{stem}_{}.wav", sanitize(&track.source_id)));
         if track.write_wav(&path, request.seconds).is_ok() {
             wavs.push((path, track.label.clone()));
         }
@@ -182,7 +181,12 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
     // Nach dem Suchen fängt der erste Zeitstempel nicht bei null an — ohne das
     // stünde im MP4 ein negativer Versatz.
     command.arg("-avoid_negative_ts").arg("make_zero");
-    command.arg("-movflags").arg("+faststart");
+    // Kein `+faststart`: Das schiebt das moov-Atom nach vorn und liest dafür
+    // die fertige Datei noch einmal komplett durch — bei 40 Mbit/s und zwei
+    // Minuten Puffer ein zweiter Durchlauf über gut 600 MB, also glatt die
+    // doppelte Wartezeit nach dem Tastendruck. Zum Abspielen und Schneiden
+    // braucht es das nicht; der Export setzt es weiterhin, und der ist der
+    // Weg zur Datei, die man weitergibt.
     command.arg(&request.output);
 
     let outcome = run(&mut command, "Clip schreiben");

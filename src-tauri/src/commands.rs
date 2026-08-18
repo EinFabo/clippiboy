@@ -215,7 +215,10 @@ pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
 
 /// Puffer starten. Läuft über denselben Pfad wie Hotkey und Tray, damit auch
 /// der Knopf in der App Toast und Banner auslöst.
-#[tauri::command]
+///
+/// `async` aus demselben Grund wie `save_clip`: Das Hochfahren des Capture-
+/// Stacks dauert einige hundert Millisekunden.
+#[tauri::command(async)]
 pub fn start_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<()> {
     if state.status.lock().buffer_active {
         return Ok(());
@@ -229,7 +232,9 @@ pub fn start_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result
     }
 }
 
-#[tauri::command]
+/// Gegenstück zu `start_buffer`. `async`, weil das Stoppen notfalls auf ein
+/// laufendes Speichern wartet.
+#[tauri::command(async)]
 pub fn stop_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<()> {
     if state.status.lock().buffer_active {
         crate::toggle_buffer_and_notify(&app);
@@ -240,7 +245,11 @@ pub fn stop_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<
 /// Speichert den Puffer. `seconds` wird derzeit nur vom Trim-Gedanken gebraucht;
 /// der übliche Weg ist der gemeinsame Pfad mit Hotkey und Tray, der zusätzlich
 /// `clip-saved` und den Overlay-Banner auslöst.
-#[tauri::command]
+///
+/// `async`, weil Versiegeln und Muxen mehrere Sekunden dauern: als synchroner
+/// Command liefe das auf dem Hauptthread und die Oberfläche stünde solange —
+/// samt der Fensteraufrufe, die der Overlay-Banner dorthin schickt.
+#[tauri::command(async)]
 pub fn save_clip(
     state: State<'_, AppState>,
     app: tauri::AppHandle,

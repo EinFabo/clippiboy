@@ -38,6 +38,18 @@ pub struct AppState {
     /// Die Aufnahmeeinstellungen, mit denen der laufende Puffer gestartet
     /// wurde — an die Quelle angeglichen und damit die echten Maße des Clips.
     pub active_recording: Mutex<Option<RecordingConfig>>,
+    /// Läuft gerade ein Speichervorgang? Siehe `begin_save`.
+    saving: std::sync::atomic::AtomicBool,
+}
+
+/// Lebt so lange, wie ein Clip geschrieben wird, und gibt den Platz beim
+/// Fallenlassen wieder frei — auch wenn zwischendurch ein `?` zuschlägt.
+pub struct SavingGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for SavingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Zustand der Automatik „Puffer an, sobald ein Spiel läuft".
@@ -150,6 +162,7 @@ impl AppState {
             quitting: std::sync::atomic::AtomicBool::new(false),
             auto: AutoBuffer::default(),
             active_recording: Mutex::new(None),
+            saving: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -178,6 +191,21 @@ impl AppState {
             log::error!("Konfiguration konnte nicht gespeichert werden: {err}");
         }
         next
+    }
+
+    /// Meldet einen Speichervorgang an. `None` heißt: es läuft schon einer.
+    ///
+    /// Bis ein Clip geschrieben ist, vergehen je nach Bitrate und Länge ein
+    /// paar Sekunden. Ohne diese Sperre startet jeder weitere Tastendruck in
+    /// dieser Zeit einen zweiten Lauf — und genau das war der häufigste Grund
+    /// für „ffmpeg ist fehlgeschlagen": Zwei Läufe kurz hintereinander teilten
+    /// sich Zielpfad und Temp-Dateien und räumten sie sich gegenseitig weg.
+    pub fn begin_save(&self) -> Option<SavingGuard<'_>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        match self.saving.compare_exchange(false, true, SeqCst, SeqCst) {
+            Ok(_) => Some(SavingGuard(&self.saving)),
+            Err(_) => None,
+        }
     }
 
     /// Läuft gerade eine Aufnahme in den Puffer?
@@ -305,13 +333,27 @@ impl AppState {
             (pipeline.shared.clone(), pipeline.shared.begin_save())
         };
 
+        // Vor dem Versiegeln ablesen: Das Abschließen des Segments dauert je
+        // nach Encoder-Warteschlange bis zu einige hundert Millisekunden, in
+        // denen kein neues Material mehr entsteht. Läse man die Uhr danach,
+        // wanderte das Fenster [jetzt − Länge, jetzt] genau um diese Zeit ins
+        // Leere und der Clip wäre vorne entsprechend kürzer.
+        let now_ms = shared
+            .elapsed_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+
         // Das laufende Segment muss abgeschlossen sein, sonst fehlen die
         // letzten Sekunden — also genau der Moment, den man speichern will.
+        // Klappt das nicht rechtzeitig, endet der Clip eben beim vorletzten
+        // Segment; das ist allemal besser, als den Moment ganz wegzuwerfen.
         if !shared.seal_current_segment(std::time::Duration::from_secs(6)) {
-            return Err("Die Aufnahme liefert gerade keine Bilder.".into());
+            log::warn!("Segment nicht rechtzeitig abgeschlossen — der Clip endet früher");
         }
 
-        if let Some(err) = shared.error.lock().clone() {
+        // `take()` statt `clone()`: Sonst taucht derselbe Fehler bei jedem
+        // weiteren Speichern erneut im Log auf, auch wenn er längst Geschichte
+        // ist.
+        if let Some(err) = shared.error.lock().take() {
             log::warn!("Encoder meldete: {err}");
         }
 
@@ -325,17 +367,21 @@ impl AppState {
 
         let segments = shared.segments.lock().clone();
         let tracks = shared.tracks.lock().clone();
-        let now_ms = shared
-            .elapsed_ms
-            .load(std::sync::atomic::Ordering::Relaxed);
 
         // Nicht die Momentaufnahme, sondern das während des Puffers erkannte
         // Spiel — beim Speichern über den Button steht ClippiBoy im Vordergrund.
         let buffering_game = self.buffering_game.lock().clone();
         let game = buffering_game.or_else(|| self.current_game.lock().clone());
-        let stamp = jiff::Zoned::now()
-            .strftime("%Y-%m-%d_%H-%M-%S")
-            .to_string();
+        // Millisekunden gehören dazu: Zwei Clips in derselben Sekunde bekamen
+        // sonst denselben Pfad. Beide ffmpeg-Läufe schrieben dann dieselbe
+        // Datei, teilten sich die Segmentliste im Temp-Ordner, und in der
+        // Datenbank (`path` ist UNIQUE) blieb am Ende nur einer von beiden übrig.
+        let now = jiff::Zoned::now();
+        let stamp = format!(
+            "{}-{:03}",
+            now.strftime("%Y-%m-%d_%H-%M-%S"),
+            now.subsec_nanosecond() / 1_000_000
+        );
         let name = match &game {
             Some(app) => format!("{}_{stamp}.mp4", sanitize_name(app)),
             None => format!("clip_{stamp}.mp4"),
