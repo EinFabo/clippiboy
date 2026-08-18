@@ -13,3 +13,6 @@ src-tauri/resources/
 .DS_Store
 *.log
 shot.png
+
+# Arbeitsverzeichnisse von Claude Code.
+.claude/
