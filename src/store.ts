@@ -32,6 +32,9 @@ interface EngineState {
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
+  /** Beide Hotkeys auf einmal — der Kern nimmt sie nur zusammen an. */
+  setHotkeys: (saveClip: string, toggleBuffer: string) => Promise<void>;
+  setClipDir: (dir: string) => Promise<void>;
   upsertSource: (source: AudioSource) => Promise<void>;
   removeSource: (id: string) => Promise<void>;
   toggleBuffer: () => Promise<void>;
@@ -170,6 +173,30 @@ export const useEngine = create<EngineState>((set, get) => ({
       // annimmt, muss das jemand sehen statt still zu scheitern.
       set({ lastError: `Einstellung übernehmen: ${String(err)}` });
     }
+  },
+
+  async setHotkeys(saveClip, toggleBuffer) {
+    if (!inTauri) {
+      set((st) => ({
+        config: {
+          ...st.config,
+          saveClipHotkey: saveClip,
+          toggleBufferHotkey: toggleBuffer,
+        },
+      }));
+      return;
+    }
+    // Bewusst ohne Vorgriff im Store: schlägt das Registrieren fehl, soll die
+    // alte Belegung stehen bleiben, und die Fehlermeldung gehört an die Zeile.
+    set({ config: await api.setHotkeys(saveClip, toggleBuffer) });
+  },
+
+  async setClipDir(dir) {
+    if (!inTauri) {
+      set((st) => ({ config: { ...st.config, clipDir: dir } }));
+      return;
+    }
+    set({ config: await api.setClipDir(dir) });
   },
 
   async upsertSource(source) {

@@ -125,3 +125,40 @@ pub fn list_targets() -> Vec<CaptureTarget> {
     let _ = TargetKind::Monitor;
     Vec::new()
 }
+
+/// Native Größe des eingestellten Ziels. `None`, wenn es gerade nicht
+/// auffindbar ist — dann bleibt die eingestellte Auflösung unangetastet.
+pub fn target_size(kind: TargetKind, id: Option<&str>) -> Option<(u32, u32)> {
+    let targets = list_targets();
+    let hit = match id {
+        Some(id) => targets.iter().find(|t| t.kind == kind && t.id == id),
+        // Ohne Auswahl nimmt die Pipeline den primären Monitor.
+        None => targets
+            .iter()
+            .find(|t| t.kind == TargetKind::Monitor && t.is_primary)
+            .or_else(|| targets.iter().find(|t| t.kind == TargetKind::Monitor)),
+    }?;
+    match (hit.width, hit.height) {
+        (0, _) | (_, 0) => None,
+        size => Some(size),
+    }
+}
+
+/// Aufnahmegröße an die Quelle angleichen.
+///
+/// Hochskalieren bringt kein Bild dazu, ein Detail zu zeigen, das der
+/// Bildschirm nicht hat — es kostet nur Bitrate. Deshalb wird die Höhe auf die
+/// der Quelle gedeckelt und die Breite immer aus deren Seitenverhältnis
+/// gerechnet, statt 16:9 anzunehmen. Beide Werte bleiben gerade, sonst nimmt
+/// H.264 sie nicht an.
+pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
+    let Some((native_width, native_height)) =
+        target_size(recording.target_kind, recording.target_id.as_deref())
+    else {
+        return;
+    };
+    let height = recording.height.clamp(2, native_height);
+    let width = (height as u64 * native_width as u64 / native_height as u64) as u32;
+    recording.height = height & !1;
+    recording.width = width.max(2) & !1;
+}

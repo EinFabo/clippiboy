@@ -66,7 +66,131 @@ pub fn set_config(
         state.stop_pipeline();
         crate::start_buffer_and_notify(&app);
     }
+
+    // Normalerweise gehen Hotkeys über `set_hotkeys`; kommen sie doch einmal
+    // hier durch, dürfen sie nicht bloß im JSON stehen und nirgends gelten.
+    if previous.save_clip_hotkey != next.save_clip_hotkey
+        || previous.toggle_buffer_hotkey != next.toggle_buffer_hotkey
+    {
+        if let Err(err) = crate::register_hotkeys(&app) {
+            crate::notify(&app, "error", err);
+        }
+    }
     next
+}
+
+/// Die beiden globalen Hotkeys neu belegen.
+///
+/// Getrennt von `set_config`, weil hier etwas schiefgehen kann: eine
+/// unbrauchbare Kombination oder eine, die schon ein anderes Programm hält.
+/// Schlägt das Registrieren fehl, gilt wieder die vorherige Belegung — sonst
+/// stünde in den Einstellungen ein Hotkey, der nichts auslöst.
+#[tauri::command]
+pub fn set_hotkeys(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    save_clip: String,
+    toggle_buffer: String,
+) -> Result<AppConfig> {
+    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer);
+    if result.is_err() {
+        // Auch nach einer abgelehnten Eingabe müssen die bisherigen Hotkeys
+        // wieder greifen — die Einstellungen legen sie fürs Aufnehmen still.
+        let _ = crate::register_hotkeys(&app);
+    }
+    result
+}
+
+fn apply_hotkeys(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+    save_clip: String,
+    toggle_buffer: String,
+) -> Result<AppConfig> {
+    let save_clip = save_clip.trim().to_string();
+    let toggle_buffer = toggle_buffer.trim().to_string();
+    crate::parse_hotkey(&save_clip)?;
+    crate::parse_hotkey(&toggle_buffer)?;
+    if save_clip.eq_ignore_ascii_case(&toggle_buffer) {
+        return Err("Beide Hotkeys liegen auf derselben Tastenkombination.".into());
+    }
+
+    let previous = state.config_snapshot();
+    let mut config = previous.clone();
+    config.save_clip_hotkey = save_clip;
+    config.toggle_buffer_hotkey = toggle_buffer;
+    let next = state.replace_config(config);
+
+    match crate::register_hotkeys(app) {
+        Ok(()) => Ok(next),
+        Err(err) => {
+            let mut rollback = state.config_snapshot();
+            rollback.save_clip_hotkey = previous.save_clip_hotkey;
+            rollback.toggle_buffer_hotkey = previous.toggle_buffer_hotkey;
+            state.replace_config(rollback);
+            let _ = crate::register_hotkeys(app);
+            Err(err)
+        }
+    }
+}
+
+/// Die globalen Hotkeys stilllegen, solange in den Einstellungen eine neue
+/// Kombination aufgenommen wird — sonst speichert das Drücken der alten
+/// Belegung nebenbei einen Clip oder stoppt den Puffer.
+#[tauri::command]
+pub fn suspend_hotkeys(app: tauri::AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    if let Err(err) = app.global_shortcut().unregister_all() {
+        log::warn!("Hotkeys konnten nicht stillgelegt werden: {err}");
+    }
+}
+
+/// Gegenstück zu `suspend_hotkeys` — nach einem Abbruch der Aufnahme.
+#[tauri::command]
+pub fn resume_hotkeys(app: tauri::AppHandle) {
+    if let Err(err) = crate::register_hotkeys(&app) {
+        log::warn!("{err}");
+    }
+}
+
+/// Den Ordner wechseln, in dem neue Clips landen.
+///
+/// Angelegt wird er gleich mit, und einmal hineingeschrieben wird auch — ein
+/// Pfad, der erst beim Speichern des ersten Clips auffliegt, hilft niemandem.
+#[tauri::command]
+pub fn set_clip_dir(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    dir: String,
+) -> Result<AppConfig> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Err("Kein Ordner ausgewählt.".into());
+    }
+    let path = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&path)
+        .map_err(|err| format!("Ordner „{dir}“ lässt sich nicht anlegen: {err}"))?;
+    let probe = path.join(".clippiboy-schreibtest");
+    std::fs::write(&probe, b"")
+        .map_err(|err| format!("In „{dir}“ darf ClippiBoy nicht schreiben: {err}"))?;
+    let _ = std::fs::remove_file(&probe);
+
+    let mut config = state.config_snapshot();
+    config.clip_dir = path.to_string_lossy().to_string();
+    let next = state.replace_config(config);
+    // Ohne die Freigabe spielt der Player nichts ab, was hier landet.
+    crate::allow_clip_dir(&app, &next.clip_dir);
+    Ok(next)
+}
+
+/// Der Vorschlag für den Clip-Ordner — Ausgangspunkt des Ordner-Dialogs und
+/// Ziel des Knopfs „Zurücksetzen".
+#[tauri::command]
+pub fn default_clip_dir() -> String {
+    crate::config::default_clip_dir()
+        .to_string_lossy()
+        .to_string()
 }
 
 #[tauri::command]

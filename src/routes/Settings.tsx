@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
@@ -30,14 +31,7 @@ export function Settings() {
 
       <section>
         <SectionTitle title="Hotkeys" />
-        <Card className="divide-y divide-line">
-          <Row label="Clip speichern" hint="Speichert den Inhalt des Replay-Puffers">
-            <Hotkey value={config.saveClipHotkey} />
-          </Row>
-          <Row label="Puffer an/aus">
-            <Hotkey value={config.toggleBufferHotkey} />
-          </Row>
-        </Card>
+        <Hotkeys />
       </section>
 
       <section>
@@ -183,14 +177,7 @@ export function Settings() {
 
       <section>
         <SectionTitle title="Speicherort" />
-        <Card className="flex items-center justify-between p-5">
-          <p className="truncate font-mono text-sm text-ink-muted">
-            {config.clipDir}
-          </p>
-          <Button size="sm" variant="secondary" disabled={!inTauri}>
-            Ändern
-          </Button>
-        </Card>
+        <ClipDir />
       </section>
 
       <section>
@@ -260,6 +247,177 @@ function ChoiceButton({
   );
 }
 
+/**
+ * Anzeigename einer Taste. Gespeichert wird immer die Schreibweise, die der
+ * Shortcut-Parser im Kern versteht — hier steht nur, was auf der Tastatur steht.
+ */
+const KEY_LABELS: Record<string, string> = {
+  Ctrl: "Strg",
+  Shift: "Umschalt",
+  Super: "Win",
+  Escape: "Esc",
+  Space: "Leertaste",
+  Enter: "Enter",
+  ArrowUp: "↑",
+  ArrowDown: "↓",
+  ArrowLeft: "←",
+  ArrowRight: "→",
+  PageUp: "Bild ↑",
+  PageDown: "Bild ↓",
+  PrintScreen: "Druck",
+  Delete: "Entf",
+  Insert: "Einfg",
+  Backspace: "Rück",
+};
+
+/** Aus einem Tastendruck die Schreibweise machen, die der Kern annimmt. */
+function accelerator(event: KeyboardEvent): string | null {
+  const mods: string[] = [];
+  if (event.ctrlKey) mods.push("Ctrl");
+  if (event.altKey) mods.push("Alt");
+  if (event.shiftKey) mods.push("Shift");
+  if (event.metaKey) mods.push("Super");
+
+  const code = event.code;
+  // Eine Zusatztaste allein ist noch keine Kombination — weitertippen lassen.
+  if (/^(Control|Alt|Shift|Meta|OS)(Left|Right)$/.test(code)) return null;
+  if (mods.length === 0) return null;
+
+  // `event.code` heißt schon fast überall so wie im Parser; nur die Buchstaben-
+  // und Zifferntasten schreibt man üblicherweise kurz.
+  const key = /^Key[A-Z]$/.test(code)
+    ? code.slice(3)
+    : /^Digit[0-9]$/.test(code)
+      ? code.slice(5)
+      : code;
+  return [...mods, key].join("+");
+}
+
+function Hotkeys() {
+  const { config, setHotkeys } = useEngine();
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const apply = async (saveClip: string, toggleBuffer: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await setHotkeys(saveClip, toggleBuffer);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Card className="divide-y divide-line">
+        <Row label="Clip speichern" hint="Speichert den Inhalt des Replay-Puffers">
+          <HotkeyInput
+            value={config.saveClipHotkey}
+            busy={saving}
+            onChange={(value) => apply(value, config.toggleBufferHotkey)}
+          />
+        </Row>
+        <Row label="Puffer an/aus">
+          <HotkeyInput
+            value={config.toggleBufferHotkey}
+            busy={saving}
+            onChange={(value) => apply(config.saveClipHotkey, value)}
+          />
+        </Row>
+      </Card>
+      <p className="mt-3 text-xs text-ink-faint">
+        Anklicken und die gewünschte Kombination drücken. Mindestens eine
+        Zusatztaste muss dabei sein, sonst löst der Hotkey beim Tippen aus.
+        Escape bricht ab.
+      </p>
+      {error && <p className="mt-2 text-xs text-live">{error}</p>}
+    </>
+  );
+}
+
+/** Zeigt eine Kombination und nimmt auf Klick eine neue auf. */
+function HotkeyInput({
+  value,
+  busy,
+  onChange,
+}: {
+  value: string;
+  busy?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  // In der Ereignisbehandlung liegt sonst der Wert vom Anfang der Aufnahme.
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  // Wurde die Aufnahme mit einer neuen Kombination beendet? Dann meldet der
+  // Kern die Hotkeys selbst wieder an, und ein `resume` hier käme ihm in die
+  // Quere.
+  const committed = useRef(false);
+
+  const stop = useCallback(() => setRecording(false), []);
+
+  useEffect(() => {
+    if (!recording) return;
+    committed.current = false;
+    if (inTauri) void api.suspendHotkeys();
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Solange aufgenommen wird, gehört jeder Anschlag hierher — auch Tab und
+      // Enter, die sonst durch die Oberfläche wandern würden.
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.code === "Escape") {
+        stop();
+        return;
+      }
+      const next = accelerator(event);
+      if (!next) return;
+      // Auch eine unveränderte Kombination geht durch den Kern: der meldet
+      // dabei die stillgelegten Hotkeys wieder an.
+      committed.current = true;
+      stop();
+      onChangeRef.current(next);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    // Klick daneben oder Fensterwechsel beendet die Aufnahme ebenfalls.
+    window.addEventListener("mousedown", stop);
+    window.addEventListener("blur", stop);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("mousedown", stop);
+      window.removeEventListener("blur", stop);
+      if (inTauri && !committed.current) void api.resumeHotkeys();
+    };
+  }, [recording, stop]);
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onMouseDown={(event) => {
+        // Ohne das würde der eigene Klick die Aufnahme sofort wieder beenden.
+        event.stopPropagation();
+        setRecording((on) => !on);
+      }}
+      className={cn(
+        "flex items-center gap-1.5 rounded-pill border px-2 py-1.5 transition-colors duration-150",
+        "disabled:pointer-events-none disabled:opacity-40",
+        recording
+          ? "border-accent bg-accent/10"
+          : "border-transparent hover:border-line hover:bg-elevated",
+      )}
+    >
+      {recording ? (
+        <span className="px-1.5 text-[13px] text-accent">Taste drücken …</span>
+      ) : (
+        <Hotkey value={value} />
+      )}
+    </button>
+  );
+}
+
 function Hotkey({ value }: { value: string }) {
   return (
     <div className="flex gap-1.5">
@@ -268,10 +426,88 @@ function Hotkey({ value }: { value: string }) {
           key={key}
           className="rounded-inner border border-line bg-elevated px-2.5 py-1 font-mono text-xs text-ink-muted"
         >
-          {key}
+          {KEY_LABELS[key] ?? key}
         </kbd>
       ))}
     </div>
+  );
+}
+
+/** Ordner für neue Clips — auswählen, zurücksetzen, öffnen. */
+function ClipDir() {
+  const { config, setClipDir } = useEngine();
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Nur für den Knopf „Zurücksetzen": ohne den Vergleich wüsste die Oberfläche
+  // nicht, ob überhaupt etwas zurückzusetzen ist.
+  const [fallback, setFallback] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    api.defaultClipDir().then(setFallback).catch(() => {});
+  }, []);
+
+  const apply = async (dir: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setClipDir(dir);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pick = async () => {
+    setError(null);
+    let picked: string | string[] | null;
+    try {
+      picked = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: config.clipDir,
+        title: "Ordner für neue Clips",
+      });
+    } catch (err) {
+      setError(String(err));
+      return;
+    }
+    // Abbruch im Dialog liefert null.
+    if (typeof picked !== "string") return;
+    await apply(picked);
+  };
+
+  const canReset = fallback !== null && fallback !== config.clipDir;
+
+  return (
+    <>
+      <Card className="flex items-center justify-between gap-6 p-5">
+        <p className="truncate font-mono text-sm text-ink-muted" title={config.clipDir}>
+          {config.clipDir}
+        </p>
+        <div className="flex shrink-0 gap-2">
+          {canReset && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => apply(fallback)}
+            >
+              Zurücksetzen
+            </Button>
+          )}
+          <Button size="sm" variant="secondary" disabled={!inTauri || busy} onClick={pick}>
+            Ändern
+          </Button>
+        </div>
+      </Card>
+      <p className="mt-3 text-xs text-ink-faint">
+        Gilt für neue Clips. Bereits gespeicherte bleiben liegen, wo sie sind,
+        und lassen sich weiter abspielen.
+      </p>
+      {error && <p className="mt-2 text-xs text-live">{error}</p>}
+    </>
   );
 }
 
