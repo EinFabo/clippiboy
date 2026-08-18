@@ -38,7 +38,7 @@ fn tool(name: &str) -> PathBuf {
     }
 }
 
-fn command(name: &str) -> Command {
+pub fn command(name: &str) -> Command {
     let mut command = Command::new(tool(name));
     #[cfg(windows)]
     {
@@ -48,11 +48,11 @@ fn command(name: &str) -> Command {
     command
 }
 
-fn ffmpeg() -> Command {
+pub fn ffmpeg() -> Command {
     command("ffmpeg")
 }
 
-fn run(command: &mut Command, what: &str) -> Result<(), String> {
+pub fn run(command: &mut Command, what: &str) -> Result<(), String> {
     let output = command
         .output()
         .map_err(|err| format!("ffmpeg konnte nicht gestartet werden ({what}): {err}"))?;
@@ -167,11 +167,17 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
         // Die WAV-Spuren müssen encodiert werden, das Video bleibt unangetastet.
         command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
     }
+    // Zweimal derselbe Name mit Absicht: MP4 kennt kein einheitliches Feld für
+    // Spurnamen, und je nach Programm wird das eine oder das andere gelesen.
     command.arg("-metadata:s:a:0").arg("title=Mix");
+    command.arg("-metadata:s:a:0").arg("handler_name=Mix");
     for (index, (_, label)) in wavs.iter().enumerate() {
         command
             .arg(format!("-metadata:s:a:{}", index + 1))
             .arg(format!("title={label}"));
+        command
+            .arg(format!("-metadata:s:a:{}", index + 1))
+            .arg(format!("handler_name={label}"));
     }
     // Nach dem Suchen fängt der erste Zeitstempel nicht bei null an — ohne das
     // stünde im MP4 ein negativer Versatz.
@@ -211,13 +217,13 @@ fn escape_for_list(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/").replace('\'', "'\\''")
 }
 
-fn sanitize(text: &str) -> String {
+pub fn sanitize(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
 }
 
-fn probe_duration_ms(path: &Path) -> Option<u64> {
+pub fn probe_duration_ms(path: &Path) -> Option<u64> {
     let output = command("ffprobe")
         .args([
             "-v",

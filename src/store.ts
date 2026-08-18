@@ -36,6 +36,14 @@ interface EngineState {
   toggleBuffer: () => Promise<void>;
   saveClip: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
+  updateClip: (id: string, meta: ClipMeta) => Promise<void>;
+}
+
+/** Die von Hand pflegbaren Felder eines Clips. */
+export interface ClipMeta {
+  title: string | null;
+  description: string | null;
+  game: string | null;
 }
 
 export const useEngine = create<EngineState>((set, get) => ({
@@ -171,5 +179,20 @@ export const useEngine = create<EngineState>((set, get) => ({
   async deleteClip(id) {
     set((st) => ({ clips: st.clips.filter((c) => c.id !== id) }));
     if (inTauri) await api.deleteClip(id);
+  },
+
+  async updateClip(id, meta) {
+    // Erst lokal übernehmen: Getippt wird in ein Feld, das jeden Anschlag
+    // sofort zeigen soll, gespeichert wird nebenher.
+    set((st) => ({
+      clips: st.clips.map((c) => (c.id === id ? { ...c, ...meta } : c)),
+    }));
+    if (!inTauri) return;
+    try {
+      const clip = await api.updateClip(id, meta);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: String(err) });
+    }
   },
 }));

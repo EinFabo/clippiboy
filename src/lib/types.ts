@@ -113,6 +113,47 @@ export interface Clip {
   height: number;
   sizeBytes: number;
   thumbPath: string | null;
+  /** Selbst vergebener Name; ohne ihn zeigt die Galerie den Dateinamen. */
+  title: string | null;
+  description: string | null;
+}
+
+/** Eine Tonspur in der Clipdatei. Spur 0 ist der Hauptmix. */
+export interface ClipTrack {
+  index: number;
+  label: string;
+  channels: number;
+  /** Entpackte Einzeldatei für die Vorschau; Spur 0 braucht keine. */
+  previewPath: string | null;
+}
+
+/** Wie eine Spur beim Export gewichtet wird. */
+export interface TrackMix {
+  index: number;
+  gainDb: number;
+  muted: boolean;
+}
+
+export interface ExportRequest {
+  clipId: string;
+  startMs: number;
+  endMs: number;
+  tracks: TrackMix[];
+  /** Zieldatei; ohne Angabe landet der Export neben dem Ausgangsclip. */
+  output?: string | null;
+}
+
+export interface ExportResult {
+  path: string;
+  durationMs: number;
+  sizeBytes: number;
+}
+
+/** Nutzlast des `export-progress`-Events. */
+export interface ExportProgress {
+  clipId: string;
+  /** 0 bis 1. */
+  progress: number;
 }
 
 export interface EngineStatus {

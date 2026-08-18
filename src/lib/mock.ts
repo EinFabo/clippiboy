@@ -6,6 +6,7 @@ import type {
   AudioProcess,
   CaptureTarget,
   Clip,
+  ClipTrack,
   EncoderInfo,
 } from "./types";
 
@@ -109,6 +110,8 @@ export const mockClips: Clip[] = [
     height: 1080,
     sizeBytes: 168_000_000,
     thumbPath: null,
+    title: "Ace auf Mirage",
+    description: "Letzte Runde, 1v3 nach dem Retake.",
   },
   {
     id: "c2",
@@ -120,6 +123,8 @@ export const mockClips: Clip[] = [
     height: 1080,
     sizeBytes: 305_000_000,
     thumbPath: null,
+    title: null,
+    description: null,
   },
   {
     id: "c3",
@@ -131,5 +136,14 @@ export const mockClips: Clip[] = [
     height: 1080,
     sizeBytes: 94_000_000,
     thumbPath: null,
+    title: null,
+    description: null,
   },
+];
+
+/** Ohne Backend gibt es keine echten Tonspuren — der Mixer soll trotzdem da sein. */
+export const mockTracks: ClipTrack[] = [
+  { index: 0, label: "Hauptmix", channels: 2, previewPath: null },
+  { index: 1, label: "Discord", channels: 2, previewPath: null },
+  { index: 2, label: "Mikrofon", channels: 2, previewPath: null },
 ];

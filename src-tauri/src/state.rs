@@ -338,6 +338,8 @@ impl AppState {
             height: config.recording.height,
             size_bytes: result.size_bytes,
             thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
+            title: None,
+            description: None,
         })
     }
 }

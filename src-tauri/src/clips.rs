@@ -49,14 +49,34 @@ impl Library {
                  tag     TEXT NOT NULL,
                  PRIMARY KEY (clip_id, tag)
              );",
-        )
+        )?;
+        // Nachträglich dazugekommen: eine bestehende Datenbank soll ihre Clips
+        // behalten, deshalb angehängt statt Tabelle neu.
+        self.add_column("title", "TEXT")?;
+        self.add_column("description", "TEXT")?;
+        Ok(())
+    }
+
+    /// Spalte anlegen, falls sie fehlt. `ALTER TABLE … ADD COLUMN` kennt kein
+    /// `IF NOT EXISTS`, deshalb der Blick in `pragma_table_info`.
+    fn add_column(&self, name: &str, decl: &str) -> rusqlite::Result<()> {
+        let exists: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('clips') WHERE name = ?1")?
+            .exists(params![name])?;
+        if !exists {
+            self.conn
+                .execute_batch(&format!("ALTER TABLE clips ADD COLUMN {name} {decl}"))?;
+        }
+        Ok(())
     }
 
     pub fn insert(&self, clip: &Clip) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO clips
-             (id, path, created_at, duration_ms, game, width, height, size_bytes, thumb_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, path, created_at, duration_ms, game, width, height, size_bytes,
+              thumb_path, title, description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 clip.id,
                 clip.path,
@@ -67,6 +87,8 @@ impl Library {
                 clip.height,
                 clip.size_bytes as i64,
                 clip.thumb_path,
+                clip.title,
+                clip.description,
             ],
         )?;
         Ok(())
@@ -74,7 +96,8 @@ impl Library {
 
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes, thumb_path
+            "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,
+                    thumb_path, title, description
              FROM clips ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -88,6 +111,8 @@ impl Library {
                 height: row.get(6)?,
                 size_bytes: row.get::<_, i64>(7)? as u64,
                 thumb_path: row.get(8)?,
+                title: row.get(9)?,
+                description: row.get(10)?,
             })
         })?;
         rows.collect()
@@ -95,6 +120,22 @@ impl Library {
 
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<Clip>> {
         Ok(self.list()?.into_iter().find(|c| c.id == id))
+    }
+
+    /// Name, Beschreibung und Spiel ändern. Leere Felder kommen als `None` an
+    /// und löschen den Eintrag wieder.
+    pub fn update_meta(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        game: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET title = ?2, description = ?3, game = ?4 WHERE id = ?1",
+            params![id, title, description, game],
+        )?;
+        Ok(())
     }
 
     /// Entfernt den Eintrag und die Videodatei.
@@ -126,6 +167,8 @@ mod tests {
             height: 1080,
             size_bytes: 1234,
             thumb_path: None,
+            title: None,
+            description: None,
         }
     }
 
@@ -146,5 +189,21 @@ mod tests {
         lib.insert(&clip("a", 1)).unwrap();
         lib.delete("a").unwrap();
         assert!(lib.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn metadata_survives_the_roundtrip() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        lib.update_meta("a", Some("Ace"), Some("4k mit Deagle"), Some("CS2"))
+            .unwrap();
+
+        let stored = lib.get("a").unwrap().unwrap();
+        assert_eq!(stored.title.as_deref(), Some("Ace"));
+        assert_eq!(stored.description.as_deref(), Some("4k mit Deagle"));
+
+        // Leeren Namen wieder loswerden.
+        lib.update_meta("a", None, None, None).unwrap();
+        assert!(lib.get("a").unwrap().unwrap().title.is_none());
     }
 }
