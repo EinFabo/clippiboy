@@ -1,16 +1,14 @@
+import { useEffect } from "react";
+
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Select, Slider } from "@/components/ui/Controls";
 import { formatBufferSeconds } from "@/lib/format";
 import { cn } from "@/lib/cn";
-import type { EncoderId } from "@/lib/types";
+import type { CaptureTarget, EncoderId } from "@/lib/types";
 
-const RESOLUTIONS = [
-  { value: "720", label: "1280 × 720" },
-  { value: "1080", label: "1920 × 1080" },
-  { value: "1440", label: "2560 × 1440" },
-  { value: "2160", label: "3840 × 2160" },
-] as const;
+/** Die üblichen Stufen; angeboten wird davon nur, was die Quelle hergibt. */
+const HEIGHTS = [720, 1080, 1440, 2160];
 
 const FPS = [
   { value: "30", label: "30 FPS" },
@@ -18,12 +16,53 @@ const FPS = [
   { value: "120", label: "120 FPS" },
 ] as const;
 
+/**
+ * Aufnahmegröße zu einer Zielhöhe. Die Breite kommt aus dem Seitenverhältnis
+ * der Quelle statt aus einem angenommenen 16:9, und beide Werte bleiben gerade —
+ * genauso rechnet der Kern in `capture::fit_to_target`.
+ */
+function fit(height: number, source: CaptureTarget | null) {
+  const ratio =
+    source && source.width > 0 && source.height > 0
+      ? source.width / source.height
+      : 16 / 9;
+  const h = Math.max(2, Math.round(height)) & ~1;
+  const w = Math.max(2, Math.round(h * ratio)) & ~1;
+  return { width: w, height: h };
+}
+
 export function Recording() {
   const { config, targets, encoders, patchConfig } = useEngine();
   const rec = config.recording;
 
   const setRec = (patch: Partial<typeof rec>) =>
     patchConfig({ recording: { ...rec, ...patch } });
+
+  // Ohne Auswahl nimmt der Kern den primären Monitor — dann soll hier auch
+  // dessen Auflösung die Grenze sein.
+  const source =
+    targets.find((t) => t.kind === rec.targetKind && t.id === rec.targetId) ??
+    targets.find((t) => t.kind === "monitor" && t.isPrimary) ??
+    null;
+
+  // Höher als die Quelle geht nicht: hochskaliert kostet es nur Bitrate und
+  // bringt kein Detail dazu. Der Kern deckelt ohnehin — hier steht dann aber
+  // wenigstens dieselbe Zahl.
+  const heights = source
+    ? [
+        ...new Set(
+          [...HEIGHTS.filter((h) => h < source.height), source.height].map(
+            (h) => fit(h, source).height,
+          ),
+        ),
+      ]
+    : HEIGHTS;
+
+  useEffect(() => {
+    if (!source) return;
+    const next = fit(Math.min(rec.height, source.height), source);
+    if (next.width !== rec.width || next.height !== rec.height) setRec(next);
+  }, [source?.id, source?.width, source?.height, rec.width, rec.height]);
 
   return (
     <div className="space-y-8 pb-12">
@@ -58,16 +97,27 @@ export function Recording() {
       <section>
         <SectionTitle title="Qualität" />
         <Card className="divide-y divide-line">
-          <Row label="Auflösung" hint="Höhe der Aufnahme, Seitenverhältnis folgt der Quelle">
+          <Row
+            label="Auflösung"
+            hint={
+              source
+                ? `Seitenverhältnis folgt der Quelle · ${source.width}×${source.height} verfügbar`
+                : "Seitenverhältnis folgt der Quelle"
+            }
+          >
             <Select
               value={String(rec.height)}
-              options={RESOLUTIONS.map((r) => ({ value: r.value, label: r.label }))}
-              onChange={(v) =>
-                setRec({
-                  height: Number(v),
-                  width: Math.round((Number(v) * 16) / 9),
-                })
-              }
+              options={heights.map((h) => {
+                const size = fit(h, source);
+                return {
+                  value: String(h),
+                  label:
+                    source && h === source.height
+                      ? `${size.width} × ${size.height} (Quelle)`
+                      : `${size.width} × ${size.height}`,
+                };
+              })}
+              onChange={(v) => setRec(fit(Number(v), source))}
             />
           </Row>
           <Row label="Bildrate">

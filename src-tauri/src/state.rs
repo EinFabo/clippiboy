@@ -9,7 +9,7 @@ use crate::buffer::ReplayBuffer;
 use crate::clips::Library;
 use crate::config;
 use crate::pipeline::{Pipeline, Shared};
-use crate::model::{AppConfig, AudioSource, Clip, EngineStatus};
+use crate::model::{AppConfig, AudioSource, Clip, EngineStatus, RecordingConfig};
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
@@ -35,6 +35,9 @@ pub struct AppState {
     pub quitting: std::sync::atomic::AtomicBool,
     /// Merker für den selbsttätigen Puffer, siehe `AutoBuffer`.
     pub auto: AutoBuffer,
+    /// Die Aufnahmeeinstellungen, mit denen der laufende Puffer gestartet
+    /// wurde — an die Quelle angeglichen und damit die echten Maße des Clips.
+    pub active_recording: Mutex<Option<RecordingConfig>>,
 }
 
 /// Zustand der Automatik „Puffer an, sobald ein Spiel läuft".
@@ -146,6 +149,7 @@ impl AppState {
             buffering_game: Mutex::new(None),
             quitting: std::sync::atomic::AtomicBool::new(false),
             auto: AutoBuffer::default(),
+            active_recording: Mutex::new(None),
         }
     }
 
@@ -203,7 +207,11 @@ impl AppState {
             );
         }
 
-        let config = self.config_snapshot();
+        let mut config = self.config_snapshot();
+        // Der Bildschirm kann seit dem Einstellen gewechselt haben — lieber
+        // hier noch einmal an die Quelle angleichen als hochskaliert
+        // aufnehmen.
+        crate::capture::fit_to_target(&mut config.recording);
         let pipeline = Pipeline::start(
             &config.recording,
             config.buffer.seconds,
@@ -213,6 +221,7 @@ impl AppState {
         )?;
         *self.shared.lock() = Some(pipeline.shared.clone());
         *self.pipeline.lock() = Some(pipeline);
+        *self.active_recording.lock() = Some(config.recording.clone());
         // Erst kopieren, dann setzen: Hielte man beide Sperren gleichzeitig,
         // liefe das gegen die umgekehrte Reihenfolge in `save_clip` und die
         // beiden Hotkey-Threads könnten sich gegenseitig blockieren.
@@ -228,6 +237,7 @@ impl AppState {
 
     pub fn stop_pipeline(&self) {
         self.shared.lock().take();
+        self.active_recording.lock().take();
         if let Some(mut pipeline) = self.pipeline.lock().take() {
             pipeline.stop();
         }
@@ -298,6 +308,14 @@ impl AppState {
             log::warn!("Encoder meldete: {err}");
         }
 
+        // Die Maße der Datei stammen von der laufenden Aufnahme, nicht aus der
+        // Konfiguration: gespeichert wird, was der Encoder wirklich bekommen hat.
+        let recording = self
+            .active_recording
+            .lock()
+            .clone()
+            .unwrap_or_else(|| config.recording.clone());
+
         let segments = shared.segments.lock().clone();
         let tracks = shared.tracks.lock().clone();
         let now_ms = shared
@@ -334,8 +352,8 @@ impl AppState {
                 .unwrap_or(0),
             duration_ms: result.duration_ms,
             game,
-            width: config.recording.width,
-            height: config.recording.height,
+            width: recording.width,
+            height: recording.height,
             size_bytes: result.size_bytes,
             thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
             title: None,

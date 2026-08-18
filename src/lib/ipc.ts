@@ -34,6 +34,15 @@ export const api = {
 
   getConfig: () => invoke<AppConfig>("get_config"),
   setConfig: (config: AppConfig) => invoke<void>("set_config", { config }),
+  /** Wirft, wenn eine Kombination ungültig oder schon belegt ist. */
+  setHotkeys: (saveClip: string, toggleBuffer: string) =>
+    invoke<AppConfig>("set_hotkeys", { saveClip, toggleBuffer }),
+  /** Wirft, wenn sich der Ordner nicht anlegen oder nicht beschreiben lässt. */
+  setClipDir: (dir: string) => invoke<AppConfig>("set_clip_dir", { dir }),
+  defaultClipDir: () => invoke<string>("default_clip_dir"),
+  /** Hotkeys stilllegen, solange die Einstellungen eine Kombination aufnehmen. */
+  suspendHotkeys: () => invoke<void>("suspend_hotkeys"),
+  resumeHotkeys: () => invoke<void>("resume_hotkeys"),
 
   addAudioSource: (source: AudioSource) =>
     invoke<AppConfig>("add_audio_source", { source }),

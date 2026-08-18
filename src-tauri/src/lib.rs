@@ -180,12 +180,41 @@ pub fn apply_autostart(app: &tauri::AppHandle, wanted: bool) {
     }
 }
 
+/// Eine Tastenkombination prüfen, bevor sie in der Konfiguration landet.
+///
+/// Nimmt die Schreibweise des Shortcut-Parsers an (`Ctrl+Shift+S`, `Alt+F9`,
+/// `Ctrl+Numpad1`). Eine Kombination ganz ohne Zusatztaste wird abgelehnt: ein
+/// nacktes `S` würde global jedes Tippen abfangen.
+pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
+    use std::str::FromStr;
+    use tauri_plugin_global_shortcut::{Modifiers, Shortcut};
+
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Es ist keine Tastenkombination hinterlegt.".into());
+    }
+    let shortcut = Shortcut::from_str(text)
+        .map_err(|_| format!("„{text}“ ist keine gültige Tastenkombination."))?;
+    if shortcut.mods == Modifiers::empty() {
+        return Err("Ohne Strg, Alt, Shift oder Windows-Taste geht es nicht — sonst löst die Taste beim Tippen aus.".into());
+    }
+    Ok(shortcut)
+}
+
 /// Globale Hotkeys registrieren (Speichern und Puffer an/aus).
-fn register_hotkeys(app: &tauri::AppHandle) {
+///
+/// Wird beim Start und nach jeder Änderung aufgerufen. Deshalb zuerst alles
+/// abmelden: sonst bliebe die alte Belegung zusätzlich aktiv.
+pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
     let config = app.state::<AppState>().config_snapshot();
     let shortcuts = app.global_shortcut();
+    if let Err(err) = shortcuts.unregister_all() {
+        log::warn!("Alte Hotkeys konnten nicht abgemeldet werden: {err}");
+    }
+
+    let mut failed: Vec<String> = Vec::new();
 
     let save = config.save_clip_hotkey.clone();
     if let Err(err) = shortcuts.on_shortcut(save.as_str(), move |app, _shortcut, event| {
@@ -198,6 +227,7 @@ fn register_hotkeys(app: &tauri::AppHandle) {
         }
     }) {
         log::warn!("Hotkey '{save}' konnte nicht registriert werden: {err}");
+        failed.push(save);
     }
 
     let toggle = config.toggle_buffer_hotkey.clone();
@@ -207,6 +237,17 @@ fn register_hotkeys(app: &tauri::AppHandle) {
         }
     }) {
         log::warn!("Hotkey '{toggle}' konnte nicht registriert werden: {err}");
+        failed.push(toggle);
+    }
+
+    match failed.len() {
+        0 => Ok(()),
+        // Windows meldet nur „schon vergeben" — praktisch immer ein anderes
+        // Programm, das dieselbe Kombination hält.
+        _ => Err(format!(
+            "{} ist schon von einem anderen Programm belegt.",
+            failed.join(" und ")
+        )),
     }
 }
 
@@ -254,6 +295,28 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
 pub fn allow_clip_dir(app: &tauri::AppHandle, dir: &str) {
     if let Err(err) = app.asset_protocol_scope().allow_directory(dir, true) {
         log::warn!("Clip-Ordner '{dir}' ist für den Player nicht freigegeben: {err}");
+    }
+}
+
+/// Auch die Ordner freigeben, in denen ältere Clips liegen.
+///
+/// Wer den Speicherort umstellt, lässt seine bisherigen Clips woanders liegen —
+/// ohne das bliebe die halbe Galerie beim nächsten Start ein schwarzes Bild.
+fn allow_existing_clip_dirs(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let clips = match state.library.lock().as_ref() {
+        Some(library) => library.list().unwrap_or_default(),
+        None => return,
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for clip in clips {
+        let Some(dir) = std::path::Path::new(&clip.path).parent() else {
+            continue;
+        };
+        let dir = dir.to_string_lossy().to_string();
+        if seen.insert(dir.clone()) {
+            allow_clip_dir(app, &dir);
+        }
     }
 }
 
@@ -305,6 +368,7 @@ pub fn run() {
             let handle = app.handle();
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
+            allow_existing_clip_dirs(handle);
             // Die entpackten Tonspuren für die Vorschau im Player: eine alte
             // Sitzung lässt nur Dateien zurück, die sich in einer Sekunde neu
             // erzeugen lassen — also erst wegräumen, dann freigeben.
@@ -326,7 +390,9 @@ pub fn run() {
                 log::error!("Tray-Symbol konnte nicht angelegt werden: {err}");
             }
             spawn_ui_updates(handle);
-            register_hotkeys(handle);
+            if let Err(err) = register_hotkeys(handle) {
+                log::warn!("{err}");
+            }
             start_buffer_if_configured(handle);
             updater::check_on_startup(handle);
             Ok(())
@@ -348,6 +414,11 @@ pub fn run() {
             commands::list_encoders,
             commands::get_config,
             commands::set_config,
+            commands::set_hotkeys,
+            commands::suspend_hotkeys,
+            commands::resume_hotkeys,
+            commands::set_clip_dir,
+            commands::default_clip_dir,
             commands::add_audio_source,
             commands::update_audio_source,
             commands::remove_audio_source,
