@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "Der Banner über dem Spiel — hört nur zu, steuert nichts",
+  "windows": ["overlay"],
+  "permissions": ["core:event:default"]
+}

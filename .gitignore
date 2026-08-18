@@ -1,0 +1,15 @@
+node_modules/
+dist/
+src-tauri/target/
+
+# Wird von `npm run ffmpeg` geholt — zwei Dateien à 100 MB gehören nicht ins Repo.
+src-tauri/resources/
+
+# Signierschlüssel für Updates. Gehört nie ins Repo, sondern in ein
+# GitHub-Secret (TAURI_SIGNING_PRIVATE_KEY).
+*.key
+*.pem
+
+.DS_Store
+*.log
+shot.png
