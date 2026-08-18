@@ -43,6 +43,19 @@ pub fn notify(app: &tauri::AppHandle, kind: &'static str, message: impl Into<Str
 /// gemeinsam genutzt, damit alle drei Wege identisch reagieren.
 pub fn save_clip_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
+
+    // Entprellen, bevor irgendetwas passiert: Läuft schon ein Speichervorgang,
+    // ist der Tastendruck die Ungeduld des Nutzers und kein zweiter Clip.
+    let Some(_saving) = state.begin_save() else {
+        log::info!("Es wird bereits ein Clip geschrieben — Tastendruck übergangen");
+        return Err("Es wird bereits ein Clip gespeichert.".into());
+    };
+
+    // Sofort Rückmeldung geben. Versiegeln und Muxen dauern je nach Bitrate und
+    // Pufferlänge mehrere Sekunden; ohne ein Zeichen an der Oberfläche drückt
+    // man in der Zeit ein zweites und drittes Mal.
+    overlay::show(app, BannerKind::Clip, "Clip wird gespeichert…", None);
+
     match state.save_clip(None) {
         Ok(clip) => {
             let seconds = clip.duration_ms / 1000;
