@@ -300,11 +300,24 @@ function TargetCard({
         }
       }}
       className={cn(
-        "cursor-pointer p-4 text-left",
-        picked && "border-accent bg-accent/8",
+        "relative cursor-pointer p-4 text-left",
+        // Deutlich genug, um es beim Überfliegen zu sehen: eine Tönung von 8 %
+        // unterscheidet sich auf dunklem Grund praktisch nicht von keiner.
+        picked && "border-accent-bright bg-accent/20",
       )}
     >
-      <p className="truncate text-sm font-medium" title={target.title}>
+      {picked && (
+        <span
+          className="absolute top-3 right-3 rounded-pill bg-accent px-2.5 py-0.5
+            text-[11px] font-medium text-white"
+        >
+          Ausgewählt
+        </span>
+      )}
+      <p
+        className={cn("truncate text-sm font-medium", picked && "pr-24")}
+        title={target.title}
+      >
         {target.title}
       </p>
       <p className="mt-1 text-xs text-ink-muted">
