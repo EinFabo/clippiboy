@@ -154,7 +154,9 @@ impl AppState {
     }
 
     /// Konfiguration ersetzen, auf Platte schreiben und abhängige Teile
-    /// nachziehen (aktuell die Pufferlänge).
+    /// nachziehen (Pufferlänge und Tonquellen). Die Bildquelle einer laufenden
+    /// Aufnahme wechselt `commands::set_config` — dort lässt sich der Neustart
+    /// auch melden.
     pub fn replace_config(&self, mut next: AppConfig) -> AppConfig {
         next.recording.encoder = crate::encode::resolve(next.recording.encoder);
         self.buffer.lock().set_capacity(next.buffer.seconds);
@@ -172,6 +174,11 @@ impl AppState {
             log::error!("Konfiguration konnte nicht gespeichert werden: {err}");
         }
         next
+    }
+
+    /// Läuft gerade eine Aufnahme in den Puffer?
+    pub fn is_buffering(&self) -> bool {
+        self.pipeline.lock().is_some()
     }
 
     pub fn upsert_source(&self, source: AudioSource) -> AppConfig {

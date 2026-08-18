@@ -104,7 +104,7 @@ pub struct CaptureTarget {
     pub is_primary: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingConfig {
     pub target_kind: TargetKind,

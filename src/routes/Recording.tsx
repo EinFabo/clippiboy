@@ -1,9 +1,11 @@
+import { useEffect } from "react";
 import { useEngine } from "@/store";
+import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Select, Slider } from "@/components/ui/Controls";
 import { formatBufferSeconds } from "@/lib/format";
 import { cn } from "@/lib/cn";
-import type { EncoderId } from "@/lib/types";
+import type { CaptureTarget, EncoderId } from "@/lib/types";
 
 const RESOLUTIONS = [
   { value: "720", label: "1280 × 720" },
@@ -19,11 +21,27 @@ const FPS = [
 ] as const;
 
 export function Recording() {
-  const { config, targets, encoders, patchConfig } = useEngine();
+  const { config, targets, encoders, patchConfig, refreshTargets } = useEngine();
   const rec = config.recording;
+
+  // Fenster kommen und gehen: Beim Start von ClippiBoy lief das Spiel meist
+  // noch nicht, also wird die Liste beim Öffnen der Seite neu geholt.
+  useEffect(() => {
+    void refreshTargets();
+  }, [refreshTargets]);
 
   const setRec = (patch: Partial<typeof rec>) =>
     patchConfig({ recording: { ...rec, ...patch } });
+
+  const monitors = targets.filter((t) => t.kind === "monitor");
+  const windows = targets.filter((t) => t.kind === "window");
+
+  // Ohne gespeicherte Auswahl nimmt der Kern den primären Monitor — das soll
+  // die Oberfläche auch zeigen, sonst wirkt nichts ausgewählt.
+  const isPicked = (t: CaptureTarget) =>
+    rec.targetId === null
+      ? rec.targetKind === "monitor" && t.kind === "monitor" && t.isPrimary
+      : rec.targetKind === t.kind && rec.targetId === t.id;
 
   return (
     <div className="space-y-8 pb-12">
@@ -32,26 +50,56 @@ export function Recording() {
       </header>
 
       <section>
-        <SectionTitle title="Quelle" />
+        <SectionTitle
+          title="Quelle"
+          action={
+            <Button size="sm" variant="ghost" onClick={() => void refreshTargets()}>
+              Aktualisieren
+            </Button>
+          }
+        />
+
+        <p className="mb-4 text-xs text-ink-faint">
+          Ein Wechsel greift sofort — läuft der Puffer, startet er mit der neuen
+          Quelle neu und die bis dahin gepufferten Sekunden sind weg.
+        </p>
+
+        <h3 className="mb-2 text-xs font-medium text-ink-muted">Monitore</h3>
         <div className="grid grid-cols-2 gap-3">
-          {targets.map((t) => (
-            <Card
+          {monitors.map((t) => (
+            <TargetCard
               key={t.id}
-              interactive
-              onClick={() => setRec({ targetKind: t.kind, targetId: t.id })}
-              className={cn(
-                "cursor-pointer p-4",
-                rec.targetId === t.id && "border-accent bg-accent/8",
-              )}
-            >
-              <p className="text-sm font-medium">{t.title}</p>
-              <p className="mt-1 text-xs text-ink-muted">
-                {t.kind === "monitor" ? "Monitor" : "Fenster"} · {t.width}×
-                {t.height}
-                {t.isPrimary && " · primär"}
-              </p>
-            </Card>
+              target={t}
+              picked={isPicked(t)}
+              onPick={() => setRec({ targetKind: t.kind, targetId: t.id })}
+            />
           ))}
+          {monitors.length === 0 && (
+            <p className="text-xs text-ink-faint">
+              Kein Monitor gefunden — ClippiBoy nimmt dann den primären
+              Bildschirm.
+            </p>
+          )}
+        </div>
+
+        <h3 className="mb-2 mt-6 text-xs font-medium text-ink-muted">
+          Fenster
+        </h3>
+        <div className="grid max-h-72 grid-cols-2 gap-3 overflow-y-auto pr-1">
+          {windows.map((t) => (
+            <TargetCard
+              key={t.id}
+              target={t}
+              picked={isPicked(t)}
+              onPick={() => setRec({ targetKind: t.kind, targetId: t.id })}
+            />
+          ))}
+          {windows.length === 0 && (
+            <p className="text-xs text-ink-faint">
+              Kein aufnehmbares Fenster offen. Starte das Spiel und tippe auf
+              „Aktualisieren“.
+            </p>
+          )}
         </div>
       </section>
 
@@ -178,5 +226,44 @@ function Row({
       </div>
       <div className="shrink-0">{children}</div>
     </div>
+  );
+}
+
+function TargetCard({
+  target,
+  picked,
+  onPick,
+}: {
+  target: CaptureTarget;
+  picked: boolean;
+  onPick: () => void;
+}) {
+  return (
+    <Card
+      role="button"
+      tabIndex={0}
+      aria-pressed={picked}
+      interactive
+      onClick={onPick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onPick();
+        }
+      }}
+      className={cn(
+        "cursor-pointer p-4 text-left",
+        picked && "border-accent bg-accent/8",
+      )}
+    >
+      <p className="truncate text-sm font-medium" title={target.title}>
+        {target.title}
+      </p>
+      <p className="mt-1 text-xs text-ink-muted">
+        {target.kind === "monitor" ? "Monitor" : "Fenster"} · {target.width}×
+        {target.height}
+        {target.isPrimary && " · primär"}
+      </p>
+    </Card>
   );
 }

@@ -30,6 +30,7 @@ interface EngineState {
 
   init: () => Promise<void>;
   refreshSources: () => Promise<void>;
+  refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
   upsertSource: (source: AudioSource) => Promise<void>;
   removeSource: (id: string) => Promise<void>;
@@ -84,15 +85,36 @@ export const useEngine = create<EngineState>((set, get) => ({
       return;
     }
 
+    // Jede Abfrage für sich: Scheitert eine — etwa die Prozessliste, für die
+    // Windows nicht immer Rechte gibt —, darf das nicht den Rest mitreißen.
+    // Vorher blieb in dem Fall auch die Zielliste leer und man konnte auf der
+    // Aufnahmeseite keine Quelle auswählen.
+    const fail = (what: string, err: unknown) => {
+      console.error(`${what} fehlgeschlagen`, err);
+      set({ lastError: `${what}: ${String(err)}` });
+    };
+    const load = async <T>(
+      what: string,
+      call: () => Promise<T>,
+      fallback: T,
+    ): Promise<T> => {
+      try {
+        return await call();
+      } catch (err) {
+        fail(what, err);
+        return fallback;
+      }
+    };
+
     try {
       const [config, devices, processes, targets, encoders, clips] =
         await Promise.all([
-          api.getConfig(),
-          api.listAudioDevices(),
-          api.listAudioProcesses(),
-          api.listCaptureTargets(),
-          api.listEncoders(),
-          api.listClips(),
+          load("Konfiguration lesen", api.getConfig, get().config),
+          load("Audiogeräte lesen", api.listAudioDevices, []),
+          load("Anwendungen lesen", api.listAudioProcesses, []),
+          load("Aufnahmequellen lesen", api.listCaptureTargets, []),
+          load("Encoder lesen", api.listEncoders, []),
+          load("Clips lesen", api.listClips, []),
         ]);
       set({ ready: true, config, devices, processes, targets, encoders, clips });
 
@@ -120,17 +142,34 @@ export const useEngine = create<EngineState>((set, get) => ({
   async refreshSources() {
     if (!inTauri) return;
     const [devices, processes, targets] = await Promise.all([
-      api.listAudioDevices(),
-      api.listAudioProcesses(),
-      api.listCaptureTargets(),
+      api.listAudioDevices().catch(() => get().devices),
+      api.listAudioProcesses().catch(() => get().processes),
+      api.listCaptureTargets().catch(() => get().targets),
     ]);
     set({ devices, processes, targets });
+  },
+
+  /** Nur die Bildquellen — Monitore und offene Fenster — neu einlesen. */
+  async refreshTargets() {
+    if (!inTauri) return;
+    try {
+      set({ targets: await api.listCaptureTargets() });
+    } catch (err) {
+      set({ lastError: `Aufnahmequellen lesen: ${String(err)}` });
+    }
   },
 
   async patchConfig(patch) {
     const config = { ...get().config, ...patch };
     set({ config });
-    if (inTauri) await api.setConfig(config);
+    if (!inTauri) return;
+    try {
+      await api.setConfig(config);
+    } catch (err) {
+      // Die Auswahl steht schon in der Oberfläche — wenn der Kern sie nicht
+      // annimmt, muss das jemand sehen statt still zu scheitern.
+      set({ lastError: `Einstellung übernehmen: ${String(err)}` });
+    }
   },
 
   async upsertSource(source) {

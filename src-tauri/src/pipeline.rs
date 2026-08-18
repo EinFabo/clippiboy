@@ -598,11 +598,19 @@ mod win {
         let capture = match recording.target_kind {
             TargetKind::Monitor => {
                 let monitor = match &recording.target_id {
-                    Some(device) => Monitor::enumerate()
+                    Some(device) => match Monitor::enumerate()
                         .map_err(|e| e.to_string())?
                         .into_iter()
                         .find(|m| m.device_name().map(|n| &n == device).unwrap_or(false))
-                        .ok_or_else(|| format!("Monitor '{device}' nicht gefunden"))?,
+                    {
+                        Some(monitor) => monitor,
+                        // Abgestöpselter oder umbenannter Bildschirm: lieber den
+                        // primären aufnehmen als gar nicht puffern.
+                        None => {
+                            log::warn!("Monitor '{device}' nicht gefunden — nehme den primären");
+                            Monitor::primary().map_err(|e| e.to_string())?
+                        }
+                    },
                     None => Monitor::primary().map_err(|e| e.to_string())?,
                 };
                 let settings = Settings::new(
@@ -618,21 +626,23 @@ mod win {
                 Handler::start_free_threaded(settings).map_err(|e| e.to_string())?
             }
             TargetKind::Window => {
-                let title = recording
+                let wanted = recording
                     .target_id
                     .clone()
                     .ok_or_else(|| "Kein Fenster ausgewählt".to_string())?;
+                // Zuerst über das Handle: Der Titel ändert sich im Spiel
+                // ständig, und `title()` schlägt bei manchen Fenstern ganz fehl
+                // — dann darf das den Handle-Vergleich nicht mitreißen.
                 let window = Window::enumerate()
                     .map_err(|e| e.to_string())?
                     .into_iter()
                     .find(|w| {
-                        w.title()
-                            .map(|t| {
-                                format!("0x{:X}", w.as_raw_hwnd() as usize) == title || t == title
-                            })
-                            .unwrap_or(false)
+                        format!("0x{:X}", w.as_raw_hwnd() as usize) == wanted
+                            || w.title().map(|t| t == wanted).unwrap_or(false)
                     })
-                    .ok_or_else(|| "Fenster nicht gefunden".to_string())?;
+                    .ok_or_else(|| {
+                        "Das gewählte Fenster ist nicht mehr offen.".to_string()
+                    })?;
                 let settings = Settings::new(
                     window,
                     CursorCaptureSettings::WithCursor,

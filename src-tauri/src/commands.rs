@@ -46,12 +46,26 @@ pub fn set_config(
     app: tauri::AppHandle,
     config: AppConfig,
 ) -> AppConfig {
+    let previous = state.config_snapshot();
     let next = state.replace_config(config);
     // Der Player kommt sonst nicht an Clips außerhalb des Videos-Ordners.
     crate::allow_clip_dir(&app, &next.clip_dir);
     // Ecke oder Bildschirm können sich geändert haben.
     crate::overlay::reposition(&app);
     crate::apply_autostart(&app, next.auto_start_with_windows);
+
+    // Ein laufendes Capture hängt fest an seinem Monitor bzw. Fenster. Ohne
+    // Neustart bliebe die Auswahl in der Oberfläche wirkungslos: Der Puffer
+    // nähme weiter die alte Quelle auf. Nur beim echten Quellenwechsel — an
+    // Auflösung oder Bitrate wird per Regler gedreht, da wäre ein Neustart je
+    // Mausbewegung fatal.
+    let target_changed = next.recording.target_kind != previous.recording.target_kind
+        || next.recording.target_id != previous.recording.target_id;
+    if target_changed && state.is_buffering() {
+        log::info!("Aufnahmequelle gewechselt — Puffer wird neu gestartet");
+        state.stop_pipeline();
+        crate::start_buffer_and_notify(&app);
+    }
     next
 }
 
