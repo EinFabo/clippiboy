@@ -65,6 +65,11 @@ pub fn create(app: &tauri::AppHandle) {
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
+        // Das Banner gehört auf den Bildschirm, nicht in den Clip. Windows
+        // nimmt ein Fenster mit dieser Anzeigezugehörigkeit aus jeder
+        // Bildschirmaufnahme heraus — auch aus Windows.Graphics.Capture, mit
+        // dem hier aufgenommen wird. Zu sehen ist es dadurch nur noch live.
+        .content_protected(true)
         .skip_taskbar(true)
         .shadow(false)
         .resizable(false)
