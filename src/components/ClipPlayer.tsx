@@ -68,6 +68,26 @@ export function ClipPlayer({
     setTrim({ start: 0, end: 0 });
   }, [clip?.id]);
 
+  // Die Position wird beim Abspielen ohne React gezeichnet: Der Frame-Loop
+  // schreibt Balken, Griff und Uhr direkt ins DOM.
+  //
+  // Vorher stand hier ein `setTime` pro Bild, also sechzig Renders in der
+  // Sekunde. Der WebView2 rendert React und das Video auf demselben Faden und
+  // ließ darüber Videobilder fallen — der Clip sah aus, als ruckelte er und
+  // liefe dem Ton davon. Nachgemessen ist die Datei dabei tadellos: 1973 von
+  // 1975 Bildabständen exakt 17 ms, Bild und Ton 18 ms auseinander.
+  const fill = useRef<HTMLDivElement>(null);
+  const knob = useRef<HTMLDivElement>(null);
+  const clockLabel = useRef<HTMLSpanElement>(null);
+
+  const paint = useCallback((seconds: number, total: number) => {
+    const ratio = total > 0 ? Math.min(1, Math.max(0, seconds / total)) : 0;
+    const percent = `${ratio * 100}%`;
+    if (fill.current) fill.current.style.width = percent;
+    if (knob.current) knob.current.style.left = percent;
+    if (clockLabel.current) clockLabel.current.textContent = clock(seconds);
+  }, []);
+
   // `timeupdate` feuert nur etwa viermal pro Sekunde — die Leiste würde
   // sichtbar springen. Solange abgespielt wird, liest ein Frame-Loop die
   // Position direkt aus dem Element. Der Zuschnitt wird hier mit durchgesetzt.
@@ -82,13 +102,13 @@ export function ClipPlayer({
         if (trim.end > 0 && element.currentTime >= trim.end) {
           element.currentTime = trim.start;
         }
-        setTime(element.currentTime);
+        paint(element.currentTime, element.duration);
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, trim.start, trim.end]);
+  }, [playing, trim.start, trim.end, paint]);
 
   const toggle = useCallback(() => {
     const element = video.current;
@@ -220,7 +240,13 @@ export function ClipPlayer({
               onClick={toggle}
               onDoubleClick={fullscreen}
               onPlay={() => setPlaying(true)}
-              onPause={() => setPlaying(false)}
+              // Beim Anhalten übernimmt React die Position wieder — sonst
+              // spränge sie beim nächsten Render auf den Stand von vor dem
+              // Abspielen zurück.
+              onPause={(e) => {
+                setPlaying(false);
+                setTime(e.currentTarget.currentTime);
+              }}
               onTimeUpdate={(e) => {
                 // Nur noch für den pausierten Zustand und fürs Spulen relevant.
                 if (e.currentTarget.paused) setTime(e.currentTarget.currentTime);
@@ -232,7 +258,10 @@ export function ClipPlayer({
                 // Ohne eigenen Zuschnitt ist der ganze Clip ausgewählt.
                 if (Number.isFinite(length)) setTrim({ start: 0, end: length });
               }}
-              onEnded={() => setPlaying(false)}
+              onEnded={(e) => {
+                setPlaying(false);
+                setTime(e.currentTarget.currentTime);
+              }}
               onError={() => setBroken(true)}
             />
           )}
@@ -281,6 +310,8 @@ export function ClipPlayer({
 
           <Scrubber
             progress={progress}
+            fillRef={fill}
+            knobRef={knob}
             duration={duration}
             trim={editing ? trim : null}
             onSeek={(ratio) => {
@@ -293,7 +324,7 @@ export function ClipPlayer({
           />
 
           <span className="shrink-0 font-mono text-xs text-ink-muted tabular-nums">
-            {clock(time)} / {clock(duration)}
+            <span ref={clockLabel}>{clock(time)}</span> / {clock(duration)}
           </span>
 
           <Volume
@@ -374,12 +405,18 @@ export function ClipPlayer({
 
 function Scrubber({
   progress,
+  fillRef,
+  knobRef,
   duration,
   trim,
   onSeek,
   onTrim,
 }: {
   progress: number;
+  /** Balken und Griff. Der Frame-Loop des Players schreibt beim Abspielen
+      direkt hinein, statt einen Render auszulösen. */
+  fillRef: React.RefObject<HTMLDivElement | null>;
+  knobRef: React.RefObject<HTMLDivElement | null>;
   duration: number;
   /** `null`, solange nicht zugeschnitten wird. */
   trim: Trim | null;
@@ -440,6 +477,7 @@ function Scrubber({
         {/* Kein width-Übergang: er würde gegen den Frame-Loop arbeiten und
             die Bewegung wieder stockend machen. */}
         <div
+          ref={fillRef}
           className="h-full rounded-pill bg-accent-bright"
           style={{ width: `${progress}%` }}
         />
@@ -462,6 +500,7 @@ function Scrubber({
       )}
 
       <div
+        ref={knobRef}
         className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-pill bg-white
           opacity-0 transition-opacity group-hover:opacity-100"
         style={{ left: `${progress}%` }}
