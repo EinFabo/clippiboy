@@ -112,6 +112,7 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: "Ace auf Mirage",
     description: "Letzte Runde, 1v3 nach dem Retake.",
+    edit: null,
   },
   {
     id: "c2",
@@ -125,6 +126,7 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: null,
     description: null,
+    edit: null,
   },
   {
     id: "c3",
@@ -138,12 +140,48 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: null,
     description: null,
+    edit: null,
   },
+  // Die Galerie muss auch den schlechten Fall aushalten: Ein Clip ohne Spiel
+  // und drei Fehlerkennungen aus der Zeit vor der schärferen Titelprüfung —
+  // daran zeigt sich, ob die Filterleiste kürzt, scrollt und aufräumbar ist.
+  {
+    id: "c4",
+    path: "C:\\Users\\fabia\\Videos\\ClippiBoy\\clip_2026-08-15_19-02-44.mp4",
+    createdAt: Date.now() - 1000 * 60 * 60 * 30,
+    durationMs: 24_000,
+    game: null,
+    width: 2560,
+    height: 1440,
+    sizeBytes: 142_000_000,
+    thumbPath: null,
+    title: null,
+    description: null,
+    edit: null,
+  },
+  ...[
+    "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
+    "C:\\Users\\fabia\\projects\\clippiboy\\synctest.mp4",
+    "Snipping Tool Überlagerung",
+  ].map((game, i) => ({
+    id: `c${5 + i}`,
+    path: `C:\\Users\\fabia\\Videos\\ClippiBoy\\clip_2026-08-1${i}_08-30-00.mp4`,
+    createdAt: Date.now() - 1000 * 60 * 60 * (40 + i * 5),
+    durationMs: 12_000 + i * 3000,
+    game,
+    width: 1920,
+    height: 1080,
+    sizeBytes: 60_000_000,
+    thumbPath: null,
+    title: null,
+    description: null,
+    edit: null,
+  })),
 ];
 
 /** Ohne Backend gibt es keine echten Tonspuren — der Mixer soll trotzdem da sein. */
 export const mockTracks: ClipTrack[] = [
-  { index: 0, label: "Hauptmix", channels: 2, previewPath: null },
-  { index: 1, label: "Discord", channels: 2, previewPath: null },
-  { index: 2, label: "Mikrofon", channels: 2, previewPath: null },
+  { index: 0, label: "Hauptmix", channels: 2, previewPath: "mock/0.m4a" },
+  { index: 1, label: "Discord", channels: 2, previewPath: "mock/1.m4a" },
+  { index: 2, label: "Mikrofon", channels: 2, previewPath: "mock/2.m4a" },
 ];

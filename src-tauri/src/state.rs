@@ -5,7 +5,6 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::audio::engine::AudioEngine;
-use crate::buffer::ReplayBuffer;
 use crate::clips::Library;
 use crate::config;
 use crate::pipeline::{Pipeline, Shared};
@@ -13,7 +12,6 @@ use crate::model::{AppConfig, AudioSource, Clip, EngineStatus, RecordingConfig};
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
-    pub buffer: Mutex<ReplayBuffer>,
     pub library: Mutex<Option<Library>>,
     pub status: Mutex<EngineStatus>,
     pub audio: Arc<AudioEngine>,
@@ -40,6 +38,17 @@ pub struct AppState {
     pub active_recording: Mutex<Option<RecordingConfig>>,
     /// Läuft gerade ein Speichervorgang? Siehe `begin_save`.
     saving: std::sync::atomic::AtomicBool,
+    /// Umschließt Start und Stopp der Aufnahme.
+    ///
+    /// Die Prüfung „läuft schon?" und das Eintragen der fertigen Pipeline
+    /// liegen weit auseinander — dazwischen wird die Aufnahmehardware
+    /// hochgefahren, was einen Moment dauert. Ohne diese Sperre kämen zwei
+    /// gleichzeitige Starts (Hotkey und Automatik, oder Tray und Fenster)
+    /// beide an der Prüfung vorbei und legten **zwei** Aufnahmen an; die erste
+    /// hinge danach unerreichbar fest und hielte Encoder und Bildschirm
+    /// belegt. Ein Stopp mitten in einem Start hätte ebenso ins Leere
+    /// gegriffen.
+    lifecycle: Mutex<()>,
 }
 
 /// Lebt so lange, wie ein Clip geschrieben wird, und gibt den Platz beim
@@ -108,6 +117,21 @@ impl AutoBuffer {
         }
     }
 
+    /// Eine Runde für den Betrieb ohne „nur im Spiel": Der Puffer soll
+    /// laufen, solange ihn niemand von Hand ausgeschaltet hat.
+    ///
+    /// Das im Takt zu prüfen statt nur beim Programmstart heißt, dass ein
+    /// Umschalten in den Einstellungen sofort wirkt — vorher passierte bis zum
+    /// nächsten Start von ClippiBoy schlicht nichts.
+    pub fn poll_always(&self, buffer_active: bool) -> AutoAction {
+        use std::sync::atomic::Ordering::SeqCst;
+        if buffer_active || self.suppressed.load(SeqCst) {
+            return AutoAction::Nothing;
+        }
+        self.started.store(true, SeqCst);
+        AutoAction::Start
+    }
+
     /// Der Nutzer hat den Puffer selbst gestartet.
     pub fn manual_start(&self) {
         use std::sync::atomic::Ordering::SeqCst;
@@ -126,7 +150,6 @@ impl AutoBuffer {
 impl AppState {
     pub fn new() -> Self {
         let config = config::load();
-        let buffer = ReplayBuffer::new(config.buffer.seconds);
         let library = match Library::open() {
             Ok(lib) => Some(lib),
             Err(err) => {
@@ -151,7 +174,6 @@ impl AppState {
 
         Self {
             config: Mutex::new(config),
-            buffer: Mutex::new(buffer),
             library: Mutex::new(library),
             status: Mutex::new(status),
             audio,
@@ -161,6 +183,7 @@ impl AppState {
             buffering_game: Mutex::new(None),
             quitting: std::sync::atomic::AtomicBool::new(false),
             auto: AutoBuffer::default(),
+            lifecycle: Mutex::new(()),
             active_recording: Mutex::new(None),
             saving: std::sync::atomic::AtomicBool::new(false),
         }
@@ -176,7 +199,6 @@ impl AppState {
     /// auch melden.
     pub fn replace_config(&self, mut next: AppConfig) -> AppConfig {
         next.recording.encoder = crate::encode::resolve(next.recording.encoder);
-        self.buffer.lock().set_capacity(next.buffer.seconds);
         self.audio.apply(&next.sources);
         // Läuft gerade eine Aufnahme, muss sie die geänderten Quellen auch
         // mitbekommen — sonst mischt sie bis zum Neustart die alten.
@@ -232,6 +254,7 @@ impl AppState {
 impl AppState {
     /// Startet die Aufnahme in den Replay-Puffer.
     pub fn start_pipeline(&self) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock();
         if self.pipeline.lock().is_some() {
             return Ok(());
         }
@@ -252,7 +275,6 @@ impl AppState {
             config.buffer.seconds,
             config.sources.clone(),
             self.audio.clone(),
-            config::data_dir().join("buffer"),
         )?;
         *self.shared.lock() = Some(pipeline.shared.clone());
         *self.pipeline.lock() = Some(pipeline);
@@ -265,12 +287,19 @@ impl AppState {
 
         let mut status = self.status.lock();
         status.buffer_active = true;
-        status.encoder = Some(config.recording.encoder);
+        // Der tatsächlich gewählte Encoder, nicht der gewünschte: Ist der
+        // Wunsch-MFT nicht angemeldet, stünde in der Anzeige sonst dauerhaft
+        // etwas anderes, als da läuft.
+        status.encoder = match self.shared.lock().as_ref() {
+            Some(shared) => *shared.encoder.lock(),
+            None => None,
+        };
         status.dropped_frames = 0;
         Ok(())
     }
 
     pub fn stop_pipeline(&self) {
+        let _lifecycle = self.lifecycle.lock();
         self.shared.lock().take();
         self.active_recording.lock().take();
         if let Some(mut pipeline) = self.pipeline.lock().take() {
@@ -304,10 +333,14 @@ impl AppState {
             status.buffered_seconds = shared.buffered_seconds();
             status.buffer_bytes = shared.buffer_bytes();
             status.dropped_frames = shared.dropped.load(std::sync::atomic::Ordering::Relaxed);
-            let elapsed = shared.elapsed_ms.load(std::sync::atomic::Ordering::Relaxed);
+            // Der Encoder bekommt konstant `fps` Bilder — die Zahl allein sagt
+            // also nichts. Interessant ist, wie viele davon echt waren: Der
+            // Rest sind Wiederholungen, weil das Bild stillstand.
             let frames = shared.frames.load(std::sync::atomic::Ordering::Relaxed);
-            if elapsed > 0 {
-                status.fps = frames as f32 * 1000.0 / elapsed as f32;
+            let duplicated = shared.duplicated.load(std::sync::atomic::Ordering::Relaxed);
+            if frames > 0 {
+                let live = frames.saturating_sub(duplicated) as f32 / frames as f32;
+                status.fps = shared.fps as f32 * live;
             }
         }
         status.game = self.current_game.lock().clone();
@@ -319,43 +352,20 @@ impl AppState {
         let config = self.config_snapshot();
         let seconds = seconds.unwrap_or(config.buffer.seconds).max(1);
 
-        // Nur den gemeinsamen Zustand herausholen und die Sperre sofort wieder
-        // freigeben: Versiegeln, Muxen und Vorschaubild dauern Sekunden, und
-        // solange käme z. B. „Beenden" aus dem Tray nicht an den Puffer heran.
-        // `_save` hält die Segmentdateien am Leben, falls parallel gestoppt
-        // wird; angemeldet wird es noch unter der Sperre, damit ein Stopp
-        // entweder davor greift oder darauf wartet.
-        let (shared, _save) = {
+        // Alles unter einer kurzen Sperre abgreifen und sie sofort wieder
+        // freigeben: Muxen und Vorschaubild dauern Sekunden, und solange käme
+        // z. B. „Beenden" aus dem Tray nicht an den Puffer heran.
+        //
+        // Ein Versiegeln wie früher gibt es nicht mehr: Der Encoder läuft
+        // durch, jedes fertige Paket liegt bereits im Ring. Es gibt also
+        // nichts abzuwarten und nichts, was dabei verloren gehen könnte.
+        let snapshot = {
             let guard = self.pipeline.lock();
             let pipeline = guard
                 .as_ref()
                 .ok_or_else(|| "Der Replay-Puffer läuft nicht.".to_string())?;
-            (pipeline.shared.clone(), pipeline.shared.begin_save())
+            pipeline.snapshot(seconds)?
         };
-
-        // Vor dem Versiegeln ablesen: Das Abschließen des Segments dauert je
-        // nach Encoder-Warteschlange bis zu einige hundert Millisekunden, in
-        // denen kein neues Material mehr entsteht. Läse man die Uhr danach,
-        // wanderte das Fenster [jetzt − Länge, jetzt] genau um diese Zeit ins
-        // Leere und der Clip wäre vorne entsprechend kürzer.
-        let now_ms = shared
-            .elapsed_ms
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        // Das laufende Segment muss abgeschlossen sein, sonst fehlen die
-        // letzten Sekunden — also genau der Moment, den man speichern will.
-        // Klappt das nicht rechtzeitig, endet der Clip eben beim vorletzten
-        // Segment; das ist allemal besser, als den Moment ganz wegzuwerfen.
-        if !shared.seal_current_segment(std::time::Duration::from_secs(6)) {
-            log::warn!("Segment nicht rechtzeitig abgeschlossen — der Clip endet früher");
-        }
-
-        // `take()` statt `clone()`: Sonst taucht derselbe Fehler bei jedem
-        // weiteren Speichern erneut im Log auf, auch wenn er längst Geschichte
-        // ist.
-        if let Some(err) = shared.error.lock().take() {
-            log::warn!("Encoder meldete: {err}");
-        }
 
         // Die Maße der Datei stammen von der laufenden Aufnahme, nicht aus der
         // Konfiguration: gespeichert wird, was der Encoder wirklich bekommen hat.
@@ -364,9 +374,6 @@ impl AppState {
             .lock()
             .clone()
             .unwrap_or_else(|| config.recording.clone());
-
-        let segments = shared.segments.lock().clone();
-        let tracks = shared.tracks.lock().clone();
 
         // Nicht die Momentaufnahme, sondern das während des Puffers erkannte
         // Spiel — beim Speichern über den Button steht ClippiBoy im Vordergrund.
@@ -387,17 +394,18 @@ impl AppState {
             None => format!("clip_{stamp}.mp4"),
         };
 
+        // Die Kennung schon hier: Unter ihr legt der Muxer die Einzelspuren ab,
+        // und die entstehen im selben ffmpeg-Lauf wie der Clip.
+        let id = uuid::Uuid::new_v4().to_string();
         let result = crate::muxer::build(crate::muxer::ClipRequest {
-            segments: &segments,
-            tracks: &tracks,
-            now_ms,
-            seconds,
+            snapshot,
+            clip_id: id.clone(),
             output: std::path::PathBuf::from(&config.clip_dir).join(name),
             temp_dir: config::data_dir().join("temp"),
         })?;
 
         Ok(Clip {
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             path: result.path.to_string_lossy().to_string(),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -411,6 +419,7 @@ impl AppState {
             thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
             title: None,
             description: None,
+            edit: None,
         })
     }
 }

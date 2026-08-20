@@ -1,14 +1,22 @@
-//! Aus den TS-Segmenten des Ringpuffers ein fertiges MP4 bauen.
+//! Aus dem Paket-Ringpuffer ein fertiges MP4 bauen.
 //!
-//! Das Video wird nur kopiert (`-c copy`), nicht neu encodiert — deshalb ist
-//! das Speichern eines Clips eine Sache von Sekundenbruchteilen und kostet
-//! keine Qualität. Zusätzliche Tonspuren werden dabei mit eingemuxt.
+//! Das Video wird nur kopiert (`-c copy`), nicht neu encodiert — Speichern
+//! kostet damit weder Zeit noch Qualität.
+//!
+//! Früher lagen hier MPEG-TS-Segmentdateien, die der `concat`-Demuxer
+//! zusammensetzen musste. Weil jeder Segment-Encoder seine Zeitrechnung wieder
+//! bei null begann, brauchte es `+genpts`, und `-ss` war wirkungslos — der
+//! Clip fing immer an einer Segmentgrenze an und war bis zu zehn Sekunden zu
+//! lang. Jetzt kommt das Video als ein durchgehender Elementarstrom aus einem
+//! einzigen Encoder: Der Schnitt sitzt auf dem Keyframe davor, und die
+//! Zeitstempel ergeben sich aus der konstanten Bildrate.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-use crate::pipeline::{Segment, TrackRing};
+use crate::pipeline::ClipSnapshot;
+use crate::stems;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -76,12 +84,11 @@ pub fn available() -> bool {
         .unwrap_or(false)
 }
 
-pub struct ClipRequest<'a> {
-    pub segments: &'a [Segment],
-    pub tracks: &'a [Arc<TrackRing>],
-    /// Zeitpunkt „jetzt" in Millisekunden seit Aufnahmestart.
-    pub now_ms: u64,
-    pub seconds: u32,
+pub struct ClipRequest {
+    pub snapshot: ClipSnapshot,
+    /// Die Kennung, unter der der Clip gleich in der Datenbank landet — die
+    /// Einzelspuren werden danach abgelegt.
+    pub clip_id: String,
     pub output: PathBuf,
     pub temp_dir: PathBuf,
 }
@@ -93,118 +100,144 @@ pub struct ClipResult {
     pub thumb_path: Option<PathBuf>,
 }
 
-pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
-    let window_start = request.now_ms.saturating_sub(request.seconds as u64 * 1000);
-
-    let mut selected: Vec<&Segment> = request
-        .segments
-        .iter()
-        .filter(|segment| segment.end_ms > window_start)
-        .collect();
-    if selected.is_empty() {
+pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
+    let snapshot = request.snapshot;
+    if snapshot.packets.is_empty() {
         return Err("Der Replay-Puffer ist noch leer.".into());
     }
-    selected.sort_by_key(|segment| segment.index);
 
     std::fs::create_dir_all(&request.temp_dir).map_err(|e| e.to_string())?;
-
-    // Concat-Demuxer statt `concat:`-Protokoll: Jedes Segment kommt aus einem
-    // frisch gestarteten Encoder, dessen Uhr wieder bei null beginnt. Das
-    // Protokoll klebt die TS-Dateien nur aneinander, ffmpeg sähe an jeder
-    // Segmentgrenze einen Zeitstempel-Rücksprung und würde den Rest verwerfen
-    // oder mit kaputtem Timing schreiben. Der Demuxer schiebt die Zeitstempel
-    // jeder Datei hinter die vorherige.
-    // Aus dem Ziel-Clip abgeleitet und damit eindeutig je Speichervorgang:
-    // Zwei gleichzeitige Speicherungen dürfen sich weder die Segmentliste noch
-    // die Tonspuren unter den Händen wegschreiben.
-    let stem = sanitize(&request.output.file_stem().unwrap_or_default().to_string_lossy());
-    let list_path = request.temp_dir.join(format!("concat_{stem}.txt"));
-    let list = selected
-        .iter()
-        .map(|segment| format!("file '{}'\n", escape_for_list(&segment.path)))
-        .collect::<String>();
-    std::fs::write(&list_path, list).map_err(|e| e.to_string())?;
     if let Some(parent) = request.output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // Zusätzliche Tonspuren als WAV bereitstellen.
+    // Aus dem Ziel-Clip abgeleitet und damit eindeutig je Speichervorgang: Zwei
+    // gleichzeitige Speicherungen dürfen sich die Zwischendateien nicht unter
+    // den Händen wegschreiben.
+    let stem = sanitize(&request.output.file_stem().unwrap_or_default().to_string_lossy());
+
+    // Videopakete als roher H.264-Elementarstrom.
+    let video_path = request.temp_dir.join(format!("clip_{stem}.h264"));
+    let mut stream: Vec<u8> = Vec::with_capacity(
+        snapshot.packets.iter().map(|p| p.data.len()).sum::<usize>()
+            + snapshot.sequence_header.len(),
+    );
+    // SPS/PPS voranstellen. Die meisten Encoder schicken sie ohnehin vor jedem
+    // IDR mit — doppelt überliest jeder Decoder, ganz fehlen dürfen sie nicht.
+    stream.extend_from_slice(&snapshot.sequence_header);
+    for packet in &snapshot.packets {
+        stream.extend_from_slice(&packet.data);
+    }
+    std::fs::write(&video_path, &stream).map_err(|e| e.to_string())?;
+
+    // Tonspuren als WAV, geschnitten auf denselben QPC wie das erste Bild.
     let mut wavs: Vec<(PathBuf, String)> = Vec::new();
-    for track in request.tracks {
+    for track in &snapshot.tracks {
         let path = request
             .temp_dir
             .join(format!("track_{stem}_{}.wav", sanitize(&track.source_id)));
-        if track.write_wav(&path, request.seconds).is_ok() {
-            wavs.push((path, track.label.clone()));
+        // Eine Spur stillschweigend wegzulassen wäre das Schlimmste: Der Clip
+        // wäre dann einfach stumm, ohne dass irgendwo stünde warum.
+        match track.write_wav_window(&path, snapshot.start_100ns, snapshot.audio_frames) {
+            Ok(()) => wavs.push((path, track.label.clone())),
+            Err(err) => log::warn!(
+                "Tonspur '{}' konnte nicht geschrieben werden: {err}",
+                track.label
+            ),
         }
     }
 
+    // Der Clip bekommt **eine** Tonspur, in der alles steckt. Discord, Browser
+    // und die meisten Player spielen von einem MP4 stur die erste Tonspur ab —
+    // lagen die Quellen wie früher auf eigenen Spuren daneben, waren sie
+    // überall außerhalb des Editors stumm.
+    //
+    // Die Pegel aus dem Aufnahme-Mixer stecken bereits in den WAVs
+    // (`AudioEngine::mix_window`), hier wird also bei 0 dB summiert.
+    let inputs: Vec<(String, f32)> = (1..=wavs.len())
+        .map(|index| (format!("{index}:a"), 0.0))
+        .collect();
+    let filter = stems::mix_filter(&inputs);
+
     let mut command = ffmpeg();
     command.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
-    // `+genpts` füllt die Zeitstempel auf, die beim Segmentwechsel fehlen.
-    command.arg("-fflags").arg("+genpts");
-    command.arg("-f").arg("concat").arg("-safe").arg("0");
-    // Kein `-ss`, um vorne auf die gewünschte Länge zu kürzen. Der
-    // Concat-Demuxer kann nur suchen, wenn in der Liste zu jeder Datei eine
-    // `duration` steht — sonst tut `-ss` *nichts*: Nachgemessen liefern
-    // `-ss 4.5` und `-ss 12` über dieselbe Liste Byte für Byte dieselbe Länge.
-    // Weggeworfen wird trotzdem etwas, nämlich alle Videopakete bis zum
-    // nächsten Keyframe. Der Clip begann dadurch mit bis zu einer Sekunde Ton
-    // ohne Bild (gemessen: `start_time` der Videospur bei 0,98 s bei 1 s
-    // Keyframe-Abstand), ohne dafür auch nur eine Sekunde kürzer zu werden.
-    //
-    // Ohne `-ss` fängt der Clip an einer Segmentgrenze an — also an einem
-    // Keyframe, mit Bild und Ton ab dem ersten Moment. Er ist damit bis zu
-    // einer Segmentlänge länger als angefordert, aber genau das war er vorher
-    // auch schon. Für ein echtes Kürzen bräuchte die Liste die tatsächlichen
-    // Laufzeiten der Segmentdateien; die Marken aus dem Ringpuffer taugen
-    // dafür nicht, weil der Demuxer sie den Zeitstempeln vorzieht und ein paar
-    // Millisekunden Abweichung je Segment die Spuren wieder verschieben würden.
-    command.arg("-i").arg(&list_path);
+    // Der Elementarstrom trägt keine Zeitstempel — die Bildrate liefert sie.
+    // Sie stimmt exakt, weil der Taktgeber echtes CFR erzeugt.
+    command.arg("-f").arg("h264").arg("-r").arg(snapshot.fps.to_string());
+    command.arg("-i").arg(&video_path);
     for (path, _) in &wavs {
         command.arg("-i").arg(path);
     }
+    if let Some(filter) = &filter {
+        command.arg("-filter_complex").arg(filter);
+    }
 
-    command.arg("-map").arg("0:v:0").arg("-map").arg("0:a:0?");
-    for index in 1..=wavs.len() {
-        command.arg("-map").arg(format!("{index}:a:0"));
+    // Erste Ausgabe: der Clip selbst.
+    command.arg("-map").arg("0:v:0");
+    match &filter {
+        Some(_) => {
+            command.arg("-map").arg(stems::MIX_LABEL);
+            command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
+            // Zweimal derselbe Name mit Absicht: MP4 kennt kein einheitliches
+            // Feld für Spurnamen, und je nach Programm wird das eine oder das
+            // andere gelesen.
+            command.arg("-metadata:s:a:0").arg("title=Mix");
+            command.arg("-metadata:s:a:0").arg("handler_name=Mix");
+        }
+        None => {
+            command.arg("-an");
+        }
     }
     command.arg("-c:v").arg("copy");
-    if wavs.is_empty() {
-        command.arg("-c:a").arg("copy");
-    } else {
-        // Die WAV-Spuren müssen encodiert werden, das Video bleibt unangetastet.
-        command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
-    }
-    // Zweimal derselbe Name mit Absicht: MP4 kennt kein einheitliches Feld für
-    // Spurnamen, und je nach Programm wird das eine oder das andere gelesen.
-    command.arg("-metadata:s:a:0").arg("title=Mix");
-    command.arg("-metadata:s:a:0").arg("handler_name=Mix");
-    for (index, (_, label)) in wavs.iter().enumerate() {
-        command
-            .arg(format!("-metadata:s:a:{}", index + 1))
-            .arg(format!("title={label}"));
-        command
-            .arg(format!("-metadata:s:a:{}", index + 1))
-            .arg(format!("handler_name={label}"));
-    }
-    // Nach dem Suchen fängt der erste Zeitstempel nicht bei null an — ohne das
-    // stünde im MP4 ein negativer Versatz.
+    // Kein `-shortest`: Der Videostrom wird nur kopiert und ist deshalb in
+    // Sekundenbruchteilen durch. ffmpeg hält den Output dann für fertig und
+    // beendet ihn, bevor der AAC-Encoder sein erstes Paket geliefert hat — die
+    // Datei kam nachweislich ganz ohne Tonspur heraus. Gebraucht wird es auch
+    // nicht: `write_wav_window` schneidet den Ton bereits auf die Länge des
+    // Bildes zu.
     command.arg("-avoid_negative_ts").arg("make_zero");
     // Kein `+faststart`: Das schiebt das moov-Atom nach vorn und liest dafür
     // die fertige Datei noch einmal komplett durch — bei 40 Mbit/s und zwei
-    // Minuten Puffer ein zweiter Durchlauf über gut 600 MB, also glatt die
-    // doppelte Wartezeit nach dem Tastendruck. Zum Abspielen und Schneiden
-    // braucht es das nicht; der Export setzt es weiterhin, und der ist der
-    // Weg zur Datei, die man weitergibt.
+    // Minuten Puffer glatt die doppelte Wartezeit nach dem Tastendruck. Zum
+    // Abspielen und Schneiden braucht es das nicht.
     command.arg(&request.output);
 
+    // Weitere Ausgaben: die Einzelspuren, damit sich die Mischung später noch
+    // ändern lässt. Bei nur einer Spur wäre das eine Kopie der Tonspur des
+    // Clips — die tut es dann auch.
+    let keep_stems = wavs.len() > 1;
+    let stems_dir = stems::dir(&request.clip_id);
+    if keep_stems {
+        std::fs::create_dir_all(&stems_dir).map_err(|e| e.to_string())?;
+        for index in 1..=wavs.len() {
+            command.arg("-map").arg(format!("{index}:a"));
+            command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
+            command.arg("-movflags").arg("+faststart");
+            command.arg(stems::track_path(&request.clip_id, index as u32 - 1));
+        }
+    }
+
     let outcome = run(&mut command, "Clip schreiben");
-    let _ = std::fs::remove_file(&list_path);
+    let _ = std::fs::remove_file(&video_path);
     for (path, _) in &wavs {
         let _ = std::fs::remove_file(path);
     }
-    outcome?;
+    if let Err(err) = outcome {
+        // Halb geschriebene Einzelspuren wären schlimmer als gar keine: Der
+        // Editor hielte sie für vollständig und mischte daraus.
+        if keep_stems {
+            stems::remove(&request.clip_id);
+        }
+        return Err(err);
+    }
+
+    if keep_stems {
+        let labels: Vec<String> = wavs.iter().map(|(_, label)| label.clone()).collect();
+        if let Err(err) = stems::write_index(&request.clip_id, &labels) {
+            log::warn!("Spurenverzeichnis nicht geschrieben: {err}");
+            stems::remove(&request.clip_id);
+        }
+    }
 
     let size_bytes = std::fs::metadata(&request.output)
         .map(|meta| meta.len())
@@ -213,7 +246,8 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
         return Err("Der Clip ist leer geblieben.".into());
     }
 
-    let duration_ms = probe_duration_ms(&request.output).unwrap_or(request.seconds as u64 * 1000);
+    let duration_ms = probe_duration_ms(&request.output)
+        .unwrap_or(snapshot.audio_frames as u64 * 1000 / 48_000);
     let thumb_path = make_thumbnail(&request.output).ok();
 
     Ok(ClipResult {
@@ -222,13 +256,6 @@ pub fn build(request: ClipRequest<'_>) -> Result<ClipResult, String> {
         size_bytes,
         thumb_path,
     })
-}
-
-/// Pfad für die Segmentliste des Concat-Demuxers aufbereiten. Der Parser liest
-/// bis zum schließenden Apostroph, ein Apostroph im Pfad muss also aussteigen;
-/// Rückwärtsschrägstriche behandelt er als Escape, deshalb Schrägstriche.
-fn escape_for_list(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/").replace('\'', "'\\''")
 }
 
 pub fn sanitize(text: &str) -> String {

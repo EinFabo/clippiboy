@@ -116,44 +116,43 @@ export interface Clip {
   /** Selbst vergebener Name; ohne ihn zeigt die Galerie den Dateinamen. */
   title: string | null;
   description: string | null;
+  /** Zuschnitt und Mischung aus dem Editor; `null` heißt unangetastet. */
+  edit: ClipEdit | null;
 }
 
-/** Eine Tonspur in der Clipdatei. Spur 0 ist der Hauptmix. */
+/**
+ * Was am Clip eingestellt ist — der Stand, der beim letzten Speichern
+ * geschrieben wurde.
+ */
+export interface ClipEdit {
+  /**
+   * Zuschnitt in Millisekunden ab Clipanfang. Eine **Markierung**: Sie steuert
+   * die Wiedergabe, ist aber nicht in die Datei eingerechnet und lässt sich
+   * deshalb jederzeit wieder aufziehen.
+   */
+  startMs: number;
+  endMs: number;
+  /** Die Pegel, die gerade in der Tonspur der Datei stecken. */
+  tracks: TrackMix[];
+}
+
+/** Eine Einzelspur eines Clips. Spur 0 ist der Hauptmix. */
 export interface ClipTrack {
   index: number;
   label: string;
   channels: number;
-  /** Entpackte Einzeldatei für die Vorschau; Spur 0 braucht keine. */
+  /**
+   * Die abgelegte Einzelspur. `null` heißt: Der Clip hat nur eine Tonspur, und
+   * die steckt in der Videodatei selbst — dann gibt es nichts zu mischen.
+   */
   previewPath: string | null;
 }
 
-/** Wie eine Spur beim Export gewichtet wird. */
+/** Wie eine Spur beim Mischen gewichtet wird. */
 export interface TrackMix {
   index: number;
   gainDb: number;
   muted: boolean;
-}
-
-export interface ExportRequest {
-  clipId: string;
-  startMs: number;
-  endMs: number;
-  tracks: TrackMix[];
-  /** Zieldatei; ohne Angabe landet der Export neben dem Ausgangsclip. */
-  output?: string | null;
-}
-
-export interface ExportResult {
-  path: string;
-  durationMs: number;
-  sizeBytes: number;
-}
-
-/** Nutzlast des `export-progress`-Events. */
-export interface ExportProgress {
-  clipId: string;
-  /** 0 bis 1. */
-  progress: number;
 }
 
 export interface EngineStatus {

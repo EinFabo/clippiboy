@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { useLayoutEffect, useRef, useState, useEffect } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Slider } from "@/components/ui/Controls";
+import { IconSpeaker } from "@/components/icons";
 import { useEngine } from "@/store";
-import { api, events, inTauri } from "@/lib/ipc";
-import { fileName, formatSize } from "@/lib/format";
+import { inTauri } from "@/lib/ipc";
+import { fileName } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import type { TrackState } from "@/lib/useClipMix";
-import type { Clip, ClipTrack, ExportResult, TrackMix } from "@/lib/types";
+import type { Clip, ClipTrack } from "@/lib/types";
 
 export interface Trim {
   /** Sekunden, wie die Zeitachse des Players. */
@@ -21,6 +21,8 @@ interface Props {
   duration: number;
   tracks: ClipTrack[];
   mix: Record<number, TrackState>;
+  /** Steht an den Spuren etwas anderes als neutral? */
+  mixTouched: boolean;
   loadingTracks: boolean;
   onTrack: (index: number, patch: Partial<TrackState>) => void;
   onResetMix: () => void;
@@ -28,291 +30,314 @@ interface Props {
   onTrim: (trim: Trim) => void;
   /** Setzt Anfang oder Ende auf die Stelle, an der der Player gerade steht. */
   onMark: (which: "start" | "end") => void;
-  toRequest: () => TrackMix[];
+  /** Liegen die Spuren einzeln vor? Nur dann lässt sich überhaupt mischen. */
+  separateTracks: boolean;
+  /** Steht etwas anderes eingestellt als in der Datei? */
+  dirty: boolean;
+  saving: boolean;
+  justSaved: boolean;
+  onSave: () => void;
+  /** Zum Audio-Mixer wechseln — von dort kommen die getrennten Spuren. */
+  onOpenMixer: () => void;
 }
 
 /** Regelbereich der Spurenregler. Mehr als +12 dB bringt nur Verzerrung. */
 const MIN_DB = -30;
 const MAX_DB = 12;
 
+/**
+ * Der Bearbeiten-Bereich neben dem Player. Er ist immer offen: Ein Clip, den
+ * man gerade ansieht, ist auch der Clip, den man benennen oder schneiden will
+ * — ein Umschalter dazwischen wäre nur ein Klick, den man erst finden muss.
+ */
 export function ClipEditor({
   clip,
   duration,
   tracks,
   mix,
+  mixTouched,
   loadingTracks,
   onTrack,
   onResetMix,
   trim,
   onTrim,
   onMark,
-  toRequest,
+  separateTracks,
+  dirty,
+  saving,
+  justSaved,
+  onSave,
+  onOpenMixer,
 }: Props) {
   const updateClip = useEngine((state) => state.updateClip);
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [done, setDone] = useState<ExportResult | null>(null);
 
   const trimmed = trim.start > 0.05 || trim.end < duration - 0.05;
   const length = Math.max(0, trim.end - trim.start);
+  const anySolo = Object.values(mix).some((state) => state.solo);
 
-  useEffect(() => {
-    setDone(null);
-  }, [clip.id]);
-
-  useEffect(() => {
-    if (!inTauri) return;
-    const unlisten = events.onExportProgress((update) => {
-      if (update.clipId === clip.id) setProgress(update.progress);
+  /** Ein Feld speichern, ohne die beiden anderen zu verlieren. */
+  const saveMeta = (patch: Partial<Record<"title" | "description" | "game", string | null>>) =>
+    updateClip(clip.id, {
+      title: clip.title,
+      description: clip.description,
+      game: clip.game,
+      ...patch,
     });
-    return () => void unlisten.then((off) => off());
-  }, [clip.id]);
-
-  async function runExport() {
-    const target = await save({
-      title: "Clip exportieren",
-      defaultPath: suggestedPath(clip),
-      filters: [{ name: "MP4-Video", extensions: ["mp4"] }],
-    });
-    if (!target) return;
-
-    setBusy(true);
-    setProgress(0);
-    setDone(null);
-    try {
-      setDone(
-        await api.exportClip({
-          clipId: clip.id,
-          startMs: Math.round(trim.start * 1000),
-          endMs: Math.round(trim.end * 1000),
-          tracks: toRequest(),
-          output: target,
-        }),
-      );
-    } catch {
-      // Der Kern meldet den Fehler bereits als Toast.
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <aside
-      className="flex w-[360px] shrink-0 flex-col rounded-card border border-line
+      className="flex w-[380px] shrink-0 flex-col rounded-card border border-line
         bg-surface/80 backdrop-blur-xl"
     >
-      {/* Nur die Felder scrollen — der Export bleibt unten stehen, sonst wäre
+      {/* Nur die Felder scrollen — Speichern bleibt unten stehen, sonst wäre
           der wichtigste Knopf ausgerechnet der, den man suchen muss. */}
-      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-5">
-      <section className="space-y-3">
-        <h3 className="text-xs font-medium tracking-wide text-ink-faint uppercase">
-          Clip
-        </h3>
-        <Field
-          label="Name"
-          value={clip.title ?? ""}
-          placeholder={fileName(clip.path)}
-          onSave={(title) =>
-            updateClip(clip.id, {
-              title,
-              description: clip.description,
-              game: clip.game,
-            })
-          }
-        />
-        <Field
-          label="Beschreibung"
-          value={clip.description ?? ""}
-          placeholder="Was passiert hier?"
-          multiline
-          onSave={(description) =>
-            updateClip(clip.id, {
-              title: clip.title,
-              description,
-              game: clip.game,
-            })
-          }
-        />
-        <Field
-          label="Spiel"
-          value={clip.game ?? ""}
-          placeholder="Unbekannt"
-          onSave={(game) =>
-            updateClip(clip.id, {
-              title: clip.title,
-              description: clip.description,
-              game,
-            })
-          }
-        />
-      </section>
+      <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-5">
+        {/* Name und Beschreibung tragen keine Beschriftung und keinen Rahmen:
+            Sie sehen aus wie das, was sie sind, und werden zum Feld, sobald
+            man sie anfasst. Ein Bearbeiten-Knopf davor wäre eine Hürde vor
+            einer Textzeile. */}
+        <section>
+          <Field
+            value={clip.title ?? ""}
+            placeholder={fileName(clip.path)}
+            ariaLabel="Name des Clips"
+            className="display text-xl leading-snug"
+            onSave={(title) => saveMeta({ title })}
+          />
+          <Field
+            value={clip.description ?? ""}
+            placeholder="Was passiert hier?"
+            ariaLabel="Beschreibung"
+            multiline
+            className="mt-1 text-sm leading-relaxed text-ink-muted"
+            onSave={(description) => saveMeta({ description })}
+          />
+          {/* Das Spiel bleibt beschriftet: Es ist kein Fließtext, sondern der
+              Wert, nach dem die Galerie filtert. */}
+          <label className="mt-3 flex items-center gap-2">
+            <span className="shrink-0 text-xs text-ink-faint">Spiel</span>
+            <Field
+              value={clip.game ?? ""}
+              placeholder="Unbekannt"
+              ariaLabel="Spiel"
+              className="text-sm"
+              onSave={(game) => saveMeta({ game })}
+            />
+          </label>
+        </section>
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs font-medium tracking-wide text-ink-faint uppercase">
-            Tonspuren
-          </h3>
-          <button
-            onClick={onResetMix}
-            className="text-xs text-ink-faint transition-colors hover:text-ink"
-          >
-            Zurücksetzen
-          </button>
-        </div>
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <SectionHead>Tonspuren</SectionHead>
+            <Reset show={mixTouched} onClick={onResetMix} />
+          </div>
 
-        {loadingTracks && (
-          <p className="text-xs text-ink-muted">Spuren werden gelesen…</p>
-        )}
-        {!loadingTracks && tracks.length === 0 && (
-          <p className="text-xs text-ink-muted">
-            Dieser Clip hat keine getrennten Tonspuren.
-          </p>
-        )}
-
-        {tracks.map((track) => {
-          const state = mix[track.index] ?? { gainDb: 0, muted: false };
-          return (
-            <div key={track.index} className="rounded-inner bg-elevated p-3">
-              <div className="flex items-center gap-2">
-                <button
-                  aria-label={state.muted ? "Spur einschalten" : "Spur stumm"}
-                  onClick={() => onTrack(track.index, { muted: !state.muted })}
-                  className={cn(
-                    "grid h-7 w-7 shrink-0 place-items-center rounded-pill text-[11px] font-semibold",
-                    "transition-colors",
-                    state.muted
-                      ? "bg-live/20 text-live"
-                      : "bg-white/10 text-ink-muted hover:text-ink",
-                  )}
-                >
-                  M
-                </button>
-                <span className="min-w-0 flex-1 truncate text-sm">
-                  {track.label}
-                </span>
-                <span
-                  className={cn(
-                    "shrink-0 font-mono text-xs tabular-nums",
-                    state.muted ? "text-ink-faint" : "text-ink-muted",
-                  )}
-                >
-                  {state.gainDb > 0 ? "+" : ""}
-                  {state.gainDb.toFixed(1)} dB
-                </span>
-              </div>
-              <div className="mt-3">
-                <Slider
-                  label={`Lautstärke ${track.label}`}
-                  value={state.gainDb}
-                  min={MIN_DB}
-                  max={MAX_DB}
-                  step={0.5}
-                  onChange={(gainDb) => onTrack(track.index, { gainDb })}
-                />
-              </div>
-            </div>
-          );
-        })}
-
-        {tracks.length > 1 && (
-          <p className="text-xs leading-relaxed text-ink-faint">
-            Die Vorschau kann nur leiser werden: steht ein Regler über 0 dB,
-            senkt sie stattdessen die übrigen Spuren ab. Der Export hebt den
-            Pegel wirklich an und rechnet alle Spuren zu einer zusammen.
-          </p>
-        )}
-      </section>
-
-      <section className="space-y-3">
-        <h3 className="text-xs font-medium tracking-wide text-ink-faint uppercase">
-          Zuschnitt
-        </h3>
-        <div className="flex gap-2">
-          <Button size="sm" className="flex-1" onClick={() => onMark("start")}>
-            Start hier
-          </Button>
-          <Button size="sm" className="flex-1" onClick={() => onMark("end")}>
-            Ende hier
-          </Button>
-        </div>
-        <div className="flex items-center justify-between text-xs text-ink-muted">
-          <span className="font-mono tabular-nums">
-            {clock(trim.start)} – {clock(trim.end)} · {clock(length)}
-          </span>
-          {trimmed && (
-            <button
-              onClick={() => onTrim({ start: 0, end: duration })}
-              className="text-ink-faint transition-colors hover:text-ink"
-            >
-              Ganzer Clip
-            </button>
+          {loadingTracks && (
+            <p className="text-xs text-ink-muted">Spuren werden gelesen…</p>
           )}
-        </div>
-        {trimmed && (
-          <p className="text-xs leading-relaxed text-ink-faint">
-            Ein Schnitt am Anfang macht den Export bildgenau — dafür wird das
-            Bild neu berechnet und das dauert länger.
-          </p>
-        )}
-      </section>
 
+          {tracks.map((track) => (
+            <TrackRow
+              key={track.index}
+              label={track.index === 0 ? "Hauptmix" : track.label}
+              state={mix[track.index] ?? { gainDb: 0, muted: false, solo: false }}
+              anySolo={anySolo}
+              onChange={(patch) => onTrack(track.index, patch)}
+            />
+          ))}
+
+          {!loadingTracks && !separateTracks && (
+            <div className="space-y-2 rounded-inner bg-elevated p-3">
+              <p className="text-xs leading-relaxed text-ink-muted">
+                Von diesem Clip gibt es keine Einzelspuren — Mikrofon und Apps
+                sind fest eingemischt und lassen sich nicht mehr trennen. Wer
+                sie später einzeln regeln will, gibt ihnen im Mixer eine eigene
+                Spur; das gilt dann für die nächsten Aufnahmen.
+              </p>
+              <Button size="sm" onClick={onOpenMixer}>
+                Im Mixer einrichten
+              </Button>
+            </div>
+          )}
+
+          {separateTracks && (
+            <p className="text-xs leading-relaxed text-ink-faint">
+              Die Vorschau kann nur leiser werden — über 0 dB senkt sie
+              stattdessen die übrigen Spuren ab. Beim Speichern wird der Pegel
+              wirklich angehoben.
+            </p>
+          )}
+        </section>
+
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <SectionHead>Zuschnitt</SectionHead>
+            <Reset
+              show={trimmed}
+              onClick={() => onTrim({ start: 0, end: duration })}
+            />
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" className="flex-1" onClick={() => onMark("start")}>
+              Start hier
+            </Button>
+            <Button size="sm" className="flex-1" onClick={() => onMark("end")}>
+              Ende hier
+            </Button>
+          </div>
+          <p className="font-mono text-xs text-ink-muted tabular-nums">
+            {clock(trim.start)} – {clock(trim.end)} · {clock(length)}
+          </p>
+          {trimmed && (
+            <p className="text-xs leading-relaxed text-ink-faint">
+              Der Zuschnitt ist eine Markierung: Er steuert die Wiedergabe, die
+              Datei bleibt vollständig. Nichts geht dabei verloren.
+            </p>
+          )}
+        </section>
       </div>
 
       <section className="space-y-3 border-t border-line p-5">
         <Button
           variant="primary"
           className="w-full"
-          disabled={busy || !inTauri}
-          onClick={runExport}
+          disabled={saving || !dirty || !inTauri}
+          onClick={onSave}
         >
-          {busy ? `Wird exportiert… ${Math.round(progress * 100)} %` : "Exportieren"}
+          {saving ? "Wird gespeichert…" : "Speichern"}
         </Button>
-        {busy && (
-          <div className="h-1 overflow-hidden rounded-pill bg-line">
-            <div
-              className="h-full rounded-pill bg-accent-bright transition-[width] duration-200"
-              style={{ width: `${Math.max(2, progress * 100)}%` }}
-            />
-          </div>
-        )}
-        {!busy && !done && (
-          <p className="text-xs text-ink-faint">
-            Schreibt eine neue Datei mit einer fertigen Tonspur.
-          </p>
-        )}
-        {done && (
-          <div className="flex items-center justify-between gap-2 rounded-inner bg-elevated p-3">
-            <div className="min-w-0">
-              <p className="truncate text-xs font-medium">
-                {fileName(done.path)}
-              </p>
-              <p className="text-xs text-ink-faint">{formatSize(done.sizeBytes)}</p>
-            </div>
-            <Button size="sm" onClick={() => api.revealPath(done.path)}>
-              Zeigen
-            </Button>
-          </div>
-        )}
+        <p className="text-xs text-ink-faint">
+          {saving
+            ? "Der Ton wird neu geschrieben, das Bild bleibt unangetastet."
+            : dirty
+              ? "Noch nicht gespeichert — die Datei im Ordner klingt bisher anders."
+              : justSaved
+                ? "Gespeichert. Der Clip im Ordner klingt jetzt so."
+                : "Die Mischung steckt in der Datei. Der Zuschnitt ist nur eine Markierung und bleibt jederzeit änderbar."}
+        </p>
       </section>
     </aside>
   );
 }
 
-/**
- * Textfeld, das beim Tippen sofort reagiert und die Änderung kurz danach
- * speichert — jeder Anschlag einzeln in die Datenbank wäre Unsinn.
- */
-function Field({
+function SectionHead({ children }: { children: React.ReactNode }) {
+  return (
+    <h3 className="text-xs font-medium tracking-wide text-ink-faint uppercase">
+      {children}
+    </h3>
+  );
+}
+
+/** Erscheint erst, wenn es etwas zurückzunehmen gibt. */
+function Reset({ show, onClick }: { show: boolean; onClick: () => void }) {
+  if (!show) return null;
+  return (
+    <button
+      onClick={onClick}
+      className="text-xs text-ink-faint transition-colors hover:text-ink"
+    >
+      Zurücksetzen
+    </button>
+  );
+}
+
+/** Eine Spur: stumm schalten, alleine hören, aussteuern. */
+function TrackRow({
   label,
-  value,
-  placeholder,
-  multiline,
-  onSave,
+  state,
+  anySolo,
+  onChange,
 }: {
   label: string;
+  state: TrackState;
+  anySolo: boolean;
+  onChange: (patch: Partial<TrackState>) => void;
+}) {
+  // Solo schlägt Stumm — steht irgendwo Solo, sind die anderen still, ganz
+  // gleich, was ihr eigener Schalter sagt.
+  const silent = anySolo ? !state.solo : state.muted;
+
+  return (
+    <div
+      className={cn(
+        "rounded-inner bg-elevated p-3 transition-opacity",
+        silent && "opacity-55",
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <button
+          aria-label={state.muted ? `${label} einschalten` : `${label} stumm`}
+          aria-pressed={state.muted}
+          onClick={() => onChange({ muted: !state.muted })}
+          className={cn(
+            "grid h-8 w-8 shrink-0 place-items-center rounded-pill transition-colors",
+            state.muted
+              ? "bg-live/20 text-live"
+              : "bg-white/10 text-ink-muted hover:text-ink",
+          )}
+        >
+          {state.muted ? (
+            <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
+              <path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4v-5Z" />
+              <path d="M16 10l4 4M20 10l-4 4" strokeLinecap="round" />
+            </svg>
+          ) : (
+            <IconSpeaker className="h-[18px] w-[18px]" />
+          )}
+        </button>
+
+        <span className="min-w-0 flex-1 truncate text-sm">{label}</span>
+
+        <button
+          aria-pressed={state.solo}
+          onClick={() => onChange({ solo: !state.solo })}
+          className={cn(
+            "shrink-0 rounded-pill px-2.5 py-1 text-[11px] font-medium transition-colors",
+            state.solo
+              ? "bg-accent text-white"
+              : "bg-white/10 text-ink-faint hover:text-ink",
+          )}
+        >
+          Nur diese
+        </button>
+      </div>
+
+      <div className="mt-3 flex items-center gap-3">
+        <Slider
+          label={`Lautstärke ${label}`}
+          value={state.gainDb}
+          min={MIN_DB}
+          max={MAX_DB}
+          step={0.5}
+          onChange={(gainDb) => onChange({ gainDb })}
+        />
+        <span className="w-14 shrink-0 text-right font-mono text-xs text-ink-muted tabular-nums">
+          {state.gainDb > 0 ? "+" : ""}
+          {state.gainDb.toFixed(1)} dB
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Textfeld ohne Beschriftung und ohne Rahmen: Es zeigt den Wert, und wer
+ * hineinklickt, ändert ihn. Gespeichert wird kurz nach dem letzten Anschlag —
+ * und beim Verlassen sofort, damit ein schnelles Schließen nichts frisst.
+ */
+function Field({
+  value,
+  placeholder,
+  ariaLabel,
+  multiline,
+  className,
+  onSave,
+}: {
   value: string;
   placeholder?: string;
+  ariaLabel: string;
   multiline?: boolean;
+  className?: string;
   onSave: (value: string | null) => void;
 }) {
   const [draft, setDraft] = useState(value);
@@ -328,51 +353,93 @@ function Field({
     saved.current = value;
   }, [value]);
 
+  const commit = () => {
+    if (draft === saved.current) return;
+    saved.current = draft;
+    latest.current(draft.trim() ? draft.trim() : null);
+  };
+  const commitRef = useRef(commit);
+  commitRef.current = commit;
+
   useEffect(() => {
     if (draft === saved.current) return;
-    const timer = window.setTimeout(() => {
-      saved.current = draft;
-      latest.current(draft.trim() ? draft.trim() : null);
-    }, 500);
+    const timer = window.setTimeout(() => commitRef.current(), 500);
     return () => window.clearTimeout(timer);
   }, [draft]);
 
-  const className = cn(
-    "w-full rounded-inner border border-line bg-elevated px-3 py-2 text-sm outline-none",
-    "transition-colors placeholder:text-ink-faint focus:border-line-strong",
+  // Verschwindet das Feld, bevor der Timer abgelaufen ist, wäre das Getippte
+  // sonst weg — der Player schließt schneller, als 500 ms vergehen.
+  useEffect(() => () => commitRef.current(), []);
+
+  const shared = cn(
+    "w-full rounded-inner border border-transparent bg-transparent px-2 py-1.5 outline-none",
+    "transition-colors placeholder:text-ink-faint",
+    "hover:border-line focus:border-line-strong focus:bg-elevated",
+    className,
   );
 
+  if (!multiline) {
+    return (
+      <input
+        aria-label={ariaLabel}
+        value={draft}
+        placeholder={placeholder}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        className={shared}
+      />
+    );
+  }
   return (
-    <label className="block">
-      <span className="mb-1.5 block text-xs text-ink-muted">{label}</span>
-      {multiline ? (
-        <textarea
-          value={draft}
-          rows={2}
-          placeholder={placeholder}
-          onChange={(e) => setDraft(e.target.value)}
-          className={cn(className, "resize-none")}
-        />
-      ) : (
-        <input
-          value={draft}
-          placeholder={placeholder}
-          onChange={(e) => setDraft(e.target.value)}
-          className={className}
-        />
-      )}
-    </label>
+    <GrowingArea
+      ariaLabel={ariaLabel}
+      value={draft}
+      placeholder={placeholder}
+      onChange={setDraft}
+      onBlur={commit}
+      className={shared}
+    />
   );
 }
 
-/** Vorschlag für den Speichern-Dialog: Name des Clips neben der Vorlage. */
-function suggestedPath(clip: Clip): string {
-  const separator = clip.path.includes("\\") ? "\\" : "/";
-  const folder = clip.path.slice(0, clip.path.lastIndexOf(separator));
-  const base = clip.title
-    ? clip.title.replace(/[\\/:*?"<>|]/g, "_").trim()
-    : fileName(clip.path).replace(/\.[^.]+$/, "");
-  return `${folder}${separator}${base}_export.mp4`;
+/** Textfeld, das mit seinem Inhalt wächst statt eine eigene Bildlaufleiste zu
+    bekommen — zwei Sätze Beschreibung sollen ohne Scrollen lesbar sein. */
+function GrowingArea({
+  ariaLabel,
+  value,
+  placeholder,
+  onChange,
+  onBlur,
+  className,
+}: {
+  ariaLabel: string;
+  value: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+  onBlur: () => void;
+  className?: string;
+}) {
+  const area = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    const element = area.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={area}
+      aria-label={ariaLabel}
+      value={value}
+      rows={1}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      onBlur={onBlur}
+      className={cn(className, "resize-none overflow-hidden")}
+    />
+  );
 }
 
 function clock(seconds: number): string {

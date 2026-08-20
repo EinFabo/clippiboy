@@ -1,57 +1,63 @@
-//! Aufnahme-Pipeline: Bildschirm → Hardware-Encoder → Segment-Ring → Clip.
+//! Aufnahme-Pipeline: Bildschirm → NV12 → Hardware-Encoder → Paket-Ring.
 //!
-//! Aufgenommen wird durchgehend in MPEG-TS-Segmente (Standard: 10 s). TS ist
-//! der einzige Container, der sich verlustfrei aneinanderhängen lässt — beim
-//! Speichern eines Clips werden also nur die passenden Segmente kopiert und in
-//! ein MP4 umgepackt, ohne neu zu encodieren.
+//! Aufgenommen wird mit **einem** durchlaufenden Encoder. Die fertigen
+//! H.264-Pakete landen im Ringpuffer aus `buffer.rs`, der Ton parallel als PCM
+//! in Ringen mit derselben Zeitachse. Beim Speichern wird nur noch gemuxt —
+//! kein Neuencodieren, kein Zusammenkleben von Dateien.
 //!
-//! Der Ton kommt aus dem Mixer: der Hauptmix läuft direkt in die Aufnahme, die
-//! Quellen mit eigener Spur werden parallel als PCM mitgeschrieben und beim
-//! Speichern als zusätzliche Tonspuren ins MP4 gemuxt.
+//! Vorher lief das anders: alle zehn Sekunden wurde ein neuer Encoder
+//! aufgesetzt, in eine MPEG-TS-Datei geschrieben und beim Speichern per
+//! `ffmpeg concat` zusammengesetzt. Jeder Wechsel kostete einen erzwungenen
+//! Keyframe und die Zeit zwischen Tausch und erstem neuen Bild — der Encoder
+//! stempelt sein erstes Bild immer auf null, diese Lücke fiel also still unter
+//! den Tisch. Das war der regelmäßige Hitch, und es war der Grund für den
+//! ganzen Aufwand um Segmentgrenzen, `+genpts` und das nicht funktionierende
+//! `-ss`.
+//!
+//! Bild und Ton hängen jetzt beide am QPC: Windows.Graphics.Capture stempelt
+//! seine Bilder mit `SystemRelativeTime`, WASAPI seine Blöcke mit
+//! `pu64QPCPosition` — dieselbe Uhr. Damit ist Synchronität keine Rechnung
+//! mehr, sondern ergibt sich.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
-use crate::audio::capture::{CHANNELS, SAMPLE_RATE};
+use crate::audio::capture::{now_100ns, CHANNELS, SAMPLE_RATE};
 use crate::audio::engine::AudioEngine;
 use crate::audio::TrackLayout;
-use crate::model::{AudioSource, RecordingConfig, TargetKind};
+use crate::buffer::{EncodedPacket, ReplayBuffer};
+use crate::model::{AudioSource, EncoderId, RecordingConfig};
 
-/// Länge eines Segments. Kurz genug für feines Zuschneiden, lang genug, dass
-/// die Segmentwechsel selten sind.
-const SEGMENT_SECONDS: u64 = 10;
+/// Wie weit der Mischer hinter der Gegenwart bleibt.
+///
+/// WASAPI liefert einen Block erst, wenn er voll ist; bis er im Ring liegt,
+/// vergehen ein paar Millisekunden. Wer näher an der Gegenwart mischt, holt
+/// sich Stille, die später durch echten Ton hätte ersetzt werden müssen —
+/// und der Platz ist dann schon vergeben.
+const AUDIO_LAG_100NS: i64 = 80 * 10_000;
 
-/// So lang muss ein Segment mindestens sein, bevor es abgeschlossen werden
-/// darf. Fällt ein erzwungenes Versiegeln direkt hinter eine planmäßige
-/// Rotation, entstünde sonst ein Segment von wenigen Millisekunden.
-const MIN_SEGMENT_MS: u64 = 400;
+/// Takt des Mischers.
+const MIX_INTERVAL: Duration = Duration::from_millis(10);
 
-#[derive(Debug, Clone)]
-pub struct Segment {
-    /// Laufende Nummer in der Reihenfolge, in der die Segmente aufgenommen
-    /// wurden. Die Abschluss-Threads laufen nebenläufig und werden nicht
-    /// zwingend in dieser Reihenfolge fertig — der Ring wird danach sortiert.
-    pub index: u64,
-    pub path: PathBuf,
-    /// Millisekunden seit Start der Aufnahme.
-    pub start_ms: u64,
-    pub end_ms: u64,
-    /// Beim Abschließen einmal ermittelt — sonst müsste die Statusanzeige im
-    /// Sekundentakt jede Segmentdatei neu statten.
-    pub bytes: u64,
-}
-
-/// Ringpuffer für eine separat mitgeschriebene Tonspur (16-bit PCM).
+/// Ringpuffer einer Tonspur (16-bit PCM), auf derselben QPC-Zeitachse wie das
+/// Bild.
 pub struct TrackRing {
     pub source_id: String,
     pub label: String,
-    samples: Mutex<VecDeque<i16>>,
+    inner: Mutex<TrackInner>,
     capacity: usize,
+}
+
+struct TrackInner {
+    samples: VecDeque<i16>,
+    /// QPC des ersten Samples im Ring.
+    start_100ns: i64,
+    primed: bool,
 }
 
 impl TrackRing {
@@ -59,27 +65,66 @@ impl TrackRing {
         Self {
             source_id,
             label,
-            samples: Mutex::new(VecDeque::new()),
-            capacity: seconds as usize * SAMPLE_RATE as usize * CHANNELS,
+            inner: Mutex::new(TrackInner {
+                samples: VecDeque::new(),
+                start_100ns: 0,
+                primed: false,
+            }),
+            // Ein Puffer über die volle Cliplänge, plus etwas Luft.
+            capacity: (seconds as usize + 2) * SAMPLE_RATE as usize * CHANNELS,
         }
     }
 
-    fn push(&self, block: &[i16]) {
-        let mut samples = self.samples.lock();
-        samples.extend(block.iter().copied());
-        if samples.len() > self.capacity {
-            let excess = samples.len() - self.capacity;
-            samples.drain(..excess);
+    /// Der Mischer erzeugt lückenlos fortlaufende Fenster; `at_100ns` setzt
+    /// deshalb nur beim allerersten Block die Zeitachse.
+    fn push(&self, block: &[i16], at_100ns: i64) {
+        let mut inner = self.inner.lock();
+        if !inner.primed {
+            inner.start_100ns = at_100ns;
+            inner.primed = true;
+        }
+        inner.samples.extend(block.iter().copied());
+        if inner.samples.len() > self.capacity {
+            let excess = inner.samples.len() - self.capacity;
+            inner.samples.drain(..excess);
+            let frames = (excess / CHANNELS) as i64;
+            inner.start_100ns += frames * 10_000_000 / SAMPLE_RATE as i64;
         }
     }
 
-    /// Die letzten `seconds` Sekunden als WAV-Datei schreiben.
-    pub fn write_wav(&self, path: &Path, seconds: u32) -> std::io::Result<()> {
-        let wanted = seconds as usize * SAMPLE_RATE as usize * CHANNELS;
-        let samples = self.samples.lock();
-        let start = samples.len().saturating_sub(wanted);
-        let data: Vec<i16> = samples.iter().skip(start).copied().collect();
-        drop(samples);
+    /// Das Zeitfenster ab `from_100ns` über `frames` Frames als WAV schreiben.
+    ///
+    /// Fehlende Stellen werden zu Stille — das hält die Spur genau so lang wie
+    /// das Bild, auch wenn eine Quelle erst später dazukam.
+    pub fn write_wav_window(
+        &self,
+        path: &Path,
+        from_100ns: i64,
+        frames: usize,
+    ) -> std::io::Result<()> {
+        let wanted = frames * CHANNELS;
+        let mut data = vec![0i16; wanted];
+        {
+            let inner = self.inner.lock();
+            if inner.primed {
+                let offset_frames =
+                    (from_100ns - inner.start_100ns) * SAMPLE_RATE as i64 / 10_000_000;
+                let offset = offset_frames * CHANNELS as i64;
+                let (mut src, mut dst) = if offset < 0 {
+                    (0usize, (-offset) as usize)
+                } else {
+                    (offset as usize, 0usize)
+                };
+                while dst < wanted {
+                    let Some(sample) = inner.samples.get(src) else {
+                        break;
+                    };
+                    data[dst] = *sample;
+                    src += 1;
+                    dst += 1;
+                }
+            }
+        }
 
         let byte_len = (data.len() * 2) as u32;
         let mut out = Vec::with_capacity(byte_len as usize + 44);
@@ -102,715 +147,345 @@ impl TrackRing {
     }
 }
 
-/// Von Pipeline und Capture-Thread gemeinsam genutzter Zustand.
+/// Von Aufnahme, Encoder und Mischer gemeinsam genutzter Zustand.
 pub struct Shared {
-    pub dir: PathBuf,
     pub buffer_seconds: u32,
-    pub segments: Mutex<Vec<Segment>>,
+    pub fps: u32,
+    /// Die encodeten Videopakete.
+    pub packets: Mutex<ReplayBuffer>,
+    /// Hauptmix (Index 0) und die Quellen mit eigener Spur.
     pub tracks: Mutex<Vec<Arc<TrackRing>>>,
     pub sources: Mutex<Vec<AudioSource>>,
     pub audio: Arc<AudioEngine>,
-    pub force_rotate: AtomicBool,
-    /// Index des Segments, in das gerade geschrieben wird. `seal_current_segment`
-    /// merkt sich den Wert und wartet gezielt auf genau dieses Segment.
-    pub current_segment: AtomicU64,
-    /// Wie viele Clips gerade geschrieben werden. `Pipeline::stop` wartet
-    /// darauf, sonst löscht es die Segmentdateien unter ffmpeg weg.
-    pub saves_in_flight: AtomicU64,
+    /// QPC, auf den PTS 0 des Videostroms fällt. Damit lässt sich zu jedem
+    /// Paket der echte Aufnahmezeitpunkt bestimmen — und der Ton an genau
+    /// derselben Stelle schneiden.
+    pub base_100ns: AtomicI64,
+    pub anchored: AtomicBool,
     pub frames: AtomicU64,
-    /// Bilder, die im *gerade laufenden* Segment gelandet sind. Wird bei jeder
-    /// Rotation zurückgesetzt. Ein Segment ohne ein einziges Bild darf nicht
-    /// abgeschlossen werden — siehe `rotate_due`.
-    pub segment_frames: AtomicU64,
     pub dropped: AtomicU64,
-    pub elapsed_ms: AtomicU64,
+    /// Bilder, die der Taktgeber wiederholen musste, weil das Bild stillstand.
+    pub duplicated: AtomicU64,
     pub error: Mutex<Option<String>>,
-    /// Wird hochgezählt, wenn sich `sources` ändert. Der Capture-Thread hält
-    /// eine Kopie und liest nur nach, wenn sich die Zahl bewegt hat — sonst
-    /// klont er die Quellenliste 60-mal pro Sekunde.
+    /// Wurde der erste Fehler dieses Laufs schon gemeldet? Ein Encoder, der
+    /// dauernd stolpert, soll die Oberfläche nicht zumüllen — aber *einmal*
+    /// muss es jemand erfahren, sonst puffert die App scheinbar weiter und
+    /// erst der Tastendruck bringt es ans Licht.
+    pub error_seen: AtomicBool,
+    /// Wird hochgezählt, wenn sich `sources` ändert. Der Mischer hält eine
+    /// Kopie und liest nur nach, wenn sich die Zahl bewegt hat.
     pub sources_generation: AtomicU64,
+    /// Welcher Encoder wirklich läuft — nicht der gewünschte.
+    pub encoder: Mutex<Option<EncoderId>>,
+    /// SPS/PPS, die beim Speichern vor den Elementarstrom gehören.
+    pub sequence_header: Mutex<Vec<u8>>,
 }
 
 impl Shared {
-    /// Gesamtdauer, die der Segment-Ring gerade abdeckt.
     pub fn buffered_seconds(&self) -> f32 {
-        let segments = self.segments.lock();
-        let elapsed = self.elapsed_ms.load(Ordering::Relaxed);
-        match segments.first() {
-            Some(first) => (elapsed.saturating_sub(first.start_ms)) as f32 / 1000.0,
-            None => 0.0,
-        }
+        self.packets.lock().buffered_seconds()
     }
 
     pub fn buffer_bytes(&self) -> u64 {
-        self.segments.lock().iter().map(|s| s.bytes).sum()
+        self.packets.lock().bytes()
     }
 
-    /// Fertiges Segment in den Ring legen — nach Index einsortiert.
-    ///
-    /// `finish()` läuft je Segment in einem eigenen Thread; ein kurzes
-    /// erzwungenes Segment kann vor einem langen fertig werden. Unsortiert
-    /// stünde der Clip später in der falschen Reihenfolge, `prune` würde die
-    /// neueste Datei löschen und `buffered_seconds` liefe daneben.
-    fn push_segment(&self, segment: Segment) {
-        let mut segments = self.segments.lock();
-        let at = segments
-            .iter()
-            .position(|existing| existing.index > segment.index)
-            .unwrap_or(segments.len());
-        segments.insert(at, segment);
-    }
-
-    /// Laufendes Segment abschließen lassen und warten, bis es im Ring liegt.
-    ///
-    /// Es genügt nicht, auf einen wachsenden Zähler zu warten: ein noch
-    /// laufender Abschluss-Thread einer früheren Rotation kann ihn hochziehen,
-    /// und dann fehlten dem Clip genau die letzten Sekunden.
-    pub fn seal_current_segment(&self, timeout: Duration) -> bool {
-        let wanted = self.current_segment.load(Ordering::Relaxed);
-        if self.sealed(wanted) {
-            return true;
-        }
-        self.force_rotate.store(true, Ordering::Relaxed);
-
-        let started = Instant::now();
-        let deadline = started + timeout;
-        while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-            if self.sealed(wanted) {
-                return true;
-            }
-            // Steht das Bild still, liefert Windows.Graphics.Capture keine
-            // Frames — das laufende Segment bleibt dann leer und lässt sich
-            // nicht abschließen. Zu holen gibt es aber auch nichts: Alles
-            // Aufgenommene liegt vollständig im vorherigen Segment. Nach einer
-            // Sekunde ohne ein einziges Bild ist das eindeutig (bei 60 fps
-            // wären es 60 gewesen).
-            if started.elapsed() > Duration::from_secs(1)
-                && self.segment_frames.load(Ordering::Relaxed) == 0
-                && !self.segments.lock().is_empty()
-            {
-                self.force_rotate.store(false, Ordering::Relaxed);
-                return true;
-            }
-        }
-        self.force_rotate.store(false, Ordering::Relaxed);
-        false
-    }
-
-    fn sealed(&self, index: u64) -> bool {
-        self.segments.lock().iter().any(|s| s.index >= index)
-    }
-
-    /// Meldet ein laufendes Speichern an. Solange die Rückgabe lebt, räumt
-    /// `Pipeline::stop` die Segmentdateien nicht weg.
-    pub fn begin_save(self: &Arc<Self>) -> SaveGuard {
-        self.saves_in_flight.fetch_add(1, Ordering::SeqCst);
-        SaveGuard(self.clone())
-    }
-
-    /// Neue Quellenliste übernehmen und den Capture-Thread darüber informieren.
+    /// Neue Quellenliste übernehmen und den Mischer darüber informieren.
     pub fn set_sources(&self, sources: Vec<AudioSource>) {
         *self.sources.lock() = sources;
         self.sources_generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn prune(&self) {
-        // Während ein Clip geschrieben wird, liest ffmpeg noch aus genau diesen
-        // Dateien. Der `SaveGuard` hält sie deshalb auch hier fest, nicht nur
-        // gegen `Pipeline::stop`. Eine ausgelassene Runde kostet nichts — der
-        // Ring wird dann einmal um ein Segment länger als nötig.
-        if self.saves_in_flight.load(Ordering::SeqCst) > 0 {
-            return;
+    /// Ein Problem der laufenden Aufnahme festhalten.
+    pub fn report(&self, message: String) {
+        log::warn!("Aufnahme: {message}");
+        *self.error.lock() = Some(message);
+    }
+
+    /// Den ersten noch ungemeldeten Fehler abholen.
+    pub fn take_unseen_error(&self) -> Option<String> {
+        if self.error_seen.swap(true, Ordering::SeqCst) {
+            return None;
         }
-        let mut segments = self.segments.lock();
-        let elapsed = self.elapsed_ms.load(Ordering::Relaxed);
-        let keep_from = elapsed.saturating_sub((self.buffer_seconds as u64 + SEGMENT_SECONDS) * 1000);
-        while segments.len() > 1 && segments[0].end_ms < keep_from {
-            let old = segments.remove(0);
-            let _ = std::fs::remove_file(&old.path);
-        }
+        self.error.lock().clone()
+    }
+
+    /// QPC-Zeitpunkt zu einem Paket-Zeitstempel.
+    pub fn qpc_of(&self, pts_us: i64) -> i64 {
+        self.base_100ns.load(Ordering::Acquire) + pts_us * 10
     }
 }
 
-#[cfg(windows)]
-mod win {
-    use super::*;
-    use crossbeam_channel::Receiver;
-    use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
-    use windows_capture::encoder::{
-        AudioSettingsBuilder, ContainerSettingsBuilder, ContainerSettingsSubType, VideoEncoder,
-        VideoSettingsBuilder, VideoSettingsSubType,
-    };
-    use windows_capture::frame::Frame;
-    use windows_capture::graphics_capture_api::InternalCaptureControl;
-    use windows_capture::monitor::Monitor;
-    use windows_capture::settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
-        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
-    };
-    use windows_capture::window::Window;
-
-    /// Takt des Ton- und Zeitgebers.
-    const PUMP_INTERVAL: Duration = Duration::from_millis(10);
-
-    /// Wie viel Ton höchstens auf Abholung warten darf. Alles darüber ist
-    /// Rückstand gegenüber dem Bild und wird verworfen.
-    const MAX_AUDIO_BACKLOG_MS: usize = 40;
-
-    /// Wie viel Ton ein normaler Pumpendurchlauf höchstens nachschiebt (200 ms).
-    const AUDIO_CHUNK_FRAMES: u64 = SAMPLE_RATE as u64 / 5;
-
-    /// Deckel fürs Auffüllen kurz vor dem Versiegeln. Steht mehr aus, ist die
-    /// Aufnahme ohnehin aus dem Tritt — und im Ringpuffer liegt längst nur
-    /// noch Stille.
-    const AUDIO_FLUSH_MAX_FRAMES: u64 = 5 * SAMPLE_RATE as u64;
-
-    pub struct Flags {
-        pub slot: Arc<EncoderSlot>,
-    }
-
-    struct SegmentState {
-        index: u64,
-        path: PathBuf,
-        start_ms: u64,
-    }
-
-    /// Encoder plus Segmentzustand, geteilt zwischen Capture-Thread und Pumpe.
-    ///
-    /// Warum geteilt: Windows.Graphics.Capture liefert nur bei Bildänderung ein
-    /// Frame. Hinge — wie ursprünglich — Ton, Segmentwechsel und die Uhr am
-    /// Frame-Callback, dann stünde bei ruhigem Bild alles still: der Ton
-    /// verhungert, das Segment rotiert nicht und `elapsed_ms` friert ein.
-    /// Deshalb läuft daneben eine Pumpe auf eigener Uhr.
-    pub struct EncoderSlot {
-        shared: Arc<Shared>,
-        recording: RecordingConfig,
-        start: Instant,
-        encoder: Mutex<Option<VideoEncoder>>,
-        segment: Mutex<SegmentState>,
-        next_encoder: Mutex<Option<Receiver<Result<VideoEncoder, String>>>>,
-        /// Bereits an den *laufenden* Encoder gelieferte Audio-Frames.
-        ///
-        /// Jeder Segment-Encoder stempelt seinen Ton als reinen Sample-Zähler
-        /// ab null, sein Bild dagegen relativ zum ersten Bild, das er bekommen
-        /// hat. Beide Nullpunkte müssen deshalb je Segment zusammenfallen. Mit
-        /// einem über die ganze Aufnahme durchlaufenden Zähler taten sie das
-        /// nicht: In jeder Segmentdatei stand der Ton anders zur Uhr als das
-        /// Bild, und beim Aneinanderhängen wurde daraus eine Lücke.
-        segment_audio_frames: AtomicU64,
-        /// Zeitpunkt des ersten Bildes im laufenden Segment, in Millisekunden
-        /// seit `start` — der gemeinsame Nullpunkt von Bild und Ton für dieses
-        /// Segment.
-        segment_video_start_ms: AtomicU64,
-        /// Zeitpunkt des zuletzt angenommenen Bildes im laufenden Segment. Bis
-        /// dorthin wird der Ton vor dem Versiegeln aufgefüllt, damit die
-        /// Segmentdatei in beiden Spuren gleich weit reicht.
-        segment_last_frame_ms: AtomicU64,
-        segment_video_started: AtomicBool,
-        running: AtomicBool,
-    }
-
-    fn build_encoder(
-        recording: &RecordingConfig,
-        path: &Path,
-    ) -> Result<VideoEncoder, Box<dyn std::error::Error + Send + Sync>> {
-        // H.264 statt des Standard-HEVC: Discord, Browser und Schnittprogramme
-        // nehmen H.264 überall an, HEVC nicht.
-        let video = VideoSettingsBuilder::new(recording.width, recording.height)
-            .sub_type(VideoSettingsSubType::H264)
-            .frame_rate(recording.fps)
-            .bitrate(recording.bitrate_kbps * 1000);
-        let audio = AudioSettingsBuilder::new()
-            .sample_rate(SAMPLE_RATE)
-            .channel_count(CHANNELS as u32)
-            .bit_per_sample(16)
-            .bitrate(192_000);
-        let container = ContainerSettingsBuilder::new().sub_type(ContainerSettingsSubType::MPEG2);
-
-        Ok(VideoEncoder::new(video, audio, container, path)?)
-    }
-
-    fn segment_path(dir: &Path, index: u64) -> PathBuf {
-        dir.join(format!("segment_{index:06}.ts"))
-    }
-
-    /// Encoder für ein Segment nebenher aufsetzen; das Ergebnis kommt über den
-    /// Kanal zurück.
-    fn spawn_encoder(
-        recording: RecordingConfig,
-        path: PathBuf,
-    ) -> Receiver<Result<VideoEncoder, String>> {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        std::thread::spawn(move || {
-            let built = build_encoder(&recording, &path).map_err(|e| e.to_string());
-            let _ = tx.send(built);
-        });
-        rx
-    }
-
-    fn to_i16(sample: f32) -> i16 {
-        (sample.clamp(-1.0, 1.0) * 32767.0) as i16
-    }
-
-    impl EncoderSlot {
-        pub fn new(shared: Arc<Shared>, recording: RecordingConfig) -> Result<Arc<Self>, String> {
-            std::fs::create_dir_all(&shared.dir).map_err(|e| e.to_string())?;
-            let path = segment_path(&shared.dir, 0);
-            let encoder = build_encoder(&recording, &path).map_err(|e| e.to_string())?;
-            // Den Encoder fürs nächste Segment schon jetzt bauen lassen: das
-            // dauert deutlich länger als ein Bildabstand und darf später weder
-            // den Capture-Thread noch die Pumpe aufhalten.
-            let next = spawn_encoder(recording.clone(), segment_path(&shared.dir, 1));
-
-            Ok(Arc::new(Self {
-                shared,
-                recording,
-                start: Instant::now(),
-                encoder: Mutex::new(Some(encoder)),
-                segment: Mutex::new(SegmentState {
-                    index: 0,
-                    path,
-                    start_ms: 0,
-                }),
-                next_encoder: Mutex::new(Some(next)),
-                segment_audio_frames: AtomicU64::new(0),
-                segment_video_start_ms: AtomicU64::new(0),
-                segment_last_frame_ms: AtomicU64::new(0),
-                segment_video_started: AtomicBool::new(false),
-                running: AtomicBool::new(true),
-            }))
-        }
-
-        fn now_ms(&self) -> u64 {
-            self.start.elapsed().as_millis() as u64
-        }
-
-        fn send_frame(&self, frame: &Frame) {
-            let now_ms = self.now_ms();
-            // Alles unter der Encoder-Sperre: `rotate` tauscht darunter den
-            // Encoder und setzt den Nullpunkt zurück. Ohne das könnte ein Bild
-            // den Nullpunkt des einen Segments setzen und im anderen landen.
-            let mut guard = self.encoder.lock();
-            let Some(encoder) = guard.as_mut() else {
-                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-                return;
-            };
-            if let Err(err) = encoder.send_frame(frame) {
-                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-                *self.shared.error.lock() = Some(format!("Encoder: {err}"));
-                return;
-            }
-            // Das erste angenommene Bild ist der Nullpunkt des Segments: Der
-            // Encoder stempelt sein Video relativ dazu, und ab hier — keine
-            // Millisekunde früher — wird Ton eingespeist.
-            if !self.segment_video_started.load(Ordering::Relaxed) {
-                self.segment_video_start_ms.store(now_ms, Ordering::Relaxed);
-                self.segment_video_started.store(true, Ordering::Relaxed);
-            }
-            self.segment_last_frame_ms.store(now_ms, Ordering::Relaxed);
-            self.shared.frames.fetch_add(1, Ordering::Relaxed);
-            self.shared.segment_frames.fetch_add(1, Ordering::Relaxed);
-        }
-
-        /// Aktuelles Segment abschließen und das nächste beginnen.
-        fn rotate(&self, now_ms: u64) {
-            // Den Nachfolger zuerst besorgen. Wurde — wie früher — erst der
-            // alte Encoder herausgenommen und der neue danach geholt, verwarf
-            // `send_frame` in der Zwischenzeit jedes ankommende Bild. Genau da
-            // entstanden die Löcher von 60 bis 300 ms an jeder Segmentgrenze:
-            // Der Videostrom verlor diese Zeit, der Ton nicht, und über einen
-            // Clip hinweg summierte sich das zum Versatz.
-            let next_index = self.segment.lock().index + 1;
-            // Der vorgebaute Encoder sollte längst fertig sein — nur falls
-            // nicht, wird hier gewartet bzw. neu gebaut.
-            let next = match self.next_encoder.lock().take() {
-                Some(rx) => rx.recv().unwrap_or_else(|err| Err(err.to_string())),
-                None => build_encoder(&self.recording, &segment_path(&self.shared.dir, next_index))
-                    .map_err(|e| e.to_string()),
-            };
-            let fresh = match next {
-                Ok(fresh) => fresh,
-                Err(err) => {
-                    // Ohne Nachfolger nicht rotieren: Das laufende Segment
-                    // wächst dann über seine zehn Sekunden hinaus, aber die
-                    // Aufnahme läuft weiter. Umgekehrt stünde sie still.
-                    *self.shared.error.lock() = Some(format!("Encoder-Neustart: {err}"));
-                    *self.next_encoder.lock() = Some(spawn_encoder(
-                        self.recording.clone(),
-                        segment_path(&self.shared.dir, next_index),
-                    ));
-                    return;
-                }
-            };
-
-            // Tausch und Nullpunkt des neuen Segments unter einer einzigen
-            // Sperre — dieselbe, die `send_frame` hält. Zwischen beidem darf
-            // kein Bild durchrutschen.
-            let encoder = {
-                let mut guard = self.encoder.lock();
-                let Some(previous) = guard.replace(fresh) else {
-                    // Es wird gerade gestoppt. Den frisch gebauten Encoder
-                    // wieder herausnehmen, sonst schriebe er ins Leere.
-                    guard.take();
-                    return;
-                };
-                self.segment_video_started.store(false, Ordering::Relaxed);
-                self.segment_audio_frames.store(0, Ordering::Relaxed);
-                self.shared.segment_frames.store(0, Ordering::Relaxed);
-                previous
-            };
-
-            let (finished_path, finished_index, start_ms) = {
-                let mut segment = self.segment.lock();
-                let finished = segment.path.clone();
-                let finished_index = segment.index;
-                let start = segment.start_ms;
-                segment.index = next_index;
-                segment.path = segment_path(&self.shared.dir, next_index);
-                segment.start_ms = now_ms;
-                self.shared
-                    .current_segment
-                    .store(next_index, Ordering::Relaxed);
-                (finished, finished_index, start)
-            };
-
-            *self.next_encoder.lock() = Some(spawn_encoder(
-                self.recording.clone(),
-                segment_path(&self.shared.dir, next_index + 1),
-            ));
-
-            let shared = self.shared.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = encoder.finish() {
-                    log::warn!("Segment konnte nicht abgeschlossen werden: {err}");
-                    return;
-                }
-                let bytes = std::fs::metadata(&finished_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                shared.push_segment(Segment {
-                    index: finished_index,
-                    path: finished_path,
-                    start_ms,
-                    end_ms: now_ms,
-                    bytes,
-                });
-                shared.prune();
-            });
-        }
-
-        fn rotate_due(&self, now_ms: u64) -> bool {
-            // Ein Segment ohne ein einziges Bild darf nicht abgeschlossen
-            // werden. Windows.Graphics.Capture liefert nur bei Bildänderung
-            // Frames; bei stehendem Bild entstünde eine TS-Datei ganz ohne
-            // Videospur. Der concat-Demuxer verlangt in allen Dateien dasselbe
-            // Stream-Layout und bricht daran ab — und zwar bei *jedem* weiteren
-            // Clip, solange die Datei im Ring liegt. Das Segment wächst dann
-            // eben über seine zehn Sekunden hinaus; es kostet nur den Ton.
-            if self.shared.segment_frames.load(Ordering::Relaxed) == 0 {
-                return false;
-            }
-            let age = now_ms.saturating_sub(self.segment.lock().start_ms);
-            if self.shared.force_rotate.load(Ordering::Relaxed) {
-                // Fällt der Tastendruck direkt hinter eine planmäßige Rotation,
-                // wäre das Segment sonst nur Millisekunden lang.
-                if age < MIN_SEGMENT_MS {
-                    return false;
-                }
-                self.shared.force_rotate.store(false, Ordering::Relaxed);
-                return true;
-            }
-            age >= SEGMENT_SECONDS * 1000
-        }
-    }
-
-    /// Zustand der Pumpe. Liegt im Thread, damit die Puffer wiederverwendet
-    /// werden und pro Durchlauf nichts allokiert wird.
-    struct Pump {
-        slot: Arc<EncoderSlot>,
-        sources: Vec<AudioSource>,
-        layout: TrackLayout,
-        generation: u64,
-        mix_buffers: Vec<Vec<f32>>,
-        pcm: Vec<u8>,
-        track_scratch: Vec<i16>,
-    }
-
-    impl Pump {
-        fn new(slot: Arc<EncoderSlot>) -> Self {
-            let sources = slot.shared.sources.lock().clone();
-            let layout = TrackLayout::from_sources(&sources);
-            let generation = slot.shared.sources_generation.load(Ordering::Relaxed);
-            Self {
-                slot,
-                sources,
-                layout,
-                generation,
-                mix_buffers: Vec::new(),
-                pcm: Vec::new(),
-                track_scratch: Vec::new(),
-            }
-        }
-
-        fn refresh_sources(&mut self) {
-            let generation = self.slot.shared.sources_generation.load(Ordering::Relaxed);
-            if generation == self.generation {
-                return;
-            }
-            self.generation = generation;
-            self.sources = self.slot.shared.sources.lock().clone();
-            self.layout = TrackLayout::from_sources(&self.sources);
-        }
-
-        /// Ton bis `until_ms` nachschieben, höchstens `limit` Frames auf
-        /// einmal. Gerechnet wird gegen den Nullpunkt des *laufenden*
-        /// Segments, nicht gegen den Aufnahmestart: Der Encoder stempelt
-        /// seinen Ton ab Sample null, sein Bild ab dem ersten Bild, das er
-        /// bekommen hat — nur so bedeutet PTS 0 in beiden Spuren derselben
-        /// Segmentdatei denselben Augenblick.
-        fn feed_audio(&mut self, until_ms: u64, limit: u64) {
-            // Vor dem ersten Bild des Segments gibt es keine Zeitachse, an die
-            // sich der Ton hängen könnte — was jetzt käme, läge in der
-            // fertigen Datei vor dem Bild.
-            if !self.slot.segment_video_started.load(Ordering::Relaxed) {
-                return;
-            }
-            let shared = self.slot.shared.clone();
-            let since_video = until_ms
-                .saturating_sub(self.slot.segment_video_start_ms.load(Ordering::Relaxed));
-            let target = since_video * SAMPLE_RATE as u64 / 1000;
-            let sent = self.slot.segment_audio_frames.load(Ordering::Relaxed);
-            let missing = target.saturating_sub(sent);
-            if missing == 0 {
-                return;
-            }
-            let frames = missing.min(limit) as usize;
-
-            self.refresh_sources();
-
-            // Rückstand begrenzen: Aufnahme- und Abholrate laufen auf
-            // verschiedenen Uhren, ohne Bremse sammelt sich der Unterschied.
-            shared
-                .audio
-                .trim_backlog(MAX_AUDIO_BACKLOG_MS * SAMPLE_RATE as usize * CHANNELS / 1000);
-            shared
-                .audio
-                .mix_into(&self.sources, &self.layout, frames, &mut self.mix_buffers);
-
-            let has_main = !self.layout.main_mix.is_empty();
-            self.pcm.clear();
-            self.pcm.reserve(frames * CHANNELS * 2);
-            if has_main {
-                for sample in &self.mix_buffers[0] {
-                    self.pcm.extend_from_slice(&to_i16(*sample).to_le_bytes());
-                }
-            } else {
-                self.pcm.resize(frames * CHANNELS * 2, 0);
-            }
-
-            // Separate Spuren in ihre Ringe schreiben.
-            let offset = usize::from(has_main);
-            {
-                let rings = shared.tracks.lock();
-                for (index, source_id) in self.layout.separate.iter().enumerate() {
-                    let Some(track) = self.mix_buffers.get(offset + index) else {
-                        continue;
-                    };
-                    let Some(ring) = rings.iter().find(|r| &r.source_id == source_id) else {
-                        continue;
-                    };
-                    self.track_scratch.clear();
-                    self.track_scratch.extend(track.iter().map(|s| to_i16(*s)));
-                    ring.push(&self.track_scratch);
-                }
-            }
-
-            let mut guard = self.slot.encoder.lock();
-            let Some(encoder) = guard.as_mut() else {
-                return;
-            };
-            if let Err(err) = encoder.send_audio_buffer(&self.pcm, 0) {
-                *shared.error.lock() = Some(format!("Ton: {err}"));
-                return;
-            }
-            drop(guard);
-            self.slot
-                .segment_audio_frames
-                .fetch_add(frames as u64, Ordering::Relaxed);
-        }
-
-        fn run(mut self) {
-            while self.slot.running.load(Ordering::Relaxed) {
-                std::thread::sleep(PUMP_INTERVAL);
-                let now_ms = self.slot.now_ms();
-                // Die Uhr des Puffers hängt an der Pumpe, nicht an den Bildern.
-                self.slot.shared.elapsed_ms.store(now_ms, Ordering::Relaxed);
-
-                if self.slot.rotate_due(now_ms) {
-                    // Erst den Ton bis zum letzten Bild dieses Segments
-                    // auffüllen, und dafür den 200-ms-Deckel lüften: Was hier
-                    // noch aussteht, gehört in die Datei, die gleich versiegelt
-                    // wird. Ging es stattdessen ins nächste Segment, fehlte es
-                    // dem Clip am Ende — so entstand der Nachlauf von fast zwei
-                    // Sekunden Bild ohne Ton.
-                    let last_frame_ms = self.slot.segment_last_frame_ms.load(Ordering::Relaxed);
-                    self.feed_audio(last_frame_ms, AUDIO_FLUSH_MAX_FRAMES);
-                    self.slot.rotate(now_ms);
-                }
-                self.feed_audio(now_ms, AUDIO_CHUNK_FRAMES);
-            }
-        }
-    }
-
-    pub struct Handler {
-        slot: Arc<EncoderSlot>,
-    }
-
-    impl GraphicsCaptureApiHandler for Handler {
-        type Flags = Flags;
-        type Error = Box<dyn std::error::Error + Send + Sync>;
-
-        fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-            Ok(Self {
-                slot: ctx.flags.slot,
-            })
-        }
-
-        /// Nur noch Bilder — Ton, Rotation und Uhr laufen in der Pumpe.
-        fn on_frame_arrived(
-            &mut self,
-            frame: &mut Frame,
-            _control: InternalCaptureControl,
-        ) -> Result<(), Self::Error> {
-            self.slot.send_frame(frame);
-            Ok(())
-        }
-
-        fn on_closed(&mut self) -> Result<(), Self::Error> {
-            log::info!("Aufnahmequelle wurde geschlossen");
-            Ok(())
-        }
-    }
-
-    pub struct Control {
-        capture: windows_capture::capture::CaptureControl<
-            Handler,
-            Box<dyn std::error::Error + Send + Sync>,
-        >,
-        slot: Arc<EncoderSlot>,
-        pump: Option<std::thread::JoinHandle<()>>,
-    }
-
-    pub fn start(shared: Arc<Shared>, recording: RecordingConfig) -> Result<Control, String> {
-        let slot = EncoderSlot::new(shared, recording.clone())?;
-        let flags = Flags { slot: slot.clone() };
-
-        let capture = match recording.target_kind {
-            TargetKind::Monitor => {
-                let monitor = match &recording.target_id {
-                    Some(device) => match Monitor::enumerate()
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .find(|m| m.device_name().map(|n| &n == device).unwrap_or(false))
-                    {
-                        Some(monitor) => monitor,
-                        // Abgestöpselter oder umbenannter Bildschirm: lieber den
-                        // primären aufnehmen als gar nicht puffern.
-                        None => {
-                            log::warn!("Monitor '{device}' nicht gefunden — nehme den primären");
-                            Monitor::primary().map_err(|e| e.to_string())?
-                        }
-                    },
-                    None => Monitor::primary().map_err(|e| e.to_string())?,
-                };
-                let settings = Settings::new(
-                    monitor,
-                    CursorCaptureSettings::WithCursor,
-                    DrawBorderSettings::WithoutBorder,
-                    SecondaryWindowSettings::Default,
-                    MinimumUpdateIntervalSettings::Default,
-                    DirtyRegionSettings::Default,
-                    ColorFormat::Bgra8,
-                    flags,
-                );
-                Handler::start_free_threaded(settings).map_err(|e| e.to_string())?
-            }
-            TargetKind::Window => {
-                let wanted = recording
-                    .target_id
-                    .clone()
-                    .ok_or_else(|| "Kein Fenster ausgewählt".to_string())?;
-                // Zuerst über das Handle: Der Titel ändert sich im Spiel
-                // ständig, und `title()` schlägt bei manchen Fenstern ganz fehl
-                // — dann darf das den Handle-Vergleich nicht mitreißen.
-                let window = Window::enumerate()
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .find(|w| {
-                        format!("0x{:X}", w.as_raw_hwnd() as usize) == wanted
-                            || w.title().map(|t| t == wanted).unwrap_or(false)
-                    })
-                    .ok_or_else(|| {
-                        "Das gewählte Fenster ist nicht mehr offen.".to_string()
-                    })?;
-                let settings = Settings::new(
-                    window,
-                    CursorCaptureSettings::WithCursor,
-                    DrawBorderSettings::WithoutBorder,
-                    SecondaryWindowSettings::Default,
-                    MinimumUpdateIntervalSettings::Default,
-                    DirtyRegionSettings::Default,
-                    ColorFormat::Bgra8,
-                    flags,
-                );
-                Handler::start_free_threaded(settings).map_err(|e| e.to_string())?
-            }
-        };
-
-        let pump = {
-            let slot = slot.clone();
-            std::thread::Builder::new()
-                .name("clippiboy-audio-pump".into())
-                .spawn(move || Pump::new(slot).run())
-                .map_err(|e| e.to_string())?
-        };
-
-        Ok(Control {
-            capture,
-            slot,
-            pump: Some(pump),
-        })
-    }
-
-    pub fn stop(mut control: Control) {
-        control.slot.running.store(false, Ordering::Relaxed);
-        if let Some(pump) = control.pump.take() {
-            let _ = pump.join();
-        }
-        let _ = control.capture.stop();
-        // Das laufende Segment sauber schließen, sonst bleibt eine
-        // unvollständige TS-Datei liegen.
-        if let Some(encoder) = control.slot.encoder.lock().take() {
-            let _ = encoder.finish();
-        }
-    }
-}
-
-/// Lebt so lange, wie ein Clip geschrieben wird. Siehe `Shared::begin_save`.
-pub struct SaveGuard(Arc<Shared>);
-
-impl Drop for SaveGuard {
-    fn drop(&mut self) {
-        self.0.saves_in_flight.fetch_sub(1, Ordering::SeqCst);
-    }
+/// Alles, was zum Schreiben eines Clips gebraucht wird — in einem Rutsch
+/// abgegriffen, damit die Sperren nicht über den ganzen ffmpeg-Lauf gehalten
+/// werden.
+pub struct ClipSnapshot {
+    pub packets: Vec<EncodedPacket>,
+    pub tracks: Vec<Arc<TrackRing>>,
+    pub sequence_header: Vec<u8>,
+    /// QPC des ersten Bildes im Clip — der Ton wird auf genau diesen Wert
+    /// geschnitten.
+    pub start_100ns: i64,
+    pub audio_frames: usize,
+    pub fps: u32,
 }
 
 /// Laufende Aufnahme.
 pub struct Pipeline {
     pub shared: Arc<Shared>,
     #[cfg(windows)]
-    control: Option<win::Control>,
+    inner: Option<win::Running>,
+}
+
+#[cfg(windows)]
+mod win {
+    use super::*;
+    use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+
+    use crate::convert::{pace, Converter, FrameSink, Latest};
+    use crate::gpu::GpuDevice;
+    use crate::mft::{EncoderSettings, VideoEncoder};
+    use crate::wgc::{self, Capture};
+
+    pub struct Running {
+        /// Muss vor dem Encoder fallen: Erst darf kein Bild mehr kommen.
+        _capture: Capture,
+        latest: Arc<Latest>,
+        pacer: Option<std::thread::JoinHandle<()>>,
+        mixer_stop: Arc<AtomicBool>,
+        mixer: Option<std::thread::JoinHandle<()>>,
+        encoder: Option<Arc<VideoEncoder>>,
+    }
+
+    /// Reicht die getakteten Bilder an den Encoder weiter.
+    struct EncoderSink {
+        encoder: Arc<VideoEncoder>,
+        shared: Arc<Shared>,
+        latest: Arc<Latest>,
+    }
+
+    impl FrameSink for EncoderSink {
+        fn on_frame(&mut self, texture: &ID3D11Texture2D, pts_100ns: i64, duplicate: bool) {
+            // Beim allerersten Bild die Ausgabezeitachse an der echten
+            // Aufnahmezeit verankern. Ohne das wüsste beim Speichern niemand,
+            // welcher Tonabschnitt zu welchem Bild gehört.
+            if !self.shared.anchored.load(Ordering::Acquire) {
+                let qpc = self.latest.frame_qpc();
+                self.shared
+                    .base_100ns
+                    .store(qpc - pts_100ns, Ordering::Release);
+                self.shared.anchored.store(true, Ordering::Release);
+            }
+            if self.encoder.submit(texture, pts_100ns) {
+                self.shared.frames.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            if duplicate {
+                self.shared.duplicated.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn start(
+        shared: Arc<Shared>,
+        recording: &RecordingConfig,
+    ) -> Result<Running, String> {
+        let gpu = Arc::new(GpuDevice::new()?);
+        let converter = Converter::new(&gpu, recording.width, recording.height, recording.fps)?;
+        let latest = Latest::new(converter);
+
+        let encoder = {
+            let shared = shared.clone();
+            Arc::new(VideoEncoder::start(
+                gpu.clone(),
+                EncoderSettings {
+                    width: recording.width,
+                    height: recording.height,
+                    fps: recording.fps,
+                    bitrate_kbps: recording.bitrate_kbps,
+                    keyframe_seconds: recording.keyframe_seconds,
+                    requested: recording.encoder,
+                },
+                move |packet| shared.packets.lock().push(packet),
+            )?)
+        };
+        *shared.encoder.lock() = Some(encoder.chosen);
+        *shared.sequence_header.lock() = encoder.sequence_header.clone();
+
+        let capture = {
+            let latest = latest.clone();
+            let closed_shared = shared.clone();
+            let shared = shared.clone();
+            wgc::start(
+                &gpu,
+                recording.target_kind,
+                recording.target_id.as_deref(),
+                recording.fps,
+                move |frame| {
+                    if let Err(err) = latest.submit(frame.texture, frame.qpc_100ns) {
+                        shared.dropped.fetch_add(1, Ordering::Relaxed);
+                        shared.report(err);
+                    }
+                },
+                {
+                    let shared = closed_shared.clone();
+                    move || {
+                        shared.report(
+                            "Die Aufnahmequelle ist verschwunden — es kommt kein Bild mehr."
+                                .into(),
+                        );
+                    }
+                },
+            )?
+        };
+
+        let pacer = {
+            let latest = latest.clone();
+            let sink = Box::new(EncoderSink {
+                encoder: encoder.clone(),
+                shared: shared.clone(),
+                latest: latest.clone(),
+            });
+            let fps = recording.fps;
+            std::thread::Builder::new()
+                .name("clippiboy-pacer".into())
+                .spawn(move || pace(latest, fps, sink))
+                .map_err(|err| format!("Taktgeber: {err}"))?
+        };
+
+        let mixer_stop = Arc::new(AtomicBool::new(false));
+        let mixer = {
+            let shared = shared.clone();
+            let stop = mixer_stop.clone();
+            std::thread::Builder::new()
+                .name("clippiboy-mixer".into())
+                .spawn(move || super::mix_loop(shared, stop))
+                .map_err(|err| format!("Mischer: {err}"))?
+        };
+
+        Ok(Running {
+            _capture: capture,
+            latest,
+            pacer: Some(pacer),
+            mixer_stop,
+            mixer: Some(mixer),
+            encoder: Some(encoder),
+        })
+    }
+
+    pub fn stop(mut running: Running) {
+        // Reihenfolge: erst keine neuen Bilder mehr takten, dann den Encoder
+        // auslaufen lassen. Umgekehrt liefe der Taktgeber ins Leere.
+        running.latest.stop();
+        if let Some(pacer) = running.pacer.take() {
+            let _ = pacer.join();
+        }
+        running.mixer_stop.store(true, Ordering::Relaxed);
+        if let Some(mixer) = running.mixer.take() {
+            let _ = mixer.join();
+        }
+        if let Some(encoder) = running.encoder.take() {
+            // Der Sink hält den zweiten Verweis; der ist mit dem Taktgeber
+            // gefallen, hier fällt der letzte und der Encoder läuft aus.
+            drop(encoder);
+        }
+    }
+}
+
+/// Der Mischer: erzeugt lückenlos fortlaufende Tonfenster auf der QPC-Achse.
+fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
+    let mut sources = shared.sources.lock().clone();
+    let mut layout = TrackLayout::from_sources(&sources);
+    let mut generation = shared.sources_generation.load(Ordering::Relaxed);
+
+    let mut buffers: Vec<Vec<f32>> = Vec::new();
+    let mut scratch: Vec<i16> = Vec::new();
+    // Gegen die Uhr gerechnet, nicht aufsummiert: So kann sich kein Fehler
+    // ansammeln, egal wie ungenau der Faden aufwacht.
+    let mut next_100ns: Option<i64> = None;
+
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(MIX_INTERVAL);
+
+        let current = shared.sources_generation.load(Ordering::Relaxed);
+        if current != generation {
+            generation = current;
+            sources = shared.sources.lock().clone();
+            layout = TrackLayout::from_sources(&sources);
+            sync_tracks(&shared, &sources, &layout);
+        }
+
+        let target = now_100ns() - AUDIO_LAG_100NS;
+        let from = *next_100ns.get_or_insert(target);
+        if target <= from {
+            continue;
+        }
+        let frames = ((target - from) * SAMPLE_RATE as i64 / 10_000_000) as usize;
+        if frames == 0 {
+            continue;
+        }
+
+        shared
+            .audio
+            .mix_window(&sources, &layout, from, frames, &mut buffers);
+
+        let rings = shared.tracks.lock();
+        let has_main = !layout.main_mix.is_empty();
+        // Spur 0 ist immer der Hauptmix — auch wenn gerade keine Quelle darauf
+        // liegt. Sonst hätte der Clip mal eine Tonspur mehr, mal eine weniger,
+        // je nachdem was beim Speichern eingeschaltet war.
+        if let Some(main) = rings.first() {
+            scratch.clear();
+            match (has_main, buffers.first()) {
+                (true, Some(mix)) => scratch.extend(mix.iter().map(|s| to_i16(*s))),
+                _ => scratch.resize(frames * CHANNELS, 0),
+            }
+            main.push(&scratch, from);
+        }
+
+        let offset = usize::from(has_main);
+        for (index, source_id) in layout.separate.iter().enumerate() {
+            let Some(track) = buffers.get(offset + index) else {
+                continue;
+            };
+            let Some(ring) = rings.iter().find(|r| &r.source_id == source_id) else {
+                continue;
+            };
+            scratch.clear();
+            scratch.extend(track.iter().map(|s| to_i16(*s)));
+            ring.push(&scratch, from);
+        }
+        drop(rings);
+
+        next_100ns = Some(from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64);
+    }
+}
+
+/// Die Spurenliste an ein geändertes Layout angleichen.
+///
+/// Spur 0 (Hauptmix) bleibt immer stehen; dahinter kommen die Quellen mit
+/// eigener Spur. Wer dazukommt, fängt mit einem leeren Ring an — sein Ton
+/// beginnt dann eben mitten im Puffer.
+fn sync_tracks(shared: &Arc<Shared>, sources: &[AudioSource], layout: &TrackLayout) {
+    let mut rings = shared.tracks.lock();
+    rings.truncate(1);
+    for id in &layout.separate {
+        let label = sources
+            .iter()
+            .find(|s| &s.id == id)
+            .map(|s| s.label.clone())
+            .unwrap_or_else(|| id.clone());
+        rings.push(Arc::new(TrackRing::new(
+            id.clone(),
+            label,
+            shared.buffer_seconds,
+        )));
+    }
+}
+
+fn to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * 32767.0) as i16
 }
 
 impl Pipeline {
@@ -819,61 +494,57 @@ impl Pipeline {
         buffer_seconds: u32,
         sources: Vec<AudioSource>,
         audio: Arc<AudioEngine>,
-        dir: PathBuf,
     ) -> Result<Self, String> {
-        // Alte Segmente einer früheren Sitzung wegräumen.
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().map(|e| e == "ts").unwrap_or(false) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+        let layout = TrackLayout::from_sources(&sources);
+
+        // Spur 0 ist der Hauptmix und immer vorhanden.
+        let mut tracks = vec![Arc::new(TrackRing::new(
+            "__mix".into(),
+            "Mix".into(),
+            buffer_seconds,
+        ))];
+        for id in &layout.separate {
+            let label = sources
+                .iter()
+                .find(|s| &s.id == id)
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| id.clone());
+            tracks.push(Arc::new(TrackRing::new(
+                id.clone(),
+                label,
+                buffer_seconds,
+            )));
         }
 
-        let layout = TrackLayout::from_sources(&sources);
-        let tracks: Vec<Arc<TrackRing>> = layout
-            .separate
-            .iter()
-            .map(|id| {
-                let label = sources
-                    .iter()
-                    .find(|s| &s.id == id)
-                    .map(|s| s.label.clone())
-                    .unwrap_or_else(|| id.clone());
-                Arc::new(TrackRing::new(id.clone(), label, buffer_seconds))
-            })
-            .collect();
-
         // Ohne das steckt in jedem Ring noch der Ton der letzten Minuten, den
-        // niemand abgeholt hat — der Clip liefe von der ersten Sekunde an
-        // hinter dem Bild her.
+        // niemand abgeholt hat.
         audio.reset_rings();
 
         let shared = Arc::new(Shared {
-            dir,
             buffer_seconds,
-            segments: Mutex::new(Vec::new()),
+            fps: recording.fps.max(1),
+            packets: Mutex::new(ReplayBuffer::new(buffer_seconds)),
             tracks: Mutex::new(tracks),
             sources: Mutex::new(sources),
             audio,
-            force_rotate: AtomicBool::new(false),
+            base_100ns: AtomicI64::new(0),
+            anchored: AtomicBool::new(false),
             frames: AtomicU64::new(0),
-            segment_frames: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
-            elapsed_ms: AtomicU64::new(0),
+            duplicated: AtomicU64::new(0),
             error: Mutex::new(None),
-            current_segment: AtomicU64::new(0),
-            saves_in_flight: AtomicU64::new(0),
+            error_seen: AtomicBool::new(false),
             sources_generation: AtomicU64::new(0),
+            encoder: Mutex::new(None),
+            sequence_header: Mutex::new(Vec::new()),
         });
 
         #[cfg(windows)]
         {
-            let control = win::start(shared.clone(), recording.clone())?;
+            let inner = win::start(shared.clone(), recording)?;
             Ok(Self {
                 shared,
-                control: Some(control),
+                inner: Some(inner),
             })
         }
 
@@ -887,31 +558,37 @@ impl Pipeline {
 
     pub fn stop(&mut self) {
         #[cfg(windows)]
-        if let Some(control) = self.control.take() {
-            win::stop(control);
+        if let Some(inner) = self.inner.take() {
+            win::stop(inner);
         }
-        // Ein Speichern, das gerade läuft, liest noch aus diesen Dateien —
-        // erst zu Ende kommen lassen, sonst bricht ffmpeg mittendrin ab.
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while self.shared.saves_in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        // Segmentdateien aufräumen — auch das gerade laufende, das noch nicht
-        // in der Liste steht.
-        self.shared.segments.lock().clear();
-        if let Ok(entries) = std::fs::read_dir(&self.shared.dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().map(|e| e == "ts").unwrap_or(false) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
+        self.shared.packets.lock().clear();
     }
 
-    /// Schließt das laufende Segment ab und wartet, bis es im Ring liegt.
-    pub fn seal_current_segment(&self, timeout: Duration) -> bool {
-        self.shared.seal_current_segment(timeout)
+    /// Die letzten `seconds` Sekunden abgreifen.
+    ///
+    /// Der Schnitt sitzt auf dem letzten Keyframe **vor** dem gewünschten
+    /// Startzeitpunkt — sonst wäre der Anfang nicht dekodierbar. Der Ton wird
+    /// auf genau denselben QPC geschnitten; daher braucht es keine Korrektur
+    /// mehr, damit Bild und Ton zusammenpassen.
+    pub fn snapshot(&self, seconds: u32) -> Result<ClipSnapshot, String> {
+        let packets = self.shared.packets.lock().snapshot(seconds);
+        if packets.is_empty() {
+            return Err("Der Replay-Puffer ist noch leer.".into());
+        }
+
+        let first_pts = packets.first().map(|p| p.pts_us).unwrap_or(0);
+        let last = packets.last().map(|p| p.pts_us).unwrap_or(first_pts);
+        let frame_us = 1_000_000 / self.shared.fps as i64;
+        let span_us = (last - first_pts + frame_us).max(0);
+
+        Ok(ClipSnapshot {
+            tracks: self.shared.tracks.lock().clone(),
+            sequence_header: self.shared.sequence_header.lock().clone(),
+            start_100ns: self.shared.qpc_of(first_pts),
+            audio_frames: (span_us * SAMPLE_RATE as i64 / 1_000_000) as usize,
+            fps: self.shared.fps,
+            packets,
+        })
     }
 }
 
@@ -921,106 +598,76 @@ impl Drop for Pipeline {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn shared() -> Arc<Shared> {
-        Arc::new(Shared {
-            // Existiert nicht: `prune` löscht Segmentdateien, und der Test soll
-            // dabei nichts Echtes erwischen.
-            dir: PathBuf::from("clippiboy-test-nirgendwo"),
-            buffer_seconds: 60,
-            segments: Mutex::new(Vec::new()),
-            tracks: Mutex::new(Vec::new()),
-            sources: Mutex::new(Vec::new()),
-            audio: Arc::new(AudioEngine::new()),
-            force_rotate: AtomicBool::new(false),
-            current_segment: AtomicU64::new(0),
-            saves_in_flight: AtomicU64::new(0),
-            frames: AtomicU64::new(0),
-            segment_frames: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
-            elapsed_ms: AtomicU64::new(0),
-            error: Mutex::new(None),
-            sources_generation: AtomicU64::new(0),
-        })
-    }
+    /// QPC (100 ns) für eine Frame-Position.
+    ///
+    /// Nur Vielfache von 6 Frames sind bei 48 kHz exakt in 100 ns darstellbar
+    /// (6 Frames = 1250 Ticks). Die Tests unten rechnen deshalb in solchen
+    /// Schritten — sonst prüften sie die Rundung statt der Fensterlogik.
+    const STEP: i64 = 6;
 
-    fn segment(index: u64, start_ms: u64, end_ms: u64) -> Segment {
-        Segment {
-            index,
-            path: PathBuf::from(format!("clippiboy-test-nirgendwo/segment_{index}.ts")),
-            start_ms,
-            end_ms,
-            bytes: 1000,
-        }
+    fn qpc_of_frame(frame: i64) -> i64 {
+        assert_eq!(frame % STEP, 0, "nur exakt darstellbare Abstände testen");
+        frame * 10_000_000 / SAMPLE_RATE as i64
     }
 
     #[test]
-    fn sealing_returns_at_once_when_the_segment_is_already_in_the_ring() {
-        let shared = shared();
-        shared.current_segment.store(3, Ordering::Relaxed);
-        shared.segments.lock().push(segment(3, 0, 10_000));
+    fn a_track_window_lands_where_its_timestamp_says() {
+        let ring = TrackRing::new("a".into(), "A".into(), 5);
+        // Sechs Frames stereo, aufsteigend, damit die Stelle erkennbar ist.
+        let block: Vec<i16> = (1..=(STEP as i16 * CHANNELS as i16)).collect();
+        ring.push(&block, qpc_of_frame(0));
+        ring.push(&[77, 88], qpc_of_frame(STEP));
 
-        assert!(shared.seal_current_segment(Duration::from_millis(100)));
-    }
+        let dir = std::env::temp_dir().join("clippiboy-test-track");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("window.wav");
+        ring.write_wav_window(&path, qpc_of_frame(STEP), 1).unwrap();
 
-    /// Bei stehendem Bild liefert Windows.Graphics.Capture keine Frames, das
-    /// laufende Segment bleibt leer und lässt sich nicht abschließen. Zu holen
-    /// gibt es dann aber auch nichts — das Speichern darf nicht sechs Sekunden
-    /// warten und danach scheitern.
-    #[test]
-    fn a_frozen_picture_does_not_block_saving() {
-        let shared = shared();
-        shared.current_segment.store(2, Ordering::Relaxed);
-        shared.segments.lock().push(segment(1, 0, 10_000));
-
-        let started = Instant::now();
-        assert!(shared.seal_current_segment(Duration::from_secs(6)));
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "Aufgeben hat {:?} gedauert",
-            started.elapsed()
-        );
-        assert!(
-            !shared.force_rotate.load(Ordering::Relaxed),
-            "Der Rotationswunsch muss zurückgenommen sein — sonst rotiert das \
-             nächste ankommende Bild sofort ein Segment von Millisekunden."
-        );
-    }
-
-    /// Ohne ein einziges fertiges Segment gibt es wirklich nichts zu speichern.
-    #[test]
-    fn without_any_segment_sealing_gives_up() {
-        let shared = shared();
-        assert!(!shared.seal_current_segment(Duration::from_millis(1200)));
-        assert!(!shared.force_rotate.load(Ordering::Relaxed));
-    }
-
-    /// `prune` läuft im Abschluss-Thread und löscht Segmentdateien — die liest
-    /// ein gerade laufendes ffmpeg aber noch.
-    #[test]
-    fn a_running_save_keeps_its_segments() {
-        let shared = shared();
-        shared.elapsed_ms.store(200_000, Ordering::Relaxed);
-        {
-            let mut segments = shared.segments.lock();
-            segments.push(segment(0, 0, 10_000));
-            segments.push(segment(1, 190_000, 200_000));
-        }
-
-        let guard = shared.begin_save();
-        shared.prune();
+        let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
-            shared.segments.lock().len(),
-            2,
-            "Während des Speicherns darf kein Segment verschwinden"
+            &bytes[44..],
+            &77i16.to_le_bytes()[..].iter().chain(88i16.to_le_bytes().iter())
+                .copied().collect::<Vec<u8>>()[..],
+            "Fenster sitzt an der falschen Stelle"
         );
+        let _ = std::fs::remove_file(&path);
+    }
 
-        drop(guard);
-        shared.prune();
-        assert_eq!(shared.segments.lock().len(), 1, "Danach schon");
+    /// Ein Fenster vor dem ersten Ton muss Stille liefern, nicht den Anfang —
+    /// sonst rutschte der Ton beim Speichern nach vorn.
+    #[test]
+    fn a_window_before_the_audio_is_silence() {
+        let ring = TrackRing::new("a".into(), "A".into(), 5);
+        ring.push(&[7, 7], qpc_of_frame(STEP * 20));
+
+        let dir = std::env::temp_dir().join("clippiboy-test-track");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("before.wav");
+        ring.write_wav_window(&path, qpc_of_frame(0), 1).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[44..], &[0, 0, 0, 0]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_oldest_audio_is_dropped_and_the_start_moves_with_it() {
+        // 1 s Kapazität + 2 s Luft = 3 s.
+        let ring = TrackRing::new("a".into(), "A".into(), 1);
+        let block = vec![0i16; SAMPLE_RATE as usize * CHANNELS];
+        for second in 0..5 {
+            ring.push(&block, qpc_of_frame(second * SAMPLE_RATE as i64));
+        }
+        // 48000 ist durch 6 teilbar — die Sekundenschritte sind also exakt.
+        let inner = ring.inner.lock();
+        assert_eq!(inner.samples.len(), ring.capacity);
+        assert!(
+            inner.start_100ns > 0,
+            "Der Ringanfang muss mitwandern, sonst zeigt jedes Fenster daneben"
+        );
     }
 }

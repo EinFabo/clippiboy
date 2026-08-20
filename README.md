@@ -17,16 +17,16 @@ oder auf einer eigenen Tonspur im Clip.
 | Video-Capture (Windows.Graphics.Capture, zero-copy) | ✅ fertig |
 | Encoder (Media Foundation, H.264 + AAC) | ✅ fertig |
 | WASAPI-Aufnahme aller Quellentypen + Mixer | ✅ fertig |
-| Clip speichern (TS-Segmente → MP4, kein Re-Encode) | ✅ fertig |
+| Clip speichern (Paket-Ring → MP4, kein Re-Encode) | ✅ fertig |
 | Globale Hotkeys | ✅ fertig |
 | Clip-Player in der App | ✅ fertig |
 | Tray-Symbol, Schließen ins Tray | ✅ fertig |
 | Banner über dem Spiel | ✅ fertig |
 | Spielerkennung (Prozess-EXE) | ✅ fertig |
-| Zusätzliche Tonspuren im Clip | ✅ implementiert, noch ungetestet |
+| Einzelspuren neben dem Clip, Mischung nachträglich änderbar | ✅ fertig |
 | Icon, Installer (NSIS), Auto-Update | ✅ fertig |
 | Puffer-Automatik (beim Start / im Spiel) | ✅ fertig |
-| Clip bearbeiten: Name, Beschreibung, Spurmischung, Zuschnitt, Export | ✅ fertig |
+| Clip bearbeiten: Name, Beschreibung, Spurmischung, Zuschnitt | ✅ fertig |
 | Upload | ⏳ offen |
 
 ## Entwickeln
@@ -67,6 +67,14 @@ npm run dev          # http://localhost:1420 mit Mock-Daten aus src/lib/mock.ts
 cd src-tauri
 cargo test --lib                            # Puffer-, Mixer- und DB-Logik
 cargo check --target x86_64-pc-windows-gnu  # typprüft auch den Windows-Code
+```
+
+Bricht der Typcheck mit `Inconsistency detected by ld.so` in einem
+Build-Skript ab, liegt das Zielverzeichnis auf der Windows-Platte — WSL kann
+von dort nicht jede Binärdatei starten. Dann einmal umlenken:
+
+```bash
+export CARGO_TARGET_DIR=~/.cache/clippiboy-target
 ```
 
 ## Weitergeben und aktualisieren
@@ -154,14 +162,20 @@ src/                     React-UI
   overlay/               eigenes Fenster: der Banner über dem Spiel
 src-tauri/src/
   model.rs               gemeinsame Datentypen
-  pipeline.rs            Capture → Encoder → Segment-Ring
-  muxer.rs               Segmente + Tonspuren → MP4 (ffmpeg, ohne Re-Encode)
+  pipeline.rs            Capture → Encoder → Paket-Ring
+  wgc.rs                 Windows.Graphics.Capture, Bilder als D3D11-Texturen
+  gpu.rs                 D3D11-Gerät, von Capture und Encoder geteilt
+  convert.rs             BGRA→NV12 auf der GPU + Taktgeber für echtes CFR
+  mft.rs                 H.264-Encoder als Media Foundation Transform
+  buffer.rs              keyframe-sicherer Paket-Ring (+ Unit-Tests)
+  muxer.rs               Pakete + Tonspuren → MP4 (ffmpeg, ohne Re-Encode)
+  stems.rs               Einzelspuren ablegen, entpacken, mischen (+ Tests)
+  preview.rs             Wegwerf-Hilfsdateien (Wellenform für die Zeitleiste)
   audio/capture.rs       WASAPI je Quelle (Gerät, Loopback, Prozess)
   audio/engine.rs        laufende Streams, Pegel, Mischen
   audio/ring.rs          Ringpuffer je Quelle (+ Unit-Tests)
   audio/devices.rs       WASAPI-Endpunkte und Prozesse mit Audio-Session
   audio/mod.rs           Spur-Layout, Gain (+ Unit-Tests)
-  buffer.rs              keyframe-sicherer Paket-Ring (+ Unit-Tests)
   capture.rs             Monitore und Fenster als Aufnahmeziele
   game.rs                Spielerkennung (+ Unit-Tests)
   games.json             EXE → Spielname
@@ -169,10 +183,12 @@ src-tauri/src/
   overlay.rs             Overlay-Fenster ansteuern
   encode.rs              Encoder-Erkennung
   clips.rs               SQLite-Clip-Index
-  export.rs              Spuren lesen/entpacken, Clip neu ausgeben (+ Tests)
   config.rs              Konfiguration als JSON
   commands.rs            Tauri-Commands
   updater.rs             Update-Prüfung und Installation
+src-tauri/examples/
+  aufnahme-probe.rs      Capture → Encoder → Muxer einmal von Hand durchspielen
+  spuren-probe.rs        zwei parallele Spurenabfragen auf denselben Clip
 scripts/fetch-ffmpeg.mjs ffmpeg/ffprobe für das Paket holen
 scripts/make-icons.py    alle Icon-Größen aus icons/icon.png
 ```
@@ -216,28 +232,44 @@ allen aktuellen Spielen — funktioniert es.
 
 ## Wie der Replay-Puffer funktioniert
 
-Aufgenommen wird durchgehend in **MPEG-TS-Segmente** von 10 Sekunden
-(`%APPDATA%\ClippiBoy\buffer`). TS ist der einzige gängige Container, der sich
-verlustfrei aneinanderhängen lässt — beim Speichern werden also nur die
-passenden Segmente kopiert und in ein MP4 umgepackt (`-c copy`), ohne neu zu
-encodieren. Ein Clip steht dadurch in ein bis zwei Sekunden.
+**Ein** Encoder läuft durch, und seine fertigen Pakete landen in einem Ring im
+Arbeitsspeicher (`buffer.rs`). Beim Speichern werden die passenden Pakete
+herausgeschnitten, als roher H.264-Elementarstrom abgelegt und mit dem Ton in
+einem einzigen ffmpeg-Lauf zu einem MP4 gepackt (`-c:v copy`) — nichts wird neu
+encodiert, ein Clip steht in ein bis zwei Sekunden.
 
-Ältere Segmente werden fortlaufend gelöscht, sodass immer genau die
-eingestellte Pufferlänge vorgehalten wird. Beim Stoppen wird alles aufgeräumt.
+Der Ring schneidet vorne immer auf ein Keyframe: Ein Clip, der mitten in einer
+Bildgruppe anfinge, hätte am Anfang Klötzchen. Ältere Pakete fallen fortlaufend
+weg, sodass genau die eingestellte Pufferlänge vorgehalten wird.
 
 Das Bild geht als Direct3D-Textur direkt in den Hardware-Encoder — es wird nie
-über die CPU kopiert.
+über die CPU kopiert. Capture und Encoder teilen sich dafür dasselbe D3D11-Gerät
+(`gpu.rs`), die Umwandlung BGRA→NV12 macht der Video-Prozessor der Grafikkarte.
 
-Ton, Segmentwechsel und die Uhr des Puffers hängen an einem eigenen Thread, der
-alle 10 ms läuft — nicht am Frame-Callback. Windows.Graphics.Capture liefert
-nämlich nur bei Bildänderung ein Frame: hinge alles am Callback, würde bei
-ruhigem Bild der Ton verhungern und der Puffer stehenbleiben. Der Nullpunkt für
+Vorher lag der Puffer als **MPEG-TS-Segmente** von 10 Sekunden auf der Platte,
+die beim Speichern per `ffmpeg concat` zusammengesetzt wurden. Das hatte drei
+Kosten, die alle weg sind:
+
+* Jeder Segmentwechsel brauchte einen neuen Encoder. Der Aufbau dauert länger
+  als ein Bildabstand, also musste der nächste im Hintergrund vorgebaut werden —
+  und trotzdem riss an jeder Grenze ein Loch von 60 bis 300 ms ins Bild, das
+  sich über einen Clip zum Versatz zwischen Bild und Ton summierte.
+* Ein Segment, das keine Datei mehr hergab — etwa weil bei stehendem Bild kein
+  einziges Frame ankam — brachte **jedes** weitere Speichern zum Scheitern,
+  solange es im Ring lag: `Impossible to open '…/segment_001124.ts'`.
+* Der Puffer stand ständig auf der Platte. Eine ältere Fassung, die abstürzte,
+  ließ ihn dort liegen; beim ersten Start der neuen wird `buffer/` deshalb
+  weggeräumt (auf einer Testmaschine 323 MB).
+
+Ton und die Uhr des Puffers hängen an einem eigenen Thread, der alle 10 ms
+läuft — nicht am Frame-Callback. Windows.Graphics.Capture liefert nämlich nur
+bei Bildänderung ein Frame: hinge alles am Callback, würde bei ruhigem Bild der
+Ton verhungern und der Puffer stehenbleiben. Aus demselben Grund taktet ein
+eigener Faden die Bilder auf `1/fps` und schickt bei ruhigem Bild das letzte
+noch einmal los — der Encoder sieht dadurch echtes CFR statt einer Bildrate,
+die er selbst umrechnen müsste. Genau das war der Judder. Der Nullpunkt für
 beide Spuren ist das erste eingetroffene Bild, damit Ton und Bild denselben
 Zeitursprung haben.
-
-Der Encoder für das nächste Segment wird im Hintergrund vorgebaut. Ihn im
-Capture-Thread aufzusetzen dauert länger als ein Bildabstand und ließ die
-Aufnahme früher alle 10 Sekunden hängen.
 
 Die Ringpuffer der Audioquellen laufen ab Programmstart mit (für die
 Pegelanzeige), werden aber vor jeder Aufnahme geleert und währenddessen auf
@@ -270,22 +302,22 @@ Im Player öffnet **Bearbeiten** (oder `E`) einen Bereich neben dem Bild:
 * **Zuschnitt** — `I` und `O` setzen Anfang und Ende auf die aktuelle Stelle,
   die Griffe in der Zeitleiste lassen sich auch ziehen. Die Wiedergabe springt
   am Ende der Auswahl zurück an ihren Anfang.
-* **Exportieren** — schreibt eine neue Datei, in der alle Spuren mit ihren
-  Reglern zu **einer** Tonspur zusammengerechnet sind.
+* **Speichern** — rechnet die eingestellte Mischung in die Clipdatei. Der
+  Zuschnitt ist bisher nur eine Markierung; die Datei bleibt in voller Länge.
 
 Zwei Dinge, die man dabei wissen sollte:
 
-**Die Vorschau kann nur leiser werden.** WebView2 gibt von einem MP4 immer nur
-die erste Tonspur wieder — an `audioTracks` kommt man nicht heran. Die übrigen
-Spuren entpackt der Kern deshalb einzeln nach `%APPDATA%\ClippiBoy\preview`
-und die UI lässt sie als eigene Audioelemente synchron mitlaufen. Deren
-Lautstärke lässt sich aber nur dämpfen, nie anheben: steht ein Regler über
-0 dB, senkt die Vorschau stattdessen die übrigen Spuren ab. Die Balance stimmt
-damit, nur die Gesamtlautstärke liegt tiefer. Der Export hebt den Pegel wirklich
-an.
+**Der Clip hat genau eine Tonspur.** Discord, der Browser und die meisten
+Player geben von einem MP4 stur die erste Tonspur wieder — lagen Mikrofon und
+Discord wie früher als eigene Spuren daneben, waren sie überall außerhalb des
+Editors stumm. Damit sich die Mischung trotzdem jederzeit ändern lässt, liegen
+die rohen Einzelspuren daneben, je Clip ein Ordner unter
+`%APPDATA%\ClippiBoy\tracks\<clip-id>\`. Sie gehören zum Clip und werden mit
+ihm gelöscht.
 
-**Ohne Schnitt am Anfang bleibt das Bild unangetastet.** Dann wird nur der Ton
-neu gerechnet (`-c:v copy`), und der Export ist in Sekunden fertig. Ein Schnitt
-am Anfang muss bildgenau sitzen, sonst rutschte er auf das nächste Keyframe —
-dafür wird das Bild neu encodiert, mit dem Encoder aus den Einstellungen und
-x264 als Rückfall, falls die Hardware streikt.
+**Die Vorschau kann nur leiser werden.** WebView2 kommt an `audioTracks` nicht
+heran, deshalb lässt die UI die Einzelspuren als eigene Audioelemente synchron
+zum Video mitlaufen. Deren Lautstärke lässt sich aber nur dämpfen, nie anheben:
+steht ein Regler über 0 dB, senkt die Vorschau stattdessen die übrigen Spuren
+ab. Die Balance stimmt damit, nur die Gesamtlautstärke liegt tiefer. Beim
+Speichern wird der Pegel wirklich angehoben.

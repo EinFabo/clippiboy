@@ -4,7 +4,7 @@
 use rusqlite::{params, Connection};
 
 use crate::config;
-use crate::model::Clip;
+use crate::model::{Clip, ClipEdit};
 
 pub struct Library {
     conn: Connection,
@@ -54,6 +54,9 @@ impl Library {
         // behalten, deshalb angehängt statt Tabelle neu.
         self.add_column("title", "TEXT")?;
         self.add_column("description", "TEXT")?;
+        // Zuschnitt und Spurenmischung als JSON — ein eigenes Tabellenschema
+        // dafür hätte nur Spalten, die sich mit dem Editor wieder ändern.
+        self.add_column("edit", "TEXT")?;
         Ok(())
     }
 
@@ -75,8 +78,8 @@ impl Library {
         self.conn.execute(
             "INSERT OR REPLACE INTO clips
              (id, path, created_at, duration_ms, game, width, height, size_bytes,
-              thumb_path, title, description)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              thumb_path, title, description, edit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 clip.id,
                 clip.path,
@@ -89,6 +92,7 @@ impl Library {
                 clip.thumb_path,
                 clip.title,
                 clip.description,
+                encode_edit(clip.edit.as_ref()),
             ],
         )?;
         Ok(())
@@ -97,7 +101,7 @@ impl Library {
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,
-                    thumb_path, title, description
+                    thumb_path, title, description, edit
              FROM clips ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -113,6 +117,7 @@ impl Library {
                 thumb_path: row.get(8)?,
                 title: row.get(9)?,
                 description: row.get(10)?,
+                edit: decode_edit(row.get::<_, Option<String>>(11)?),
             })
         })?;
         rows.collect()
@@ -138,6 +143,26 @@ impl Library {
         Ok(())
     }
 
+    /// Zuschnitt und Spurenmischung ablegen. `None` löscht sie wieder — der
+    /// Clip gilt dann als unangetastet.
+    pub fn set_edit(&self, id: &str, edit: Option<&ClipEdit>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET edit = ?2 WHERE id = ?1",
+            params![id, encode_edit(edit)],
+        )?;
+        Ok(())
+    }
+
+    /// Die Dateigröße nachtragen. Nötig, sobald die Datei neu geschrieben
+    /// wurde — sonst stünde in der Galerie noch die Größe von vorher.
+    pub fn set_size(&self, id: &str, size_bytes: u64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET size_bytes = ?2 WHERE id = ?1",
+            params![id, size_bytes],
+        )?;
+        Ok(())
+    }
+
     /// Entfernt den Eintrag und die Videodatei.
     pub fn delete(&self, id: &str) -> rusqlite::Result<()> {
         if let Some(clip) = self.get(id)? {
@@ -149,6 +174,25 @@ impl Library {
         self.conn
             .execute("DELETE FROM clips WHERE id = ?1", params![id])?;
         Ok(())
+    }
+}
+
+/// Der Editor-Stand als JSON. Scheitert das Serialisieren, ist ein fehlender
+/// Zuschnitt besser als ein Clip, der sich nicht mehr speichern lässt.
+fn encode_edit(edit: Option<&ClipEdit>) -> Option<String> {
+    edit.and_then(|value| serde_json::to_string(value).ok())
+}
+
+/// Unlesbares JSON (etwa aus einer älteren Version) wird verworfen statt die
+/// ganze Galerie scheitern zu lassen.
+fn decode_edit(raw: Option<String>) -> Option<ClipEdit> {
+    let raw = raw?;
+    match serde_json::from_str(&raw) {
+        Ok(edit) => Some(edit),
+        Err(err) => {
+            log::warn!("Editor-Stand unlesbar ({err}) — wird verworfen");
+            None
+        }
     }
 }
 
@@ -169,6 +213,7 @@ mod tests {
             thumb_path: None,
             title: None,
             description: None,
+            edit: None,
         }
     }
 
@@ -205,5 +250,30 @@ mod tests {
         // Leeren Namen wieder loswerden.
         lib.update_meta("a", None, None, None).unwrap();
         assert!(lib.get("a").unwrap().unwrap().title.is_none());
+    }
+
+    #[test]
+    fn edit_survives_the_roundtrip() {
+        use crate::model::TrackMix;
+
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        assert!(lib.get("a").unwrap().unwrap().edit.is_none());
+
+        let edit = ClipEdit {
+            start_ms: 2_500,
+            end_ms: 9_000,
+            tracks: vec![TrackMix {
+                index: 1,
+                gain_db: -6.0,
+                muted: true,
+            }],
+        };
+        lib.set_edit("a", Some(&edit)).unwrap();
+        assert_eq!(lib.get("a").unwrap().unwrap().edit, Some(edit));
+
+        // Zurücksetzen macht den Clip wieder unangetastet.
+        lib.set_edit("a", None).unwrap();
+        assert!(lib.get("a").unwrap().unwrap().edit.is_none());
     }
 }

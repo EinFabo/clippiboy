@@ -24,12 +24,15 @@ export function Card({ interactive, className, children, ...rest }: CardProps) {
 export function Pill({
   children,
   className,
+  title,
 }: {
   children: ReactNode;
   className?: string;
+  title?: string;
 }) {
   return (
     <span
+      title={title}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-pill px-3 py-1 text-xs font-medium",
         "bg-black/45 text-ink backdrop-blur-md",

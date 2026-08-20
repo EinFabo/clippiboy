@@ -33,7 +33,6 @@ dirs = "5"
 jiff = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-capture = "2"
 windows = { version = "0.58", features = [
     "implement",
     "Win32_Foundation",
@@ -54,6 +53,12 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
 ] }
 windows-core = "0.58"
 

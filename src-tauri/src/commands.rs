@@ -6,10 +6,11 @@ use crate::audio::devices;
 use crate::capture;
 use crate::clips::Library;
 use crate::encode;
-use crate::export;
+use crate::preview;
+use crate::stems;
 use crate::model::{
-    AppConfig, AudioDevice, AudioProcess, AudioSource, CaptureTarget, Clip, ClipTrack, EncoderInfo,
-    EngineStatus, ExportProgress, ExportRequest, ExportResult,
+    AppConfig, AudioDevice, AudioProcess, AudioSource, CaptureTarget, Clip, ClipEdit, ClipTrack,
+    EncoderInfo, EngineStatus, TrackMix,
 };
 use crate::state::AppState;
 
@@ -272,6 +273,8 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
 
 #[tauri::command]
 pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
+    // Die Einzelspuren gehören zum Clip und haben ohne ihn keinen Zweck mehr.
+    stems::remove(&id);
     with_library(&state, |lib| lib.delete(&id).map_err(|e| e.to_string()))
 }
 
@@ -317,72 +320,69 @@ pub fn update_clip(
     })
 }
 
-/// Die Tonspuren eines Clips — jede mit einer entpackten Datei für die
-/// Vorschau, damit der Player sie einzeln aussteuern kann.
+/// Bild der Tonspur für die Zeitleiste. Liefert den Pfad zum PNG.
 ///
-/// `async`, weil ffprobe und das Entpacken je nach Länge eine Sekunde brauchen
-/// und der Hauptfaden solange das Fenster nicht zeichnen würde.
+/// `async`, weil ffmpeg dafür den Ton einmal komplett durchliest.
+#[tauri::command(async)]
+pub fn clip_waveform(state: State<'_, AppState>, id: String) -> Result<String> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+    preview::waveform(&clip).map(|path| path.to_string_lossy().to_string())
+}
+
+/// Die Tonspuren eines Clips, jede mit einer eigenen Datei für die Vorschau —
+/// nur so lassen sie sich im Player einzeln aussteuern.
+///
+/// `async`, weil das Nachziehen bei einem Clip aus der Zeit vor der Umstellung
+/// je nach Länge eine Sekunde braucht und der Hauptfaden solange das Fenster
+/// nicht zeichnen würde.
 #[tauri::command(async)]
 pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTrack>> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "Clip nicht gefunden".to_string())?;
-
-    let mut tracks = export::tracks(&clip)?;
-    for track in tracks.iter_mut().skip(1) {
-        match export::extract_track(&clip, track.index) {
-            Ok(path) => track.preview_path = Some(path.to_string_lossy().to_string()),
-            // Ohne Vorschaudatei bleibt der Regler bedienbar, nur hörbar wird
-            // die Spur erst im Export.
-            Err(err) => log::warn!("Spur {} nicht entpackt: {err}", track.index),
-        }
-    }
-    Ok(tracks)
+    stems::tracks(&clip)
 }
 
-/// Den Clip mit der eingestellten Mischung und dem Zuschnitt neu ausgeben.
+/// Die eingestellte Mischung in den Clip schreiben und den Zuschnitt als
+/// Markierung ablegen.
+///
+/// Nur der Ton wird eingerechnet — das Bild bleibt unangetastet, der Zuschnitt
+/// bleibt jederzeit wieder aufziehbar.
 #[tauri::command(async)]
-pub fn export_clip(
+pub fn apply_clip_edit(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
-    request: ExportRequest,
-) -> Result<ExportResult> {
-    use tauri::Emitter;
+    id: String,
+    start_ms: u64,
+    end_ms: u64,
+    tracks: Vec<TrackMix>,
+) -> Result<Clip> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
 
-    let clip = with_library(&state, |lib| {
-        lib.get(&request.clip_id).map_err(|e| e.to_string())
-    })?
-    .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+    let size_bytes = match stems::apply(&clip, &tracks) {
+        Ok(size) => size,
+        Err(err) => {
+            crate::notify(&app, "error", err.clone());
+            return Err(err);
+        }
+    };
 
-    let config = state.config_snapshot();
-    let clip_id = clip.id.clone();
-    let result = export::export(
-        &clip,
-        &request,
-        crate::encode::resolve(config.recording.encoder),
-        config.recording.bitrate_kbps,
-        |progress| {
-            let _ = app.emit(
-                "export-progress",
-                ExportProgress {
-                    clip_id: clip_id.clone(),
-                    progress,
-                },
-            );
-        },
-    );
-    match &result {
-        Ok(export) => crate::notify(
-            &app,
-            "ok",
-            format!("Export fertig · {}", file_name(&export.path)),
-        ),
-        Err(err) => crate::notify(&app, "error", err.clone()),
-    }
-    result
+    let edit = ClipEdit {
+        start_ms,
+        end_ms,
+        tracks,
+    };
+    with_library(&state, |lib| {
+        lib.set_edit(&id, Some(&edit)).map_err(|e| e.to_string())?;
+        lib.set_size(&id, size_bytes).map_err(|e| e.to_string())?;
+        lib.get(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Clip nicht gefunden".to_string())
+    })
 }
 
-/// Beliebige Datei im Explorer zeigen — für den Export, der auch außerhalb des
-/// Clip-Ordners landen darf und deshalb keine Clip-Kennung hat.
+/// Beliebige Datei im Explorer zeigen.
 #[tauri::command]
 pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<()> {
     use tauri_plugin_opener::OpenerExt;
@@ -390,13 +390,6 @@ pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<()> {
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| e.to_string())
-}
-
-fn file_name(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
 }
 
 fn with_library<T>(
