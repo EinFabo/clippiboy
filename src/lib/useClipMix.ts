@@ -161,7 +161,12 @@ export function useClipMix(
     // Audioelementen — die Tonspur des Videos enthält dasselbe noch einmal.
     if (video.current) video.current.volume = separate ? 0 : master;
     for (const [index, audio] of elements.current) audio.volume = volume(index);
-  }, [tracks, mix, master, video, separate]);
+    // `bindKey` gehört dazu, obwohl es hier nirgends steht: Nach dem Speichern
+    // hängt der Player ein **frisches** Videoelement ein, und das fängt bei
+    // voller Lautstärke an. `video` ist ein Ref und ändert seine Identität
+    // dabei nicht — ohne diesen Eintrag liefe der Effekt also nicht noch einmal
+    // und man hörte alles doppelt, bis jemand den Clip neu öffnet.
+  }, [tracks, mix, master, video, separate, bindKey]);
 
   // Die Spuren an das Video hängen: starten, anhalten, springen.
   useEffect(() => {
