@@ -4,16 +4,21 @@ pub mod capture;
 pub mod clips;
 pub mod commands;
 pub mod config;
+pub mod convert;
 pub mod encode;
-pub mod export;
 pub mod game;
+pub mod gpu;
+pub mod mft;
 pub mod model;
 pub mod muxer;
 pub mod overlay;
 pub mod pipeline;
+pub mod preview;
 pub mod state;
+pub mod stems;
 pub mod tray;
 pub mod updater;
+pub mod wgc;
 
 use std::time::Duration;
 
@@ -145,16 +150,24 @@ fn start_buffer_if_configured(app: &tauri::AppHandle) {
     std::thread::spawn(move || start_buffer_and_notify(&app));
 }
 
-/// Automatik „Puffer an, sobald ein Spiel läuft". Läuft im Takt der
-/// Spielerkennung, also alle zwei Sekunden.
+/// Die Puffer-Automatik, im Takt der Spielerkennung (alle zwei Sekunden).
+///
+/// Deckt beide Betriebsarten ab: „nur im Spiel" folgt dem Vordergrundfenster,
+/// sonst soll der Puffer einfach laufen. Beides gehört in denselben Takt —
+/// wird die Einstellung geändert, greift das dadurch sofort und nicht erst
+/// beim nächsten Programmstart.
 fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
     let state = app.state::<AppState>();
     let config = state.config_snapshot();
-    if !config.buffer.auto_start || !config.only_buffer_in_game {
+    if !config.buffer.auto_start {
         return;
     }
     let active = state.status.lock().buffer_active;
-    let action = state.auto.poll(game.is_some(), active);
+    let action = if config.only_buffer_in_game {
+        state.auto.poll(game.is_some(), active)
+    } else {
+        state.auto.poll_always(active)
+    };
     if action == state::AutoAction::Nothing {
         return;
     }
@@ -166,6 +179,29 @@ fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
         state::AutoAction::Stop => stop_buffer_and_notify(&app),
         state::AutoAction::Nothing => {}
     });
+}
+
+/// Reste wegräumen, die niemand mehr braucht.
+///
+/// `buffer/` stammt aus der Zeit, als der Puffer als MPEG-TS-Segmente auf der
+/// Platte lag. Der Puffer liegt längst im Arbeitsspeicher, aber wer von einer
+/// älteren Fassung kommt, schleppt die Dateien sonst für immer mit — auf einer
+/// Testmaschine waren das 323 MB, bei langem Puffer und hoher Bitrate schnell
+/// ein Vielfaches.
+///
+/// `temp/` gehört dem Muxer, der seine Zwischendateien selbst wegräumt. Was
+/// hier noch liegt, ist ein abgestürzter Lauf von vorhin.
+fn discard_leftovers() {
+    for stale in ["buffer", "temp"] {
+        let dir = config::data_dir().join(stale);
+        if !dir.is_dir() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => log::info!("Reste aus '{stale}' weggeräumt"),
+            Err(err) => log::warn!("'{stale}' ließ sich nicht räumen: {err}"),
+        }
+    }
 }
 
 /// Argument, mit dem Windows ClippiBoy beim Anmelden startet.
@@ -291,6 +327,21 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 let game = state.track_game();
                 apply_auto_buffer(&handle, game.as_ref());
             }
+            // Meldet die Aufnahme ein Problem, muss das jemand erfahren. Ohne
+            // das puffert die App scheinbar weiter, und erst der Tastendruck
+            // auf „Clip speichern" bringt ans Licht, dass seit Minuten nichts
+            // mehr ankommt.
+            if tick % 20 == 0 {
+                let trouble = state
+                    .shared
+                    .lock()
+                    .as_ref()
+                    .and_then(|shared| shared.take_unseen_error());
+                if let Some(err) = trouble {
+                    notify(&handle, "error", err.clone());
+                    overlay::show(&handle, BannerKind::Error, "Aufnahme gestört", Some(err));
+                }
+            }
             if tick % 20 == 0 {
                 let status = state.status_snapshot();
                 tray::refresh(&handle, &status);
@@ -382,11 +433,14 @@ pub fn run() {
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);
-            // Die entpackten Tonspuren für die Vorschau im Player: eine alte
-            // Sitzung lässt nur Dateien zurück, die sich in einer Sekunde neu
-            // erzeugen lassen — also erst wegräumen, dann freigeben.
-            export::clear_previews();
-            allow_clip_dir(handle, &export::preview_dir().to_string_lossy());
+            discard_leftovers();
+            // Wegwerfbares aus einer alten Sitzung: erst räumen, dann freigeben.
+            preview::clear();
+            allow_clip_dir(handle, &preview::dir().to_string_lossy());
+            // Die Einzelspuren dagegen sind das Original der Mischung und
+            // bleiben liegen — der Player spielt sie direkt von dort ab.
+            let _ = std::fs::create_dir_all(stems::root());
+            allow_clip_dir(handle, &stems::root().to_string_lossy());
             // Mitgeliefertes ffmpeg/ffprobe bekannt machen, bevor irgendetwas
             // einen Clip schreiben will.
             if let Ok(dir) = handle.path().resource_dir() {
@@ -444,7 +498,8 @@ pub fn run() {
             commands::reveal_clip,
             commands::update_clip,
             commands::clip_tracks,
-            commands::export_clip,
+            commands::clip_waveform,
+            commands::apply_clip_edit,
             commands::reveal_path,
             commands::app_version,
             commands::check_update,

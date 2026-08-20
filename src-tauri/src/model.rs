@@ -66,17 +66,6 @@ pub enum EncoderId {
     X264,
 }
 
-impl EncoderId {
-    pub fn ffmpeg_name(self) -> &'static str {
-        match self {
-            EncoderId::Nvenc => "h264_nvenc",
-            EncoderId::Amf => "h264_amf",
-            EncoderId::Qsv => "h264_qsv",
-            EncoderId::X264 => "libx264",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderInfo {
@@ -212,6 +201,23 @@ pub struct Clip {
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Zuschnitt und Spurenmischung, wie sie im Editor zuletzt standen.
+    /// `None` heißt: unangetastet, also ganzer Clip mit allen Spuren.
+    #[serde(default)]
+    pub edit: Option<ClipEdit>,
+}
+
+/// Was im Editor eingestellt wurde. Der Clip auf der Platte bleibt davon
+/// unberührt — erst der Export rechnet es fest ein. Deshalb lässt sich jede
+/// Einstellung jederzeit wieder zurücknehmen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipEdit {
+    /// Zuschnitt in Millisekunden ab Clipanfang.
+    pub start_ms: u64,
+    pub end_ms: u64,
+    #[serde(default)]
+    pub tracks: Vec<TrackMix>,
 }
 
 /// Eine Tonspur, wie sie in der fertigen MP4-Datei liegt. Spur 0 ist der
@@ -229,42 +235,12 @@ pub struct ClipTrack {
 }
 
 /// Wie eine Spur beim Export gewichtet wird.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackMix {
     pub index: u32,
     pub gain_db: f32,
     pub muted: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportRequest {
-    pub clip_id: String,
-    /// Zuschnitt in Millisekunden ab Clipanfang.
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub tracks: Vec<TrackMix>,
-    /// Zieldatei. Ohne Angabe landet der Export neben dem Ausgangsclip.
-    #[serde(default)]
-    pub output: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportResult {
-    pub path: String,
-    pub duration_ms: u64,
-    pub size_bytes: u64,
-}
-
-/// Fortschritt eines laufenden Exports (Event `export-progress`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportProgress {
-    pub clip_id: String,
-    /// 0 bis 1.
-    pub progress: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

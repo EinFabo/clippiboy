@@ -17,6 +17,30 @@ use crate::audio::ring::SampleRing;
 use crate::model::SourceKind;
 
 /// Einheitliches Format aller Quellen nach der Konvertierung.
+/// Aktuelle QPC-Zeit in 100-ns-Einheiten — dieselbe Zeitachse, auf der
+/// Windows.Graphics.Capture seine Bilder stempelt.
+pub fn now_100ns() -> i64 {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Performance::{
+            QueryPerformanceCounter, QueryPerformanceFrequency,
+        };
+        let mut frequency = 0i64;
+        let mut counter = 0i64;
+        if QueryPerformanceFrequency(&mut frequency).is_err() || frequency == 0 {
+            return 0;
+        }
+        let _ = QueryPerformanceCounter(&mut counter);
+        // Erst teilen, dann multiplizieren wäre ungenau; erst multiplizieren
+        // liefe bei 64 Bit über. Deshalb getrennt nach ganzen Sekunden und Rest.
+        let seconds = counter / frequency;
+        let rest = counter % frequency;
+        seconds * 10_000_000 + rest * 10_000_000 / frequency
+    }
+    #[cfg(not(windows))]
+    0
+}
+
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 
@@ -438,13 +462,31 @@ mod win {
                 let mut data: *mut u8 = std::ptr::null_mut();
                 let mut frames = 0u32;
                 let mut flags = 0u32;
+                // Der QPC-Zeitstempel lag hier immer schon bereit und wurde
+                // weggeworfen. Er ist dieselbe Uhr wie
+                // `Direct3D11CaptureFrame::SystemRelativeTime` — damit fällt
+                // die ganze frühere Drift-Korrektur weg.
+                let mut qpc_100ns = 0u64;
                 if unsafe {
-                    capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                    capture.GetBuffer(
+                        &mut data,
+                        &mut frames,
+                        &mut flags,
+                        None,
+                        Some(&mut qpc_100ns),
+                    )
                 }
                 .is_err()
                 {
                     break;
                 }
+                // Nicht jeder Treiber füllt ihn. Dann selbst ablesen — die Uhr
+                // ist dieselbe, nur der Ablesezeitpunkt etwas später.
+                let qpc_100ns = if qpc_100ns == 0 {
+                    now_100ns()
+                } else {
+                    qpc_100ns as i64
+                };
 
                 if frames > 0 {
                     // AUDCLNT_BUFFERFLAGS_SILENT = 0x2 — Puffer ignorieren und
@@ -458,7 +500,7 @@ mod win {
                         };
                         convert(raw, frames as usize, &format, &mut converted);
                     }
-                    ring.write(&converted);
+                    ring.write(&converted, qpc_100ns);
                 }
 
                 let _ = unsafe { capture.ReleaseBuffer(frames) };

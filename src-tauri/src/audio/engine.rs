@@ -133,23 +133,35 @@ impl AudioEngine {
         }
     }
 
-    /// Rückstand in allen Ringen auf `max_samples` begrenzen.
-    pub fn trim_backlog(&self, max_samples: usize) {
-        for run in self.running.lock().values() {
-            run.ring.trim_to(max_samples);
-        }
+    /// Bis wohin auf der QPC-Zeitachse alle laufenden Quellen Material haben.
+    ///
+    /// Der Mischer darf nur bis hierhin arbeiten: Was er einmal erzeugt hat,
+    /// ist geschrieben — käme der Ton einer Quelle danach noch an, wäre sein
+    /// Platz schon vergeben.
+    pub fn ready_until_100ns(&self) -> Option<i64> {
+        let running = self.running.lock();
+        running
+            .values()
+            .filter_map(|run| run.ring.end_100ns())
+            .min()
     }
 
-    /// Mischt `frames` Frames in `out`: Index 0 ist der Hauptmix, danach die
-    /// Quellen mit eigener Spur (Reihenfolge wie im Layout).
+    /// Mischt das Zeitfenster ab `from_100ns` über `frames` Frames nach `out`:
+    /// Index 0 ist der Hauptmix, danach die Quellen mit eigener Spur
+    /// (Reihenfolge wie im Layout).
     ///
-    /// Schreibt in mitgebrachte Puffer statt neue anzulegen — das hier läuft
-    /// pro Videobild auf dem Capture-Thread, und jede Allokation dort ist
-    /// Jitter im Bild.
-    pub fn mix_into(
+    /// Es wird ausdrücklich **nach Zeit** gelesen, nicht „das Nächste". Vorher
+    /// nahm jede Quelle vorne von ihrem Ring weg, und wie viel, ergab sich aus
+    /// der Wanduhr — Quellen mit leicht unterschiedlichem Gerätetakt drifteten
+    /// dadurch gegeneinander und gegen das Bild.
+    ///
+    /// Schreibt in mitgebrachte Puffer statt neue anzulegen: Das hier läuft im
+    /// Millisekundentakt.
+    pub fn mix_window(
         &self,
         sources: &[AudioSource],
         layout: &TrackLayout,
+        from_100ns: i64,
         frames: usize,
         out: &mut Vec<Vec<f32>>,
     ) {
@@ -178,7 +190,7 @@ impl AudioEngine {
                 let gain = gain_factor(source.gain_db);
                 if first {
                     // Die erste Quelle darf direkt in den Zielpuffer schreiben.
-                    run.ring.read_into(mix);
+                    run.ring.read_window(from_100ns, mix);
                     for sample in mix.iter_mut() {
                         *sample *= gain;
                     }
@@ -188,7 +200,7 @@ impl AudioEngine {
                 if scratch.len() != sample_count {
                     scratch.resize(sample_count, 0.0);
                 }
-                run.ring.read_into(&mut scratch);
+                run.ring.read_window(from_100ns, &mut scratch);
                 for (target, sample) in mix.iter_mut().zip(scratch.iter()) {
                     *target += sample * gain;
                 }
@@ -208,7 +220,7 @@ impl AudioEngine {
                 continue;
             };
             let gain = gain_factor(source.gain_db);
-            run.ring.read_into(track);
+            run.ring.read_window(from_100ns, track);
             for sample in track.iter_mut() {
                 *sample = (*sample * gain).clamp(-1.0, 1.0);
             }

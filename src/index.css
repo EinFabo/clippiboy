@@ -64,3 +64,12 @@ button {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
+
+/* Waagerecht scrollende Leisten führen selbst durch Verlaufskanten — eine
+   Bildlaufleiste darunter wäre nur ein zweiter, hässlicher Hinweis. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

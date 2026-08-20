@@ -60,6 +60,96 @@ const IGNORED: &[&str] = &[
     "notepad.exe",
     "notepad++.exe",
     "explorerframe.exe",
+    // Werkzeuge, deren Fenster den ganzen Monitor bedecken und deshalb ohne
+    // diese Zeilen als „Spiel" durchgingen — der Snipping-Tool-Schleier ist
+    // der Klassiker.
+    "snippingtool.exe",
+    "screenclippinghost.exe",
+    "screensketch.exe",
+    "sharex.exe",
+    "greenshot.exe",
+    "snagit32.exe",
+    "snagiteditor.exe",
+    "systemsettings.exe",
+    "dwm.exe",
+    "sihost.exe",
+    "textinputhost.exe",
+    "rundll32.exe",
+    "logonui.exe",
+    // Videowiedergabe: ein Film im Vollbild ist kein Spielstand.
+    "mpv.exe",
+    "mpc-hc.exe",
+    "mpc-hc64.exe",
+    "potplayermini.exe",
+    "potplayermini64.exe",
+    "wmplayer.exe",
+    "video.ui.exe",
+    "photos.exe",
+    // Weitere Browser und Chromium-Hüllen.
+    "opera_gx.exe",
+    "chromium.exe",
+    "librewolf.exe",
+    "waterfox.exe",
+    "zen.exe",
+    "arc.exe",
+    "msedgewebview2.exe",
+    "chrome_proxy.exe",
+    // Kommunikation und Büro.
+    "whatsapp.exe",
+    "telegram.exe",
+    "signal.exe",
+    "zoom.exe",
+    "ms-teams.exe",
+    "outlook.exe",
+    "thunderbird.exe",
+    "winword.exe",
+    "excel.exe",
+    "powerpnt.exe",
+    "acrord32.exe",
+    "acrobat.exe",
+    // Aufnahme- und Overlay-Werkzeuge.
+    "obs.exe",
+    "streamlabs obs.exe",
+    "xsplit.core.exe",
+    "overwolf.exe",
+    "nvidia overlay.exe",
+    "cursor.exe",
+    "sublime_text.exe",
+];
+
+/// Titelendungen, die eine fremde Anwendung verraten. Trifft eine davon zu,
+/// gilt das Fenster als kein Spiel — auch wenn es den Monitor ausfüllt.
+///
+/// Zweite Sicherung hinter `IGNORED`: Diese Liste kann nie vollständig sein —
+/// portable, umbenannte oder noch unbekannte Anwendungen stehen nicht darin.
+/// Der Titel verrät sie trotzdem.
+const FOREIGN_TITLES: &[&str] = &[
+    " - youtube",
+    " – youtube",
+    " - google chrome",
+    " – google chrome",
+    " - mozilla firefox",
+    " – mozilla firefox",
+    " - microsoft edge",
+    " – microsoft edge",
+    " - opera",
+    " – opera",
+    " - brave",
+    " – brave",
+    " - vivaldi",
+    " – vivaldi",
+    " - discord",
+    " – discord",
+    " - visual studio code",
+    " – visual studio code",
+    " überlagerung",
+    " overlay",
+];
+
+/// Dateiendungen am Titel: Ein Fenster, das eine Datei zeigt, spielt nichts.
+const FILE_TITLES: &[&str] = &[
+    ".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".mp3", ".flac", ".wav", ".png", ".jpg",
+    ".jpeg", ".gif", ".webp", ".pdf", ".txt", ".log", ".json", ".docx", ".xlsx",
 ];
 
 /// Endungen am Fenstertitel, die nichts über das Spiel aussagen.
@@ -121,9 +211,32 @@ pub fn is_ignored(exe: &str) -> bool {
     ignored().contains(exe.to_lowercase().as_str())
 }
 
+/// Verrät der Fenstertitel, dass hier gar kein Spiel läuft?
+pub fn is_foreign_title(title: &str) -> bool {
+    let lower = title.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // Ein Pfad ist nie ein Spielname — „C:\\…\\clip.mp4" kam so in die Galerie.
+    if lower.contains(":\\") || lower.starts_with("\\\\") {
+        return true;
+    }
+    FILE_TITLES.iter().any(|ext| lower.ends_with(ext))
+        || FOREIGN_TITLES.iter().any(|end| lower.ends_with(end))
+}
+
 /// Fenstertitel auf den nackten Spielnamen zurechtstutzen.
 pub fn clean_title(title: &str) -> String {
     let mut text = title.trim().to_string();
+
+    // Ungelesen-Zähler am Anfang: „(102) …" sagt nichts über das Spiel.
+    if let Some(rest) = text.strip_prefix('(') {
+        if let Some((count, tail)) = rest.split_once(')') {
+            if !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()) {
+                text = tail.trim().to_string();
+            }
+        }
+    }
 
     // Bekannte Endungen abschneiden — mehrfach, „Spiel (64-bit) - Steam".
     loop {
@@ -179,6 +292,12 @@ pub fn resolve_name(exe: &str, title: &str, fullscreen: bool) -> Option<String> 
     }
     // Unbekannte Anwendung: nur im Vollbild als Spiel durchgehen lassen.
     if !fullscreen {
+        return None;
+    }
+    // Und auch dann nicht, wenn der Titel eine fremde Anwendung verrät. Lieber
+    // „Unbekannt" als ein Browsertab, der für immer als Filter in der Galerie
+    // steht.
+    if is_foreign_title(title) {
         return None;
     }
     let cleaned = clean_title(title);
@@ -382,6 +501,49 @@ mod tests {
         // Keine Versionsnummer — kein Punkt, also Teil des Namens.
         assert_eq!(clean_title("Counter-Strike 2"), "Counter-Strike 2");
         assert_eq!(clean_title("Half-Life 2"), "Half-Life 2");
+    }
+
+    #[test]
+    fn foreign_windows_do_not_become_a_game() {
+        // Genau die Einträge, die vorher als Filter in der Galerie standen.
+        assert_eq!(
+            resolve_name(
+                "unbekannt.exe",
+                "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_name(
+                "unbekannt.exe",
+                "C:\\Users\\fabia\\projects\\clippiboy\\synctest.mp4",
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_name("unbekannt.exe", "Snipping Tool Überlagerung", true),
+            None
+        );
+        assert!(is_ignored("SnippingTool.exe"));
+    }
+
+    #[test]
+    fn a_known_game_survives_a_foreign_looking_title() {
+        // Die Liste wiegt schwerer als der Titel — sonst verlöre ein Spiel
+        // seinen Namen, nur weil es gerade ein Video abspielt.
+        assert_eq!(
+            resolve_name("cs2.exe", "irgendwas.mp4", true).as_deref(),
+            Some("Counter-Strike 2")
+        );
+    }
+
+    #[test]
+    fn unread_counters_are_trimmed() {
+        assert_eq!(clean_title("(3) Mein Spiel"), "Mein Spiel");
+        // Keine Klammerzahl, sondern Teil des Namens.
+        assert_eq!(clean_title("(Beta) Mein Spiel"), "(Beta) Mein Spiel");
     }
 
     #[test]

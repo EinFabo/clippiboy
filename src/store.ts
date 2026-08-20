@@ -10,6 +10,7 @@ import type {
   Clip,
   EncoderInfo,
   LevelMap,
+  TrackMix,
 } from "./lib/types";
 
 interface EngineState {
@@ -41,6 +42,19 @@ interface EngineState {
   saveClip: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
+  /** Ein Spiel bei allen Clips entfernen — die Clips selbst bleiben. */
+  clearGame: (game: string) => Promise<void>;
+  /** Zuschnitt und Mischung merken; `null` setzt den Clip zurück. */
+  /**
+   * Die Mischung in die Clipdatei schreiben und den Zuschnitt als Markierung
+   * ablegen. Fasst die Datei selbst an, nicht nur die Datenbank.
+   */
+  applyClipEdit: (
+    id: string,
+    startMs: number,
+    endMs: number,
+    tracks: TrackMix[],
+  ) => Promise<void>;
 }
 
 /** Die von Hand pflegbaren Felder eines Clips. */
@@ -259,6 +273,48 @@ export const useEngine = create<EngineState>((set, get) => ({
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       set({ lastError: String(err) });
+    }
+  },
+
+  /**
+   * Räumt einen Filter weg, der keiner ist: Fehlerkennungen wie ein
+   * Browserfenster stehen sonst für immer in der Galerie. Die Clips bleiben
+   * unangetastet und heißen danach „Unbekannt".
+   */
+  async clearGame(game) {
+    const affected = get().clips.filter((c) => c.game === game);
+    if (affected.length === 0) return;
+
+    set((st) => ({
+      clips: st.clips.map((c) => (c.game === game ? { ...c, game: null } : c)),
+    }));
+    if (!inTauri) return;
+    try {
+      // Der Kern kennt nur einzelne Clips; nacheinander, damit die
+      // SQLite-Verbindung nicht mit Parallelschreibern kämpft.
+      for (const clip of affected) {
+        await api.updateClip(clip.id, {
+          title: clip.title,
+          description: clip.description,
+          game: null,
+        });
+      }
+    } catch (err) {
+      set({ lastError: String(err) });
+    }
+  },
+
+  async applyClipEdit(id, startMs, endMs, tracks) {
+    if (!inTauri) return;
+    // Bewusst ohne Vorgriff im Store: Hier wird eine Datei neu geschrieben.
+    // Scheitert das — etwa weil sie noch offen ist — darf die Oberfläche nicht
+    // behaupten, es sei gespeichert.
+    try {
+      const clip = await api.applyClipEdit(id, startMs, endMs, tracks);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: String(err) });
+      throw err;
     }
   },
 }));

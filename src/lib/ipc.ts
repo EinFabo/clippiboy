@@ -10,10 +10,8 @@ import type {
   ClipTrack,
   EncoderInfo,
   EngineStatus,
-  ExportProgress,
-  ExportRequest,
-  ExportResult,
   LevelMap,
+  TrackMix,
   UpdateInfo,
 } from "./types";
 
@@ -69,8 +67,18 @@ export const api = {
     meta: { title: string | null; description: string | null; game: string | null },
   ) => invoke<Clip>("update_clip", { id, ...meta }),
   clipTracks: (id: string) => invoke<ClipTrack[]>("clip_tracks", { id }),
-  exportClip: (request: ExportRequest) =>
-    invoke<ExportResult>("export_clip", { request }),
+  clipWaveform: (id: string) => invoke<string>("clip_waveform", { id }),
+  /**
+   * Die Mischung in die Clipdatei schreiben und den Zuschnitt als Markierung
+   * ablegen. Der Clip wird dabei ersetzt — der Player darf ihn währenddessen
+   * nicht offen halten, sonst scheitert das Ersetzen unter Windows.
+   */
+  applyClipEdit: (
+    id: string,
+    startMs: number,
+    endMs: number,
+    tracks: TrackMix[],
+  ) => invoke<Clip>("apply_clip_edit", { id, startMs, endMs, tracks }),
 };
 
 export const events = {
@@ -82,10 +90,6 @@ export const events = {
     listen<Clip>("clip-saved", (e) => cb(e.payload)),
   onUpdateAvailable: (cb: (info: UpdateInfo) => void): Promise<UnlistenFn> =>
     listen<UpdateInfo>("update-available", (e) => cb(e.payload)),
-  onExportProgress: (
-    cb: (progress: ExportProgress) => void,
-  ): Promise<UnlistenFn> =>
-    listen<ExportProgress>("export-progress", (e) => cb(e.payload)),
   onAudioErrors: (
     cb: (errors: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>

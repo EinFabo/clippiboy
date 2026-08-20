@@ -13,6 +13,18 @@ import {
 import { cn } from "@/lib/cn";
 import type { AudioSource, SourceKind } from "@/lib/types";
 
+/**
+ * Bekommt die Quelle von sich aus eine eigene Tonspur?
+ *
+ * Mikrofon und einzelne Anwendungen ja: Genau die will man später im Clip
+ * leiser drehen oder ganz loswerden, und das geht nur, wenn sie nicht schon
+ * beim Aufnehmen in den Hauptmix gerechnet wurden. Ein Ausgabegerät ist der
+ * Spielton selbst — der bleibt der Hauptmix.
+ */
+function wantsOwnTrack(kind: SourceKind): boolean {
+  return kind.type !== "outputDevice";
+}
+
 function sourceIcon(kind: SourceKind) {
   if (kind.type === "inputDevice") return <IconMic className="h-4 w-4" />;
   if (kind.type === "outputDevice") return <IconSpeaker className="h-4 w-4" />;
@@ -76,6 +88,8 @@ export function AudioMixer() {
             </Button>
           }
         />
+
+        <MixedInHint sources={config.sources} onFix={upsertSource} />
 
         {adding && (
           <AddSourcePanel
@@ -262,6 +276,49 @@ function AvailableSources({
   );
 }
 
+/**
+ * Wer ClippiBoy vor dieser Änderung eingerichtet hat, hat Mikrofon und Apps im
+ * Hauptmix — im Clip lassen sie sich dann nicht mehr trennen. Still umstellen
+ * wäre falsch (es ändert, was aufgenommen wird), also fragen wir einmal.
+ */
+function MixedInHint({
+  sources,
+  onFix,
+}: {
+  sources: AudioSource[];
+  onFix: (source: AudioSource) => Promise<void>;
+}) {
+  const affected = sources.filter((s) => wantsOwnTrack(s.kind) && !s.separateTrack);
+  if (affected.length === 0) return null;
+
+  return (
+    <Card className="mb-4 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
+      <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-muted">
+        <span className="font-medium text-ink">
+          {affected.map((s) => s.label).join(", ")}
+        </span>{" "}
+        {affected.length === 1 ? "läuft" : "laufen"} in den Hauptmix. In
+        fertigen Clips {affected.length === 1 ? "lässt" : "lassen"} sich{" "}
+        {affected.length === 1 ? "diese Quelle" : "diese Quellen"} dann nicht
+        mehr einzeln stumm schalten oder leiser drehen.
+      </p>
+      <Button
+        size="sm"
+        className="shrink-0"
+        // Nacheinander: Jeder Aufruf bekommt die ganze Konfiguration zurück,
+        // parallel würde die letzte Antwort die übrigen Änderungen verschlucken.
+        onClick={async () => {
+          for (const source of affected) {
+            await onFix({ ...source, separateTrack: true });
+          }
+        }}
+      >
+        Eigene Spuren geben
+      </Button>
+    </Card>
+  );
+}
+
 function AddSourcePanel({
   onAdd,
   onClose,
@@ -281,7 +338,7 @@ function AddSourcePanel({
     gainDb: 0,
     muted: false,
     solo: false,
-    separateTrack: false,
+    separateTrack: wantsOwnTrack(kind),
   });
 
   return (

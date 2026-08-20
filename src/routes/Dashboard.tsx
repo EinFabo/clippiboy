@@ -116,11 +116,13 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       className="h-full w-full object-cover"
                     />
                   )}
-                  <div className="absolute bottom-3 left-3">
-                    <Pill>{clip.game ?? "Unbekannt"}</Pill>
-                  </div>
-                  <div className="absolute right-3 bottom-3">
-                    <Pill>{formatDuration(clip.durationMs)}</Pill>
+                  {/* Eine Zeile für beide Marken: Ein langer Spielname kürzt
+                      sich, statt sich unter die Dauer zu schieben. */}
+                  <div className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
+                    <Pill className="min-w-0">
+                      <span className="min-w-0 truncate">{clip.game ?? "Unbekannt"}</span>
+                    </Pill>
+                    <Pill className="shrink-0">{formatDuration(clip.durationMs)}</Pill>
                   </div>
                 </div>
                 <div className="flex items-center justify-between p-4">
@@ -149,6 +151,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           onIndexChange={setPlaying}
           onClose={() => setPlaying(null)}
           onDelete={deleteClip}
+          onOpenMixer={() => onNavigate("audio")}
         />
       )}
     </div>

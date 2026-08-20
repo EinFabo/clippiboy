@@ -30,7 +30,7 @@ export default function App() {
       <main className="relative h-full overflow-y-auto pt-24 pb-16">
         <div className="mx-auto w-full max-w-[1180px] px-8">
           {route === "dashboard" && <Dashboard onNavigate={setRoute} />}
-          {route === "clips" && <Clips />}
+          {route === "clips" && <Clips onNavigate={setRoute} />}
           {route === "audio" && <AudioMixer />}
           {route === "recording" && <Recording />}
           {route === "settings" && <Settings />}
