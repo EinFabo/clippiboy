@@ -258,6 +258,28 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     })
 }
 
+/// Eine frisch geschriebene Datei an die Stelle einer bestehenden schieben.
+///
+/// Windows lässt eine geöffnete Datei nicht ersetzen; der Player gibt sie
+/// vorher frei, aber das Handle verschwindet nicht immer im selben Augenblick
+/// — deshalb ein paar Anläufe, bevor aufgegeben wird.
+pub fn replace_file(temp: &Path, target: &Path) -> Result<(), String> {
+    let mut last = None;
+    for attempt in 0..10 {
+        match std::fs::rename(temp, target) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last = Some(err);
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+            }
+        }
+    }
+    Err(format!(
+        "Der Clip ließ sich nicht ersetzen ({}). Ist er gerade woanders geöffnet?",
+        last.map(|err| err.to_string()).unwrap_or_default()
+    ))
+}
+
 pub fn sanitize(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -282,7 +304,7 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
     Some((seconds * 1000.0) as u64)
 }
 
-fn make_thumbnail(video: &Path) -> Result<PathBuf, String> {
+pub fn make_thumbnail(video: &Path) -> Result<PathBuf, String> {
     let thumb = video.with_extension("jpg");
     run(
         ffmpeg()

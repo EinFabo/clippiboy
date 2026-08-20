@@ -113,6 +113,7 @@ export const mockClips: Clip[] = [
     title: "Ace auf Mirage",
     description: "Letzte Runde, 1v3 nach dem Retake.",
     edit: null,
+    original: null,
   },
   {
     id: "c2",
@@ -127,6 +128,7 @@ export const mockClips: Clip[] = [
     title: null,
     description: null,
     edit: null,
+    original: null,
   },
   {
     id: "c3",
@@ -141,6 +143,7 @@ export const mockClips: Clip[] = [
     title: null,
     description: null,
     edit: null,
+    original: null,
   },
   // Die Galerie muss auch den schlechten Fall aushalten: Ein Clip ohne Spiel
   // und drei Fehlerkennungen aus der Zeit vor der schärferen Titelprüfung —
@@ -158,6 +161,7 @@ export const mockClips: Clip[] = [
     title: null,
     description: null,
     edit: null,
+    original: null,
   },
   ...[
     "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
@@ -176,6 +180,7 @@ export const mockClips: Clip[] = [
     title: null,
     description: null,
     edit: null,
+    original: null,
   })),
 ];
 

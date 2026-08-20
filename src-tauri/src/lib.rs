@@ -5,6 +5,7 @@ pub mod clips;
 pub mod commands;
 pub mod config;
 pub mod convert;
+pub mod edit;
 pub mod encode;
 pub mod game;
 pub mod gpu;
@@ -441,6 +442,11 @@ pub fn run() {
             // bleiben liegen — der Player spielt sie direkt von dort ab.
             let _ = std::fs::create_dir_all(stems::root());
             allow_clip_dir(handle, &stems::root().to_string_lossy());
+            // Die unversehrten Aufnahmen geschnittener Clips bleiben ebenfalls
+            // liegen, werden aber nie abgespielt — also auch nicht freigeben.
+            if let Some(library) = app.state::<AppState>().library.lock().as_ref() {
+                edit::repair(library);
+            }
             // Mitgeliefertes ffmpeg/ffprobe bekannt machen, bevor irgendetwas
             // einen Clip schreiben will.
             if let Ok(dir) = handle.path().resource_dir() {
@@ -500,6 +506,7 @@ pub fn run() {
             commands::clip_tracks,
             commands::clip_waveform,
             commands::apply_clip_edit,
+            commands::restore_clip_original,
             commands::reveal_path,
             commands::app_version,
             commands::check_update,

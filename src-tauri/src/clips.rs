@@ -4,7 +4,7 @@
 use rusqlite::{params, Connection};
 
 use crate::config;
-use crate::model::{Clip, ClipEdit};
+use crate::model::{Clip, ClipEdit, ClipOriginal};
 
 pub struct Library {
     conn: Connection,
@@ -57,6 +57,9 @@ impl Library {
         // Zuschnitt und Spurenmischung als JSON — ein eigenes Tabellenschema
         // dafür hätte nur Spalten, die sich mit dem Editor wieder ändern.
         self.add_column("edit", "TEXT")?;
+        // Wo der ausgelieferte Ausschnitt im Original sitzt, solange die
+        // unversehrte Aufnahme noch in der Original-Ablage liegt.
+        self.add_column("original", "TEXT")?;
         Ok(())
     }
 
@@ -78,8 +81,8 @@ impl Library {
         self.conn.execute(
             "INSERT OR REPLACE INTO clips
              (id, path, created_at, duration_ms, game, width, height, size_bytes,
-              thumb_path, title, description, edit)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              thumb_path, title, description, edit, original)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 clip.id,
                 clip.path,
@@ -93,6 +96,7 @@ impl Library {
                 clip.title,
                 clip.description,
                 encode_edit(clip.edit.as_ref()),
+                encode_original(clip.original.as_ref()),
             ],
         )?;
         Ok(())
@@ -101,7 +105,7 @@ impl Library {
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,
-                    thumb_path, title, description, edit
+                    thumb_path, title, description, edit, original
              FROM clips ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -118,6 +122,7 @@ impl Library {
                 title: row.get(9)?,
                 description: row.get(10)?,
                 edit: decode_edit(row.get::<_, Option<String>>(11)?),
+                original: decode_original(row.get::<_, Option<String>>(12)?),
             })
         })?;
         rows.collect()
@@ -153,12 +158,28 @@ impl Library {
         Ok(())
     }
 
-    /// Die Dateigröße nachtragen. Nötig, sobald die Datei neu geschrieben
-    /// wurde — sonst stünde in der Galerie noch die Größe von vorher.
-    pub fn set_size(&self, id: &str, size_bytes: u64) -> rusqlite::Result<()> {
+    /// Länge und Größe nachtragen. Nötig, sobald die Datei neu geschrieben
+    /// wurde — sonst stünden in der Galerie noch die Werte von vorher, und nach
+    /// einem Zuschnitt wäre die angezeigte Dauer schlicht falsch.
+    pub fn set_file_state(
+        &self,
+        id: &str,
+        duration_ms: u64,
+        size_bytes: u64,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE clips SET size_bytes = ?2 WHERE id = ?1",
-            params![id, size_bytes],
+            "UPDATE clips SET duration_ms = ?2, size_bytes = ?3 WHERE id = ?1",
+            params![id, duration_ms as i64, size_bytes as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Die Original-Ablage vermerken. `None` heißt: Es gibt kein Original mehr,
+    /// der Clip ist wieder (oder immer noch) die ganze Aufnahme.
+    pub fn set_original(&self, id: &str, original: Option<&ClipOriginal>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET original = ?2 WHERE id = ?1",
+            params![id, encode_original(original)],
         )?;
         Ok(())
     }
@@ -196,6 +217,24 @@ fn decode_edit(raw: Option<String>) -> Option<ClipEdit> {
     }
 }
 
+/// Die Original-Ablage als JSON.
+fn encode_original(original: Option<&ClipOriginal>) -> Option<String> {
+    original.and_then(|value| serde_json::to_string(value).ok())
+}
+
+/// Unlesbares JSON wird verworfen. Der Clip gilt dann als ungeschnitten — die
+/// Datei daneben findet [`crate::edit::repair`] beim nächsten Start wieder.
+fn decode_original(raw: Option<String>) -> Option<ClipOriginal> {
+    let raw = raw?;
+    match serde_json::from_str(&raw) {
+        Ok(original) => Some(original),
+        Err(err) => {
+            log::warn!("Original-Ablage unlesbar ({err}) — wird verworfen");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +253,7 @@ mod tests {
             title: None,
             description: None,
             edit: None,
+            original: None,
         }
     }
 
@@ -275,5 +315,45 @@ mod tests {
         // Zurücksetzen macht den Clip wieder unangetastet.
         lib.set_edit("a", None).unwrap();
         assert!(lib.get("a").unwrap().unwrap().edit.is_none());
+    }
+
+    /// Der Eintrag trägt den Versatz der Einzelspuren. Ginge er beim Neustart
+    /// verloren, liefe die Vorschau eines geschnittenen Clips versetzt und
+    /// „Zuschnitt aufheben" wäre nicht mehr zu finden.
+    #[test]
+    fn the_original_survives_the_roundtrip() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        assert!(lib.get("a").unwrap().unwrap().original.is_none());
+
+        let original = ClipOriginal {
+            duration_ms: 60_000,
+            start_ms: 5_000,
+            end_ms: 20_000,
+        };
+        lib.set_original("a", Some(&original)).unwrap();
+        assert_eq!(lib.get("a").unwrap().unwrap().original, Some(original));
+
+        lib.set_original("a", None).unwrap();
+        assert!(lib.get("a").unwrap().unwrap().original.is_none());
+    }
+
+    /// Nach dem Schneiden steht in der Galerie sonst die alte Länge.
+    #[test]
+    fn length_and_size_move_together() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        lib.set_file_state("a", 12_000, 4_711).unwrap();
+
+        let stored = lib.get("a").unwrap().unwrap();
+        assert_eq!(stored.duration_ms, 12_000);
+        assert_eq!(stored.size_bytes, 4_711);
+    }
+
+    /// Unlesbares JSON darf nicht die ganze Galerie mitreißen.
+    #[test]
+    fn a_broken_entry_is_dropped_not_fatal() {
+        assert!(decode_original(Some("{kaputt".into())).is_none());
+        assert!(decode_edit(Some("{kaputt".into())).is_none());
     }
 }

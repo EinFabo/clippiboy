@@ -114,7 +114,11 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 >
                   {clip.thumbPath && (
                     <img
-                      src={fileUrl(clip.thumbPath)}
+                      // Nach einem Schnitt steht unter demselben Pfad ein neues
+                      // Bild. Ohne den Anhang zeigte der WebView weiter das aus
+                      // seinem Zwischenspeicher — also eine Stelle, die im Clip
+                      // gar nicht mehr vorkommt.
+                      src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
                       alt=""
                       className="h-full w-full object-cover"
                     />
@@ -137,10 +141,12 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       <span className="min-w-0 truncate">{clip.game ?? "Unbekannt"}</span>
                     </Pill>
                     <span className="flex shrink-0 items-center gap-1.5">
-                      {/* Zeigt, dass der Clip einen Zuschnitt oder eine eigene
-                          Mischung hat — beides steckt sonst unsichtbar drin. */}
-                      {clip.edit && (
-                        <Pill title="Zugeschnitten oder abgemischt">
+                      {/* Nur bei echtem Zuschnitt: Eine geänderte Mischung
+                          sieht man dem Clip nicht an, aber seine Länge schon —
+                          und dass das Original noch daneben liegt, ist die
+                          Auskunft, die hier zählt. */}
+                      {clip.original && (
+                        <Pill title="Zugeschnitten — das Original liegt daneben">
                           <IconScissors className="h-3 w-3" />
                         </Pill>
                       )}

@@ -118,6 +118,11 @@ export interface Clip {
   description: string | null;
   /** Zuschnitt und Mischung aus dem Editor; `null` heißt unangetastet. */
   edit: ClipEdit | null;
+  /**
+   * Liegt die unversehrte Aufnahme noch daneben? Dann ist dieser Clip
+   * geschnitten und lässt sich mit `restoreClipOriginal` wieder aufziehen.
+   */
+  original: ClipOriginal | null;
 }
 
 /**
@@ -126,14 +131,35 @@ export interface Clip {
  */
 export interface ClipEdit {
   /**
-   * Zuschnitt in Millisekunden ab Clipanfang. Eine **Markierung**: Sie steuert
-   * die Wiedergabe, ist aber nicht in die Datei eingerechnet und lässt sich
-   * deshalb jederzeit wieder aufziehen.
+   * Der volle Bereich der **aktuellen** Datei, also `0 .. durationMs`. Der
+   * Zuschnitt steckt seit dem Speichern in der Datei selbst; wo er im Original
+   * saß, steht in {@link ClipOriginal}.
    */
   startMs: number;
   endMs: number;
   /** Die Pegel, die gerade in der Tonspur der Datei stecken. */
   tracks: TrackMix[];
+}
+
+/**
+ * Die unversehrte Aufnahme eines geschnittenen Clips — und wo der ausgelieferte
+ * Ausschnitt in ihr sitzt.
+ *
+ * `startMs` ist zugleich der Versatz, um den die Einzelspuren gegenüber dem
+ * Video verschoben sind: Die Spuren bleiben ungeschnitten und stehen immer in
+ * Koordinaten des Originals.
+ */
+export interface ClipOriginal {
+  durationMs: number;
+  startMs: number;
+  endMs: number;
+}
+
+/** Wie weit das Neuschreiben eines Clips ist. */
+export interface ClipProgress {
+  clipId: string;
+  /** 0 bis 1. */
+  progress: number;
 }
 
 /** Eine Einzelspur eines Clips. Spur 0 ist der Hauptmix. */

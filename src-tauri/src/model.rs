@@ -205,11 +205,19 @@ pub struct Clip {
     /// `None` heißt: unangetastet, also ganzer Clip mit allen Spuren.
     #[serde(default)]
     pub edit: Option<ClipEdit>,
+    /// Liegt die unversehrte Aufnahme noch in der Original-Ablage? Dann ist
+    /// dieser Clip geschnitten und lässt sich jederzeit wieder aufziehen.
+    #[serde(default)]
+    pub original: Option<ClipOriginal>,
 }
 
-/// Was im Editor eingestellt wurde. Der Clip auf der Platte bleibt davon
-/// unberührt — erst der Export rechnet es fest ein. Deshalb lässt sich jede
-/// Einstellung jederzeit wieder zurücknehmen.
+/// Was im Editor eingestellt wurde.
+///
+/// Der Zuschnitt steckt nach dem Speichern **in der Datei** — `start_ms` und
+/// `end_ms` beschreiben deshalb nur noch den vollen Bereich der aktuellen
+/// Datei, also `0 .. Dauer`. Wo dieser Bereich im Original saß, steht in
+/// [`ClipOriginal`]. Die Pegel dagegen sind hier die Wahrheit: Sie lassen sich
+/// jederzeit ändern, weil die Einzelspuren daneben liegen bleiben.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipEdit {
@@ -218,6 +226,34 @@ pub struct ClipEdit {
     pub end_ms: u64,
     #[serde(default)]
     pub tracks: Vec<TrackMix>,
+}
+
+/// Die weggeschnittene Aufnahme, die unter `<data>/originals/<clip-id>/`
+/// weiterlebt — und wo in ihr der ausgelieferte Ausschnitt sitzt.
+///
+/// Diese Angaben sind der Nullpunkt für alles Weitere: Die Einzelspuren stehen
+/// immer in Koordinaten des **Originals**, die Griffe im Player dagegen in
+/// Koordinaten der **aktuellen** Datei. `start_ms` ist der Versatz zwischen
+/// beiden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipOriginal {
+    /// Volle Länge der unversehrten Aufnahme.
+    pub duration_ms: u64,
+    /// Wo der ausgelieferte Ausschnitt im Original anfängt und aufhört.
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// Wie weit das Neuschreiben eines Clips ist. Wandert als Event
+/// `clip-progress` an die Oberfläche — ein Schnitt am Anfang encodiert das Bild
+/// neu, und das dauert zu lange für einen Knopf ohne Lebenszeichen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipProgress {
+    pub clip_id: String,
+    /// 0 bis 1.
+    pub progress: f32,
 }
 
 /// Eine Tonspur, wie sie in der fertigen MP4-Datei liegt. Spur 0 ist der

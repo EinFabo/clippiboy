@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use clippiboy_lib::model::Clip;
-use clippiboy_lib::{muxer, stems};
+use clippiboy_lib::model::{Clip, EncoderId};
+use clippiboy_lib::{edit, muxer, stems};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -25,7 +25,7 @@ fn main() {
         id: "spuren-probe".into(),
         path: path.clone(),
         created_at: 0,
-        duration_ms: 0,
+        duration_ms: muxer::probe_duration_ms(std::path::Path::new(&path)).unwrap_or(0),
         game: None,
         width: 0,
         height: 0,
@@ -34,6 +34,7 @@ fn main() {
         title: None,
         description: None,
         edit: None,
+        original: None,
     });
 
     // Mit einem sauberen Stand anfangen, sonst prüft der Lauf nur den
@@ -44,7 +45,10 @@ fn main() {
     let handles: Vec<_> = (0..2)
         .map(|n| {
             let clip = clip.clone();
-            std::thread::spawn(move || (n, stems::tracks(&clip)))
+            std::thread::spawn(move || {
+                let source = edit::source_path(&clip);
+                (n, stems::tracks(&clip.id, &source))
+            })
         })
         .collect();
 
@@ -103,8 +107,12 @@ fn main() {
         })
         .collect();
     println!("\nSpeichern mit gemischten Pegeln:");
-    match stems::apply(&clip, &mix) {
-        Ok(size) => println!("  geschrieben, {:.1} MB", size as f64 / 1_048_576.0),
+    let whole = edit::Trim::whole(clip.duration_ms);
+    match edit::apply(&clip, whole, &mix, EncoderId::X264, 40_000, |_| {}) {
+        Ok(applied) => println!(
+            "  geschrieben, {:.1} MB",
+            applied.size_bytes as f64 / 1_048_576.0
+        ),
         Err(err) => {
             eprintln!("  fehlgeschlagen: {err}");
             stems::remove(&clip.id);
@@ -113,6 +121,7 @@ fn main() {
     }
 
     stems::remove(&clip.id);
+    edit::remove(&clip.id);
     if broken > 0 {
         eprintln!("\n{broken} Spur(en) beschädigt.");
         std::process::exit(1);

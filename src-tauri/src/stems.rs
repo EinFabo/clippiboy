@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::config;
-use crate::model::{Clip, ClipTrack, TrackMix};
+use crate::model::{ClipTrack, TrackMix};
 use crate::muxer::{command, ffmpeg, run, sanitize};
 
 /// Ausgabemarke der Mischkette aus [`mix_filter`].
@@ -132,24 +132,30 @@ pub fn remove(clip_id: &str) {
     let _ = std::fs::remove_dir_all(dir(clip_id));
 }
 
-/// Die Spuren eines Clips — aus der Ablage, sonst aus der Clipdatei geholt.
+/// Die Spuren eines Clips — aus der Ablage, sonst aus `source` geholt.
 ///
 /// Bei Clips aus der Zeit vor der Umstellung liegen die Quellen noch als
 /// zusätzliche Tonspuren im MP4. Die werden hier einmalig herausgezogen; ab
 /// dann ist die Ablage die Quelle.
-pub fn tracks(clip: &Clip) -> Result<Vec<ClipTrack>, String> {
-    if let Some(tracks) = from_index(&clip.id) {
+///
+/// `source` ist bewusst nicht `clip.path`: Sobald ein Clip geschnitten ist,
+/// liegt die unversehrte Aufnahme in der Original-Ablage, und nur die darf
+/// hier entpackt werden — sonst wäre die Ablage selbst geschnitten und die
+/// Vorschau liefe um den Zuschnitt versetzt. Den richtigen Pfad liefert
+/// [`crate::edit::source_path`].
+pub fn tracks(clip_id: &str, source: &Path) -> Result<Vec<ClipTrack>, String> {
+    if let Some(tracks) = from_index(clip_id) {
         return Ok(tracks);
     }
 
     // Ab hier wird geschrieben, also einer nach dem anderen. Wer gewartet hat,
     // findet die Ablage danach fertig vor und muss nichts mehr tun.
     let _busy = EXTRACTING.lock();
-    if let Some(tracks) = from_index(&clip.id) {
+    if let Some(tracks) = from_index(clip_id) {
         return Ok(tracks);
     }
 
-    let in_file = tracks_in_file(clip)?;
+    let in_file = tracks_in_file(source)?;
     if in_file.len() <= 1 {
         // Eine Spur: Die Tonspur der Clipdatei *ist* das Original, eine Kopie
         // daneben wäre nur doppelter Platz. Ohne `previewPath` spielt der
@@ -160,19 +166,19 @@ pub fn tracks(clip: &Clip) -> Result<Vec<ClipTrack>, String> {
     // Altbestand: die Spuren aus dem MP4 in die Ablage holen.
     let mut extracted = Vec::with_capacity(in_file.len());
     for track in &in_file {
-        let path = extract(clip, track.index)?;
+        let path = extract(clip_id, source, track.index)?;
         extracted.push(ClipTrack {
             preview_path: Some(path.to_string_lossy().to_string()),
             ..track.clone()
         });
     }
     let labels: Vec<String> = extracted.iter().map(|t| t.label.clone()).collect();
-    write_index(&clip.id, &labels).map_err(|err| err.to_string())?;
+    write_index(clip_id, &labels).map_err(|err| err.to_string())?;
     Ok(extracted)
 }
 
 /// Die Tonspuren einer Clipdatei, in der Reihenfolge der Datei.
-fn tracks_in_file(clip: &Clip) -> Result<Vec<ClipTrack>, String> {
+pub fn tracks_in_file(source: &Path) -> Result<Vec<ClipTrack>, String> {
     let output = command("ffprobe")
         .args([
             "-v",
@@ -184,7 +190,7 @@ fn tracks_in_file(clip: &Clip) -> Result<Vec<ClipTrack>, String> {
             "-of",
             "json",
         ])
-        .arg(&clip.path)
+        .arg(source)
         .output()
         .map_err(|err| format!("ffprobe konnte nicht gestartet werden: {err}"))?;
     if !output.status.success() {
@@ -242,19 +248,19 @@ fn label_of(stream: &serde_json::Value, index: usize) -> String {
         })
 }
 
-/// Eine Tonspur aus der Clipdatei in die Ablage holen.
-fn extract(clip: &Clip, index: u32) -> Result<PathBuf, String> {
-    let out = track_path(&clip.id, index);
-    std::fs::create_dir_all(dir(&clip.id)).map_err(|e| e.to_string())?;
+/// Eine Tonspur aus `source` in die Ablage holen.
+fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> {
+    let out = track_path(clip_id, index);
+    std::fs::create_dir_all(dir(clip_id)).map_err(|e| e.to_string())?;
     // Erst neben das Ziel schreiben und dann verschieben: Unter dem Zielnamen
     // darf nie eine halbe Datei liegen. Eine solche meldet die richtige Länge
     // und fällt erst auf, wenn sie jemand dekodieren will.
-    let temp = dir(&clip.id).join(format!("{index}.{}.teil", std::process::id()));
+    let temp = dir(clip_id).join(format!("{index}.{}.teil", std::process::id()));
 
     let mut copy = ffmpeg();
     copy.args(["-y", "-hide_banner", "-loglevel", "error"])
         .arg("-i")
-        .arg(&clip.path)
+        .arg(source)
         .args(["-map", &format!("0:a:{index}"), "-c:a", "copy"])
         .args(["-movflags", "+faststart"])
         .arg("-f")
@@ -269,7 +275,7 @@ fn extract(clip: &Clip, index: u32) -> Result<PathBuf, String> {
         encode
             .args(["-y", "-hide_banner", "-loglevel", "error"])
             .arg("-i")
-            .arg(&clip.path)
+            .arg(source)
             .args(["-map", &format!("0:a:{index}"), "-c:a", "aac", "-b:a", "192k"])
             .args(["-movflags", "+faststart"])
             .arg("-f")
@@ -347,133 +353,6 @@ pub fn levels(tracks: &[ClipTrack], mix: &[TrackMix]) -> Vec<f32> {
             }
         })
         .collect()
-}
-
-/// Die Mischung fest in die Tonspur der Clipdatei rechnen.
-///
-/// Das Bild wird dabei nur kopiert: Der Zuschnitt ist eine Markierung am Clip
-/// und wird nicht eingerechnet, also gibt es keinen Grund, auch nur ein Bild
-/// neu zu encodieren. Speichern ist damit ein reines Ummuxen und in Sekunden
-/// durch.
-///
-/// Gibt die neue Dateigröße zurück.
-pub fn apply(clip: &Clip, mix: &[TrackMix]) -> Result<u64, String> {
-    match attempt(clip, mix) {
-        Ok(size) => Ok(size),
-        Err(err) if recoverable(clip) => {
-            // Der Clip enthält die Spuren noch selbst — ein beschädigter Stand
-            // in der Ablage ist damit kein Grund aufzugeben.
-            log::warn!("Speichern fehlgeschlagen ({err}) — Einzelspuren werden neu entpackt");
-            remove(&clip.id);
-            attempt(clip, mix)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// Lassen sich die Einzelspuren notfalls aus dem Clip neu ziehen?
-///
-/// Nur dann darf die Ablage weggeworfen werden. Bei Clips aus der neuen
-/// Aufnahme ist sie die **einzige** Fassung der getrennten Quellen — sie zu
-/// löschen hieße, die Mischung für immer festzunageln.
-fn recoverable(clip: &Clip) -> bool {
-    tracks_in_file(clip).map(|list| list.len() > 1).unwrap_or(false)
-}
-
-fn attempt(clip: &Clip, mix: &[TrackMix]) -> Result<u64, String> {
-    let source = PathBuf::from(&clip.path);
-    if !source.is_file() {
-        return Err("Die Clipdatei ist nicht mehr da.".into());
-    }
-
-    let list = tracks(clip)?;
-    let gains = levels(&list, mix);
-
-    // Woher der Ton kommt: aus den abgelegten Einzelspuren, oder — wenn es
-    // keine gibt — aus der Clipdatei selbst.
-    let sources: Vec<PathBuf> = list
-        .iter()
-        .filter_map(|track| track.preview_path.as_ref().map(PathBuf::from))
-        .collect();
-    let from_stems = sources.len() == list.len() && !sources.is_empty();
-
-    let inputs: Vec<(String, f32)> = if from_stems {
-        gains
-            .iter()
-            .enumerate()
-            .map(|(slot, gain)| (format!("{}:a", slot + 1), *gain))
-            .collect()
-    } else {
-        list.iter()
-            .zip(&gains)
-            .map(|(track, gain)| (format!("0:a:{}", track.index), *gain))
-            .collect()
-    };
-    let filter = mix_filter(&inputs);
-
-    // ffmpeg darf nicht in seine eigene Eingabe schreiben — also daneben und
-    // danach darüber.
-    let temp = source.with_extension("neu.mp4");
-    let mut command = ffmpeg();
-    command
-        .args(["-y", "-hide_banner", "-loglevel", "error"])
-        .arg("-i")
-        .arg(&source);
-    if from_stems {
-        for path in &sources {
-            command.arg("-i").arg(path);
-        }
-    }
-    if let Some(filter) = &filter {
-        command.arg("-filter_complex").arg(filter);
-    }
-    command.arg("-map").arg("0:v:0");
-    match &filter {
-        Some(_) => {
-            command.arg("-map").arg(MIX_LABEL);
-            command.args(["-c:a", "aac", "-b:a", "192k"]);
-            command.args(["-metadata:s:a:0", "title=Mix"]);
-            command.args(["-metadata:s:a:0", "handler_name=Mix"]);
-        }
-        // Alles stumm geschaltet: Dann bekommt der Clip eben keine Tonspur.
-        None => {
-            command.arg("-an");
-        }
-    }
-    command.args(["-c:v", "copy"]);
-    command.args(["-movflags", "+faststart"]);
-    command.arg(&temp);
-
-    if let Err(err) = run(&mut command, "Clip speichern") {
-        let _ = std::fs::remove_file(&temp);
-        return Err(err);
-    }
-
-    // Erst hier wird das Original angefasst. Windows lässt eine geöffnete
-    // Datei nicht ersetzen; der Player gibt sie vorher frei, aber das Handle
-    // verschwindet nicht immer im selben Augenblick — deshalb ein paar
-    // Anläufe, bevor aufgegeben wird.
-    let mut last = None;
-    for attempt in 0..10 {
-        match std::fs::rename(&temp, &source) {
-            Ok(()) => {
-                last = None;
-                break;
-            }
-            Err(err) => {
-                last = Some(err);
-                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
-            }
-        }
-    }
-    if let Some(err) = last {
-        let _ = std::fs::remove_file(&temp);
-        return Err(format!(
-            "Der Clip ließ sich nicht ersetzen ({err}). Ist er gerade woanders geöffnet?"
-        ));
-    }
-
-    Ok(std::fs::metadata(&source).map(|meta| meta.len()).unwrap_or(0))
 }
 
 /// Ist `file` jünger als `source` — und damit noch gültig?

@@ -35,8 +35,13 @@ interface Props {
   /** Steht etwas anderes eingestellt als in der Datei? */
   dirty: boolean;
   saving: boolean;
+  /** 0 bis 1, solange geschrieben wird. `null`, solange nichts zu melden ist. */
+  progress: number | null;
   justSaved: boolean;
   onSave: () => void;
+  /** Den Zuschnitt aufheben und die ganze Aufnahme zurückholen. */
+  onRestore: () => void;
+  restoring: boolean;
   /** Zum Audio-Mixer wechseln — von dort kommen die getrennten Spuren. */
   onOpenMixer: () => void;
 }
@@ -65,14 +70,21 @@ export function ClipEditor({
   separateTracks,
   dirty,
   saving,
+  progress,
   justSaved,
   onSave,
+  onRestore,
+  restoring,
   onOpenMixer,
 }: Props) {
   const updateClip = useEngine((state) => state.updateClip);
 
   const trimmed = trim.start > 0.05 || trim.end < duration - 0.05;
   const length = Math.max(0, trim.end - trim.start);
+  // Ein Schnitt am Anfang muss bildgenau sitzen — beim Kopieren rutschte er auf
+  // das Keyframe davor. Dafür wird das Bild neu gerechnet, und das dauert.
+  const reencodes = trim.start > 0.25;
+  const busy = saving || restoring;
   const anySolo = Object.values(mix).some((state) => state.solo);
 
   /** Ein Feld speichern, ohne die beiden anderen zu verlieren. */
@@ -188,11 +200,28 @@ export function ClipEditor({
           <p className="font-mono text-xs text-ink-muted tabular-nums">
             {clock(trim.start)} – {clock(trim.end)} · {clock(length)}
           </p>
-          {trimmed && (
+          {reencodes && (
             <p className="text-xs leading-relaxed text-ink-faint">
-              Der Zuschnitt ist eine Markierung: Er steuert die Wiedergabe, die
-              Datei bleibt vollständig. Nichts geht dabei verloren.
+              Ein Schnitt am Anfang muss bildgenau sitzen — dafür wird das Bild
+              neu gerechnet. Das dauert länger als sonst.
             </p>
+          )}
+
+          {clip.original && (
+            <div className="space-y-2 rounded-inner bg-elevated p-3">
+              <p className="text-xs leading-relaxed text-ink-muted">
+                Geschnitten aus {clock(clip.original.durationMs / 1000)} — ab{" "}
+                {clock(clip.original.startMs / 1000)}. Die ganze Aufnahme liegt
+                daneben und kommt auf Knopfdruck zurück.
+              </p>
+              <Button
+                size="sm"
+                disabled={busy || !inTauri}
+                onClick={onRestore}
+              >
+                {restoring ? "Wird zurückgeholt…" : "Zuschnitt aufheben"}
+              </Button>
+            </div>
           )}
         </section>
       </div>
@@ -201,22 +230,41 @@ export function ClipEditor({
         <Button
           variant="primary"
           className="w-full"
-          disabled={saving || !dirty || !inTauri}
+          disabled={busy || !dirty || !inTauri}
           onClick={onSave}
         >
           {saving ? "Wird gespeichert…" : "Speichern"}
         </Button>
-        <p className="text-xs text-ink-faint">
-          {saving
-            ? "Der Ton wird neu geschrieben, das Bild bleibt unangetastet."
-            : dirty
-              ? "Noch nicht gespeichert — die Datei im Ordner klingt bisher anders."
-              : justSaved
-                ? "Gespeichert. Der Clip im Ordner klingt jetzt so."
-                : "Die Mischung steckt in der Datei. Der Zuschnitt ist nur eine Markierung und bleibt jederzeit änderbar."}
+        {busy && progress !== null && <Progress value={progress} />}
+        <p className="text-xs leading-relaxed text-ink-faint">
+          {restoring
+            ? "Die ganze Aufnahme wird zurückgeschrieben."
+            : saving
+              ? reencodes
+                ? "Der Clip wird geschnitten — das Bild wird dafür neu gerechnet."
+                : "Der Clip wird neu geschrieben, das Bild bleibt unangetastet."
+              : dirty
+                ? "Noch nicht gespeichert — die Datei im Ordner ist bisher eine andere."
+                : justSaved
+                  ? "Gespeichert. So liegt der Clip jetzt im Ordner — fertig zum Verschicken."
+                  : clip.original
+                    ? "Der Zuschnitt steckt in der Datei. Das Original liegt daneben, aufheben geht jederzeit."
+                    : "Die Datei im Ordner ist genau das, was hier steht."}
         </p>
       </section>
     </aside>
+  );
+}
+
+/** Ein Balken statt eines Knopfes, der nur „warte" sagt. */
+function Progress({ value }: { value: number }) {
+  return (
+    <div className="h-1 overflow-hidden rounded-pill bg-white/10">
+      <div
+        className="h-full rounded-pill bg-accent transition-[width] duration-200"
+        style={{ width: `${Math.round(Math.min(1, Math.max(0, value)) * 100)}%` }}
+      />
+    </div>
   );
 }
 

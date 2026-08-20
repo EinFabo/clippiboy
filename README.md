@@ -170,6 +170,7 @@ src-tauri/src/
   buffer.rs              keyframe-sicherer Paket-Ring (+ Unit-Tests)
   muxer.rs               Pakete + Tonspuren → MP4 (ffmpeg, ohne Re-Encode)
   stems.rs               Einzelspuren ablegen, entpacken, mischen (+ Tests)
+  edit.rs                Clip neu schreiben: Mischung + Zuschnitt (+ Tests)
   preview.rs             Wegwerf-Hilfsdateien (Wellenform für die Zeitleiste)
   audio/capture.rs       WASAPI je Quelle (Gerät, Loopback, Prozess)
   audio/engine.rs        laufende Streams, Pegel, Mischen
@@ -189,6 +190,7 @@ src-tauri/src/
 src-tauri/examples/
   aufnahme-probe.rs      Capture → Encoder → Muxer einmal von Hand durchspielen
   spuren-probe.rs        zwei parallele Spurenabfragen auf denselben Clip
+  schnitt-probe.rs       schneiden, nachmessen, aufheben, nachmessen
 scripts/fetch-ffmpeg.mjs ffmpeg/ffprobe für das Paket holen
 scripts/make-icons.py    alle Icon-Größen aus icons/icon.png
 ```
@@ -302,10 +304,32 @@ Im Player öffnet **Bearbeiten** (oder `E`) einen Bereich neben dem Bild:
 * **Zuschnitt** — `I` und `O` setzen Anfang und Ende auf die aktuelle Stelle,
   die Griffe in der Zeitleiste lassen sich auch ziehen. Die Wiedergabe springt
   am Ende der Auswahl zurück an ihren Anfang.
-* **Speichern** — rechnet die eingestellte Mischung in die Clipdatei. Der
-  Zuschnitt ist bisher nur eine Markierung; die Datei bleibt in voller Länge.
+* **Speichern** — schreibt beides in die Datei: die Mischung **und** den
+  Zuschnitt. Was danach im Ordner liegt, ist der fertige Clip — man kann ihn
+  ohne weiteres Zutun verschicken.
 
-Zwei Dinge, die man dabei wissen sollte:
+Der Zuschnitt geht dabei nicht verloren. Beim ersten echten Schnitt wandert die
+unversehrte Aufnahme nach `%APPDATA%\ClippiBoy\originals\<clip-id>\`, und im
+Bearbeiten-Bereich steht dann **Zuschnitt aufheben** — ein Klick, und der ganze
+Clip ist zurück. Weiter *hinein*schneiden geht auch ohne Aufheben; die Griffe
+laufen dabei über die Zeitachse der geschnittenen Datei, gerechnet wird intern
+im Original.
+
+Vier Dinge, die man dabei wissen sollte:
+
+**Hinten kürzen ist verlustfrei, vorne nicht.** Fängt der Schnitt bei null an,
+wird das Bild nur kopiert (`-c:v copy`) und die Datei steht in ein bis zwei
+Sekunden. Ein Schnitt am Anfang muss dagegen bildgenau sitzen — beim Kopieren
+rutschte er auf das Keyframe davor, also bis zu zwei Sekunden zu früh. Dafür
+wird das Bild neu encodiert, mit dem Encoder aus den Einstellungen und x264 als
+Rückfall, falls die Hardware streikt (etwa weil nebenan der Puffer läuft). Ein
+Fortschrittsbalken zeigt, wie weit es ist. Gerechnet wird dabei **immer** aus
+dem Original, nie aus der schon geschnittenen Datei — der Verlust bleibt so bei
+einer Generation, auch wenn man dreimal nachschneidet.
+
+**Ein geschnittener Clip braucht doppelt Platz**, solange das Original daneben
+liegt. Es verschwindet, sobald der Zuschnitt aufgehoben oder der Clip gelöscht
+wird.
 
 **Der Clip hat genau eine Tonspur.** Discord, der Browser und die meisten
 Player geben von einem MP4 stur die erste Tonspur wieder — lagen Mikrofon und
@@ -314,6 +338,12 @@ Editors stumm. Damit sich die Mischung trotzdem jederzeit ändern lässt, liegen
 die rohen Einzelspuren daneben, je Clip ein Ordner unter
 `%APPDATA%\ClippiBoy\tracks\<clip-id>\`. Sie gehören zum Clip und werden mit
 ihm gelöscht.
+
+Die Spuren bleiben dabei **ungeschnitten** und stehen immer in Koordinaten der
+unversehrten Aufnahme. Das ist Absicht: Sie werden dadurch nie ersetzt, es gibt
+keinen zweiten Zeitstrahl, der davonlaufen kann, und Windows kann einem keine
+offene Datei sperren. Der Preis ist eine Zahl, die stimmen muss — der Versatz
+zwischen Spur und Bild, und das ist genau `original.startMs`.
 
 **Die Vorschau kann nur leiser werden.** WebView2 kommt an `audioTracks` nicht
 heran, deshalb lässt die UI die Einzelspuren als eigene Audioelemente synchron
