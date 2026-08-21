@@ -394,13 +394,23 @@ impl AppState {
             None => format!("clip_{stamp}.mp4"),
         };
 
+        // Je Spiel ein Ordner. Ein neuer Clip ist noch kein Favorit, also
+        // entscheidet allein das Spiel — ohne eines bleibt er im Clip-Ordner.
+        let dir = crate::filing::dir_for(
+            std::path::Path::new(&config.clip_dir),
+            game.as_deref(),
+            false,
+        );
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("Ordner '{}' ließ sich nicht anlegen: {err}", dir.display()))?;
+
         // Die Kennung schon hier: Unter ihr legt der Muxer die Einzelspuren ab,
         // und die entstehen im selben ffmpeg-Lauf wie der Clip.
         let id = uuid::Uuid::new_v4().to_string();
         let result = crate::muxer::build(crate::muxer::ClipRequest {
             snapshot,
             clip_id: id.clone(),
-            output: std::path::PathBuf::from(&config.clip_dir).join(name),
+            output: dir.join(name),
             temp_dir: config::data_dir().join("temp"),
         })?;
 
@@ -419,6 +429,7 @@ impl AppState {
             thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
             title: None,
             description: None,
+            favorite: false,
             edit: None,
             original: None,
         })

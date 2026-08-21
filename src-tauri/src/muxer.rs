@@ -248,7 +248,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
 
     let duration_ms = probe_duration_ms(&request.output)
         .unwrap_or(snapshot.audio_frames as u64 * 1000 / 48_000);
-    let thumb_path = make_thumbnail(&request.output).ok();
+    let thumb_path = crate::thumbs::make(&request.output, &request.clip_id).ok();
 
     Ok(ClipResult {
         path: request.output,
@@ -302,18 +302,4 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
     let text = String::from_utf8_lossy(&output.stdout);
     let seconds: f64 = text.trim().parse().ok()?;
     Some((seconds * 1000.0) as u64)
-}
-
-pub fn make_thumbnail(video: &Path) -> Result<PathBuf, String> {
-    let thumb = video.with_extension("jpg");
-    run(
-        ffmpeg()
-            .args(["-y", "-hide_banner", "-loglevel", "error", "-ss", "0.5"])
-            .arg("-i")
-            .arg(video)
-            .args(["-frames:v", "1", "-vf", "scale=480:-1", "-q:v", "4"])
-            .arg(&thumb),
-        "Vorschaubild",
-    )?;
-    Ok(thumb)
 }

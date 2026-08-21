@@ -110,6 +110,7 @@ export function ClipEditor({
             einer Textzeile. */}
         <section>
           <Field
+            key={`title-${clip.id}`}
             value={clip.title ?? ""}
             placeholder={fileName(clip.path)}
             ariaLabel="Name des Clips"
@@ -117,6 +118,7 @@ export function ClipEditor({
             onSave={(title) => saveMeta({ title })}
           />
           <Field
+            key={`description-${clip.id}`}
             value={clip.description ?? ""}
             placeholder="Was passiert hier?"
             ariaLabel="Beschreibung"
@@ -129,6 +131,7 @@ export function ClipEditor({
           <label className="mt-3 flex items-center gap-2">
             <span className="shrink-0 text-xs text-ink-faint">Spiel</span>
             <Field
+              key={`game-${clip.id}`}
               value={clip.game ?? ""}
               placeholder="Unbekannt"
               ariaLabel="Spiel"
@@ -389,22 +392,32 @@ function Field({
   onSave: (value: string | null) => void;
 }) {
   const [draft, setDraft] = useState(value);
+  /**
+   * Was zuletzt an den Kern ging — oder von dort kam. Immer in der Form, die
+   * der Kern ablegt, also ohne Leerzeichen am Rand.
+   */
   const saved = useRef(value);
   // Der Aufrufer gibt bei jedem Render eine neue Funktion herein; hinge der
   // Timer daran, würde er dauernd neu anfangen und nie auslösen.
   const latest = useRef(onSave);
   latest.current = onSave;
 
-  // Von außen geändert (anderer Clip, Speicherung durch): Entwurf nachziehen.
+  // Von außen geändert (anderer Clip, Zurücksetzen): Entwurf nachziehen.
+  //
+  // Die eigene Speicherung kommt hier ebenfalls wieder herein, nur eben
+  // getrimmt. Die darf den Entwurf nicht anfassen: Sonst verschwindet mitten
+  // im Tippen das Leerzeichen, das gerade zwischen zwei Wörter sollte.
   useEffect(() => {
-    setDraft(value);
+    if (value === saved.current) return;
     saved.current = value;
+    setDraft(value);
   }, [value]);
 
   const commit = () => {
-    if (draft === saved.current) return;
-    saved.current = draft;
-    latest.current(draft.trim() ? draft.trim() : null);
+    const next = draft.trim();
+    if (next === saved.current) return;
+    saved.current = next;
+    latest.current(next ? next : null);
   };
   const commitRef = useRef(commit);
   commitRef.current = commit;

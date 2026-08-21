@@ -10,11 +10,30 @@ import type { CaptureTarget, EncoderId } from "@/lib/types";
 /** Die üblichen Stufen; angeboten wird davon nur, was die Quelle hergibt. */
 const HEIGHTS = [720, 1080, 1440, 2160];
 
-const FPS = [
-  { value: "30", label: "30 FPS" },
-  { value: "60", label: "60 FPS" },
-  { value: "120", label: "120 FPS" },
-] as const;
+/** Die üblichen Bildraten, solange der Bildschirm seine Rate nicht verrät. */
+const FPS = [30, 60, 120];
+
+/**
+ * Welche Bildraten die Quelle wirklich hergibt.
+ *
+ * Mehr Bilder aufzunehmen, als der Bildschirm ausgibt, bringt keine Bewegung
+ * dazu, flüssiger zu sein — es entstehen nur doppelte Bilder, die Platz
+ * kosten. Deshalb die üblichen Stufen bis zur Wiederholrate und die Rate
+ * selbst obendrauf: Ein 165-Hz-Monitor soll auch 165 anbieten. So rechnet der
+ * Kern in `capture::fps_choices`.
+ */
+function fpsChoices(source: CaptureTarget | null): number[] {
+  const refresh = source?.refreshHz ?? null;
+  if (!refresh || refresh < 20) return FPS;
+  return [...FPS.filter((fps) => fps < refresh), refresh];
+}
+
+/** Die eingestellte Bildrate auf eine angebotene Stufe bringen — nach unten,
+    denn mehr aufzunehmen als eingestellt wäre eine Überraschung. */
+function fitFps(fps: number, choices: number[]): number {
+  if (choices.includes(fps)) return fps;
+  return [...choices].reverse().find((step) => step <= fps) ?? choices[0];
+}
 
 /**
  * Aufnahmegröße zu einer Zielhöhe. Die Breite kommt aus dem Seitenverhältnis
@@ -74,11 +93,29 @@ export function Recording() {
       ]
     : HEIGHTS;
 
+  const rates = fpsChoices(source);
+  // Die Auswahl als Text: An der Liste selbst hinge der Effekt bei jedem
+  // Render neu, sie ist bei jedem Durchlauf ein neues Array.
+  const ratesKey = rates.join();
+
+  // Größe und Bildrate an die Quelle angleichen. Wer von einem 165-Hz-Monitor
+  // auf einen 60-Hz-Zweitschirm wechselt, hätte sonst eine Einstellung stehen,
+  // die dort nichts mehr bedeutet — der Kern rückt sie ohnehin zurecht.
   useEffect(() => {
     if (!source) return;
     const next = fit(Math.min(rec.height, source.height), source);
-    if (next.width !== rec.width || next.height !== rec.height) setRec(next);
-  }, [source?.id, source?.width, source?.height, rec.width, rec.height]);
+    const fps = fitFps(rec.fps, rates);
+    const sized = next.width !== rec.width || next.height !== rec.height;
+    if (sized || fps !== rec.fps) setRec({ ...next, fps });
+  }, [
+    source?.id,
+    source?.width,
+    source?.height,
+    ratesKey,
+    rec.width,
+    rec.height,
+    rec.fps,
+  ]);
 
   return (
     <div className="space-y-8 pb-12">
@@ -166,10 +203,23 @@ export function Recording() {
               onChange={(v) => setRec(fit(Number(v), source))}
             />
           </Row>
-          <Row label="Bildrate">
+          <Row
+            label="Bildrate"
+            hint={
+              source?.refreshHz
+                ? `${source.refreshHz} Hz zeigt die Quelle — mehr Bilder wären nur Wiederholungen`
+                : "Die Wiederholrate der Quelle ist nicht bekannt"
+            }
+          >
             <Select
               value={String(rec.fps)}
-              options={FPS.map((f) => ({ value: f.value, label: f.label }))}
+              options={rates.map((fps) => ({
+                value: String(fps),
+                label:
+                  fps === source?.refreshHz
+                    ? `${fps} FPS (Quelle)`
+                    : `${fps} FPS`,
+              }))}
               onChange={(v) => setRec({ fps: Number(v) })}
             />
           </Row>
@@ -323,6 +373,7 @@ function TargetCard({
       <p className="mt-1 text-xs text-ink-muted">
         {target.kind === "monitor" ? "Monitor" : "Fenster"} · {target.width}×
         {target.height}
+        {target.refreshHz ? ` · ${target.refreshHz} Hz` : ""}
         {target.isPrimary && " · primär"}
       </p>
     </Card>

@@ -34,7 +34,7 @@ use parking_lot::Mutex;
 
 use crate::config;
 use crate::model::{Clip, ClipOriginal, EncoderId, TrackMix};
-use crate::muxer::{ffmpeg, make_thumbnail, probe_duration_ms, replace_file, sanitize};
+use crate::muxer::{ffmpeg, probe_duration_ms, replace_file, sanitize};
 use crate::stems;
 
 /// Ab hier gilt eine Grenze als bewusst gesetzt. Darunter ist sie das Ergebnis
@@ -357,7 +357,7 @@ fn run(
 
     // Das Vorschaubild zeigte sonst ein Bild, das im Clip gar nicht mehr
     // vorkommt.
-    if let Err(err) = make_thumbnail(&target) {
+    if let Err(err) = crate::thumbs::make(&target, &clip.id) {
         log::warn!("Vorschaubild ließ sich nicht erneuern: {err}");
     }
 

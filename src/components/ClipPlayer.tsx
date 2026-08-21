@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
 import { ClipEditor, type Trim } from "@/components/ClipEditor";
-import { IconTrash } from "@/components/icons";
+import { useClipMenu } from "@/components/clipMenu";
+import { IconHeart, IconTrash } from "@/components/icons";
 import { useEngine } from "@/store";
 import { api, events, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
@@ -48,6 +49,8 @@ export function ClipPlayer({
   const video = useRef<HTMLVideoElement>(null);
   const frame = useRef<HTMLDivElement>(null);
   const applyClipEdit = useEngine((state) => state.applyClipEdit);
+  const setFavorite = useEngine((state) => state.setFavorite);
+  const clipMenu = useClipMenu();
   const restoreClipOriginal = useEngine((state) => state.restoreClipOriginal);
 
   const [playing, setPlaying] = useState(false);
@@ -81,6 +84,15 @@ export function ClipPlayer({
   useEffect(() => {
     setJustSaved(false);
   }, [clip?.id]);
+
+  /** Löschen und dabei im Player weiterrücken — war der letzte Clip weg,
+      bleibt nichts mehr zu zeigen. */
+  const removeClip = useCallback(() => {
+    if (!clip) return;
+    onDelete(clip.id);
+    if (clips.length <= 1) onClose();
+    else onIndexChange(Math.min(index, clips.length - 2));
+  }, [clip, clips.length, index, onClose, onDelete, onIndexChange]);
 
   const step = useCallback(
     (delta: number) => {
@@ -399,6 +411,9 @@ export function ClipPlayer({
       >
         <div
           ref={frame}
+          onContextMenu={(event) =>
+            clip && clipMenu(event, clip, { onDelete: removeClip })
+          }
           className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-card bg-black"
         >
           {broken || !source ? (
@@ -567,6 +582,23 @@ export function ClipPlayer({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Die Datei zieht erst beim Schließen in den Favoriten-Ordner um —
+              mitten in der Wiedergabe risse sie dem Player unter den Füßen
+              weg. Die Galerie kümmert sich darum. */}
+          <Button
+            size="sm"
+            variant={clip.favorite ? "primary" : "secondary"}
+            aria-pressed={clip.favorite}
+            icon={
+              <IconHeart
+                filled={clip.favorite}
+                className={cn("h-4 w-4", !clip.favorite && "text-live")}
+              />
+            }
+            onClick={() => void setFavorite(clip.id, !clip.favorite)}
+          >
+            {clip.favorite ? "Favorit" : "Merken"}
+          </Button>
           <Button
             size="sm"
             variant="secondary"
@@ -578,11 +610,7 @@ export function ClipPlayer({
             size="sm"
             variant="danger"
             icon={<IconTrash className="h-4 w-4" />}
-            onClick={() => {
-              onDelete(clip.id);
-              if (clips.length <= 1) onClose();
-              else onIndexChange(Math.min(index, clips.length - 2));
-            }}
+            onClick={removeClip}
           >
             Löschen
           </Button>

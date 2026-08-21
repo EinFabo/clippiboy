@@ -1,5 +1,7 @@
 //! Tauri-Commands — die einzige Schnittstelle der UI zum Kern.
 
+use std::path::Path;
+
 use tauri::State;
 
 use crate::audio::devices;
@@ -278,7 +280,70 @@ pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
     // Zweck mehr.
     stems::remove(&id);
     edit::remove(&id);
-    with_library(&state, |lib| lib.delete(&id).map_err(|e| e.to_string()))
+    // Das Vorschaubild auch dann, wenn in der Datenbank keines vermerkt ist.
+    crate::thumbs::remove(&id);
+
+    let clip_dir = state.config_snapshot().clip_dir;
+    let folder = with_library(&state, |lib| {
+        let folder = lib
+            .get(&id)
+            .map_err(|e| e.to_string())?
+            .and_then(|clip| std::path::PathBuf::from(clip.path).parent().map(Path::to_path_buf));
+        lib.delete(&id).map_err(|e| e.to_string())?;
+        Ok(folder)
+    })?;
+    // War das der letzte Clip seines Spiels, bleibt sonst ein leerer Ordner
+    // stehen.
+    if let Some(folder) = folder {
+        crate::filing::prune(&folder, Path::new(&clip_dir));
+    }
+    Ok(())
+}
+
+/// Das Herz an einem Clip setzen oder wegnehmen.
+///
+/// Die Datei zieht dabei **nicht** von selbst um — das erledigt `file_clip`,
+/// sobald der Clip nicht mehr im Player offen ist. Ein Umzug unter dem
+/// laufenden Video heraus würde die Wiedergabe abreißen lassen.
+#[tauri::command]
+pub fn set_clip_favorite(state: State<'_, AppState>, id: String, favorite: bool) -> Result<Clip> {
+    with_library(&state, |lib| {
+        lib.set_favorite(&id, favorite).map_err(|e| e.to_string())?;
+        lib.get(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Clip nicht gefunden".into())
+    })
+}
+
+/// Die Datei eines Clips in den Ordner bringen, in den sie gehört.
+///
+/// Scheitert der Umzug — meist, weil die Datei noch offen ist —, bleibt sie
+/// liegen und der Clip wird unverändert zurückgegeben. Der nächste Start holt
+/// es nach (`filing::tidy`); die Galerie stimmt in der Zwischenzeit trotzdem,
+/// denn sie liest aus der Datenbank.
+#[tauri::command]
+pub fn file_clip(state: State<'_, AppState>, id: String) -> Result<Clip> {
+    let clip_dir = state.config_snapshot().clip_dir;
+    with_library(&state, |lib| {
+        let clip = lib
+            .get(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+        match crate::filing::place(&clip, &clip_dir) {
+            Ok(Some(target)) => {
+                lib.set_path(&id, &target.to_string_lossy())
+                    .map_err(|e| e.to_string())?;
+                lib.get(&id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Clip nicht gefunden".into())
+            }
+            Ok(None) => Ok(clip),
+            Err(err) => {
+                log::warn!("Clip '{id}' blieb liegen: {err}");
+                Ok(clip)
+            }
+        }
+    })
 }
 
 #[tauri::command]
@@ -295,6 +360,47 @@ pub fn reveal_clip(
     app.opener()
         .reveal_item_in_dir(&clip.path)
         .map_err(|e| e.to_string())
+}
+
+/// Die Videodatei eines Clips in die Zwischenablage legen.
+///
+/// Nicht den Pfad, die **Datei**: In Discord oder WhatsApp hängt Strg+V den
+/// Clip danach als Anhang an, im Explorer legt es eine Kopie ab.
+#[tauri::command]
+pub fn copy_clip_file(state: State<'_, AppState>, id: String) -> Result<()> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+    let path = std::path::PathBuf::from(&clip.path);
+    if !path.is_file() {
+        return Err("Die Clipdatei ist nicht mehr da.".into());
+    }
+    crate::clipboard::copy_files(&[path])
+}
+
+/// Den Clip in dem Player öffnen, den Windows dafür vorgesehen hat.
+#[tauri::command]
+pub fn open_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+    app.opener()
+        .open_path(&clip.path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Text in die Zwischenablage legen — für „Pfad kopieren" und das Menü in den
+/// Textfeldern.
+#[tauri::command]
+pub fn clipboard_write_text(text: String) -> Result<()> {
+    crate::clipboard::copy_text(&text)
+}
+
+/// Text aus der Zwischenablage holen. Steckt kein Text darin, kommt ein leerer
+/// zurück — dann gibt es eben nichts einzufügen.
+#[tauri::command]
+pub fn clipboard_read_text() -> Result<String> {
+    crate::clipboard::read_text()
 }
 
 /// Name, Beschreibung und Spiel eines Clips ändern. Leere Felder löschen den

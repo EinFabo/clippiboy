@@ -91,6 +91,9 @@ pub struct CaptureTarget {
     pub width: u32,
     pub height: u32,
     pub is_primary: bool,
+    /// Bildwiederholrate des Bildschirms in Hertz — bei einem Fenster die des
+    /// Bildschirms, auf dem es liegt. `None`, wenn Windows sie nicht meldet.
+    pub refresh_hz: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +204,11 @@ pub struct Clip {
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Mit dem Herz markiert. Ist zugleich eine eigene Kategorie: Die Datei
+    /// liegt dann im Ordner `Favoriten`, in der App bleibt der Clip unter
+    /// seinem Spiel auffindbar.
+    #[serde(default)]
+    pub favorite: bool,
     /// Zuschnitt und Spurenmischung, wie sie im Editor zuletzt standen.
     /// `None` heißt: unangetastet, also ganzer Clip mit allen Spuren.
     #[serde(default)]

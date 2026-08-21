@@ -67,6 +67,26 @@ export const api = {
     id: string,
     meta: { title: string | null; description: string | null; game: string | null },
   ) => invoke<Clip>("update_clip", { id, ...meta }),
+  /**
+   * Die Videodatei in die Zwischenablage legen — nicht den Pfad, die Datei.
+   * In Discord hängt Strg+V den Clip danach als Anhang an.
+   */
+  copyClipFile: (id: string) => invoke<void>("copy_clip_file", { id }),
+  /** Den Clip im Standardplayer von Windows öffnen. */
+  openClip: (id: string) => invoke<void>("open_clip", { id }),
+  clipboardWriteText: (text: string) =>
+    invoke<void>("clipboard_write_text", { text }),
+  /** Leerer String heißt: In der Zwischenablage steckt kein Text. */
+  clipboardReadText: () => invoke<string>("clipboard_read_text"),
+  /** Das Herz setzen oder wegnehmen. Die Datei bleibt dabei liegen. */
+  setClipFavorite: (id: string, favorite: boolean) =>
+    invoke<Clip>("set_clip_favorite", { id, favorite }),
+  /**
+   * Die Datei in den Ordner bringen, in den sie gehört (Spiel oder
+   * `Favoriten`). Bewusst getrennt vom Ändern: Solange der Clip im Player
+   * läuft, darf ihm niemand die Datei unter den Füßen wegziehen.
+   */
+  fileClip: (id: string) => invoke<Clip>("file_clip", { id }),
   clipTracks: (id: string) => invoke<ClipTrack[]>("clip_tracks", { id }),
   clipWaveform: (id: string) => invoke<string>("clip_waveform", { id }),
   /**
