@@ -42,6 +42,14 @@ interface EngineState {
   saveClip: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
+  /** Das Herz setzen oder wegnehmen. */
+  setFavorite: (id: string, favorite: boolean) => Promise<void>;
+  /**
+   * Die Datei in ihren Ordner bringen — nach einem Wechsel von Spiel oder
+   * Herz. Getrennt vom Ändern, damit der Player nicht mitten in der Wiedergabe
+   * seine Datei verliert: Er ruft das erst beim Schließen.
+   */
+  fileClip: (id: string) => Promise<void>;
   /** Ein Spiel bei allen Clips entfernen — die Clips selbst bleiben. */
   clearGame: (game: string) => Promise<void>;
   /**
@@ -277,6 +285,37 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
   },
 
+  async setFavorite(id, favorite) {
+    // Das Herz muss ohne Verzögerung umspringen — ein Klick, den man erst
+    // sieht, wenn die Datenbank geantwortet hat, fühlt sich kaputt an.
+    set((st) => ({
+      clips: st.clips.map((c) => (c.id === id ? { ...c, favorite } : c)),
+    }));
+    if (!inTauri) return;
+    try {
+      const clip = await api.setClipFavorite(id, favorite);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set((st) => ({
+        clips: st.clips.map((c) =>
+          c.id === id ? { ...c, favorite: !favorite } : c,
+        ),
+        lastError: String(err),
+      }));
+    }
+  },
+
+  async fileClip(id) {
+    if (!inTauri) return;
+    try {
+      const clip = await api.fileClip(id);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      // Der Ordner ist Kosmetik; der Clip selbst stimmt in jedem Fall.
+      console.error("Clip einsortieren fehlgeschlagen", err);
+    }
+  },
+
   /**
    * Räumt einen Filter weg, der keiner ist: Fehlerkennungen wie ein
    * Browserfenster stehen sonst für immer in der Galerie. Die Clips bleiben
@@ -299,6 +338,8 @@ export const useEngine = create<EngineState>((set, get) => ({
           description: clip.description,
           game: null,
         });
+        // Ohne Spiel gehört die Datei zurück in den Clip-Ordner.
+        await get().fileClip(clip.id);
       }
     } catch (err) {
       set({ lastError: String(err) });

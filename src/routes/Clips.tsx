@@ -3,10 +3,12 @@ import { useEngine } from "@/store";
 import { Card, Pill } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
+import { useClipMenu } from "@/components/clipMenu";
 import {
   IconCheck,
   IconClose,
   IconFolder,
+  IconHeart,
   IconScissors,
   IconSearch,
   IconTrash,
@@ -15,22 +17,49 @@ import type { Route } from "@/components/NavBar";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, fileName, formatAgo, formatDuration, formatSize } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import { isTextField } from "@/lib/dom";
+import type { Clip } from "@/lib/types";
 
 /**
- * Der Filter für Clips ohne Spiel.
+ * Wonach die Galerie gerade filtert.
  *
- * `null` heißt „alle", ein Spielname filtert auf dieses Spiel. Der leere String
- * kann für keines davon stehen: Der Kern macht aus einem leeren Spielnamen
- * beim Speichern `null`. Deshalb taugt er als dritter Zustand.
+ * Ein eigener Typ statt eines Spielnamens mit Sonderwerten: „Favoriten" und
+ * „ohne Spiel" sind keine Spiele, und ein Spiel, das zufällig so hieße, soll
+ * den Filter nicht durcheinanderbringen.
  */
-const NO_GAME = "";
+type Filter =
+  | { kind: "all" }
+  | { kind: "favorites" }
+  | { kind: "untagged" }
+  | { kind: "game"; name: string };
+
+const ALL: Filter = { kind: "all" };
 
 export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
-  const { clips, deleteClip, clearGame } = useEngine();
+  const { clips, deleteClip, clearGame, setFavorite, fileClip } = useEngine();
   const [query, setQuery] = useState("");
-  const [game, setGame] = useState<string | null>(null);
+  const [filter, setFilter] = useState<Filter>(ALL);
   /** Welcher Clip im Player liegt. Bearbeitet wird dort immer. */
   const [open, setOpen] = useState<number | null>(null);
+  /**
+   * Die Wiedergabeliste, wie sie beim Öffnen aussah — als Kennungen.
+   *
+   * Sie darf sich unter dem Player nicht ändern: Wer im Editor das Spiel
+   * eines Clips einträgt, während die Galerie nach genau diesem Spiel
+   * filtert, fiele sonst mitten im Tippen aus der Liste, und der Player
+   * stünde plötzlich auf einem anderen Clip.
+   */
+  const [playlist, setPlaylist] = useState<string[]>([]);
+  /**
+   * Welche Clips im Player angefasst wurden. Ihre Dateien wandern beim
+   * Schließen in den passenden Ordner — währenddessen ginge das nicht, der
+   * Player hat die Datei ja offen.
+   */
+  const touched = useRef<Set<string>>(new Set());
+  /** Welcher Clip gerade umbenannt wird — der Klick auf den Namen und
+      „Umbenennen" im Rechtsklick-Menü landen beide hier. */
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const clipMenu = useClipMenu();
 
   /** Spiele mit Anzahl, häufigste zuerst — die Leiste soll oben stehen haben,
       wonach auch wirklich gefiltert wird. */
@@ -45,15 +74,22 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
   }, [clips]);
 
   const untagged = useMemo(() => clips.filter((c) => !c.game).length, [clips]);
+  const favorites = useMemo(() => clips.filter((c) => c.favorite).length, [clips]);
 
   // Wird das Spiel eines Clips umbenannt oder entfernt, verschwindet sein
   // Filter — ohne das bliebe die Galerie leer und niemand wüsste, warum.
+  // Nicht, solange der Player offen ist: Dort entsteht die Änderung gerade,
+  // und der Filter dahinter soll dabei stehen bleiben.
   useEffect(() => {
-    if (game === null) return;
+    if (filter.kind === "all" || open !== null) return;
     const gone =
-      game === NO_GAME ? untagged === 0 : !games.some((g) => g.name === game);
-    if (gone) setGame(null);
-  }, [game, games, untagged]);
+      filter.kind === "untagged"
+        ? untagged === 0
+        : filter.kind === "favorites"
+          ? favorites === 0
+          : !games.some((g) => g.name === filter.name);
+    if (gone) setFilter(ALL);
+  }, [filter, games, untagged, favorites, open]);
 
   const visible = clips.filter((c) => {
     const haystack = [
@@ -65,12 +101,49 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
       .join(" ")
       .toLowerCase();
     const matchesQuery = !query || haystack.includes(query.toLowerCase());
-    const matchesGame =
-      game === null ? true : game === NO_GAME ? !c.game : c.game === game;
-    return matchesQuery && matchesGame;
+    const matchesFilter =
+      filter.kind === "all"
+        ? true
+        : filter.kind === "favorites"
+          ? c.favorite
+          : filter.kind === "untagged"
+            ? !c.game
+            : c.game === filter.name;
+    return matchesQuery && matchesFilter;
   });
 
-  const filtered = query !== "" || game !== null;
+  const filtered = query !== "" || filter.kind !== "all";
+
+  // Gelöschte Clips fallen aus der Wiedergabeliste heraus, geänderte bleiben
+  // darin — mit dem Stand, den der Store gerade hält.
+  const playing = useMemo(() => {
+    const byId = new Map(clips.map((clip) => [clip.id, clip]));
+    return playlist
+      .map((id) => byId.get(id))
+      .filter((clip): clip is Clip => clip !== undefined);
+  }, [playlist, clips]);
+
+  /** Den Player mit der Liste öffnen, die gerade in der Galerie steht. */
+  const openAt = (index: number) => {
+    setPlaylist(visible.map((clip) => clip.id));
+    touched.current = new Set(visible[index] ? [visible[index].id] : []);
+    setOpen(index);
+  };
+
+  /** Beim Schließen nachholen, was während der Wiedergabe nicht ging: die
+      Dateien der angesehenen Clips in ihren Ordner bringen. */
+  const closePlayer = () => {
+    setOpen(null);
+    const seen = [...touched.current];
+    touched.current = new Set();
+    for (const id of seen) void fileClip(id);
+  };
+
+  /** Herz an oder aus — und die Datei gleich mitnehmen. */
+  const toggleFavorite = async (clip: Clip) => {
+    await setFavorite(clip.id, !clip.favorite);
+    await fileClip(clip.id);
+  };
 
   return (
     <div className="space-y-6">
@@ -91,9 +164,10 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
         <GameFilters
           games={games}
           untagged={untagged}
+          favorites={favorites}
           total={clips.length}
-          active={game}
-          onSelect={setGame}
+          active={filter}
+          onSelect={setFilter}
           onRemove={clearGame}
         />
       </div>
@@ -105,10 +179,24 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
       ) : (
         <div className="grid grid-cols-3 gap-4 pb-10">
           {visible.map((clip, index) => (
-            <Card key={clip.id} interactive className="group overflow-hidden">
+            <Card
+              key={clip.id}
+              interactive
+              className="group overflow-hidden"
+              onContextMenu={(event) => {
+                // Steht der Zeiger im Namensfeld, gehört das Menü dem Text —
+                // darum kümmert sich `TextMenu` von sich aus.
+                if (isTextField(event.target)) return;
+                clipMenu(event, clip, {
+                  onOpen: () => openAt(index),
+                  onRename: () => setRenaming(clip.id),
+                  onDelete: () => deleteClip(clip.id),
+                });
+              }}
+            >
               <div className="relative">
                 <button
-                  onClick={() => setOpen(index)}
+                  onClick={() => openAt(index)}
                   aria-label={`${clip.game ?? "Clip"} abspielen`}
                   className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
                 >
@@ -154,6 +242,28 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                     </span>
                   </span>
                 </button>
+                {/* Das Herz bleibt sichtbar, wenn es gesetzt ist — sonst
+                    müsste man jede Kachel anfahren, um seine Favoriten zu
+                    sehen. */}
+                <button
+                  aria-label={clip.favorite ? "Herz wegnehmen" : "Als Favorit merken"}
+                  aria-pressed={clip.favorite}
+                  title={
+                    clip.favorite
+                      ? "Favorit — die Datei liegt im Ordner „Favoriten“"
+                      : "Als Favorit merken"
+                  }
+                  onClick={() => void toggleFavorite(clip)}
+                  className={cn(
+                    "absolute top-3 left-3 grid h-8 w-8 place-items-center rounded-pill",
+                    "bg-black/50 backdrop-blur-md transition",
+                    clip.favorite
+                      ? "text-live"
+                      : "text-white/70 opacity-0 group-hover:opacity-100 hover:text-white",
+                  )}
+                >
+                  <IconHeart filled={clip.favorite} className="h-4 w-4" />
+                </button>
                 <div
                   className="absolute top-3 right-3 flex gap-1.5 opacity-0 transition-opacity
                     group-hover:opacity-100"
@@ -174,9 +284,11 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 </div>
               </div>
               <div className="p-4">
-                <p className="truncate text-sm font-medium">
-                  {clipName(clip)}
-                </p>
+                <NameField
+                  clip={clip}
+                  editing={renaming === clip.id}
+                  onEditing={(on) => setRenaming(on ? clip.id : null)}
+                />
                 <p className="mt-1 truncate text-xs text-ink-muted">
                   {clip.game ? `${clip.game} · ` : ""}
                   {formatAgo(clip.createdAt)} · {clip.height}p ·{" "}
@@ -190,7 +302,7 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 {/* Nur ein Knopf: Ansehen und Bearbeiten sind derselbe
                     Bildschirm geworden. */}
                 <div className="mt-3">
-                  <Button size="sm" onClick={() => setOpen(index)}>
+                  <Button size="sm" onClick={() => openAt(index)}>
                     Öffnen
                   </Button>
                 </div>
@@ -200,17 +312,104 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
         </div>
       )}
 
-      {open !== null && visible.length > 0 && (
+      {open !== null && playing.length > 0 && (
         <ClipPlayer
-          clips={visible}
-          index={Math.min(open, visible.length - 1)}
-          onIndexChange={setOpen}
-          onClose={() => setOpen(null)}
+          clips={playing}
+          index={Math.min(open, playing.length - 1)}
+          onIndexChange={(next) => {
+            const clip = playing[next];
+            if (clip) touched.current.add(clip.id);
+            setOpen(next);
+          }}
+          onClose={closePlayer}
           onDelete={deleteClip}
           onOpenMixer={() => onNavigate("audio")}
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Der Name in der Kachel — ein Klick macht ihn zum Feld.
+ *
+ * Umbenennen soll nicht heißen, erst den Player zu öffnen. Der Name steht
+ * beim Anfassen markiert da, Enter und ein Klick daneben speichern, Escape
+ * verwirft. Gespeichert wird nur der Name; die Datei im Ordner behält ihren.
+ */
+function NameField({
+  clip,
+  editing,
+  onEditing,
+}: {
+  clip: Clip;
+  /** Von außen gesteuert, damit „Umbenennen" im Rechtsklick-Menü hier landet. */
+  editing: boolean;
+  onEditing: (on: boolean) => void;
+}) {
+  const updateClip = useEngine((state) => state.updateClip);
+  const [draft, setDraft] = useState("");
+  // Escape nimmt dem Feld den Fokus, und das löst sonst noch das Speichern
+  // aus, das gerade abgebrochen wurde.
+  const cancelled = useRef(false);
+
+  // Der Entwurf beginnt beim aktuellen Namen — egal, ob das Feld über den
+  // Klick oder über das Menü aufgeht.
+  useEffect(() => {
+    if (editing) {
+      cancelled.current = false;
+      setDraft(clip.title ?? "");
+    }
+  }, [editing, clip.title]);
+
+  const commit = () => {
+    onEditing(false);
+    if (cancelled.current) {
+      cancelled.current = false;
+      return;
+    }
+    const next = draft.trim();
+    if (next === (clip.title ?? "")) return;
+    void updateClip(clip.id, {
+      title: next || null,
+      description: clip.description,
+      game: clip.game,
+    });
+  };
+
+  if (!editing) {
+    return (
+      <button
+        title="Klicken zum Umbenennen"
+        onClick={() => onEditing(true)}
+        className="-mx-1.5 block w-[calc(100%+0.75rem)] truncate rounded-inner px-1.5 py-0.5
+          text-left text-sm font-medium transition-colors hover:bg-hover"
+      >
+        {clipName(clip)}
+      </button>
+    );
+  }
+
+  return (
+    <input
+      autoFocus
+      value={draft}
+      aria-label="Name des Clips"
+      placeholder={fileName(clip.path)}
+      onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") {
+          cancelled.current = true;
+          e.currentTarget.blur();
+        }
+      }}
+      className="-mx-1.5 w-[calc(100%+0.75rem)] rounded-inner border border-line-strong
+        bg-elevated px-1.5 py-0.5 text-sm font-medium outline-none
+        placeholder:font-normal placeholder:text-ink-faint"
+    />
   );
 }
 
@@ -257,6 +456,7 @@ function SearchField({
 function GameFilters({
   games,
   untagged,
+  favorites,
   total,
   active,
   onSelect,
@@ -264,9 +464,10 @@ function GameFilters({
 }: {
   games: Array<{ name: string; count: number }>;
   untagged: number;
+  favorites: number;
   total: number;
-  active: string | null;
-  onSelect: (game: string | null) => void;
+  active: Filter;
+  onSelect: (filter: Filter) => void;
   onRemove: (game: string) => void;
 }) {
   const strip = useRef<HTMLDivElement>(null);
@@ -280,7 +481,7 @@ function GameFilters({
     setFade({ left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 });
   }, []);
 
-  useLayoutEffect(measure, [measure, games, untagged]);
+  useLayoutEffect(measure, [measure, games, untagged, favorites]);
 
   // Das Mausrad kippen: In der Leiste gibt es nichts, was senkrecht scrollen
   // könnte, also soll das Rad sie waagerecht bewegen. Nur wenn sie wirklich
@@ -321,9 +522,32 @@ function GameFilters({
       className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5"
       style={{ maskImage: mask, WebkitMaskImage: mask }}
     >
-      <Chip active={active === null} onClick={() => onSelect(null)} count={total}>
+      <Chip
+        active={active.kind === "all"}
+        onClick={() => onSelect({ kind: "all" })}
+        count={total}
+      >
         Alle
       </Chip>
+
+      {favorites > 0 && (
+        <Chip
+          active={active.kind === "favorites"}
+          count={favorites}
+          onClick={() => onSelect({ kind: "favorites" })}
+          icon={
+            <IconHeart
+              filled
+              className={cn(
+                "h-3.5 w-3.5",
+                active.kind === "favorites" ? "text-black/70" : "text-live",
+              )}
+            />
+          }
+        >
+          Favoriten
+        </Chip>
+      )}
 
       {games.map(({ name, count }) =>
         confirming === name ? (
@@ -339,9 +563,9 @@ function GameFilters({
         ) : (
           <Chip
             key={name}
-            active={active === name}
+            active={active.kind === "game" && active.name === name}
             count={count}
-            onClick={() => onSelect(name)}
+            onClick={() => onSelect({ kind: "game", name })}
             onRemove={() => setConfirming(name)}
           >
             {name}
@@ -351,9 +575,9 @@ function GameFilters({
 
       {untagged > 0 && (
         <Chip
-          active={active === NO_GAME}
+          active={active.kind === "untagged"}
           count={untagged}
-          onClick={() => onSelect(NO_GAME)}
+          onClick={() => onSelect({ kind: "untagged" })}
         >
           Ohne Spiel
         </Chip>
@@ -370,12 +594,14 @@ function GameFilters({
 function Chip({
   active,
   count,
+  icon,
   onClick,
   onRemove,
   children,
 }: {
   active: boolean;
   count: number;
+  icon?: React.ReactNode;
   onClick: () => void;
   onRemove?: () => void;
   children: string;
@@ -398,6 +624,7 @@ function Chip({
           onRemove ? "pr-1.5" : "pr-4",
         )}
       >
+        {icon}
         <span className="max-w-[180px] truncate">{children}</span>
         <span className={cn("tabular-nums", active ? "text-black/45" : "text-ink-faint")}>
           {count}

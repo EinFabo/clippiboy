@@ -60,6 +60,8 @@ impl Library {
         // Wo der ausgelieferte Ausschnitt im Original sitzt, solange die
         // unversehrte Aufnahme noch in der Original-Ablage liegt.
         self.add_column("original", "TEXT")?;
+        // Das Herz in der Galerie.
+        self.add_column("favorite", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(())
     }
 
@@ -81,8 +83,8 @@ impl Library {
         self.conn.execute(
             "INSERT OR REPLACE INTO clips
              (id, path, created_at, duration_ms, game, width, height, size_bytes,
-              thumb_path, title, description, edit, original)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              thumb_path, title, description, edit, original, favorite)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 clip.id,
                 clip.path,
@@ -97,6 +99,7 @@ impl Library {
                 clip.description,
                 encode_edit(clip.edit.as_ref()),
                 encode_original(clip.original.as_ref()),
+                clip.favorite,
             ],
         )?;
         Ok(())
@@ -105,7 +108,7 @@ impl Library {
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,
-                    thumb_path, title, description, edit, original
+                    thumb_path, title, description, edit, original, favorite
              FROM clips ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -123,6 +126,7 @@ impl Library {
                 description: row.get(10)?,
                 edit: decode_edit(row.get::<_, Option<String>>(11)?),
                 original: decode_original(row.get::<_, Option<String>>(12)?),
+                favorite: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -144,6 +148,34 @@ impl Library {
         self.conn.execute(
             "UPDATE clips SET title = ?2, description = ?3, game = ?4 WHERE id = ?1",
             params![id, title, description, game],
+        )?;
+        Ok(())
+    }
+
+    /// Das Herz setzen oder wegnehmen.
+    pub fn set_favorite(&self, id: &str, favorite: bool) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET favorite = ?2 WHERE id = ?1",
+            params![id, favorite],
+        )?;
+        Ok(())
+    }
+
+    /// Den Dateipfad nachtragen — nach einem Umzug in einen anderen Ordner.
+    pub fn set_path(&self, id: &str, path: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET path = ?2 WHERE id = ?1",
+            params![id, path],
+        )?;
+        Ok(())
+    }
+
+    /// Das Vorschaubild eintragen. `None` heißt: Es gibt keines mehr — die
+    /// Galerie zeigt dann ihren Farbverlauf statt eines toten Pfades.
+    pub fn set_thumb(&self, id: &str, thumb_path: Option<&str>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET thumb_path = ?2 WHERE id = ?1",
+            params![id, thumb_path],
         )?;
         Ok(())
     }
@@ -254,6 +286,7 @@ mod tests {
             description: None,
             edit: None,
             original: None,
+            favorite: false,
         }
     }
 

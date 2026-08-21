@@ -82,6 +82,59 @@ export const IconTrash = ({ className = base }: P) => (
   </svg>
 );
 
+/** Das Herz. Gefüllt heißt: markiert — der Unterschied muss auf einen Blick
+    erkennbar sein, ohne die Farbe zu suchen. */
+export const IconHeart = ({
+  className = base,
+  filled = false,
+}: P & { filled?: boolean }) => (
+  <svg
+    viewBox="0 0 24 24"
+    className={className}
+    fill={filled ? "currentColor" : "none"}
+    strokeWidth="1.8"
+    stroke="currentColor"
+    strokeLinejoin="round"
+  >
+    <path d="M12 20.3 4.6 13a4.6 4.6 0 0 1 6.5-6.5l.9.9.9-.9A4.6 4.6 0 1 1 19.4 13l-7.4 7.3Z" />
+  </svg>
+);
+
+export const IconPlay = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" className={className} fill="currentColor">
+    <path d="M8 5.4 18.5 12 8 18.6V5.4Z" />
+  </svg>
+);
+
+export const IconPencil = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
+    <path d="M4 20v-3.5L16 4.6a1.6 1.6 0 0 1 2.3 0l1.1 1.1a1.6 1.6 0 0 1 0 2.3L7.5 20H4Z" />
+  </svg>
+);
+
+/** Zwei Blätter übereinander — Kopieren. */
+export const IconCopy = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
+    <rect x="9" y="9" width="11" height="11" rx="2.5" />
+    <path d="M15 5.5A2.5 2.5 0 0 0 12.5 3h-7A2.5 2.5 0 0 0 3 5.5v7A2.5 2.5 0 0 0 5.5 15" strokeLinecap="round" />
+  </svg>
+);
+
+/** Klemmbrett — Einfügen. */
+export const IconPaste = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
+    <path d="M9 4.5H7A2.5 2.5 0 0 0 4.5 7v12A2.5 2.5 0 0 0 7 21.5h10a2.5 2.5 0 0 0 2.5-2.5V7A2.5 2.5 0 0 0 17 4.5h-2" />
+    <rect x="9" y="2.5" width="6" height="4" rx="1.5" />
+  </svg>
+);
+
+/** Gestrichelter Rahmen — alles markieren. */
+export const IconSelectAll = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round" strokeDasharray="3 3">
+    <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
+  </svg>
+);
+
 export const IconFolder = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
     <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17V7.5Z" />

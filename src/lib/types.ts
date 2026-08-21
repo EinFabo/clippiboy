@@ -51,6 +51,11 @@ export interface CaptureTarget {
   width: number;
   height: number;
   isPrimary: boolean;
+  /**
+   * Bildwiederholrate in Hertz — bei einem Fenster die des Bildschirms, auf
+   * dem es liegt. `null`, wenn Windows sie nicht meldet.
+   */
+  refreshHz: number | null;
 }
 
 export interface RecordingConfig {
@@ -116,6 +121,11 @@ export interface Clip {
   /** Selbst vergebener Name; ohne ihn zeigt die Galerie den Dateinamen. */
   title: string | null;
   description: string | null;
+  /**
+   * Mit dem Herz markiert — zugleich eine eigene Kategorie: Die Datei liegt
+   * dann im Ordner `Favoriten`, in der App bleibt der Clip unter seinem Spiel.
+   */
+  favorite: boolean;
   /** Zuschnitt und Mischung aus dem Editor; `null` heißt unangetastet. */
   edit: ClipEdit | null;
   /**

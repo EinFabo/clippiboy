@@ -48,7 +48,10 @@ Tools mit C++-Workload und WebView2 (ab Windows 11 vorinstalliert).
 ffmpeg muss **nicht** installiert sein: `npm run ffmpeg` legt eine
 getestete Fassung neben die App, und die hat Vorrang vor einer im PATH.
 
-Hotkeys: `Strg+Shift+B` Puffer an/aus, `Strg+Shift+S` Clip speichern.
+Hotkeys: `Strg+Shift+B` Puffer an/aus, `Strg+Shift+S` Clip speichern. Beide
+lassen sich in den Einstellungen auf jede Taste legen — auch auf eine ohne
+Zusatztaste, etwa `F9`. Eine einzelne Buchstabentaste gilt dann allerdings
+überall, auch im Chat.
 
 Das ✕ schließt die App nicht, sondern legt sie ins Tray — dort lässt sie sich
 wieder öffnen, der Puffer an- und ausschalten und ein Clip speichern; der
@@ -158,6 +161,9 @@ src/                     React-UI
   routes/                Übersicht, Clips, Audio-Mixer, Aufnahme, Einstellungen
   components/ClipPlayer.tsx   Player über der Galerie
   components/ClipEditor.tsx   Bearbeiten-Bereich: Metadaten, Spuren, Export
+  components/ui/Menu.tsx      Rechtsklick-Menü (ein Menü, global)
+  components/clipMenu.tsx     dessen Einträge für einen Clip
+  components/TextMenu.tsx     WebView-Menü aus, eigenes Menü in Textfeldern
   lib/useClipMix.ts      zusätzliche Tonspuren synchron zum Video abspielen
   overlay/               eigenes Fenster: der Banner über dem Spiel
 src-tauri/src/
@@ -177,13 +183,16 @@ src-tauri/src/
   audio/ring.rs          Ringpuffer je Quelle (+ Unit-Tests)
   audio/devices.rs       WASAPI-Endpunkte und Prozesse mit Audio-Session
   audio/mod.rs           Spur-Layout, Gain (+ Unit-Tests)
-  capture.rs             Monitore und Fenster als Aufnahmeziele
+  capture.rs             Monitore und Fenster als Aufnahmeziele, samt Hz
   game.rs                Spielerkennung (+ Unit-Tests)
   games.json             EXE → Spielname
   tray.rs                Tray-Symbol, Menü, Tooltip
   overlay.rs             Overlay-Fenster ansteuern
   encode.rs              Encoder-Erkennung
+  clipboard.rs           Windows-Zwischenablage: Datei (CF_HDROP) und Text
   clips.rs               SQLite-Clip-Index
+  filing.rs              Ordnung im Clip-Ordner: je Spiel ein Ordner (+ Tests)
+  thumbs.rs              Vorschaubilder (im Datenverzeichnis, nicht beim Clip)
   config.rs              Konfiguration als JSON
   commands.rs            Tauri-Commands
   updater.rs             Update-Prüfung und Installation
@@ -194,6 +203,22 @@ src-tauri/examples/
 scripts/fetch-ffmpeg.mjs ffmpeg/ffprobe für das Paket holen
 scripts/make-icons.py    alle Icon-Größen aus icons/icon.png
 ```
+
+## Auflösung und Bildrate
+
+Beides folgt der gewählten Quelle. Die Auflösung wird auf deren Höhe gedeckelt
+und die Breite aus ihrem Seitenverhältnis gerechnet, nicht aus einem
+angenommenen 16:9. Die Bildrate bietet die üblichen Stufen nur bis zur
+Wiederholrate des Bildschirms an — und dessen eigene Rate obendrauf, damit ein
+165-Hz-Panel auch wirklich 165 hergibt. Mehr Bilder aufzunehmen, als der
+Bildschirm ausgibt, bringt keine Bewegung dazu, flüssiger zu sein; es entstehen
+nur doppelte Bilder, die Bitrate kosten. Bei einem Fenster zählt der
+Bildschirm, auf dem es liegt.
+
+Der Kern rückt eine Einstellung, die nicht mehr passt, selbst zurecht
+(`capture::fit_to_target`) — wer von einem 165-Hz-Monitor auf einen 60-Hz-
+Zweitschirm wechselt, findet dort 60 vor statt einer Zahl, die das Panel nie
+zeigen kann.
 
 ## Spielerkennung
 
@@ -298,8 +323,11 @@ das ebenso: siehe „Clips bearbeiten".
 Im Player öffnet **Bearbeiten** (oder `E`) einen Bereich neben dem Bild:
 
 * **Name, Beschreibung, Spiel** — landen in der Clip-Datenbank, nicht im
-  Dateinamen; die Datei bleibt, wo sie ist. Die Suche in der Galerie findet
-  alle drei.
+  Dateinamen; die Datei behält ihren. Die Suche in der Galerie findet alle
+  drei. Der Name lässt sich auch ohne Player ändern: In der Galerie ein Klick
+  auf den Namen, er steht markiert da, Enter speichert, Escape verwirft. Wer das Spiel ändert, während die Galerie danach filtert, bleibt
+  im Player trotzdem auf seinem Clip: Die Wiedergabeliste wird beim Öffnen
+  eingefroren.
 * **Tonspuren** — je Spur ein Regler von −30 bis +12 dB und ein Stummschalter.
 * **Zuschnitt** — `I` und `O` setzen Anfang und Ende auf die aktuelle Stelle,
   die Griffe in der Zeitleiste lassen sich auch ziehen. Die Wiedergabe springt
@@ -307,6 +335,80 @@ Im Player öffnet **Bearbeiten** (oder `E`) einen Bereich neben dem Bild:
 * **Speichern** — schreibt beides in die Datei: die Mischung **und** den
   Zuschnitt. Was danach im Ordner liegt, ist der fertige Clip — man kann ihn
   ohne weiteres Zutun verschicken.
+
+## Das Rechtsklick-Menü
+
+Das eingebaute Menü von WebView2 — „Zurück", „Aktualisieren", „Drucken",
+„Untersuchen" — ist in der ganzen App abgeschaltet. Es bietet keine einzige
+nützliche Aktion und sieht aus wie ein Browser, der sich verlaufen hat.
+
+An seine Stelle treten zwei eigene Menüs im Stil der Oberfläche:
+
+**Auf einem Clip** (Kachel in der Galerie und Bild im Player): Öffnen · Mit
+Standardplayer öffnen · Umbenennen · Favorit · **Clip kopieren** · Pfad
+kopieren · Im Ordner zeigen · Löschen. „Clip kopieren" legt die **Datei** in
+die Zwischenablage, nicht ihren Pfad — in Discord oder WhatsApp hängt Strg+V
+den Clip danach als Anhang an, im Explorer legt es eine Kopie ab. Das Format
+dafür ist `CF_HDROP`, und das kann kein WebView: Es kommt aus
+`src-tauri/src/clipboard.rs`.
+
+**In Textfeldern**: Ausschneiden · Kopieren · Einfügen · Alles markieren. Auch
+der Text geht über den Kern statt über `navigator.clipboard` — Lesen aus der
+Zwischenablage fragt im WebView um Erlaubnis, und dieser Dialog gehört nicht in
+eine App, die ohnehin schon nativ ist. Eingefügt wird über den Setter des
+Prototyps plus `input`-Ereignis, sonst bekäme React die Änderung nicht mit und
+der Entwurf spränge beim nächsten Render zurück.
+
+Das Menü nimmt bewusst keinen Fokus (`onMouseDown` abgefangen): Sonst verlöre
+das Textfeld darunter seine Auswahl, und der Editor speicherte beim Blur mitten
+im Vorgang. Die Tastatur (↑/↓/Enter/Escape) läuft deshalb über das Dokument.
+Gerendert wird in `document.fullscreenElement ?? document.body` — im Vollbild
+des Players ist alles andere unsichtbar.
+
+## Ordnung im Clip-Ordner
+
+Jedes Spiel bekommt seinen eigenen Ordner, Favoriten kommen in `Favoriten`,
+und was kein Spiel hat, bleibt direkt im Clip-Ordner liegen:
+
+```
+Videos\ClippiBoy\
+  clip_2026-08-18_11-37.mp4      ← ohne Spiel
+  Bodycam\
+  Counter-Strike 2\
+  Favoriten\                     ← alles mit Herz, quer über die Spiele
+```
+
+Ändert sich das Spiel eines Clips oder sein Herz, wandert die Datei mit. Zwei
+Regeln dazu:
+
+**Verschoben wird erst, wenn der Clip nicht mehr offen ist.** Der Player hält
+die Datei während der Wiedergabe; sie ihm unter den Füßen wegzuziehen, ließe
+das Video abreißen. Die Galerie holt es nach, sobald der Player zugeht — und
+was dabei schiefging (Datei gesperrt, Absturz), räumt `filing::tidy` beim
+nächsten Start auf. Die Galerie stimmt in der Zwischenzeit trotzdem: Sie liest
+aus der Datenbank, nicht aus dem Dateisystem.
+
+**Angefasst wird nur, was im eingestellten Clip-Ordner liegt** — direkt darin
+oder eine Ebene tiefer. Wer den Speicherort umstellt, lässt seine bisherigen
+Clips bewusst liegen, wo sie sind; die zieht niemand hinterher. Leer gewordene
+Spielordner verschwinden von selbst, der Clip-Ordner selbst nie.
+
+Ein **Favorit ist zugleich eine Kategorie**: Die Datei liegt in `Favoriten`, in
+der App bleibt der Clip unter seinem Spiel auffindbar — beides sind Filter über
+dieselbe Datenbank. Das Herz sitzt auf der Kachel (sichtbar, sobald es gesetzt
+ist) und im Player.
+
+Spielnamen werden für den Ordner entschärft: verbotene Zeichen fliegen raus,
+Punkte und Leerzeichen am Ende auch, Gerätenamen wie `CON` bekommen einen
+Unterstrich davor, und nach 60 Zeichen ist Schluss — Spielnamen kommen teils
+aus Fenstertiteln, und die können ganze Sätze sein.
+
+Die **Vorschaubilder** liegen nicht beim Clip, sondern unter
+`%APPDATA%\ClippiBoy\thumbs\<clip-id>.jpg`. Der Clip-Ordner gehört dem
+Nutzer und soll nur Videos enthalten — wer ihn öffnet, will Clips sehen und
+nicht zu jedem eine halbe Bilddatei. Bilder aus älteren Fassungen, die noch
+neben dem Video liegen, zieht ClippiBoy beim Start dorthin um. Nach einem
+Schnitt wird das Bild neu gerechnet, mit dem Clip wird es gelöscht.
 
 Der Zuschnitt geht dabei nicht verloren. Beim ersten echten Schnitt wandert die
 unversehrte Aufnahme nach `%APPDATA%\ClippiBoy\originals\<clip-id>\`, und im

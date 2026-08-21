@@ -25,9 +25,9 @@ export const mockProcesses: AudioProcess[] = [
 ];
 
 export const mockTargets: CaptureTarget[] = [
-  { kind: "monitor", id: "\\\\.\\DISPLAY1", title: "Monitor 1 — 2560×1440", width: 2560, height: 1440, isPrimary: true },
-  { kind: "monitor", id: "\\\\.\\DISPLAY2", title: "Monitor 2 — 1920×1080", width: 1920, height: 1080, isPrimary: false },
-  { kind: "window", id: "0x00120A", title: "Counter-Strike 2", width: 2560, height: 1440, isPrimary: false },
+  { kind: "monitor", id: "\\\\.\\DISPLAY1", title: "Monitor 1 — 2560×1440", width: 2560, height: 1440, isPrimary: true, refreshHz: 165 },
+  { kind: "monitor", id: "\\\\.\\DISPLAY2", title: "Monitor 2 — 1920×1080", width: 1920, height: 1080, isPrimary: false, refreshHz: 60 },
+  { kind: "window", id: "0x00120A", title: "Counter-Strike 2", width: 2560, height: 1440, isPrimary: false, refreshHz: 165 },
 ];
 
 export const mockEncoders: EncoderInfo[] = [
@@ -112,6 +112,7 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: "Ace auf Mirage",
     description: "Letzte Runde, 1v3 nach dem Retake.",
+    favorite: true,
     edit: null,
     original: null,
   },
@@ -127,6 +128,7 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: null,
     description: null,
+    favorite: false,
     edit: null,
     original: null,
   },
@@ -142,6 +144,7 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: null,
     description: null,
+    favorite: false,
     edit: null,
     original: null,
   },
@@ -160,6 +163,7 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: null,
     description: null,
+    favorite: false,
     edit: null,
     original: null,
   },
@@ -179,6 +183,7 @@ export const mockClips: Clip[] = [
     thumbPath: null,
     title: null,
     description: null,
+    favorite: false,
     edit: null,
     original: null,
   })),

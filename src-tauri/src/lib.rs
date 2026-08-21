@@ -1,12 +1,14 @@
 pub mod audio;
 pub mod buffer;
 pub mod capture;
+pub mod clipboard;
 pub mod clips;
 pub mod commands;
 pub mod config;
 pub mod convert;
 pub mod edit;
 pub mod encode;
+pub mod filing;
 pub mod game;
 pub mod gpu;
 pub mod mft;
@@ -17,6 +19,7 @@ pub mod pipeline;
 pub mod preview;
 pub mod state;
 pub mod stems;
+pub mod thumbs;
 pub mod tray;
 pub mod updater;
 pub mod wgc;
@@ -233,22 +236,19 @@ pub fn apply_autostart(app: &tauri::AppHandle, wanted: bool) {
 /// Eine Tastenkombination prüfen, bevor sie in der Konfiguration landet.
 ///
 /// Nimmt die Schreibweise des Shortcut-Parsers an (`Ctrl+Shift+S`, `Alt+F9`,
-/// `Ctrl+Numpad1`). Eine Kombination ganz ohne Zusatztaste wird abgelehnt: ein
-/// nacktes `S` würde global jedes Tippen abfangen.
+/// `Ctrl+Numpad1`) — und ebenso eine einzelne Taste wie `F9` oder `PrintScreen`.
+/// Eine Taste ohne Zusatztaste gilt global: Wer `S` belegt, speichert auch
+/// beim Schreiben einer Nachricht einen Clip. Das ist eine Entscheidung des
+/// Nutzers, die Oberfläche warnt davor — abgelehnt wird sie hier nicht mehr.
 pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
     use std::str::FromStr;
-    use tauri_plugin_global_shortcut::{Modifiers, Shortcut};
+    use tauri_plugin_global_shortcut::Shortcut;
 
     let text = text.trim();
     if text.is_empty() {
         return Err("Es ist keine Tastenkombination hinterlegt.".into());
     }
-    let shortcut = Shortcut::from_str(text)
-        .map_err(|_| format!("„{text}“ ist keine gültige Tastenkombination."))?;
-    if shortcut.mods == Modifiers::empty() {
-        return Err("Ohne Strg, Alt, Shift oder Windows-Taste geht es nicht — sonst löst die Taste beim Tippen aus.".into());
-    }
-    Ok(shortcut)
+    Shortcut::from_str(text).map_err(|_| format!("„{text}“ ist keine gültige Tastenkombination."))
 }
 
 /// Globale Hotkeys registrieren (Speichern und Puffer an/aus).
@@ -442,10 +442,19 @@ pub fn run() {
             // bleiben liegen — der Player spielt sie direkt von dort ab.
             let _ = std::fs::create_dir_all(stems::root());
             allow_clip_dir(handle, &stems::root().to_string_lossy());
+            // Die Vorschaubilder liegen im Datenverzeichnis statt im Ordner des
+            // Nutzers — die Galerie lädt sie von dort.
+            let _ = std::fs::create_dir_all(thumbs::dir());
+            allow_clip_dir(handle, &thumbs::dir().to_string_lossy());
             // Die unversehrten Aufnahmen geschnittener Clips bleiben ebenfalls
             // liegen, werden aber nie abgespielt — also auch nicht freigeben.
             if let Some(library) = app.state::<AppState>().library.lock().as_ref() {
                 edit::repair(library);
+                // Bilder aus älteren Fassungen liegen noch neben den Videos.
+                thumbs::migrate(library);
+                // Und was seit dem letzten Mal nicht in seinen Spielordner
+                // gefunden hat, wandert jetzt dorthin.
+                filing::tidy(library, &config.clip_dir);
             }
             // Mitgeliefertes ffmpeg/ffprobe bekannt machen, bevor irgendetwas
             // einen Clip schreiben will.
@@ -487,6 +496,12 @@ pub fn run() {
             commands::list_encoders,
             commands::get_config,
             commands::set_config,
+            commands::set_clip_favorite,
+            commands::file_clip,
+            commands::copy_clip_file,
+            commands::open_clip,
+            commands::clipboard_write_text,
+            commands::clipboard_read_text,
             commands::set_hotkeys,
             commands::suspend_hotkeys,
             commands::resume_hotkeys,

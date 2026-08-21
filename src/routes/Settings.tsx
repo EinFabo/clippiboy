@@ -268,9 +268,62 @@ const KEY_LABELS: Record<string, string> = {
   Delete: "Entf",
   Insert: "Einfg",
   Backspace: "Rück",
+  CapsLock: "Feststell",
+  ScrollLock: "Rollen",
+  NumLock: "Num",
+  Pause: "Pause",
+  NumpadAdd: "Num +",
+  NumpadSubtract: "Num −",
+  NumpadMultiply: "Num ×",
+  NumpadDivide: "Num ÷",
+  NumpadDecimal: "Num ,",
+  NumpadEnter: "Num Enter",
+  NumpadEqual: "Num =",
 };
 
-/** Aus einem Tastendruck die Schreibweise machen, die der Kern annimmt. */
+/** Was auf der Taste steht. Der Ziffernblock folgt einem Muster, der Rest steht
+    in {@link KEY_LABELS}; alles andere heißt schon so, wie es heißt. */
+function keyLabel(key: string): string {
+  const numpad = /^Numpad([0-9])$/.exec(key);
+  if (numpad) return `Num ${numpad[1]}`;
+  return KEY_LABELS[key] ?? key;
+}
+
+/**
+ * Tasten, die der Hotkey-Parser im Kern kennt und die nicht schon über ihr
+ * Muster erkannt werden (Buchstaben, Ziffern, F-Tasten, Ziffernblock).
+ *
+ * Was hier fehlt, nimmt der Kern nicht an — etwa die Kontextmenü-Taste oder
+ * die kleine `<`-Taste neben der linken Umschalttaste. Die Aufnahme läuft
+ * dann einfach weiter, statt eine Belegung anzubieten, die gleich wieder
+ * abgelehnt würde.
+ */
+const KEYS = new Set([
+  "Backquote", "Backslash", "BracketLeft", "BracketRight", "Comma", "Equal",
+  "Minus", "Period", "Quote", "Semicolon", "Slash",
+  "Backspace", "CapsLock", "Enter", "Space", "Tab",
+  "Delete", "End", "Home", "Insert", "PageDown", "PageUp",
+  "PrintScreen", "ScrollLock", "Pause", "NumLock",
+  "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp",
+  "NumpadAdd", "NumpadDecimal", "NumpadDivide", "NumpadEnter", "NumpadEqual",
+  "NumpadMultiply", "NumpadSubtract",
+  "AudioVolumeDown", "AudioVolumeUp", "AudioVolumeMute",
+  "MediaPlayPause", "MediaStop", "MediaTrackNext", "MediaTrackPrevious",
+]);
+
+function supported(code: string): boolean {
+  return (
+    /^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|F([1-9]|1[0-9]|2[0-4]))$/.test(code) ||
+    KEYS.has(code)
+  );
+}
+
+/**
+ * Aus einem Tastendruck die Schreibweise machen, die der Kern annimmt.
+ *
+ * Zusatztasten sind erlaubt, aber nicht verlangt: Wer `F9` allein belegen
+ * will, soll das können — so machen es die anderen Aufnahmeprogramme auch.
+ */
 function accelerator(event: KeyboardEvent): string | null {
   const mods: string[] = [];
   if (event.ctrlKey) mods.push("Ctrl");
@@ -279,9 +332,9 @@ function accelerator(event: KeyboardEvent): string | null {
   if (event.metaKey) mods.push("Super");
 
   const code = event.code;
-  // Eine Zusatztaste allein ist noch keine Kombination — weitertippen lassen.
+  // Eine Zusatztaste allein ist noch keine Belegung — weitertippen lassen.
   if (/^(Control|Alt|Shift|Meta|OS)(Left|Right)$/.test(code)) return null;
-  if (mods.length === 0) return null;
+  if (!supported(code)) return null;
 
   // `event.code` heißt schon fast überall so wie im Parser; nur die Buchstaben-
   // und Zifferntasten schreibt man üblicherweise kurz.
@@ -293,10 +346,30 @@ function accelerator(event: KeyboardEvent): string | null {
   return [...mods, key].join("+");
 }
 
+/** Zusatztasten, an denen eine Belegung als „nur im Notfall" erkennbar ist. */
+const MODIFIERS = ["Ctrl", "Alt", "Shift", "Super"];
+
+/** Tasten, die in einem Textfeld ohnehin nichts schreiben. */
+const HARMLESS =
+  /^(F([1-9]|1[0-9]|2[0-4])|PrintScreen|ScrollLock|Pause|NumLock|CapsLock|Insert|AudioVolume|Media)/;
+
+/**
+ * Eine Belegung, die beim Tippen dazwischenfunkt: eine einzelne Taste, die
+ * auch in einem Textfeld etwas zu suchen hat. `F9` oder `Druck` sind harmlos,
+ * ein nacktes `S` ist es nicht.
+ */
+function risky(value: string): boolean {
+  const keys = value.split("+");
+  if (keys.some((key) => MODIFIERS.includes(key))) return false;
+  return !HARMLESS.test(keys[0] ?? "");
+}
+
 function Hotkeys() {
   const { config, setHotkeys } = useEngine();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const warn =
+    risky(config.saveClipHotkey) || risky(config.toggleBufferHotkey);
 
   const apply = async (saveClip: string, toggleBuffer: string) => {
     setSaving(true);
@@ -329,10 +402,16 @@ function Hotkeys() {
         </Row>
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
-        Anklicken und die gewünschte Kombination drücken. Mindestens eine
-        Zusatztaste muss dabei sein, sonst löst der Hotkey beim Tippen aus.
-        Escape bricht ab.
+        Anklicken und die gewünschte Taste drücken — mit oder ohne Strg, Alt,
+        Shift und Windows-Taste. Escape bricht ab.
       </p>
+      {warn && (
+        <p className="mt-2 text-xs text-ink-muted">
+          Eine einzelne Taste, mit der man auch schreiben kann, gilt überall:
+          Sie löst mitten im Chat aus. F-Tasten und Druck sind die ruhigeren
+          Plätze.
+        </p>
+      )}
       {error && <p className="mt-2 text-xs text-live">{error}</p>}
     </>
   );
@@ -426,7 +505,7 @@ function Hotkey({ value }: { value: string }) {
           key={key}
           className="rounded-inner border border-line bg-elevated px-2.5 py-1 font-mono text-xs text-ink-muted"
         >
-          {KEY_LABELS[key] ?? key}
+          {keyLabel(key)}
         </kbd>
       ))}
     </div>
