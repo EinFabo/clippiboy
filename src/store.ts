@@ -354,8 +354,8 @@ export const useEngine = create<EngineState>((set, get) => ({
   async applyClipEdit(id, startMs, endMs, tracks) {
     if (!inTauri) return;
     // Deliberately without an optimistic update: a file is rewritten here. If
-    // that fails — because it is still open, say — the UI must not
-    // behaupten, es sei gespeichert.
+    // that fails — because it is still open, say — the UI must not claim it was
+    // saved.
     try {
       const clip = await api.applyClipEdit(id, startMs, endMs, tracks);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));

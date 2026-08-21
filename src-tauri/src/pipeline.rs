@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn only_separate_sources_get_a_track() {
         let sources = vec![
-            source("spiel", "Spiel", false),
+            source("game", "Game", false),
             source("mic", "Microphone", true),
         ];
         let tracks = tracks_for(&sources, &[], 5);
