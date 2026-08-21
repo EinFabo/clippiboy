@@ -19,9 +19,9 @@ export function Toasts() {
 
   useEffect(() => {
     if (!inTauri) return;
-    // StrictMode mountet den Effekt zweimal; `listen` löst aber erst nach dem
-    // Cleanup auf. Ohne das Abbruch-Flag bleibt der erste Listener hängen und
-    // jede Meldung erscheint doppelt.
+    // StrictMode mounts the effect twice, but `listen` only resolves after the
+    // cleanup. Without the cancelled flag the first listener stays around and
+    // every message appears twice.
     let cancelled = false;
     let unlisten: (() => void) | undefined;
 

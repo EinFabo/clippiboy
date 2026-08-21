@@ -1,4 +1,4 @@
-// Schlanke Inline-Icons (24er Grid, currentColor) — keine Icon-Library nötig.
+// Lean inline icons (24 grid, currentColor) — no icon library needed.
 type P = { className?: string };
 const base = "h-[18px] w-[18px]";
 
@@ -82,8 +82,8 @@ export const IconTrash = ({ className = base }: P) => (
   </svg>
 );
 
-/** Das Herz. Gefüllt heißt: markiert — der Unterschied muss auf einen Blick
-    erkennbar sein, ohne die Farbe zu suchen. */
+/** The heart. Filled means marked — the difference has to be recognizable at a
+    glance, without hunting for the colour. */
 export const IconHeart = ({
   className = base,
   filled = false,
@@ -112,7 +112,7 @@ export const IconPencil = ({ className = base }: P) => (
   </svg>
 );
 
-/** Zwei Blätter übereinander — Kopieren. */
+/** Two sheets on top of each other — copy. */
 export const IconCopy = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
     <rect x="9" y="9" width="11" height="11" rx="2.5" />
@@ -120,7 +120,7 @@ export const IconCopy = ({ className = base }: P) => (
   </svg>
 );
 
-/** Klemmbrett — Einfügen. */
+/** Clipboard — paste. */
 export const IconPaste = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
     <path d="M9 4.5H7A2.5 2.5 0 0 0 4.5 7v12A2.5 2.5 0 0 0 7 21.5h10a2.5 2.5 0 0 0 2.5-2.5V7A2.5 2.5 0 0 0 17 4.5h-2" />

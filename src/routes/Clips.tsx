@@ -21,11 +21,11 @@ import { isTextField } from "@/lib/dom";
 import type { Clip } from "@/lib/types";
 
 /**
- * Wonach die Galerie gerade filtert.
+ * What the gallery is filtering by right now.
  *
- * Ein eigener Typ statt eines Spielnamens mit Sonderwerten: „Favoriten" und
- * „ohne Spiel" sind keine Spiele, und ein Spiel, das zufällig so hieße, soll
- * den Filter nicht durcheinanderbringen.
+ * A type of its own instead of a game name with magic values: "favorites" and
+ * "no game" are not games, and a game that happened to be called that should not
+ * throw the filter off.
  */
 type Filter =
   | { kind: "all" }
@@ -39,30 +39,30 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const { clips, deleteClip, clearGame, setFavorite, fileClip } = useEngine();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>(ALL);
-  /** Welcher Clip im Player liegt. Bearbeitet wird dort immer. */
+  /** Which clip is in the player. Editing always happens there. */
   const [open, setOpen] = useState<number | null>(null);
   /**
-   * Die Wiedergabeliste, wie sie beim Öffnen aussah — als Kennungen.
+   * The playlist as it looked when the player opened — as ids.
    *
-   * Sie darf sich unter dem Player nicht ändern: Wer im Editor das Spiel
-   * eines Clips einträgt, während die Galerie nach genau diesem Spiel
-   * filtert, fiele sonst mitten im Tippen aus der Liste, und der Player
-   * stünde plötzlich auf einem anderen Clip.
+   * It must not change under the player: entering a clip's game in the editor
+   * while the gallery filters by exactly that game would otherwise drop it out
+   * of the list mid-typing, and the player would suddenly sit on a different
+   * clip.
    */
   const [playlist, setPlaylist] = useState<string[]>([]);
   /**
-   * Welche Clips im Player angefasst wurden. Ihre Dateien wandern beim
-   * Schließen in den passenden Ordner — währenddessen ginge das nicht, der
-   * Player hat die Datei ja offen.
+   * Which clips were touched in the player. Their files move into the matching
+   * folder on close — that would not work while it is open, since the player
+   * holds the file.
    */
   const touched = useRef<Set<string>>(new Set());
-  /** Welcher Clip gerade umbenannt wird — der Klick auf den Namen und
-      „Umbenennen" im Rechtsklick-Menü landen beide hier. */
+  /** Which clip is being renamed — both the click on the name and "Rename" in
+      the right-click menu land here. */
   const [renaming, setRenaming] = useState<string | null>(null);
   const clipMenu = useClipMenu();
 
-  /** Spiele mit Anzahl, häufigste zuerst — die Leiste soll oben stehen haben,
-      wonach auch wirklich gefiltert wird. */
+  /** Games with a count, most frequent first — the bar should lead with what
+      people actually filter by. */
   const games = useMemo(() => {
     const counts = new Map<string, number>();
     for (const clip of clips) {
@@ -70,16 +70,16 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
     }
     return [...counts]
       .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "de"));
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "en"));
   }, [clips]);
 
   const untagged = useMemo(() => clips.filter((c) => !c.game).length, [clips]);
   const favorites = useMemo(() => clips.filter((c) => c.favorite).length, [clips]);
 
-  // Wird das Spiel eines Clips umbenannt oder entfernt, verschwindet sein
-  // Filter — ohne das bliebe die Galerie leer und niemand wüsste, warum.
-  // Nicht, solange der Player offen ist: Dort entsteht die Änderung gerade,
-  // und der Filter dahinter soll dabei stehen bleiben.
+  // If a clip's game is renamed or removed, its filter disappears — without
+  // this the gallery would stay empty and nobody would know why. Not while the
+  // player is open, though: that is where the change is being made, and the
+  // filter behind it should stay put.
   useEffect(() => {
     if (filter.kind === "all" || open !== null) return;
     const gone =
@@ -114,8 +114,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
   const filtered = query !== "" || filter.kind !== "all";
 
-  // Gelöschte Clips fallen aus der Wiedergabeliste heraus, geänderte bleiben
-  // darin — mit dem Stand, den der Store gerade hält.
+  // Deleted clips fall out of the playlist, changed ones stay in it — with
+  // whatever state the store currently holds.
   const playing = useMemo(() => {
     const byId = new Map(clips.map((clip) => [clip.id, clip]));
     return playlist
@@ -123,15 +123,15 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
       .filter((clip): clip is Clip => clip !== undefined);
   }, [playlist, clips]);
 
-  /** Den Player mit der Liste öffnen, die gerade in der Galerie steht. */
+  /** Open the player with the list currently shown in the gallery. */
   const openAt = (index: number) => {
     setPlaylist(visible.map((clip) => clip.id));
     touched.current = new Set(visible[index] ? [visible[index].id] : []);
     setOpen(index);
   };
 
-  /** Beim Schließen nachholen, was während der Wiedergabe nicht ging: die
-      Dateien der angesehenen Clips in ihren Ordner bringen. */
+  /** On close, catch up on what was not possible during playback: move the
+      files of the clips that were viewed into their folder. */
   const closePlayer = () => {
     setOpen(null);
     const seen = [...touched.current];
@@ -139,7 +139,7 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
     for (const id of seen) void fileClip(id);
   };
 
-  /** Herz an oder aus — und die Datei gleich mitnehmen. */
+  /** Heart on or off — and take the file along right away. */
   const toggleFavorite = async (clip: Clip) => {
     await setFavorite(clip.id, !clip.favorite);
     await fileClip(clip.id);
@@ -156,8 +156,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
           <SearchField value={query} onChange={setQuery} />
           <span className="ml-auto shrink-0 text-xs text-ink-faint">
             {filtered
-              ? `${visible.length} von ${clips.length} Clips`
-              : `${clips.length} Clips`}
+              ? `${visible.length} of ${clips.length} clips`
+              : `${clips.length} clips`}
           </span>
         </div>
 
@@ -174,7 +174,7 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
       {visible.length === 0 ? (
         <Card className="grid h-56 place-items-center text-sm text-ink-muted">
-          Keine Clips gefunden.
+          No clips found.
         </Card>
       ) : (
         <div className="grid grid-cols-3 gap-4 pb-10">
@@ -184,8 +184,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
               interactive
               className="group overflow-hidden"
               onContextMenu={(event) => {
-                // Steht der Zeiger im Namensfeld, gehört das Menü dem Text —
-                // darum kümmert sich `TextMenu` von sich aus.
+                // If the cursor is in the name field the menu belongs to the
+                // text — `TextMenu` takes care of that on its own.
                 if (isTextField(event.target)) return;
                 clipMenu(event, clip, {
                   onOpen: () => openAt(index),
@@ -197,21 +197,21 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
               <div className="relative">
                 <button
                   onClick={() => openAt(index)}
-                  aria-label={`${clip.game ?? "Clip"} abspielen`}
+                  aria-label={`Play ${clip.game ?? "clip"}`}
                   className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
                 >
                   {clip.thumbPath && (
                     <img
-                      // Nach einem Schnitt steht unter demselben Pfad ein neues
-                      // Bild. Ohne den Anhang zeigte der WebView weiter das aus
-                      // seinem Zwischenspeicher — also eine Stelle, die im Clip
-                      // gar nicht mehr vorkommt.
+                      // After a trim there is a new picture under the same path.
+                      // Without the suffix the WebView would keep showing the one
+                      // from its cache — a moment that no longer appears in the
+                      // clip at all.
                       src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
                       alt=""
                       className="h-full w-full object-cover"
                     />
                   )}
-                  {/* Abspielsymbol nur beim Überfahren — sonst verdeckt es das Bild. */}
+                  {/* Play symbol on hover only — it covers the picture otherwise. */}
                   <span
                     className="absolute inset-0 grid place-items-center bg-black/30 opacity-0
                       transition-opacity duration-200 group-hover:opacity-100"
@@ -222,19 +222,18 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       </svg>
                     </span>
                   </span>
-                  {/* Beide Marken in einer Zeile: Ein langer Spielname schiebt
-                      sich sonst unter die Dauer statt sich zu kürzen. */}
+                  {/* Both pills on one row: a long game name would otherwise
+                      slide under the duration instead of truncating. */}
                   <span className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
                     <Pill className="min-w-0">
-                      <span className="min-w-0 truncate">{clip.game ?? "Unbekannt"}</span>
+                      <span className="min-w-0 truncate">{clip.game ?? "Unknown"}</span>
                     </Pill>
                     <span className="flex shrink-0 items-center gap-1.5">
-                      {/* Nur bei echtem Zuschnitt: Eine geänderte Mischung
-                          sieht man dem Clip nicht an, aber seine Länge schon —
-                          und dass das Original noch daneben liegt, ist die
-                          Auskunft, die hier zählt. */}
+                      {/* Only on a real trim: you cannot see a changed mix on a
+                          clip, but you can see its length — and that the original
+                          still sits beside it is the fact that counts here. */}
                       {clip.original && (
-                        <Pill title="Zugeschnitten — das Original liegt daneben">
+                        <Pill title="Trimmed — the original sits beside it">
                           <IconScissors className="h-3 w-3" />
                         </Pill>
                       )}
@@ -242,16 +241,17 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                     </span>
                   </span>
                 </button>
-                {/* Das Herz bleibt sichtbar, wenn es gesetzt ist — sonst
-                    müsste man jede Kachel anfahren, um seine Favoriten zu
-                    sehen. */}
+                {/* The heart stays visible once set — otherwise you would have
+                    to hover every tile to see your favorites. */}
                 <button
-                  aria-label={clip.favorite ? "Herz wegnehmen" : "Als Favorit merken"}
+                  aria-label={
+                    clip.favorite ? "Remove from favorites" : "Add to favorites"
+                  }
                   aria-pressed={clip.favorite}
                   title={
                     clip.favorite
-                      ? "Favorit — die Datei liegt im Ordner „Favoriten“"
-                      : "Als Favorit merken"
+                      ? 'Favorite — the file lives in the "Favorites" folder'
+                      : "Add to favorites"
                   }
                   onClick={() => void toggleFavorite(clip)}
                   className={cn(
@@ -269,13 +269,13 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                     group-hover:opacity-100"
                 >
                   <IconAction
-                    label="Im Ordner zeigen"
+                    label="Show in folder"
                     onClick={() => inTauri && api.revealClip(clip.id)}
                   >
                     <IconFolder className="h-4 w-4" />
                   </IconAction>
                   <IconAction
-                    label="Clip löschen"
+                    label="Delete clip"
                     danger
                     onClick={() => deleteClip(clip.id)}
                   >
@@ -299,11 +299,11 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                     {clip.description}
                   </p>
                 )}
-                {/* Nur ein Knopf: Ansehen und Bearbeiten sind derselbe
-                    Bildschirm geworden. */}
+                {/* Only one button: viewing and editing have become the same
+                    screen. */}
                 <div className="mt-3">
                   <Button size="sm" onClick={() => openAt(index)}>
-                    Öffnen
+                    Open
                   </Button>
                 </div>
               </div>
@@ -331,11 +331,11 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
 }
 
 /**
- * Der Name in der Kachel — ein Klick macht ihn zum Feld.
+ * The name on the tile — one click turns it into a field.
  *
- * Umbenennen soll nicht heißen, erst den Player zu öffnen. Der Name steht
- * beim Anfassen markiert da, Enter und ein Klick daneben speichern, Escape
- * verwirft. Gespeichert wird nur der Name; die Datei im Ordner behält ihren.
+ * Renaming should not mean opening the player first. The name comes up selected,
+ * Enter and a click elsewhere save, Escape discards. Only the name is saved; the
+ * file in the folder keeps its own.
  */
 function NameField({
   clip,
@@ -343,18 +343,18 @@ function NameField({
   onEditing,
 }: {
   clip: Clip;
-  /** Von außen gesteuert, damit „Umbenennen" im Rechtsklick-Menü hier landet. */
+  /** Driven from outside so "Rename" in the right-click menu lands here. */
   editing: boolean;
   onEditing: (on: boolean) => void;
 }) {
   const updateClip = useEngine((state) => state.updateClip);
   const [draft, setDraft] = useState("");
-  // Escape nimmt dem Feld den Fokus, und das löst sonst noch das Speichern
-  // aus, das gerade abgebrochen wurde.
+  // Escape takes focus off the field, and that would otherwise still trigger the
+  // save that was just cancelled.
   const cancelled = useRef(false);
 
-  // Der Entwurf beginnt beim aktuellen Namen — egal, ob das Feld über den
-  // Klick oder über das Menü aufgeht.
+  // The draft starts at the current name — whether the field opens via the click
+  // or via the menu.
   useEffect(() => {
     if (editing) {
       cancelled.current = false;
@@ -380,7 +380,7 @@ function NameField({
   if (!editing) {
     return (
       <button
-        title="Klicken zum Umbenennen"
+        title="Click to rename"
         onClick={() => onEditing(true)}
         className="-mx-1.5 block w-[calc(100%+0.75rem)] truncate rounded-inner px-1.5 py-0.5
           text-left text-sm font-medium transition-colors hover:bg-hover"
@@ -394,7 +394,7 @@ function NameField({
     <input
       autoFocus
       value={draft}
-      aria-label="Name des Clips"
+      aria-label="Clip name"
       placeholder={fileName(clip.path)}
       onFocus={(e) => e.currentTarget.select()}
       onChange={(e) => setDraft(e.target.value)}
@@ -427,13 +427,13 @@ function SearchField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => e.key === "Escape" && onChange("")}
-        placeholder="Suchen…"
+        placeholder="Search…"
         className="h-10 w-full rounded-pill border border-line bg-surface pr-10 pl-10 text-sm
           outline-none transition-colors placeholder:text-ink-faint focus:border-line-strong"
       />
       {value && (
         <button
-          aria-label="Suche leeren"
+          aria-label="Clear search"
           onClick={() => onChange("")}
           className="absolute top-1/2 right-3 grid h-6 w-6 -translate-y-1/2 place-items-center
             rounded-pill text-ink-faint transition-colors hover:bg-hover hover:text-ink"
@@ -446,12 +446,12 @@ function SearchField({
 }
 
 /**
- * Die Spielfilter als eine einzige, waagerecht scrollende Zeile.
+ * The game filters as a single horizontally scrolling row.
  *
- * Vorher wuchs die Leiste nach rechts aus dem Fenster heraus und lange
- * Fenstertitel brachen innerhalb ihrer Pille um. Jetzt gilt: eine Zeile, feste
- * Höhe, lange Namen werden gekürzt — und was gar kein Spiel ist, lässt sich
- * mit dem × wegräumen, statt für immer dazustehen.
+ * The bar used to grow out of the window to the right, and long window titles
+ * wrapped inside their pill. Now: one row, fixed height, long names truncate —
+ * and whatever is not a game at all can be cleared away with the ×, instead of
+ * standing there forever.
  */
 function GameFilters({
   games,
@@ -483,9 +483,10 @@ function GameFilters({
 
   useLayoutEffect(measure, [measure, games, untagged, favorites]);
 
-  // Das Mausrad kippen: In der Leiste gibt es nichts, was senkrecht scrollen
-  // könnte, also soll das Rad sie waagerecht bewegen. Nur wenn sie wirklich
-  // übersteht — sonst nähme sie der Galerie grundlos das Scrollen weg.
+  // Tip the mouse wheel over: there is nothing in the bar that could scroll
+  // vertically, so the wheel should move it horizontally. Only when it really
+  // overflows — otherwise it would take scrolling away from the gallery for no
+  // reason.
   useEffect(() => {
     const el = strip.current;
     if (!el) return;
@@ -503,7 +504,7 @@ function GameFilters({
     };
   }, [measure]);
 
-  // Die Rückfrage darf nicht stehen bleiben, wenn man woanders weiterarbeitet.
+  // The confirmation must not stay up when you carry on elsewhere.
   useEffect(() => {
     if (!confirming) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setConfirming(null);
@@ -527,7 +528,7 @@ function GameFilters({
         onClick={() => onSelect({ kind: "all" })}
         count={total}
       >
-        Alle
+        All
       </Chip>
 
       {favorites > 0 && (
@@ -545,7 +546,7 @@ function GameFilters({
             />
           }
         >
-          Favoriten
+          Favorites
         </Chip>
       )}
 
@@ -579,7 +580,7 @@ function GameFilters({
           count={untagged}
           onClick={() => onSelect({ kind: "untagged" })}
         >
-          Ohne Spiel
+          No game
         </Chip>
       )}
     </div>
@@ -587,9 +588,9 @@ function GameFilters({
 }
 
 /**
- * Eine Filterpille. Der ×-Knopf sitzt fest im Layout und wird nur sichtbar,
- * wenn man die Pille anfasst — täte er das nicht, sprängen beim Überfahren
- * alle folgenden Pillen zur Seite.
+ * One filter pill. The × button holds its place in the layout and only becomes
+ * visible on hover — if it did not, every following pill would jump sideways as
+ * you moved across.
  */
 function Chip({
   active,
@@ -632,8 +633,8 @@ function Chip({
       </button>
       {onRemove && (
         <button
-          aria-label={`Filter „${children}" entfernen`}
-          title="Filter entfernen — der Spielname wird von diesen Clips gelöst"
+          aria-label={`Remove the "${children}" filter`}
+          title="Remove filter — the game name is detached from these clips"
           onClick={onRemove}
           className={cn(
             "mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-pill opacity-0 transition",
@@ -648,7 +649,7 @@ function Chip({
   );
 }
 
-/** Die Rückfrage steht an der Stelle der Pille — kein Dialog über der Seite. */
+/** The confirmation sits in the pill's place — no dialog over the page. */
 function ConfirmChip({
   name,
   onConfirm,
@@ -666,9 +667,9 @@ function ConfirmChip({
       <span className="max-w-[160px] truncate" title={name}>
         {name}
       </span>
-      <span className="whitespace-nowrap">entfernen?</span>
+      <span className="whitespace-nowrap">remove?</span>
       <button
-        aria-label="Entfernen bestätigen"
+        aria-label="Confirm removal"
         onClick={onConfirm}
         autoFocus
         className="ml-1 grid h-6 w-6 place-items-center rounded-pill hover:bg-live/25"
@@ -676,7 +677,7 @@ function ConfirmChip({
         <IconCheck className="h-3.5 w-3.5" />
       </button>
       <button
-        aria-label="Abbrechen"
+        aria-label="Cancel"
         onClick={onCancel}
         className="mr-1 grid h-6 w-6 place-items-center rounded-pill text-ink-muted hover:bg-hover hover:text-ink"
       >
@@ -686,7 +687,7 @@ function ConfirmChip({
   );
 }
 
-/** Runder Knopf über dem Vorschaubild. */
+/** Round button over the thumbnail. */
 function IconAction({
   label,
   danger,

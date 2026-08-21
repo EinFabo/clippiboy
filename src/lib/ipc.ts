@@ -16,10 +16,10 @@ import type {
   UpdateInfo,
 } from "./types";
 
-/** Läuft die App im Tauri-Container? (Im reinen Browser-Vite fehlt das IPC.) */
+/** Is the app running inside the Tauri container? (Plain browser Vite has no IPC.) */
 export const inTauri = "__TAURI_INTERNALS__" in window;
 
-/// Lokale Datei in eine für den WebView ladbare URL übersetzen.
+/// Translate a local file into a URL the WebView can load.
 export function fileUrl(path: string | null): string | undefined {
   if (!path || !inTauri) return undefined;
   return convertFileSrc(path);
@@ -33,13 +33,13 @@ export const api = {
 
   getConfig: () => invoke<AppConfig>("get_config"),
   setConfig: (config: AppConfig) => invoke<void>("set_config", { config }),
-  /** Wirft, wenn eine Kombination ungültig oder schon belegt ist. */
+  /** Throws when a combination is invalid or already taken. */
   setHotkeys: (saveClip: string, toggleBuffer: string) =>
     invoke<AppConfig>("set_hotkeys", { saveClip, toggleBuffer }),
-  /** Wirft, wenn sich der Ordner nicht anlegen oder nicht beschreiben lässt. */
+  /** Throws when the folder cannot be created or written to. */
   setClipDir: (dir: string) => invoke<AppConfig>("set_clip_dir", { dir }),
   defaultClipDir: () => invoke<string>("default_clip_dir"),
-  /** Hotkeys stilllegen, solange die Einstellungen eine Kombination aufnehmen. */
+  /** Suspend the hotkeys while the settings record a combination. */
   suspendHotkeys: () => invoke<void>("suspend_hotkeys"),
   resumeHotkeys: () => invoke<void>("resume_hotkeys"),
 
@@ -68,34 +68,33 @@ export const api = {
     meta: { title: string | null; description: string | null; game: string | null },
   ) => invoke<Clip>("update_clip", { id, ...meta }),
   /**
-   * Die Videodatei in die Zwischenablage legen — nicht den Pfad, die Datei.
-   * In Discord hängt Strg+V den Clip danach als Anhang an.
+   * Put the video file on the clipboard — not the path, the file. In Discord,
+   * Ctrl+V then attaches the clip.
    */
   copyClipFile: (id: string) => invoke<void>("copy_clip_file", { id }),
-  /** Den Clip im Standardplayer von Windows öffnen. */
+  /** Open the clip in the Windows default player. */
   openClip: (id: string) => invoke<void>("open_clip", { id }),
   clipboardWriteText: (text: string) =>
     invoke<void>("clipboard_write_text", { text }),
-  /** Leerer String heißt: In der Zwischenablage steckt kein Text. */
+  /** An empty string means there is no text on the clipboard. */
   clipboardReadText: () => invoke<string>("clipboard_read_text"),
-  /** Das Herz setzen oder wegnehmen. Die Datei bleibt dabei liegen. */
+  /** Set or take away the heart. The file stays where it is. */
   setClipFavorite: (id: string, favorite: boolean) =>
     invoke<Clip>("set_clip_favorite", { id, favorite }),
   /**
-   * Die Datei in den Ordner bringen, in den sie gehört (Spiel oder
-   * `Favoriten`). Bewusst getrennt vom Ändern: Solange der Clip im Player
-   * läuft, darf ihm niemand die Datei unter den Füßen wegziehen.
+   * Move the file into the folder it belongs in (game or `Favorites`).
+   * Deliberately separate from editing: while the clip is playing in the player,
+   * nobody may pull its file out from under it.
    */
   fileClip: (id: string) => invoke<Clip>("file_clip", { id }),
   clipTracks: (id: string) => invoke<ClipTrack[]>("clip_tracks", { id }),
   clipWaveform: (id: string) => invoke<string>("clip_waveform", { id }),
   /**
-   * Den Clip so schreiben, wie er im Editor steht: Mischung eingerechnet,
-   * Zuschnitt ausgeführt. `startMs`/`endMs` beziehen sich auf die Zeitachse der
-   * **aktuellen** Datei.
+   * Write the clip exactly as it stands in the editor: mix applied, trim carried
+   * out. `startMs`/`endMs` refer to the **current** file's timeline.
    *
-   * Der Clip wird dabei ersetzt — der Player darf ihn währenddessen nicht offen
-   * halten, sonst scheitert das Ersetzen unter Windows.
+   * The clip is replaced in the process — the player must not hold it open while
+   * that happens, or the replace fails on Windows.
    */
   applyClipEdit: (
     id: string,
@@ -103,7 +102,7 @@ export const api = {
     endMs: number,
     tracks: TrackMix[],
   ) => invoke<Clip>("apply_clip_edit", { id, startMs, endMs, tracks }),
-  /** Den Zuschnitt aufheben: die ganze Aufnahme zurück, Mischung behalten. */
+  /** Undo the trim: the whole recording back, keep the mix. */
   restoreClipOriginal: (id: string) =>
     invoke<Clip>("restore_clip_original", { id }),
 };
@@ -123,7 +122,7 @@ export const events = {
     cb: (errors: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>
     listen<Record<string, string>>("audio-errors", (e) => cb(e.payload)),
-  /** Quellen, die zwar laufen, aber nicht so, wie man es erwartet. */
+  /** Sources that do run, but not the way one expects. */
   onAudioWarnings: (
     cb: (warnings: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>

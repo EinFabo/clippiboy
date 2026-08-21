@@ -23,12 +23,12 @@ interface EngineState {
   clips: Clip[];
   levels: LevelMap;
   sourceErrors: Record<string, string>;
-  /** Quelle läuft, aber doppelt oder auf einer Notuhr — kein Fehler, aber
-   *  etwas, das man vor der Aufnahme wissen will. */
+  /** The source runs, but doubled or on a fallback clock — not an error, but
+   *  something you want to know before recording. */
   sourceWarnings: Record<string, string>;
   bufferActive: boolean;
   bufferedSeconds: number;
-  /** Im Vordergrund erkanntes Spiel, vom Kern gemeldet. */
+  /** Game detected in the foreground, reported by the core. */
   detectedGame: string | null;
   lastError: string | null;
 
@@ -36,7 +36,7 @@ interface EngineState {
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  /** Beide Hotkeys auf einmal — der Kern nimmt sie nur zusammen an. */
+  /** Both hotkeys at once — the core only accepts them together. */
   setHotkeys: (saveClip: string, toggleBuffer: string) => Promise<void>;
   setClipDir: (dir: string) => Promise<void>;
   upsertSource: (source: AudioSource) => Promise<void>;
@@ -45,19 +45,19 @@ interface EngineState {
   saveClip: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
-  /** Das Herz setzen oder wegnehmen. */
+  /** Set or take away the heart. */
   setFavorite: (id: string, favorite: boolean) => Promise<void>;
   /**
-   * Die Datei in ihren Ordner bringen — nach einem Wechsel von Spiel oder
-   * Herz. Getrennt vom Ändern, damit der Player nicht mitten in der Wiedergabe
-   * seine Datei verliert: Er ruft das erst beim Schließen.
+   * Move the file into its folder — after a change of game or heart. Kept apart
+   * from editing so the player does not lose its file mid-playback: it only calls
+   * this on close.
    */
   fileClip: (id: string) => Promise<void>;
-  /** Ein Spiel bei allen Clips entfernen — die Clips selbst bleiben. */
+  /** Remove one game from every clip — the clips themselves stay. */
   clearGame: (game: string) => Promise<void>;
   /**
    * Den Clip so schreiben, wie er im Editor steht: Mischung eingerechnet,
-   * Zuschnitt ausgeführt. Fasst die Datei selbst an, nicht nur die Datenbank.
+   * trim carried out. Touches the file itself, not just the database.
    */
   applyClipEdit: (
     id: string,
@@ -65,11 +65,11 @@ interface EngineState {
     endMs: number,
     tracks: TrackMix[],
   ) => Promise<void>;
-  /** Den Zuschnitt aufheben und die ganze Aufnahme zurückholen. */
+  /** Undo the trim and pull the whole recording back. */
   restoreClipOriginal: (id: string) => Promise<void>;
 }
 
-/** Die von Hand pflegbaren Felder eines Clips. */
+/** A clip's hand-editable fields. */
 export interface ClipMeta {
   title: string | null;
   description: string | null;
@@ -94,7 +94,7 @@ export const useEngine = create<EngineState>((set, get) => ({
 
   async init() {
     if (!inTauri) {
-      // Browser-Modus: Mocks laden, Pegel simulieren.
+      // Browser mode: load the mocks, simulate levels.
       set({
         ready: true,
         config: mock.mockConfig,
@@ -115,10 +115,10 @@ export const useEngine = create<EngineState>((set, get) => ({
       return;
     }
 
-    // Jede Abfrage für sich: Scheitert eine — etwa die Prozessliste, für die
-    // Windows nicht immer Rechte gibt —, darf das nicht den Rest mitreißen.
-    // Vorher blieb in dem Fall auch die Zielliste leer und man konnte auf der
-    // Aufnahmeseite keine Quelle auswählen.
+    // Every query on its own: if one fails — the process list, say, for which
+    // Windows does not always grant rights — that must not take the rest down
+    // with it. Previously the target list stayed empty in that case too and no
+    // source could be picked on the recording page.
     const fail = (what: string, err: unknown) => {
       console.error(`${what} fehlgeschlagen`, err);
       set({ lastError: `${what}: ${String(err)}` });
@@ -140,7 +140,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       const [config, devices, processes, targets, encoders, clips] =
         await Promise.all([
           load("Konfiguration lesen", api.getConfig, get().config),
-          load("Audiogeräte lesen", api.listAudioDevices, []),
+          load("read audio devices", api.listAudioDevices, []),
           load("Anwendungen lesen", api.listAudioProcesses, []),
           load("Aufnahmequellen lesen", api.listCaptureTargets, []),
           load("Encoder lesen", api.listEncoders, []),
@@ -156,8 +156,8 @@ export const useEngine = create<EngineState>((set, get) => ({
           detectedGame: s.game,
         }),
       );
-      // Hotkey, Tray und Button laufen im Kern über denselben Pfad und melden
-      // sich alle hierüber — deshalb wird der Clip nur an dieser Stelle ergänzt.
+      // Hotkey, tray and button all run through the same path in the core and
+      // report back here — which is why the clip is only added at this one spot.
       await events.onClipSaved((clip) =>
         set((st) => ({
           clips: [clip, ...st.clips.filter((c) => c.id !== clip.id)],
@@ -180,7 +180,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     set({ devices, processes, targets });
   },
 
-  /** Nur die Bildquellen — Monitore und offene Fenster — neu einlesen. */
+  /** Re-read only the video sources — monitors and open windows. */
   async refreshTargets() {
     if (!inTauri) return;
     try {
@@ -197,9 +197,9 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       await api.setConfig(config);
     } catch (err) {
-      // Die Auswahl steht schon in der Oberfläche — wenn der Kern sie nicht
-      // annimmt, muss das jemand sehen statt still zu scheitern.
-      set({ lastError: `Einstellung übernehmen: ${String(err)}` });
+      // The selection already stands in the UI — if the core does not accept it,
+      // somebody has to see that rather than have it fail silently.
+      set({ lastError: `Apply setting: ${String(err)}` });
     }
   },
 
@@ -214,8 +214,8 @@ export const useEngine = create<EngineState>((set, get) => ({
       }));
       return;
     }
-    // Bewusst ohne Vorgriff im Store: schlägt das Registrieren fehl, soll die
-    // alte Belegung stehen bleiben, und die Fehlermeldung gehört an die Zeile.
+    // Deliberately without an optimistic update: if registering fails, the old
+    // assignment should stand, and the error belongs on that row.
     set({ config: await api.setHotkeys(saveClip, toggleBuffer) });
   },
 
@@ -263,7 +263,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   async saveClip() {
     if (!inTauri) return;
     try {
-      // Der Kern meldet den fertigen Clip über `clip-saved` zurück.
+      // The core reports the finished clip back via `clip-saved`.
       await api.saveClip();
     } catch (err) {
       set({ lastError: String(err) });
@@ -276,8 +276,8 @@ export const useEngine = create<EngineState>((set, get) => ({
   },
 
   async updateClip(id, meta) {
-    // Erst lokal übernehmen: Getippt wird in ein Feld, das jeden Anschlag
-    // sofort zeigen soll, gespeichert wird nebenher.
+    // Apply locally first: typing happens in a field that should show every
+    // keystroke right away, saving runs alongside.
     set((st) => ({
       clips: st.clips.map((c) => (c.id === id ? { ...c, ...meta } : c)),
     }));
@@ -291,8 +291,8 @@ export const useEngine = create<EngineState>((set, get) => ({
   },
 
   async setFavorite(id, favorite) {
-    // Das Herz muss ohne Verzögerung umspringen — ein Klick, den man erst
-    // sieht, wenn die Datenbank geantwortet hat, fühlt sich kaputt an.
+    // The heart has to flip with no delay — a click you only see once the
+    // database has answered feels broken.
     set((st) => ({
       clips: st.clips.map((c) => (c.id === id ? { ...c, favorite } : c)),
     }));
@@ -316,15 +316,15 @@ export const useEngine = create<EngineState>((set, get) => ({
       const clip = await api.fileClip(id);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
-      // Der Ordner ist Kosmetik; der Clip selbst stimmt in jedem Fall.
+      // The folder is cosmetic; the clip itself is right either way.
       console.error("Clip einsortieren fehlgeschlagen", err);
     }
   },
 
   /**
-   * Räumt einen Filter weg, der keiner ist: Fehlerkennungen wie ein
-   * Browserfenster stehen sonst für immer in der Galerie. Die Clips bleiben
-   * unangetastet und heißen danach „Unbekannt".
+   * Clears away a filter that is not one: misdetections like a browser window
+   * would otherwise stand in the gallery forever. The clips stay untouched and
+   * are called "Unknown" afterwards.
    */
   async clearGame(game) {
     const affected = get().clips.filter((c) => c.game === game);
@@ -335,15 +335,15 @@ export const useEngine = create<EngineState>((set, get) => ({
     }));
     if (!inTauri) return;
     try {
-      // Der Kern kennt nur einzelne Clips; nacheinander, damit die
-      // SQLite-Verbindung nicht mit Parallelschreibern kämpft.
+      // The core only knows individual clips; one after another, so the SQLite
+      // connection does not have to fight parallel writers.
       for (const clip of affected) {
         await api.updateClip(clip.id, {
           title: clip.title,
           description: clip.description,
           game: null,
         });
-        // Ohne Spiel gehört die Datei zurück in den Clip-Ordner.
+        // With no game the file belongs back in the clip folder.
         await get().fileClip(clip.id);
       }
     } catch (err) {
@@ -353,8 +353,8 @@ export const useEngine = create<EngineState>((set, get) => ({
 
   async applyClipEdit(id, startMs, endMs, tracks) {
     if (!inTauri) return;
-    // Bewusst ohne Vorgriff im Store: Hier wird eine Datei neu geschrieben.
-    // Scheitert das — etwa weil sie noch offen ist — darf die Oberfläche nicht
+    // Deliberately without an optimistic update: a file is rewritten here. If
+    // that fails — because it is still open, say — the UI must not
     // behaupten, es sei gespeichert.
     try {
       const clip = await api.applyClipEdit(id, startMs, endMs, tracks);

@@ -11,11 +11,11 @@ import { useEngine } from "@/store";
 export type Route = "dashboard" | "clips" | "audio" | "recording" | "settings";
 
 const items: Array<{ id: Route; label: string; icon: typeof IconHome }> = [
-  { id: "dashboard", label: "Übersicht", icon: IconHome },
+  { id: "dashboard", label: "Overview", icon: IconHome },
   { id: "clips", label: "Clips", icon: IconClips },
   { id: "audio", label: "Audio", icon: IconAudio },
-  { id: "recording", label: "Aufnahme", icon: IconRecord },
-  { id: "settings", label: "Einstellungen", icon: IconSettings },
+  { id: "recording", label: "Recording", icon: IconRecord },
+  { id: "settings", label: "Settings", icon: IconSettings },
 ];
 
 export function NavBar({
@@ -57,7 +57,7 @@ export function NavBar({
             "inline-flex h-9 items-center gap-2 rounded-pill px-4 text-[13px] font-medium",
             bufferActive ? "text-ink" : "text-ink-faint",
           )}
-          title={bufferActive ? "Replay-Puffer läuft" : "Replay-Puffer aus"}
+          title={bufferActive ? "Replay buffer running" : "Replay buffer off"}
         >
           <span
             className={cn(
@@ -65,7 +65,7 @@ export function NavBar({
               bufferActive ? "animate-pulse bg-live" : "bg-line-strong",
             )}
           />
-          {bufferActive ? "Puffer aktiv" : "Puffer aus"}
+          {bufferActive ? "Buffer on" : "Buffer off"}
         </span>
       </div>
     </nav>

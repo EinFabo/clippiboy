@@ -13,13 +13,13 @@ import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/cn";
 
-/** Ein Eintrag im Menü. Trenner tragen nichts als sich selbst. */
+/** One entry in the menu. Separators carry nothing but themselves. */
 export type MenuEntry =
   | {
       kind: "item";
       label: string;
       icon?: ReactNode;
-      /** Rechts angezeigtes Tastenkürzel, etwa „Strg+C". */
+      /** Shortcut shown on the right, "Ctrl+C" for instance. */
       shortcut?: string;
       danger?: boolean;
       disabled?: boolean;
@@ -28,9 +28,9 @@ export type MenuEntry =
   | { kind: "separator" };
 
 /**
- * Was zum Öffnen reicht: Position und die Möglichkeit, das Ereignis
- * abzufangen. Passt sowohl auf React-Ereignisse als auch auf die des
- * Dokuments — das Menü in den Textfeldern kommt von dort.
+ * What is enough to open: a position and the ability to swallow the event. Fits
+ * both React events and the document's own — the text field menu comes from
+ * there.
  */
 export interface MenuTrigger {
   clientX: number;
@@ -41,8 +41,8 @@ export interface MenuTrigger {
 
 interface MenuApi {
   /**
-   * Menü an der Position des Ereignisses aufmachen. Fängt das Ereignis ab —
-   * das eingebaute Menü des WebViews bleibt damit zu.
+   * Open the menu at the event's position. Swallows the event — that keeps the
+   * WebView's built-in menu shut.
    */
   open: (trigger: MenuTrigger, entries: MenuEntry[]) => void;
   close: () => void;
@@ -50,10 +50,10 @@ interface MenuApi {
 
 const Context = createContext<MenuApi | null>(null);
 
-/** Zum Öffnen eines Menüs — überall unter dem {@link MenuProvider}. */
+/** For opening a menu — anywhere below the {@link MenuProvider}. */
 export function useMenu(): MenuApi {
   const api = useContext(Context);
-  if (!api) throw new Error("useMenu braucht einen MenuProvider");
+  if (!api) throw new Error("useMenu needs a MenuProvider");
   return api;
 }
 
@@ -61,20 +61,20 @@ interface Open {
   x: number;
   y: number;
   entries: MenuEntry[];
-  /** Im Vollbild ist alles außerhalb des Vollbild-Elements unsichtbar. */
+  /** In fullscreen everything outside the fullscreen element is invisible. */
   host: Element;
 }
 
 /**
- * Hält genau ein Menü. Mehr braucht es nicht: Ein zweiter Rechtsklick
- * ersetzt, was gerade offen ist.
+ * Holds exactly one menu. No more is needed: a second right-click replaces
+ * whatever is open.
  */
 export function MenuProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState<Open | null>(null);
 
   const close = useCallback(() => setOpen(null), []);
-  // `setOpen` ist stabil, also ist es die Schnittstelle auch — sonst hinge an
-  // jedem Render ein neues Objekt und jeder Aufrufer renderte mit.
+  // `setOpen` is stable, so the interface is too — otherwise every render would
+  // hang a new object off it and every caller would re-render along.
   const api = useMemo<MenuApi>(
     () => ({
       open: (trigger, entries) => {
@@ -101,7 +101,7 @@ export function MenuProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** Abstand zum Fensterrand, damit das Menü nicht klebt. */
+/** Distance to the window edge so the menu does not stick to it. */
 const EDGE = 8;
 
 function Surface({
@@ -113,11 +113,11 @@ function Surface({
   const box = useRef<HTMLDivElement>(null);
   const [at, setAt] = useState({ x, y });
   const [shown, setShown] = useState(false);
-  /** Womit die Tastatur gerade arbeitet. -1 heißt: nichts hervorgehoben. */
+  /** What the keyboard is working on. -1 means nothing is highlighted. */
   const [active, setActive] = useState(-1);
 
-  // Kippen, statt aus dem Fenster zu laufen. Erst nach dem Einhängen — vorher
-  // ist die Größe des Menüs nicht bekannt.
+  // Flip instead of running out of the window. Only after mounting — before
+  // that the menu's size is not known.
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
@@ -141,11 +141,11 @@ function Surface({
   };
 
   useEffect(() => {
-    // Alles, was den Blick woanders hinlenkt, schließt das Menü.
+    // Anything that draws the eye elsewhere closes the menu.
     const onScroll = () => onClose();
-    // Ein Klick **im** Menü darf es nicht schließen, bevor der Eintrag
-    // ausgelöst hat — sonst verschwände der Knopf unter dem Mauszeiger und
-    // `click` käme nie an.
+    // A click **inside** the menu must not close it before the entry has fired —
+    // otherwise the button would vanish from under the cursor and `click` would
+    // never arrive.
     const onDown = (event: MouseEvent) => {
       if (box.current?.contains(event.target as Node)) return;
       onClose();
@@ -177,7 +177,7 @@ function Surface({
     window.addEventListener("blur", onClose);
     window.addEventListener("resize", onClose);
     window.addEventListener("keydown", onKey, true);
-    // In der Erfassungsphase, sonst entgeht uns das Scrollen in der Galerie.
+    // In the capture phase, otherwise we miss scrolling in the gallery.
     window.addEventListener("scroll", onScroll, true);
     return () => {
       window.removeEventListener("mousedown", onDown);
@@ -192,8 +192,8 @@ function Surface({
     <div
       ref={box}
       role="menu"
-      // Das Menü nimmt bewusst keinen Fokus: Sonst verlöre das Textfeld
-      // darunter seine Auswahl — und der Editor speicherte beim Blur.
+      // The menu deliberately takes no focus: the text field underneath would
+      // otherwise lose its selection — and the editor would save on blur.
       onMouseDown={(event) => event.preventDefault()}
       onContextMenu={(event) => event.preventDefault()}
       style={{ left: at.x, top: at.y }}
@@ -224,8 +224,8 @@ function Surface({
               active === index && (entry.danger ? "bg-live/15" : "bg-hover"),
             )}
           >
-            {/* Feste Spalte für das Symbol, damit die Beschriftungen auch
-                ohne eines auf einer Linie stehen. */}
+            {/* A fixed column for the icon, so labels line up even without
+                one. */}
             <span className="grid h-4 w-4 shrink-0 place-items-center text-ink-muted">
               {entry.icon}
             </span>

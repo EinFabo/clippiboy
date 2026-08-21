@@ -1,4 +1,4 @@
-// Muss mit src-tauri/src/model.rs übereinstimmen (serde camelCase).
+// Must match src-tauri/src/model.rs (serde camelCase).
 
 export type DeviceKind = "output" | "input";
 
@@ -15,7 +15,7 @@ export interface AudioProcess {
   exe: string;
 }
 
-/** Die drei Quellentypen des Mixers. */
+/** The mixer's three source types. */
 export type SourceKind =
   | { type: "outputDevice"; deviceId: string }
   | { type: "inputDevice"; deviceId: string }
@@ -29,7 +29,7 @@ export interface AudioSource {
   gainDb: number;
   muted: boolean;
   solo: boolean;
-  /** Eigene Tonspur im MP4 statt in den Hauptmix. */
+  /** Its own audio track in the MP4 instead of the main mix. */
   separateTrack: boolean;
 }
 
@@ -52,8 +52,8 @@ export interface CaptureTarget {
   height: number;
   isPrimary: boolean;
   /**
-   * Bildwiederholrate in Hertz — bei einem Fenster die des Bildschirms, auf
-   * dem es liegt. `null`, wenn Windows sie nicht meldet.
+   * Refresh rate in hertz — for a window, that of the screen it sits on. `null`
+   * when Windows does not report it.
    */
   refreshHz: number | null;
 }
@@ -70,7 +70,7 @@ export interface RecordingConfig {
 }
 
 export interface BufferConfig {
-  /** Puffer von selbst einschalten — siehe `onlyBufferInGame`. */
+  /** Switch the buffer on by itself — see `onlyBufferInGame`. */
   autoStart: boolean;
   seconds: number;
 }
@@ -81,7 +81,7 @@ export type OverlayCorner =
   | "bottomLeft"
   | "bottomRight";
 
-/** Der Banner über dem Spiel — jede Meldungsart einzeln abschaltbar. */
+/** The banner over the game — every kind of message can be switched off. */
 export interface OverlayConfig {
   enabled: boolean;
   onClipSaved: boolean;
@@ -89,9 +89,9 @@ export interface OverlayConfig {
   onError: boolean;
   corner: OverlayCorner;
   durationMs: number;
-  /** Gerätename des Bildschirms (`\\.\DISPLAY1`); null = primärer. */
+  /** Device name of the screen (`\\.\DISPLAY1`); null = primary. */
   monitor: string | null;
-  /** Statt festem Bildschirm dem Vordergrundfenster folgen. */
+  /** Follow the foreground window instead of a fixed screen. */
   followActiveScreen: boolean;
 }
 
@@ -118,45 +118,45 @@ export interface Clip {
   height: number;
   sizeBytes: number;
   thumbPath: string | null;
-  /** Selbst vergebener Name; ohne ihn zeigt die Galerie den Dateinamen. */
+  /** A name given by hand; without it the gallery shows the file name. */
   title: string | null;
   description: string | null;
   /**
-   * Mit dem Herz markiert — zugleich eine eigene Kategorie: Die Datei liegt
-   * dann im Ordner `Favoriten`, in der App bleibt der Clip unter seinem Spiel.
+   * Marked with the heart — and a category of its own: the file then lives in
+   * the `Favorites` folder, while inside the app the clip stays under its game.
    */
   favorite: boolean;
-  /** Zuschnitt und Mischung aus dem Editor; `null` heißt unangetastet. */
+  /** Trim and mix from the editor; `null` means untouched. */
   edit: ClipEdit | null;
   /**
-   * Liegt die unversehrte Aufnahme noch daneben? Dann ist dieser Clip
-   * geschnitten und lässt sich mit `restoreClipOriginal` wieder aufziehen.
+   * Is the untouched recording still beside it? Then this clip is trimmed and
+   * can be pulled open again with `restoreClipOriginal`.
    */
   original: ClipOriginal | null;
 }
 
 /**
- * Was am Clip eingestellt ist — der Stand, der beim letzten Speichern
+ * What is set on the clip — the state that was written into the file
  * geschrieben wurde.
  */
 export interface ClipEdit {
   /**
-   * Der volle Bereich der **aktuellen** Datei, also `0 .. durationMs`. Der
-   * Zuschnitt steckt seit dem Speichern in der Datei selbst; wo er im Original
-   * saß, steht in {@link ClipOriginal}.
+   * The full range of the **current** file, i.e. `0 .. durationMs`. Since saving,
+   * the trim sits in the file itself; where it sat in the original is recorded in
+   * {@link ClipOriginal}.
    */
   startMs: number;
   endMs: number;
-  /** Die Pegel, die gerade in der Tonspur der Datei stecken. */
+  /** The levels currently baked into the file's audio track. */
   tracks: TrackMix[];
 }
 
 /**
- * Die unversehrte Aufnahme eines geschnittenen Clips — und wo der ausgelieferte
+ * The untouched recording of a trimmed clip — and where the delivered
  * Ausschnitt in ihr sitzt.
  *
- * `startMs` ist zugleich der Versatz, um den die Einzelspuren gegenüber dem
- * Video verschoben sind: Die Spuren bleiben ungeschnitten und stehen immer in
+ * `startMs` is at the same time the offset by which the individual tracks are
+ * shifted against the video: the tracks stay untrimmed and are always in
  * Koordinaten des Originals.
  */
 export interface ClipOriginal {
@@ -165,26 +165,26 @@ export interface ClipOriginal {
   endMs: number;
 }
 
-/** Wie weit das Neuschreiben eines Clips ist. */
+/** How far along rewriting a clip is. */
 export interface ClipProgress {
   clipId: string;
   /** 0 bis 1. */
   progress: number;
 }
 
-/** Eine Einzelspur eines Clips. Spur 0 ist der Hauptmix. */
+/** One individual track of a clip. Track 0 is the main mix. */
 export interface ClipTrack {
   index: number;
   label: string;
   channels: number;
   /**
-   * Die abgelegte Einzelspur. `null` heißt: Der Clip hat nur eine Tonspur, und
-   * die steckt in der Videodatei selbst — dann gibt es nichts zu mischen.
+   * The stored individual track. `null` means the clip has only one audio track
+   * and that sits in the video file itself — then there is nothing to mix.
    */
   previewPath: string | null;
 }
 
-/** Wie eine Spur beim Mischen gewichtet wird. */
+/** How a track is weighted while mixing. */
 export interface TrackMix {
   index: number;
   gainDb: number;
@@ -198,11 +198,11 @@ export interface EngineStatus {
   droppedFrames: number;
   encoder: EncoderId | null;
   fps: number;
-  /** Zuletzt im Vordergrund erkanntes Spiel. */
+  /** Game last detected in the foreground. */
   game: string | null;
 }
 
-/** Nutzlast des `overlay-banner`-Events (nur im Overlay-Fenster). */
+/** Payload of the `overlay-banner` event (overlay window only). */
 export interface OverlayBanner {
   kind: "clip" | "buffer" | "bufferOff" | "error" | "info";
   title: string;
@@ -213,7 +213,7 @@ export interface OverlayBanner {
 
 export type LevelMap = Record<string, number>;
 
-/** Was `check_update` über eine neuere Fassung meldet. */
+/** What `check_update` reports about a newer version. */
 export interface UpdateInfo {
   version: string;
   currentVersion: string;

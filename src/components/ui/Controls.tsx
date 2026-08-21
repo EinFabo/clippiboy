@@ -100,8 +100,8 @@ export function Select<T extends string>({
   );
 }
 
-/// Pegel steigen sofort und fallen weich — sonst flackert der Balken bei den
-/// 20 Spitzenwerten pro Sekunde, die der Kern liefert.
+/// Levels rise instantly and fall softly — otherwise the bar flickers at the 20
+/// peak values a second the core delivers.
 export function Meter({ level }: { level: number }) {
   const [shown, setShown] = useState(0);
 
@@ -117,8 +117,8 @@ export function Meter({ level }: { level: number }) {
     return () => clearInterval(timer);
   }, []);
 
-  // Lineare Amplitude sieht auf einem Balken immer nach „nichts" aus:
-  // normale Sprache liegt bei 0,03–0,1. Deshalb dB-Skala von -60 bis 0.
+  // Linear amplitude always looks like "nothing" on a bar: normal speech sits at
+  // 0.03–0.1. Hence a dB scale from -60 to 0.
   const db = shown > 0 ? 20 * Math.log10(shown) : -Infinity;
   const pct = Math.min(100, Math.max(0, ((db + 60) / 60) * 100));
 

@@ -27,7 +27,7 @@ body {
   cursor: default;
 }
 
-/* Große Headlines im Referenz-Stil: eng gesetzt, kräftig */
+/* Large headlines in the reference style: tightly set, bold */
 .display {
   font-weight: 700;
   letter-spacing: -0.03em;
@@ -59,14 +59,14 @@ button {
   cursor: pointer;
 }
 
-/* Fokus nur bei Tastaturbedienung sichtbar */
+/* Focus ring visible only for keyboard use */
 :focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
-/* Waagerecht scrollende Leisten führen selbst durch Verlaufskanten — eine
-   Bildlaufleiste darunter wäre nur ein zweiter, hässlicher Hinweis. */
+/* Horizontally scrolling bars guide by their own fade edges — a scrollbar below
+   would only be a second, ugly hint. */
 .no-scrollbar {
   scrollbar-width: none;
 }

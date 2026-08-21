@@ -11,7 +11,7 @@ import type { TrackState } from "@/lib/useClipMix";
 import type { Clip, ClipTrack } from "@/lib/types";
 
 export interface Trim {
-  /** Sekunden, wie die Zeitachse des Players. */
+  /** Seconds, like the player's timeline. */
   start: number;
   end: number;
 }
@@ -21,39 +21,39 @@ interface Props {
   duration: number;
   tracks: ClipTrack[];
   mix: Record<number, TrackState>;
-  /** Steht an den Spuren etwas anderes als neutral? */
+  /** Is anything on the tracks set to something other than neutral? */
   mixTouched: boolean;
   loadingTracks: boolean;
   onTrack: (index: number, patch: Partial<TrackState>) => void;
   onResetMix: () => void;
   trim: Trim;
   onTrim: (trim: Trim) => void;
-  /** Setzt Anfang oder Ende auf die Stelle, an der der Player gerade steht. */
+  /** Sets start or end to wherever the player currently stands. */
   onMark: (which: "start" | "end") => void;
-  /** Liegen die Spuren einzeln vor? Nur dann lässt sich überhaupt mischen. */
+  /** Are the tracks available separately? Only then can anything be mixed. */
   separateTracks: boolean;
-  /** Steht etwas anderes eingestellt als in der Datei? */
+  /** Is anything set differently from what is in the file? */
   dirty: boolean;
   saving: boolean;
-  /** 0 bis 1, solange geschrieben wird. `null`, solange nichts zu melden ist. */
+  /** 0 to 1 while writing. `null` while there is nothing to report. */
   progress: number | null;
   justSaved: boolean;
   onSave: () => void;
-  /** Den Zuschnitt aufheben und die ganze Aufnahme zurückholen. */
+  /** Undo the trim and pull the whole recording back. */
   onRestore: () => void;
   restoring: boolean;
-  /** Zum Audio-Mixer wechseln — von dort kommen die getrennten Spuren. */
+  /** Switch to the audio mixer — that is where the separated tracks come from. */
   onOpenMixer: () => void;
 }
 
-/** Regelbereich der Spurenregler. Mehr als +12 dB bringt nur Verzerrung. */
+/** Range of the track sliders. More than +12 dB only brings distortion. */
 const MIN_DB = -30;
 const MAX_DB = 12;
 
 /**
- * Der Bearbeiten-Bereich neben dem Player. Er ist immer offen: Ein Clip, den
- * man gerade ansieht, ist auch der Clip, den man benennen oder schneiden will
- * — ein Umschalter dazwischen wäre nur ein Klick, den man erst finden muss.
+ * The editing pane beside the player. It is always open: a clip you are looking
+ * at is also the clip you want to name or trim — a toggle in between would only
+ * be a click you have to find first.
  */
 export function ClipEditor({
   clip,
@@ -81,13 +81,13 @@ export function ClipEditor({
 
   const trimmed = trim.start > 0.05 || trim.end < duration - 0.05;
   const length = Math.max(0, trim.end - trim.start);
-  // Ein Schnitt am Anfang muss bildgenau sitzen — beim Kopieren rutschte er auf
-  // das Keyframe davor. Dafür wird das Bild neu gerechnet, und das dauert.
+  // A cut at the start has to be frame-accurate — when copying it slid to the
+  // keyframe before it. So the video gets recomputed, and that takes time.
   const reencodes = trim.start > 0.25;
   const busy = saving || restoring;
   const anySolo = Object.values(mix).some((state) => state.solo);
 
-  /** Ein Feld speichern, ohne die beiden anderen zu verlieren. */
+  /** Save one field without losing the other two. */
   const saveMeta = (patch: Partial<Record<"title" | "description" | "game", string | null>>) =>
     updateClip(clip.id, {
       title: clip.title,
@@ -101,40 +101,39 @@ export function ClipEditor({
       className="flex w-[380px] shrink-0 flex-col rounded-card border border-line
         bg-surface/80 backdrop-blur-xl"
     >
-      {/* Nur die Felder scrollen — Speichern bleibt unten stehen, sonst wäre
-          der wichtigste Knopf ausgerechnet der, den man suchen muss. */}
+      {/* Only the fields scroll — Save stays put at the bottom, otherwise the
+          most important button would be the one you have to hunt for. */}
       <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-5">
-        {/* Name und Beschreibung tragen keine Beschriftung und keinen Rahmen:
-            Sie sehen aus wie das, was sie sind, und werden zum Feld, sobald
-            man sie anfasst. Ein Bearbeiten-Knopf davor wäre eine Hürde vor
-            einer Textzeile. */}
+        {/* Name and description carry no label and no border: they look like
+            what they are and turn into a field the moment you touch them. An
+            edit button in front would be a hurdle before a line of text. */}
         <section>
           <Field
             key={`title-${clip.id}`}
             value={clip.title ?? ""}
             placeholder={fileName(clip.path)}
-            ariaLabel="Name des Clips"
+            ariaLabel="Clip name"
             className="display text-xl leading-snug"
             onSave={(title) => saveMeta({ title })}
           />
           <Field
             key={`description-${clip.id}`}
             value={clip.description ?? ""}
-            placeholder="Was passiert hier?"
-            ariaLabel="Beschreibung"
+            placeholder="What happens here?"
+            ariaLabel="Description"
             multiline
             className="mt-1 text-sm leading-relaxed text-ink-muted"
             onSave={(description) => saveMeta({ description })}
           />
-          {/* Das Spiel bleibt beschriftet: Es ist kein Fließtext, sondern der
-              Wert, nach dem die Galerie filtert. */}
+          {/* The game keeps its label: it is not prose but the value the gallery
+              filters by. */}
           <label className="mt-3 flex items-center gap-2">
-            <span className="shrink-0 text-xs text-ink-faint">Spiel</span>
+            <span className="shrink-0 text-xs text-ink-faint">Game</span>
             <Field
               key={`game-${clip.id}`}
               value={clip.game ?? ""}
-              placeholder="Unbekannt"
-              ariaLabel="Spiel"
+              placeholder="Unknown"
+              ariaLabel="Game"
               className="text-sm"
               onSave={(game) => saveMeta({ game })}
             />
@@ -143,18 +142,18 @@ export function ClipEditor({
 
         <section className="space-y-3">
           <div className="flex items-center justify-between">
-            <SectionHead>Tonspuren</SectionHead>
+            <SectionHead>Audio tracks</SectionHead>
             <Reset show={mixTouched} onClick={onResetMix} />
           </div>
 
           {loadingTracks && (
-            <p className="text-xs text-ink-muted">Spuren werden gelesen…</p>
+            <p className="text-xs text-ink-muted">Reading tracks…</p>
           )}
 
           {tracks.map((track) => (
             <TrackRow
               key={track.index}
-              label={track.index === 0 ? "Hauptmix" : track.label}
+              label={track.index === 0 ? "Main mix" : track.label}
               state={mix[track.index] ?? { gainDb: 0, muted: false, solo: false }}
               anySolo={anySolo}
               onChange={(patch) => onTrack(track.index, patch)}
@@ -164,29 +163,28 @@ export function ClipEditor({
           {!loadingTracks && !separateTracks && (
             <div className="space-y-2 rounded-inner bg-elevated p-3">
               <p className="text-xs leading-relaxed text-ink-muted">
-                Von diesem Clip gibt es keine Einzelspuren — Mikrofon und Apps
-                sind fest eingemischt und lassen sich nicht mehr trennen. Wer
-                sie später einzeln regeln will, gibt ihnen im Mixer eine eigene
-                Spur; das gilt dann für die nächsten Aufnahmen.
+                This clip has no separate tracks — microphone and apps are mixed
+                in for good and cannot be separated any more. To control them
+                individually later, give them their own track in the mixer; that
+                applies to the next recordings.
               </p>
               <Button size="sm" onClick={onOpenMixer}>
-                Im Mixer einrichten
+                Set up in the mixer
               </Button>
             </div>
           )}
 
           {separateTracks && (
             <p className="text-xs leading-relaxed text-ink-faint">
-              Die Vorschau kann nur leiser werden — über 0 dB senkt sie
-              stattdessen die übrigen Spuren ab. Beim Speichern wird der Pegel
-              wirklich angehoben.
+              The preview can only get quieter — above 0 dB it lowers the other
+              tracks instead. On save the level really is raised.
             </p>
           )}
         </section>
 
         <section className="space-y-3">
           <div className="flex items-center justify-between">
-            <SectionHead>Zuschnitt</SectionHead>
+            <SectionHead>Trim</SectionHead>
             <Reset
               show={trimmed}
               onClick={() => onTrim({ start: 0, end: duration })}
@@ -194,10 +192,10 @@ export function ClipEditor({
           </div>
           <div className="flex gap-2">
             <Button size="sm" className="flex-1" onClick={() => onMark("start")}>
-              Start hier
+              Start here
             </Button>
             <Button size="sm" className="flex-1" onClick={() => onMark("end")}>
-              Ende hier
+              End here
             </Button>
           </div>
           <p className="font-mono text-xs text-ink-muted tabular-nums">
@@ -205,24 +203,24 @@ export function ClipEditor({
           </p>
           {reencodes && (
             <p className="text-xs leading-relaxed text-ink-faint">
-              Ein Schnitt am Anfang muss bildgenau sitzen — dafür wird das Bild
-              neu gerechnet. Das dauert länger als sonst.
+              A cut at the start has to be frame-accurate — the video gets
+              recomputed for it. That takes longer than usual.
             </p>
           )}
 
           {clip.original && (
             <div className="space-y-2 rounded-inner bg-elevated p-3">
               <p className="text-xs leading-relaxed text-ink-muted">
-                Geschnitten aus {clock(clip.original.durationMs / 1000)} — ab{" "}
-                {clock(clip.original.startMs / 1000)}. Die ganze Aufnahme liegt
-                daneben und kommt auf Knopfdruck zurück.
+                Trimmed from {clock(clip.original.durationMs / 1000)} — starting
+                at {clock(clip.original.startMs / 1000)}. The whole recording sits
+                beside it and comes back at the press of a button.
               </p>
               <Button
                 size="sm"
                 disabled={busy || !inTauri}
                 onClick={onRestore}
               >
-                {restoring ? "Wird zurückgeholt…" : "Zuschnitt aufheben"}
+                {restoring ? "Restoring…" : "Undo trim"}
               </Button>
             </div>
           )}
@@ -236,30 +234,30 @@ export function ClipEditor({
           disabled={busy || !dirty || !inTauri}
           onClick={onSave}
         >
-          {saving ? "Wird gespeichert…" : "Speichern"}
+          {saving ? "Saving…" : "Save"}
         </Button>
         {busy && progress !== null && <Progress value={progress} />}
         <p className="text-xs leading-relaxed text-ink-faint">
           {restoring
-            ? "Die ganze Aufnahme wird zurückgeschrieben."
+            ? "The whole recording is being written back."
             : saving
               ? reencodes
-                ? "Der Clip wird geschnitten — das Bild wird dafür neu gerechnet."
-                : "Der Clip wird neu geschrieben, das Bild bleibt unangetastet."
+                ? "The clip is being trimmed — the video is recomputed for it."
+                : "The clip is being rewritten, the video stays untouched."
               : dirty
-                ? "Noch nicht gespeichert — die Datei im Ordner ist bisher eine andere."
+                ? "Not saved yet — the file in the folder is still a different one."
                 : justSaved
-                  ? "Gespeichert. So liegt der Clip jetzt im Ordner — fertig zum Verschicken."
+                  ? "Saved. That is how the clip sits in the folder now — ready to send."
                   : clip.original
-                    ? "Der Zuschnitt steckt in der Datei. Das Original liegt daneben, aufheben geht jederzeit."
-                    : "Die Datei im Ordner ist genau das, was hier steht."}
+                    ? "The trim sits in the file. The original is beside it, undoing works any time."
+                    : "The file in the folder is exactly what stands here."}
         </p>
       </section>
     </aside>
   );
 }
 
-/** Ein Balken statt eines Knopfes, der nur „warte" sagt. */
+/** A bar instead of a button that only says "wait". */
 function Progress({ value }: { value: number }) {
   return (
     <div className="h-1 overflow-hidden rounded-pill bg-white/10">
@@ -279,7 +277,7 @@ function SectionHead({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Erscheint erst, wenn es etwas zurückzunehmen gibt. */
+/** Only appears once there is something to take back. */
 function Reset({ show, onClick }: { show: boolean; onClick: () => void }) {
   if (!show) return null;
   return (
@@ -287,12 +285,12 @@ function Reset({ show, onClick }: { show: boolean; onClick: () => void }) {
       onClick={onClick}
       className="text-xs text-ink-faint transition-colors hover:text-ink"
     >
-      Zurücksetzen
+      Reset
     </button>
   );
 }
 
-/** Eine Spur: stumm schalten, alleine hören, aussteuern. */
+/** One track: mute it, hear it alone, set its level. */
 function TrackRow({
   label,
   state,
@@ -304,8 +302,8 @@ function TrackRow({
   anySolo: boolean;
   onChange: (patch: Partial<TrackState>) => void;
 }) {
-  // Solo schlägt Stumm — steht irgendwo Solo, sind die anderen still, ganz
-  // gleich, was ihr eigener Schalter sagt.
+  // Solo beats mute — with solo set anywhere, the others are silent no matter
+  // what their own switch says.
   const silent = anySolo ? !state.solo : state.muted;
 
   return (
@@ -317,7 +315,7 @@ function TrackRow({
     >
       <div className="flex items-center gap-2">
         <button
-          aria-label={state.muted ? `${label} einschalten` : `${label} stumm`}
+          aria-label={state.muted ? `Unmute ${label}` : `Mute ${label}`}
           aria-pressed={state.muted}
           onClick={() => onChange({ muted: !state.muted })}
           className={cn(
@@ -349,13 +347,13 @@ function TrackRow({
               : "bg-white/10 text-ink-faint hover:text-ink",
           )}
         >
-          Nur diese
+          Solo
         </button>
       </div>
 
       <div className="mt-3 flex items-center gap-3">
         <Slider
-          label={`Lautstärke ${label}`}
+          label={`Volume ${label}`}
           value={state.gainDb}
           min={MIN_DB}
           max={MAX_DB}
@@ -372,9 +370,9 @@ function TrackRow({
 }
 
 /**
- * Textfeld ohne Beschriftung und ohne Rahmen: Es zeigt den Wert, und wer
- * hineinklickt, ändert ihn. Gespeichert wird kurz nach dem letzten Anschlag —
- * und beim Verlassen sofort, damit ein schnelles Schließen nichts frisst.
+ * A text field with no label and no border: it shows the value, and clicking
+ * into it changes that value. It saves shortly after the last keystroke — and
+ * immediately on leaving, so a quick close swallows nothing.
  */
 function Field({
   value,
@@ -393,20 +391,20 @@ function Field({
 }) {
   const [draft, setDraft] = useState(value);
   /**
-   * Was zuletzt an den Kern ging — oder von dort kam. Immer in der Form, die
-   * der Kern ablegt, also ohne Leerzeichen am Rand.
+   * What last went to the core — or came from it. Always in the form the core
+   * stores, i.e. without surrounding whitespace.
    */
   const saved = useRef(value);
-  // Der Aufrufer gibt bei jedem Render eine neue Funktion herein; hinge der
-  // Timer daran, würde er dauernd neu anfangen und nie auslösen.
+  // The caller passes in a new function on every render; if the timer hung off
+  // that, it would restart constantly and never fire.
   const latest = useRef(onSave);
   latest.current = onSave;
 
-  // Von außen geändert (anderer Clip, Zurücksetzen): Entwurf nachziehen.
+  // Changed from outside (different clip, reset): pull the draft along.
   //
-  // Die eigene Speicherung kommt hier ebenfalls wieder herein, nur eben
-  // getrimmt. Die darf den Entwurf nicht anfassen: Sonst verschwindet mitten
-  // im Tippen das Leerzeichen, das gerade zwischen zwei Wörter sollte.
+  // Our own save comes back in here too, only trimmed. That one must not touch
+  // the draft: otherwise the space that was meant to go between two words
+  // disappears mid-typing.
   useEffect(() => {
     if (value === saved.current) return;
     saved.current = value;
@@ -428,8 +426,8 @@ function Field({
     return () => window.clearTimeout(timer);
   }, [draft]);
 
-  // Verschwindet das Feld, bevor der Timer abgelaufen ist, wäre das Getippte
-  // sonst weg — der Player schließt schneller, als 500 ms vergehen.
+  // If the field disappears before the timer has run out, what was typed would
+  // otherwise be gone — the player closes faster than 500 ms pass.
   useEffect(() => () => commitRef.current(), []);
 
   const shared = cn(
@@ -463,8 +461,8 @@ function Field({
   );
 }
 
-/** Textfeld, das mit seinem Inhalt wächst statt eine eigene Bildlaufleiste zu
-    bekommen — zwei Sätze Beschreibung sollen ohne Scrollen lesbar sein. */
+/** A text field that grows with its content instead of getting a scrollbar of
+    its own — two sentences of description should be readable without scrolling. */
 function GrowingArea({
   ariaLabel,
   value,

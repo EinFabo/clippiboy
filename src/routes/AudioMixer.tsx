@@ -14,12 +14,12 @@ import { cn } from "@/lib/cn";
 import type { AudioSource, SourceKind } from "@/lib/types";
 
 /**
- * Bekommt die Quelle von sich aus eine eigene Tonspur?
+ * Does the source get a track of its own by default?
  *
- * Mikrofon und einzelne Anwendungen ja: Genau die will man später im Clip
- * leiser drehen oder ganz loswerden, und das geht nur, wenn sie nicht schon
- * beim Aufnehmen in den Hauptmix gerechnet wurden. Ein Ausgabegerät ist der
- * Spielton selbst — der bleibt der Hauptmix.
+ * Microphone and individual applications yes: those are exactly what you want to
+ * turn down or drop entirely in the clip later, and that only works if they were
+ * not already folded into the main mix while recording. An output device is the
+ * game audio itself — that stays the main mix.
  */
 function wantsOwnTrack(kind: SourceKind): boolean {
   return kind.type !== "outputDevice";
@@ -34,13 +34,13 @@ function sourceIcon(kind: SourceKind) {
 function sourceHint(kind: SourceKind, deviceName: (id: string) => string) {
   switch (kind.type) {
     case "inputDevice":
-      return `Eingang · ${deviceName(kind.deviceId)}`;
+      return `Input · ${deviceName(kind.deviceId)}`;
     case "outputDevice":
-      return `Ausgang (Loopback) · ${deviceName(kind.deviceId)}`;
+      return `Output (loopback) · ${deviceName(kind.deviceId)}`;
     case "process":
       return kind.mode === "include"
-        ? `Anwendung · PID ${kind.pid}`
-        : `Alles außer PID ${kind.pid}`;
+        ? `Application · PID ${kind.pid}`
+        : `Everything except PID ${kind.pid}`;
   }
 }
 
@@ -67,17 +67,17 @@ export function AudioMixer() {
   return (
     <div className="space-y-8">
       <header className="pt-10">
-        <h1 className="display text-4xl">Audio-Mixer</h1>
+        <h1 className="display text-4xl">Audio mixer</h1>
         <p className="mt-3 max-w-lg text-[15px] leading-relaxed text-white/70">
-          Beliebig viele Quellen gleichzeitig: Ausgabegeräte, einzelne
-          Anwendungen und Mikrofone. Jede Quelle kann in den Hauptmix oder auf
-          eine eigene Tonspur im Clip laufen.
+          Any number of sources at once: output devices, individual
+          applications and microphones. Each source can run into the main mix or
+          onto a track of its own in the clip.
         </p>
       </header>
 
       <section>
         <SectionTitle
-          title="Quellen"
+          title="Sources"
           action={
             <Button
               size="sm"
@@ -85,7 +85,7 @@ export function AudioMixer() {
               icon={<IconPlus className="h-4 w-4" />}
               onClick={() => setAdding((v) => !v)}
             >
-              Quelle hinzufügen
+              Add source
             </Button>
           }
         />
@@ -131,7 +131,7 @@ export function AudioMixer() {
                       />
                       {source.separateTrack && (
                         <span className="rounded-pill bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent-bright">
-                          eigene Spur
+                          own track
                         </span>
                       )}
                     </div>
@@ -156,7 +156,7 @@ export function AudioMixer() {
 
                   <div className="flex w-52 shrink-0 items-center gap-3">
                     <Slider
-                      label={`Lautstärke ${source.label}`}
+                      label={`Volume ${source.label}`}
                       value={source.gainDb}
                       min={-30}
                       max={12}
@@ -191,7 +191,7 @@ export function AudioMixer() {
                     <MiniToggle
                       active={source.separateTrack}
                       activeClass="bg-accent/25 text-accent-bright"
-                      title="Eigene Tonspur im MP4"
+                      title="Own audio track in the MP4"
                       onClick={() =>
                         upsertSource({
                           ...source,
@@ -203,7 +203,7 @@ export function AudioMixer() {
                     </MiniToggle>
                     <span className="mx-1">
                       <Toggle
-                        label={`${source.label} aktiv`}
+                        label={`${source.label} enabled`}
                         checked={source.enabled}
                         onChange={(enabled) =>
                           upsertSource({ ...source, enabled })
@@ -211,7 +211,7 @@ export function AudioMixer() {
                       />
                     </span>
                     <button
-                      aria-label="Quelle entfernen"
+                      aria-label="Remove source"
                       onClick={() => removeSource(source.id)}
                       className="grid h-8 w-8 place-items-center rounded-pill text-ink-faint
                         transition-colors hover:bg-live/15 hover:text-live"
@@ -227,15 +227,14 @@ export function AudioMixer() {
 
         {config.sources.length === 0 && (
           <Card className="grid h-32 place-items-center text-sm text-ink-muted">
-            Noch keine Audioquelle konfiguriert.
+            No audio source configured yet.
           </Card>
         )}
       </section>
 
       <p className="pb-4 text-xs leading-relaxed text-ink-faint">
-        Anwendungs-Quellen nutzen Prozess-Loopback (Windows 10 Build 20348+).
-        Auf älteren Systemen steht nur die Aufnahme kompletter Ausgabegeräte zur
-        Verfügung.
+        Application sources use process loopback (Windows 10 build 20348+). On
+        older systems only capturing whole output devices is available.
       </p>
 
       <AvailableSources processes={processes} />
@@ -278,15 +277,15 @@ function AvailableSources({
   if (processes.length === 0) return null;
   return (
     <p className="pb-10 text-xs text-ink-faint">
-      Erkannte Anwendungen mit Audio: {processes.map((p) => p.name).join(" · ")}
+      Applications detected with audio: {processes.map((p) => p.name).join(" · ")}
     </p>
   );
 }
 
 /**
- * Wer ClippiBoy vor dieser Änderung eingerichtet hat, hat Mikrofon und Apps im
- * Hauptmix — im Clip lassen sie sich dann nicht mehr trennen. Still umstellen
- * wäre falsch (es ändert, was aufgenommen wird), also fragen wir einmal.
+ * Anyone who set ClippiBoy up before this change has microphone and apps in the
+ * main mix — they cannot be separated in the clip afterwards. Switching silently
+ * would be wrong (it changes what gets recorded), so we ask once.
  */
 function MixedInHint({
   sources,
@@ -304,23 +303,22 @@ function MixedInHint({
         <span className="font-medium text-ink">
           {affected.map((s) => s.label).join(", ")}
         </span>{" "}
-        {affected.length === 1 ? "läuft" : "laufen"} in den Hauptmix. In
-        fertigen Clips {affected.length === 1 ? "lässt" : "lassen"} sich{" "}
-        {affected.length === 1 ? "diese Quelle" : "diese Quellen"} dann nicht
-        mehr einzeln stumm schalten oder leiser drehen.
+        {affected.length === 1 ? "runs" : "run"} into the main mix. In finished
+        clips {affected.length === 1 ? "it" : "they"} can no longer be muted or
+        turned down individually.
       </p>
       <Button
         size="sm"
         className="shrink-0"
-        // Nacheinander: Jeder Aufruf bekommt die ganze Konfiguration zurück,
-        // parallel würde die letzte Antwort die übrigen Änderungen verschlucken.
+        // One after another: each call gets the whole config back, so in
+        // parallel the last answer would swallow the other changes.
         onClick={async () => {
           for (const source of affected) {
             await onFix({ ...source, separateTrack: true });
           }
         }}
       >
-        Eigene Spuren geben
+        Give them their own tracks
       </Button>
     </Card>
   );
@@ -351,20 +349,20 @@ function AddSourcePanel({
   return (
     <Card className="mb-4 p-5">
       <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Quelle auswählen</h3>
+        <h3 className="text-sm font-semibold">Pick a source</h3>
         <div className="flex gap-2">
           <Button size="sm" variant="ghost" onClick={refreshSources}>
-            Aktualisieren
+            Refresh
           </Button>
           <Button size="sm" variant="ghost" onClick={onClose}>
-            Schließen
+            Close
           </Button>
         </div>
       </div>
 
       <div className="grid grid-cols-3 gap-6">
         <SourceColumn
-          title="Anwendungen"
+          title="Applications"
           icon={<IconApp className="h-4 w-4" />}
           entries={processes.map((p) => ({
             key: String(p.pid),
@@ -375,23 +373,23 @@ function AddSourcePanel({
           }))}
         />
         <SourceColumn
-          title="Ausgänge (Loopback)"
+          title="Outputs (loopback)"
           icon={<IconSpeaker className="h-4 w-4" />}
           entries={outputs.map((d) => ({
             key: d.id,
             label: d.name,
-            sub: d.isDefault ? "Standardgerät" : "",
+            sub: d.isDefault ? "Default device" : "",
             onPick: () =>
               onAdd(make(d.name, { type: "outputDevice", deviceId: d.id })),
           }))}
         />
         <SourceColumn
-          title="Eingänge"
+          title="Inputs"
           icon={<IconMic className="h-4 w-4" />}
           entries={inputs.map((d) => ({
             key: d.id,
             label: d.name,
-            sub: d.isDefault ? "Standardgerät" : "",
+            sub: d.isDefault ? "Default device" : "",
             onPick: () =>
               onAdd(make(d.name, { type: "inputDevice", deviceId: d.id })),
           }))}
@@ -435,7 +433,7 @@ function SourceColumn({
           </button>
         ))}
         {entries.length === 0 && (
-          <p className="px-3 py-2 text-xs text-ink-faint">nichts gefunden</p>
+          <p className="px-3 py-2 text-xs text-ink-faint">nothing found</p>
         )}
       </div>
     </div>

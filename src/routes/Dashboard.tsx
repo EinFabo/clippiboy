@@ -29,15 +29,15 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
       <header className="pt-10 pb-4 text-center">
         <h1 className="display text-5xl">ClippiBoy</h1>
         <p className="mx-auto mt-4 max-w-md text-[15px] leading-relaxed text-white/70">
-          Läuft im Hintergrund, hört auf jede Audioquelle einzeln, und speichert
-          rückwirkend genau den Moment, der es wert war.
+          Runs in the background, listens to every audio source separately, and
+          saves — after the fact — exactly the moment that was worth it.
         </p>
         <div className="mt-7 flex justify-center gap-3">
           <Button
             variant={bufferActive ? "secondary" : "primary"}
             onClick={toggleBuffer}
           >
-            {bufferActive ? "Puffer stoppen" : "Puffer starten"}
+            {bufferActive ? "Stop buffer" : "Start buffer"}
           </Button>
           <Button
             variant="secondary"
@@ -45,41 +45,41 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
             onClick={saveClip}
             disabled={!bufferActive}
           >
-            Clip speichern
+            Save clip
           </Button>
         </div>
       </header>
 
       <section className="grid grid-cols-4 gap-4">
         <Stat
-          label="Replay-Puffer"
+          label="Replay buffer"
           value={
             bufferActive
               ? formatBufferSeconds(Math.round(bufferedSeconds))
-              : "aus"
+              : "off"
           }
-          hint={`von ${formatBufferSeconds(config.buffer.seconds)}`}
+          hint={`of ${formatBufferSeconds(config.buffer.seconds)}`}
           live={bufferActive}
         />
         <Stat
-          label="Erkanntes Spiel"
-          value={detectedGame ?? "keins"}
+          label="Detected game"
+          value={detectedGame ?? "none"}
           hint={
             detectedGame
-              ? "Trägt den Namen an den nächsten Clip"
-              : "Kein Spiel im Vordergrund"
+              ? "Its name goes on the next clip"
+              : "No game in the foreground"
           }
         />
         <Stat
-          label="Aufnahme"
+          label="Recording"
           value={`${config.recording.height}p${config.recording.fps}`}
           hint={`${Math.round(config.recording.bitrateKbps / 1000)} Mbit/s · ${config.recording.encoder.toUpperCase()}`}
           onClick={() => onNavigate("recording")}
         />
         <Stat
-          label="Audioquellen"
+          label="Audio sources"
           value={String(config.sources.filter((s) => s.enabled).length)}
-          hint={`${config.sources.filter((s) => s.separateTrack).length} eigene Spuren`}
+          hint={`${config.sources.filter((s) => s.separateTrack).length} on their own track`}
           onClick={() => onNavigate("audio")}
         />
       </section>
@@ -88,16 +88,16 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
       <section>
         <SectionTitle
-          title="Neueste Clips"
+          title="Latest clips"
           action={
             <Button size="sm" variant="ghost" onClick={() => onNavigate("clips")}>
-              Alle ansehen
+              See all
             </Button>
           }
         />
         {recent.length === 0 ? (
           <Card className="grid h-44 place-items-center text-sm text-ink-muted">
-            Noch keine Clips — starte den Puffer und drücke{" "}
+            No clips yet — start the buffer and press{" "}
             <kbd className="mx-1 rounded-inner border border-line bg-elevated px-2 py-0.5 text-xs">
               {config.saveClipHotkey}
             </kbd>
@@ -119,11 +119,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       className="h-full w-full object-cover"
                     />
                   )}
-                  {/* Eine Zeile für beide Marken: Ein langer Spielname kürzt
-                      sich, statt sich unter die Dauer zu schieben. */}
+                  {/* One row for both pills: a long game name truncates rather
+                      than sliding under the duration. */}
                   <div className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
                     <Pill className="min-w-0">
-                      <span className="min-w-0 truncate">{clip.game ?? "Unbekannt"}</span>
+                      <span className="min-w-0 truncate">{clip.game ?? "Unknown"}</span>
                     </Pill>
                     <Pill className="shrink-0">{formatDuration(clip.durationMs)}</Pill>
                   </div>

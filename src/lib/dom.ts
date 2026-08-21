@@ -1,14 +1,13 @@
-/** Textfelder, in denen ein eigenes Menü mit Einfügen sinnvoll ist. */
+/** Text fields where a menu of our own with paste makes sense. */
 const TEXT_TYPES = ["text", "search", "url", "email", "tel", "password", "number"];
 
 export type TextField = HTMLInputElement | HTMLTextAreaElement;
 
 /**
- * Ist das Ziel ein Feld, in das man schreiben kann?
+ * Is the target a field you can type into?
  *
- * Zwei Stellen fragen danach: das globale Textfeld-Menü und die Clip-Kachel,
- * die ihr eigenes Menü zurückhält, solange der Zeiger über ihrem Namensfeld
- * steht.
+ * Two places ask: the global text field menu, and the clip tile, which holds
+ * back its own menu while the cursor is over its name field.
  */
 export function isTextField(target: EventTarget | null): target is TextField {
   if (target instanceof HTMLTextAreaElement) return true;

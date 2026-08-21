@@ -4,21 +4,21 @@ import { fileUrl, inTauri } from "@/lib/ipc";
 import type { OverlayBanner } from "@/lib/types";
 import { cn } from "@/lib/cn";
 
-/** Wie lange die Ausblend-Animation läuft — muss zu `cb-card-out` passen. */
+/** How long the fade-out animation runs — has to match `cb-card-out`. */
 const LEAVE_MS = 240;
 
 interface Shown extends OverlayBanner {
-  /** Steigt mit jedem Banner; erzwingt einen Remount, damit die
-   *  CSS-Animationen sauber von vorn laufen. */
+  /** Increments with every banner; forces a remount so the CSS animations run
+   *  cleanly from the start. */
   seq: number;
 }
 
 /**
- * Der Banner, der über dem Spiel eingeblendet wird.
+ * The banner shown over the game.
  *
- * Das Fenster selbst wird von Rust gezeigt, positioniert und wieder versteckt;
- * hier geht es nur um Inhalt und Animation. Es ist klick-durchlässig, also gibt
- * es bewusst keine Knöpfe darin.
+ * The window itself is shown, positioned and hidden again by Rust; this is only
+ * about content and animation. It is click-through, so there are deliberately no
+ * buttons in it.
  */
 export function Overlay() {
   const [banner, setBanner] = useState<Shown | null>(null);
@@ -28,12 +28,12 @@ export function Overlay() {
 
   useEffect(() => {
     if (!inTauri) {
-      // Im Browser (`npm run dev`) einen Beispielbanner zeigen, damit sich das
-      // Aussehen ohne Windows-Build prüfen lässt.
+      // In the browser (`npm run dev`) show a sample banner so the look can be
+      // checked without a Windows build.
       setBanner({
         kind: "clip",
         title: "Counter-Strike 2",
-        detail: "Clip gespeichert · 32 s",
+        detail: "Clip saved · 32 s",
         thumbPath: null,
         durationMs: 3500,
         seq: 0,
@@ -41,8 +41,8 @@ export function Overlay() {
       return;
     }
 
-    // Siehe Toasts.tsx: ohne Abbruch-Flag überlebt der StrictMode-Doppelmount
-    // einen Listener zu viel.
+    // See Toasts.tsx: without the cancelled flag the StrictMode double-mount
+    // leaves one listener too many behind.
     let cancelled = false;
     let unlisten: (() => void) | undefined;
 
@@ -92,8 +92,8 @@ export function Overlay() {
     info: "var(--color-line-strong)",
   }[banner.kind];
 
-  // "Puffer aus" spielt die Linie rückwärts ab und graut sie dabei aus — das
-  // Gegenstück zum Einschalten.
+  // "Buffer off" plays the line backwards and greys it out along the way — the
+  // counterpart to switching on.
   const rewind = banner.kind === "bufferOff";
 
   const thumb = fileUrl(banner.thumbPath);
@@ -109,7 +109,7 @@ export function Overlay() {
           banner.kind === "error" ? "bg-live/15" : "bg-[var(--glass)]",
         )}
       >
-        {/* Die Linie läuft einmal um die Karte und glüht dann aus. */}
+        {/* The line runs once around the card and then fades out. */}
         <svg
           className={cn(
             "cb-outline pointer-events-none absolute inset-0 h-full w-full overflow-visible",
@@ -118,8 +118,8 @@ export function Overlay() {
           style={{ "--cb-stroke": stroke } as CSSProperties}
           aria-hidden
         >
-          {/* pathLength normiert den Umfang auf 100 — sonst hinge die
-              Strichlänge an der tatsächlichen Kartengröße. */}
+          {/* pathLength normalizes the perimeter to 100 — otherwise the dash
+              length would depend on the card's actual size. */}
           <rect className="cb-halo" pathLength={100} />
           <rect className="cb-line" pathLength={100} />
         </svg>

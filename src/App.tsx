@@ -22,7 +22,7 @@ export default function App() {
   return (
     <MenuProvider>
       <div className="relative h-full overflow-hidden bg-base">
-        {/* Violetter Verlauf oben — die Signatur des Referenz-Designs */}
+        {/* Violet gradient at the top — the signature of the reference design */}
         <div
           className="pointer-events-none absolute inset-x-0 top-0 h-[420px] opacity-90"
           style={{ background: "var(--hero-gradient)" }}
@@ -40,8 +40,8 @@ export default function App() {
           </div>
         </main>
         <Toasts />
-        {/* Nimmt dem WebView sein eigenes Menü ab und gibt den Textfeldern
-            eines im Stil des Programms. */}
+        {/* Takes the WebView's own menu away and gives text fields one in the
+            program's style. */}
         <TextMenu />
       </div>
     </MenuProvider>

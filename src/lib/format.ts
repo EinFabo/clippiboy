@@ -14,11 +14,11 @@ export function formatSize(bytes: number): string {
 
 export function formatAgo(ts: number): string {
   const min = Math.round((Date.now() - ts) / 60000);
-  if (min < 1) return "gerade eben";
-  if (min < 60) return `vor ${min} Min`;
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
   const h = Math.round(min / 60);
-  if (h < 24) return `vor ${h} Std`;
-  return new Date(ts).toLocaleDateString("de-DE", {
+  if (h < 24) return `${h}h ago`;
+  return new Date(ts).toLocaleDateString("en-US", {
     day: "numeric",
     month: "long",
     year: "numeric",
@@ -32,12 +32,12 @@ export function formatBufferSeconds(s: number): string {
   return rest ? `${m} min ${rest} s` : `${m} min`;
 }
 
-/** Der Dateiname ohne Ordner — Windows- und Unix-Pfade. */
+/** The file name without its folder — Windows and Unix paths. */
 export function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-/** Wie der Clip überall heißt: der selbst vergebene Name, sonst die Datei. */
+/** What the clip is called everywhere: its given name, otherwise the file. */
 export function clipName(clip: Clip): string {
   return clip.title ?? fileName(clip.path);
 }

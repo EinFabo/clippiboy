@@ -1,5 +1,5 @@
-/* Das Overlay-Fenster ist durchsichtig — index.css setzt für die Hauptapp
-   einen deckenden Hintergrund, der hier weg muss. */
+/* The overlay window is transparent — index.css sets an opaque background for
+   the main app, and that has to go here. */
 html,
 body,
 #root {
@@ -7,9 +7,9 @@ body,
   overflow: hidden;
 }
 
-/* Die Einblendung läuft komplett über Compositor-Eigenschaften (opacity,
-   transform, stroke-dashoffset). Kein Layout, kein Repaint des Inhalts —
-   sonst ruckelt der Banner genau dann, wenn das Spiel die GPU braucht. */
+/* The fade-in runs entirely on compositor properties (opacity, transform,
+   stroke-dashoffset). No layout, no repaint of the content — otherwise the
+   banner stutters exactly when the game needs the GPU. */
 
 @keyframes cb-card-in {
   from {
@@ -33,8 +33,8 @@ body,
   }
 }
 
-/* Die Linie zeichnet sich einmal rundherum. `pathLength="100"` macht die
-   Rechnung unabhängig von der tatsächlichen Kantenlänge. */
+/* The line draws itself once all the way around. `pathLength="100"` makes the
+   arithmetic independent of the actual edge length. */
 @keyframes cb-trace {
   from {
     stroke-dashoffset: 100;
@@ -44,8 +44,8 @@ body,
   }
 }
 
-/* "Puffer aus": dieselbe Linie rückwärts — sie zieht sich dorthin zurück, wo
-   sie beim Einschalten losgelaufen ist, und verliert dabei ihre Farbe. */
+/* "Buffer off": the same line backwards — it retreats to where it set off when
+   switching on, losing its colour along the way. */
 @keyframes cb-untrace {
   from {
     stroke-dashoffset: 0;
@@ -57,7 +57,7 @@ body,
   }
 }
 
-/* Danach glüht sie kurz auf und bleibt als leiser Rand stehen. */
+/* Then it glows up briefly and stays as a quiet border. */
 @keyframes cb-glow {
   0% {
     opacity: 0;
@@ -70,7 +70,7 @@ body,
   }
 }
 
-/* Spiegelbild von `cb-glow`: kurz aufleuchten, dann ganz weg. */
+/* Mirror image of `cb-glow`: flare briefly, then gone entirely. */
 @keyframes cb-unglow {
   0% {
     opacity: 0.35;
@@ -92,8 +92,8 @@ body,
   animation: cb-card-out 240ms cubic-bezier(0.4, 0, 1, 1) both;
 }
 
-/* Geometrie als CSS statt als Attribut: so folgt das Rechteck der Kartengröße,
-   ohne dass JS sie ausmessen muss. */
+/* Geometry as CSS rather than as an attribute: that way the rectangle follows
+   the card's size without JS having to measure it. */
 .cb-outline rect {
   x: 1px;
   y: 1px;
@@ -120,8 +120,8 @@ body,
     cb-glow 900ms ease-out 200ms both;
 }
 
-/* Rückwärts: gespiegelte Kurve (a,b,c,d) -> (1-c,1-d,1-a,1-b), damit das
-   Tempo genau umgekehrt zum Einschalten wirkt. */
+/* Backwards: mirrored curve (a,b,c,d) -> (1-c,1-d,1-a,1-b), so the pacing is
+   exactly the reverse of switching on. */
 .cb-outline-rewind .cb-line {
   animation: cb-untrace 760ms cubic-bezier(0.85, 0, 0.67, 1) both;
 }

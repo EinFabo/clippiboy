@@ -9,20 +9,19 @@ import { formatBufferSeconds } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import type { CaptureTarget, EncoderId } from "@/lib/types";
 
-/** Die üblichen Stufen; angeboten wird davon nur, was die Quelle hergibt. */
+/** The usual steps; only what the source supports is offered. */
 const HEIGHTS = [720, 1080, 1440, 2160];
 
-/** Die üblichen Bildraten, solange der Bildschirm seine Rate nicht verrät. */
+/** The usual frame rates, as long as the screen does not reveal its own. */
 const FPS = [30, 60, 120];
 
 /**
- * Welche Bildraten die Quelle wirklich hergibt.
+ * Which frame rates the source really supports.
  *
- * Mehr Bilder aufzunehmen, als der Bildschirm ausgibt, bringt keine Bewegung
- * dazu, flüssiger zu sein — es entstehen nur doppelte Bilder, die Platz
- * kosten. Deshalb die üblichen Stufen bis zur Wiederholrate und die Rate
- * selbst obendrauf: Ein 165-Hz-Monitor soll auch 165 anbieten. So rechnet der
- * Kern in `capture::fps_choices`.
+ * Capturing more frames than the screen puts out does not make any motion
+ * smoother — it only produces duplicate frames that cost space. Hence the usual
+ * steps up to the refresh rate plus that rate itself: a 165 Hz monitor should
+ * offer 165 too. That is how the core computes it in `capture::fps_choices`.
  */
 function fpsChoices(source: CaptureTarget | null): number[] {
   const refresh = source?.refreshHz ?? null;
@@ -30,17 +29,17 @@ function fpsChoices(source: CaptureTarget | null): number[] {
   return [...FPS.filter((fps) => fps < refresh), refresh];
 }
 
-/** Die eingestellte Bildrate auf eine angebotene Stufe bringen — nach unten,
-    denn mehr aufzunehmen als eingestellt wäre eine Überraschung. */
+/** Snap the configured frame rate onto an offered step — downwards, because
+    capturing more than was set would be a surprise. */
 function fitFps(fps: number, choices: number[]): number {
   if (choices.includes(fps)) return fps;
   return [...choices].reverse().find((step) => step <= fps) ?? choices[0];
 }
 
 /**
- * Aufnahmegröße zu einer Zielhöhe. Die Breite kommt aus dem Seitenverhältnis
- * der Quelle statt aus einem angenommenen 16:9, und beide Werte bleiben gerade —
- * genauso rechnet der Kern in `capture::fit_to_target`.
+ * Capture size for a target height. The width comes from the source's aspect
+ * ratio instead of an assumed 16:9, and both values stay even — exactly how the
+ * core computes it in `capture::fit_to_target`.
  */
 function fit(height: number, source: CaptureTarget | null) {
   const ratio =
@@ -56,8 +55,8 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const { config, targets, encoders, patchConfig, refreshTargets } = useEngine();
   const rec = config.recording;
 
-  // Fenster kommen und gehen: Beim Start von ClippiBoy lief das Spiel meist
-  // noch nicht, also wird die Liste beim Öffnen der Seite neu geholt.
+  // Windows come and go: when ClippiBoy started the game usually was not
+  // running yet, so the list is fetched again when the page opens.
   useEffect(() => {
     void refreshTargets();
   }, [refreshTargets]);
@@ -68,23 +67,22 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const monitors = targets.filter((t) => t.kind === "monitor");
   const windows = targets.filter((t) => t.kind === "window");
 
-  // Ohne gespeicherte Auswahl nimmt der Kern den primären Monitor — das soll
-  // die Oberfläche auch zeigen, sonst wirkt nichts ausgewählt.
+  // With no saved selection the core takes the primary monitor — the UI should
+  // show that too, otherwise nothing looks selected.
   const isPicked = (t: CaptureTarget) =>
     rec.targetId === null
       ? rec.targetKind === "monitor" && t.kind === "monitor" && t.isPrimary
       : rec.targetKind === t.kind && rec.targetId === t.id;
 
-  // Ohne Auswahl nimmt der Kern den primären Monitor — dann soll hier auch
-  // dessen Auflösung die Grenze sein.
+  // With no selection the core takes the primary monitor — then its resolution
+  // should be the limit here too.
   const source =
     targets.find((t) => t.kind === rec.targetKind && t.id === rec.targetId) ??
     targets.find((t) => t.kind === "monitor" && t.isPrimary) ??
     null;
 
-  // Höher als die Quelle geht nicht: hochskaliert kostet es nur Bitrate und
-  // bringt kein Detail dazu. Der Kern deckelt ohnehin — hier steht dann aber
-  // wenigstens dieselbe Zahl.
+  // No higher than the source: upscaled it only costs bitrate and adds no
+  // detail. The core caps it anyway — but at least the same number stands here.
   const heights = source
     ? [
         ...new Set(
@@ -96,13 +94,13 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
     : HEIGHTS;
 
   const rates = fpsChoices(source);
-  // Die Auswahl als Text: An der Liste selbst hinge der Effekt bei jedem
-  // Render neu, sie ist bei jedem Durchlauf ein neues Array.
+  // The choices as text: hanging the effect off the list itself would re-run it
+  // on every render, since it is a new array each time.
   const ratesKey = rates.join();
 
-  // Größe und Bildrate an die Quelle angleichen. Wer von einem 165-Hz-Monitor
-  // auf einen 60-Hz-Zweitschirm wechselt, hätte sonst eine Einstellung stehen,
-  // die dort nichts mehr bedeutet — der Kern rückt sie ohnehin zurecht.
+  // Fit size and frame rate to the source. Switching from a 165 Hz monitor to a
+  // 60 Hz second screen would otherwise leave a setting standing that means
+  // nothing there — the core straightens it out anyway.
   useEffect(() => {
     if (!source) return;
     const next = fit(Math.min(rec.height, source.height), source);
@@ -122,27 +120,27 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   return (
     <div className="space-y-8 pb-12">
       <header className="pt-10">
-        <h1 className="display text-4xl">Aufnahme</h1>
+        <h1 className="display text-4xl">Recording</h1>
       </header>
 
       <SourceTrouble onOpenMixer={() => onNavigate("audio")} />
 
       <section>
         <SectionTitle
-          title="Quelle"
+          title="Source"
           action={
             <Button size="sm" variant="ghost" onClick={() => void refreshTargets()}>
-              Aktualisieren
+              Refresh
             </Button>
           }
         />
 
         <p className="mb-4 text-xs text-ink-faint">
-          Ein Wechsel greift sofort — läuft der Puffer, startet er mit der neuen
-          Quelle neu und die bis dahin gepufferten Sekunden sind weg.
+          A change takes effect immediately — if the buffer is running it
+          restarts on the new source, and the seconds buffered so far are gone.
         </p>
 
-        <h3 className="mb-2 text-xs font-medium text-ink-muted">Monitore</h3>
+        <h3 className="mb-2 text-xs font-medium text-ink-muted">Monitors</h3>
         <div className="grid grid-cols-2 gap-3">
           {monitors.map((t) => (
             <TargetCard
@@ -154,14 +152,13 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           ))}
           {monitors.length === 0 && (
             <p className="text-xs text-ink-faint">
-              Kein Monitor gefunden — ClippiBoy nimmt dann den primären
-              Bildschirm.
+              No monitor found — ClippiBoy then takes the primary screen.
             </p>
           )}
         </div>
 
         <h3 className="mb-2 mt-6 text-xs font-medium text-ink-muted">
-          Fenster
+          Windows
         </h3>
         <div className="grid max-h-72 grid-cols-2 gap-3 overflow-y-auto pr-1">
           {windows.map((t) => (
@@ -174,23 +171,18 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           ))}
           {windows.length === 0 && (
             <p className="text-xs text-ink-faint">
-              Kein aufnehmbares Fenster offen. Starte das Spiel und tippe auf
-              „Aktualisieren“.
+              No capturable window open. Start the game and hit "Refresh".
             </p>
           )}
         </div>
       </section>
 
       <section>
-        <SectionTitle title="Qualität" />
+        <SectionTitle title="Quality" />
         <Card className="divide-y divide-line">
           <Row
-            label="Auflösung"
-            hint={
-              source
-                ? `Seitenverhältnis folgt der Quelle · ${source.width}×${source.height} verfügbar`
-                : "Seitenverhältnis folgt der Quelle"
-            }
+            label="Resolution"
+            hint={source ? `${source.width}×${source.height} available` : undefined}
           >
             <Select
               value={String(rec.height)}
@@ -200,7 +192,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                   value: String(h),
                   label:
                     source && h === source.height
-                      ? `${size.width} × ${size.height} (Quelle)`
+                      ? `${size.width} × ${size.height} (source)`
                       : `${size.width} × ${size.height}`,
                 };
               })}
@@ -208,11 +200,11 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
             />
           </Row>
           <Row
-            label="Bildrate"
+            label="Frame rate"
             hint={
               source?.refreshHz
-                ? `${source.refreshHz} Hz zeigt die Quelle — mehr Bilder wären nur Wiederholungen`
-                : "Die Wiederholrate der Quelle ist nicht bekannt"
+                ? `The source shows ${source.refreshHz} Hz — more frames would only be repeats`
+                : "The source's refresh rate is not known"
             }
           >
             <Select
@@ -221,7 +213,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 value: String(fps),
                 label:
                   fps === source?.refreshHz
-                    ? `${fps} FPS (Quelle)`
+                    ? `${fps} FPS (source)`
                     : `${fps} FPS`,
               }))}
               onChange={(v) => setRec({ fps: Number(v) })}
@@ -229,9 +221,9 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </Row>
           <Row
             label="Bitrate"
-            hint={`${Math.round(rec.bitrateKbps / 1000)} Mbit/s — ca. ${Math.round(
+            hint={`${Math.round(rec.bitrateKbps / 1000)} Mbit/s — about ${Math.round(
               (rec.bitrateKbps / 8 / 1024) * 60,
-            )} MB pro Minute`}
+            )} MB per minute`}
           >
             <div className="w-64">
               <Slider
@@ -246,27 +238,27 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </Row>
           <Row
             label="Encoder"
-            hint="Hardware-Encoder halten die CPU frei — Fallback ist x264"
+            hint="Hardware encoders keep the CPU free — the fallback is x264"
           >
             <Select
               value={rec.encoder}
               options={encoders.map((e) => ({
                 value: e.id as EncoderId,
-                label: e.available ? e.name : `${e.name} (nicht verfügbar)`,
+                label: e.available ? e.name : `${e.name} (not available)`,
               }))}
               onChange={(encoder) => setRec({ encoder })}
             />
           </Row>
           <Row
-            label="Keyframe-Intervall"
-            hint="Bestimmt, wie genau ein Clip zugeschnitten werden kann"
+            label="Keyframe interval"
+            hint="Determines how precisely a clip can be trimmed"
           >
             <Select
               value={String(rec.keyframeSeconds)}
               options={[
-                { value: "1", label: "1 Sekunde" },
-                { value: "2", label: "2 Sekunden" },
-                { value: "4", label: "4 Sekunden" },
+                { value: "1", label: "1 second" },
+                { value: "2", label: "2 seconds" },
+                { value: "4", label: "4 seconds" },
               ]}
               onChange={(v) => setRec({ keyframeSeconds: Number(v) })}
             />
@@ -275,14 +267,13 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
       </section>
 
       <section>
-        <SectionTitle title="Replay-Puffer" />
+        <SectionTitle title="Replay buffer" />
         <Card className="p-5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium">Pufferlänge</p>
+              <p className="text-sm font-medium">Buffer length</p>
               <p className="mt-1 text-xs text-ink-muted">
-                {formatBufferSeconds(config.buffer.seconds)} im Arbeitsspeicher ·
-                geschätzt{" "}
+                {formatBufferSeconds(config.buffer.seconds)} in memory · roughly{" "}
                 {Math.round(
                   (rec.bitrateKbps / 8 / 1024) * config.buffer.seconds,
                 )}{" "}
@@ -295,7 +286,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </div>
           <div className="mt-4">
             <Slider
-              label="Pufferlänge"
+              label="Buffer length"
               value={config.buffer.seconds}
               min={15}
               max={600}
@@ -355,8 +346,8 @@ function TargetCard({
       }}
       className={cn(
         "relative cursor-pointer p-4 text-left",
-        // Deutlich genug, um es beim Überfliegen zu sehen: eine Tönung von 8 %
-        // unterscheidet sich auf dunklem Grund praktisch nicht von keiner.
+        // Clear enough to spot at a glance: an 8 % tint on a dark ground is
+        // practically indistinguishable from none.
         picked && "border-accent-bright bg-accent/20",
       )}
     >
@@ -365,7 +356,7 @@ function TargetCard({
           className="absolute top-3 right-3 rounded-pill bg-accent px-2.5 py-0.5
             text-[11px] font-medium text-white"
         >
-          Ausgewählt
+          Selected
         </span>
       )}
       <p
@@ -375,10 +366,10 @@ function TargetCard({
         {target.title}
       </p>
       <p className="mt-1 text-xs text-ink-muted">
-        {target.kind === "monitor" ? "Monitor" : "Fenster"} · {target.width}×
+        {target.kind === "monitor" ? "Monitor" : "Window"} · {target.width}×
         {target.height}
         {target.refreshHz ? ` · ${target.refreshHz} Hz` : ""}
-        {target.isPrimary && " · primär"}
+        {target.isPrimary && " · primary"}
       </p>
     </Card>
   );

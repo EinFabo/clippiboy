@@ -13,11 +13,11 @@ import { useEngine } from "@/store";
 import { api, inTauri } from "@/lib/ipc";
 import type { Clip } from "@/lib/types";
 
-/** Was die jeweilige Stelle zusätzlich beisteuert. */
+/** What the calling site contributes on top. */
 interface Options {
-  /** Nur in der Galerie: Der Player ist ja noch zu. */
+  /** Gallery only: the player is still closed there. */
   onOpen?: () => void;
-  /** Nur in der Galerie: Der Editor hat sein eigenes Namensfeld. */
+  /** Gallery only: the editor has a name field of its own. */
   onRename?: () => void;
   onDelete: () => void;
 }
@@ -25,8 +25,8 @@ interface Options {
 const icon = "h-4 w-4";
 
 /**
- * Das Rechtsklick-Menü eines Clips — dieselben Einträge in der Galerie wie im
- * Player, nur dass dort „Öffnen" und „Umbenennen" fehlen.
+ * A clip's right-click menu — the same entries in the gallery as in the player,
+ * except that "Open" and "Rename" are missing there.
  */
 export function useClipMenu() {
   const menu = useMenu();
@@ -39,14 +39,14 @@ export function useClipMenu() {
     if (options.onOpen) {
       entries.push({
         kind: "item",
-        label: "Öffnen",
+        label: "Open",
         icon: <IconPlay className={icon} />,
         onSelect: options.onOpen,
       });
     }
     entries.push({
       kind: "item",
-      label: "Mit Standardplayer öffnen",
+      label: "Open in default player",
       icon: <IconArrowUpRight className={icon} />,
       disabled: !inTauri,
       onSelect: () => void api.openClip(clip.id),
@@ -54,21 +54,21 @@ export function useClipMenu() {
     if (options.onRename) {
       entries.push({
         kind: "item",
-        label: "Umbenennen",
+        label: "Rename",
         icon: <IconPencil className={icon} />,
         onSelect: options.onRename,
       });
     }
     entries.push({
       kind: "item",
-      label: clip.favorite ? "Herz wegnehmen" : "Als Favorit merken",
+      label: clip.favorite ? "Remove from favorites" : "Add to favorites",
       icon: <IconHeart filled={clip.favorite} className={icon} />,
       onSelect: async () => {
         await setFavorite(clip.id, !clip.favorite);
-        // In der Galerie darf die Datei sofort umziehen. Im Player hält das
-        // Videoelement sie noch — dort holt es `closePlayer` nach, und ein
-        // zweiter Anlauf hier schadet nicht: Liegt sie schon richtig, tut
-        // `fileClip` nichts.
+        // In the gallery the file may move right away. In the player the video
+        // element still holds it — `closePlayer` catches up there, and a second
+        // attempt here does no harm: if it already sits right, `fileClip` does
+        // nothing.
         if (options.onOpen) await fileClip(clip.id);
       },
     });
@@ -76,24 +76,23 @@ export function useClipMenu() {
     entries.push({ kind: "separator" });
     entries.push({
       kind: "item",
-      label: "Clip kopieren",
-      // Der eine Eintrag, den es sonst nirgends gibt: die Datei selbst in der
-      // Zwischenablage, fertig für Strg+V in Discord.
+      label: "Copy clip",
+      // The one entry you find nowhere else: the file itself on the clipboard,
+      // ready for Ctrl+V in Discord.
       icon: <IconCopy className={icon} />,
-      shortcut: "für Discord",
       disabled: !inTauri,
       onSelect: () => void api.copyClipFile(clip.id),
     });
     entries.push({
       kind: "item",
-      label: "Pfad kopieren",
+      label: "Copy path",
       icon: <IconPaste className={icon} />,
       disabled: !inTauri,
       onSelect: () => void api.clipboardWriteText(clip.path),
     });
     entries.push({
       kind: "item",
-      label: "Im Ordner zeigen",
+      label: "Show in folder",
       icon: <IconFolder className={icon} />,
       disabled: !inTauri,
       onSelect: () => void api.revealClip(clip.id),
@@ -102,7 +101,7 @@ export function useClipMenu() {
     entries.push({ kind: "separator" });
     entries.push({
       kind: "item",
-      label: "Löschen",
+      label: "Delete",
       icon: <IconTrash className={icon} />,
       danger: true,
       onSelect: options.onDelete,

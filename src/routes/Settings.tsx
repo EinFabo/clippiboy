@@ -10,10 +10,10 @@ import { cn } from "@/lib/cn";
 import type { OverlayCorner, UpdateInfo } from "@/lib/types";
 
 const corners: [OverlayCorner, string][] = [
-  ["topLeft", "oben links"],
-  ["topRight", "oben rechts"],
-  ["bottomLeft", "unten links"],
-  ["bottomRight", "unten rechts"],
+  ["topLeft", "top left"],
+  ["topRight", "top right"],
+  ["bottomLeft", "bottom left"],
+  ["bottomRight", "bottom right"],
 ];
 
 export function Settings() {
@@ -26,7 +26,7 @@ export function Settings() {
   return (
     <div className="space-y-8 pb-12">
       <header className="pt-10">
-        <h1 className="display text-4xl">Einstellungen</h1>
+        <h1 className="display text-4xl">Settings</h1>
       </header>
 
       <section>
@@ -35,12 +35,9 @@ export function Settings() {
       </section>
 
       <section>
-        <SectionTitle title="Verhalten" />
+        <SectionTitle title="Behaviour" />
         <Card className="divide-y divide-line">
-          <Row
-            label="Puffer automatisch einschalten"
-            hint="Ohne das läuft ClippiBoy nur mit, wenn du den Puffer selbst startest"
-          >
+          <Row label="Start the buffer automatically">
             <Toggle
               checked={config.buffer.autoStart}
               onChange={(autoStart) =>
@@ -49,11 +46,11 @@ export function Settings() {
             />
           </Row>
           <Row
-            label="Nur im Spiel puffern"
+            label="Only buffer in game"
             hint={
               config.buffer.autoStart
-                ? "An: der Puffer startet erst, wenn ein Spiel im Vordergrund ist, und stoppt eine halbe Minute nach dem Beenden. Aus: er läuft ab dem Start von ClippiBoy durch."
-                : "Wirkt erst, wenn der Puffer automatisch eingeschaltet wird"
+                ? "Starts once a game is in the foreground, stops half a minute after it exits"
+                : "Needs automatic start"
             }
           >
             <Toggle
@@ -62,7 +59,7 @@ export function Settings() {
               onChange={(onlyBufferInGame) => patchConfig({ onlyBufferInGame })}
             />
           </Row>
-          <Row label="Mit Windows starten" hint="Startet versteckt im Tray">
+          <Row label="Start with Windows" hint="Starts hidden in the tray">
             <Toggle
               checked={config.autoStartWithWindows}
               onChange={(autoStartWithWindows) =>
@@ -74,42 +71,39 @@ export function Settings() {
       </section>
 
       <section>
-        <SectionTitle title="Banner über dem Spiel" />
+        <SectionTitle title="Banner over the game" />
         <Card className="divide-y divide-line">
           <Row
-            label="Banner anzeigen"
-            hint="Kurze Einblendung über dem Spiel, wie bei Medal oder ShadowPlay"
+            label="Show banner"
+            hint="A brief overlay above the game, like Medal or ShadowPlay"
           >
             <Toggle
               checked={config.overlay.enabled}
               onChange={(enabled) => patchOverlay({ enabled })}
             />
           </Row>
-          <Row label="Clip gespeichert" hint="Mit Vorschaubild, Spiel und Länge">
+          <Row label="Clip saved">
             <Toggle
               checked={config.overlay.onClipSaved}
               disabled={!config.overlay.enabled}
               onChange={(onClipSaved) => patchOverlay({ onClipSaved })}
             />
           </Row>
-          <Row label="Puffer an/aus" hint="Damit man ohne Fenster weiß, ob aufgenommen wird">
+          <Row label="Buffer on/off">
             <Toggle
               checked={config.overlay.onBufferToggle}
               disabled={!config.overlay.enabled}
               onChange={(onBufferToggle) => patchOverlay({ onBufferToggle })}
             />
           </Row>
-          <Row label="Fehler" hint="Sonst merkt man beim Spielen nicht, dass nichts aufgenommen wird">
+          <Row label="Errors">
             <Toggle
               checked={config.overlay.onError}
               disabled={!config.overlay.enabled}
               onChange={(onError) => patchOverlay({ onError })}
             />
           </Row>
-          <Row
-            label="Bildschirm"
-            hint="Fest verankert, damit der Banner nicht zwischen Monitoren springt"
-          >
+          <Row label="Screen">
             <div className="flex flex-wrap justify-end gap-1.5">
               {monitors.map((monitor) => (
                 <ChoiceButton
@@ -135,11 +129,11 @@ export function Settings() {
                 disabled={!config.overlay.enabled}
                 onClick={() => patchOverlay({ followActiveScreen: true })}
               >
-                folgt dem Spiel
+                follows the game
               </ChoiceButton>
             </div>
           </Row>
-          <Row label="Ecke" hint="Wo der Banner erscheint">
+          <Row label="Corner">
             <div className="flex gap-1.5">
               {corners.map(([corner, label]) => (
                 <ChoiceButton
@@ -153,7 +147,7 @@ export function Settings() {
               ))}
             </div>
           </Row>
-          <Row label="Anzeigedauer" hint="Fehler bleiben immer mindestens 6 Sekunden stehen">
+          <Row label="Duration" hint="Errors always stay at least 6 s">
             <div className="flex gap-1.5">
               {[2000, 3500, 5000, 8000].map((durationMs) => (
                 <ChoiceButton
@@ -169,14 +163,14 @@ export function Settings() {
           </Row>
         </Card>
         <p className="mt-3 text-xs text-ink-faint">
-          Über einem Spiel im exklusiven Vollbild kann der Banner nicht erscheinen —
-          ClippiBoy klinkt sich bewusst nicht in den Spielprozess ein. Im randlosen
-          Vollbild und im Fenstermodus funktioniert er.
+          The banner cannot appear over a game in exclusive fullscreen — ClippiBoy
+          deliberately does not hook into the game process. Borderless fullscreen
+          and windowed mode work.
         </p>
       </section>
 
       <section>
-        <SectionTitle title="Speicherort" />
+        <SectionTitle title="Storage location" />
         <ClipDir />
       </section>
 
@@ -191,10 +185,6 @@ export function Settings() {
         </Card>
       )}
 
-      <p className="text-xs text-ink-faint">
-        Windows-Capture über Windows.Graphics.Capture, kein Hooking in
-        Spielprozesse.
-      </p>
     </div>
   );
 }
@@ -248,41 +238,36 @@ function ChoiceButton({
 }
 
 /**
- * Anzeigename einer Taste. Gespeichert wird immer die Schreibweise, die der
- * Shortcut-Parser im Kern versteht — hier steht nur, was auf der Tastatur steht.
+ * Display name of a key. What gets stored is always the spelling the core's
+ * shortcut parser understands — this only holds what is printed on the keyboard.
+ * Keys whose name already matches are left out.
  */
 const KEY_LABELS: Record<string, string> = {
-  Ctrl: "Strg",
-  Shift: "Umschalt",
   Super: "Win",
   Escape: "Esc",
-  Space: "Leertaste",
-  Enter: "Enter",
   ArrowUp: "↑",
   ArrowDown: "↓",
   ArrowLeft: "←",
   ArrowRight: "→",
-  PageUp: "Bild ↑",
-  PageDown: "Bild ↓",
-  PrintScreen: "Druck",
-  Delete: "Entf",
-  Insert: "Einfg",
-  Backspace: "Rück",
-  CapsLock: "Feststell",
-  ScrollLock: "Rollen",
+  PageUp: "Page ↑",
+  PageDown: "Page ↓",
+  PrintScreen: "PrtSc",
+  Delete: "Del",
+  Insert: "Ins",
+  CapsLock: "Caps",
+  ScrollLock: "Scroll",
   NumLock: "Num",
-  Pause: "Pause",
   NumpadAdd: "Num +",
   NumpadSubtract: "Num −",
   NumpadMultiply: "Num ×",
   NumpadDivide: "Num ÷",
-  NumpadDecimal: "Num ,",
+  NumpadDecimal: "Num .",
   NumpadEnter: "Num Enter",
   NumpadEqual: "Num =",
 };
 
-/** Was auf der Taste steht. Der Ziffernblock folgt einem Muster, der Rest steht
-    in {@link KEY_LABELS}; alles andere heißt schon so, wie es heißt. */
+/** What is printed on the key. The numpad follows a pattern, the rest is in
+    {@link KEY_LABELS}; everything else is already called what it is called. */
 function keyLabel(key: string): string {
   const numpad = /^Numpad([0-9])$/.exec(key);
   if (numpad) return `Num ${numpad[1]}`;
@@ -290,13 +275,12 @@ function keyLabel(key: string): string {
 }
 
 /**
- * Tasten, die der Hotkey-Parser im Kern kennt und die nicht schon über ihr
- * Muster erkannt werden (Buchstaben, Ziffern, F-Tasten, Ziffernblock).
+ * Keys the core's hotkey parser knows and that are not already recognized by
+ * their pattern (letters, digits, F keys, numpad).
  *
- * Was hier fehlt, nimmt der Kern nicht an — etwa die Kontextmenü-Taste oder
- * die kleine `<`-Taste neben der linken Umschalttaste. Die Aufnahme läuft
- * dann einfach weiter, statt eine Belegung anzubieten, die gleich wieder
- * abgelehnt würde.
+ * Whatever is missing here the core will not accept — the context menu key, say,
+ * or the small `<` key next to the left shift. Recording then simply carries on
+ * instead of offering an assignment that would be rejected right away.
  */
 const KEYS = new Set([
   "Backquote", "Backslash", "BracketLeft", "BracketRight", "Comma", "Equal",
@@ -319,10 +303,10 @@ function supported(code: string): boolean {
 }
 
 /**
- * Aus einem Tastendruck die Schreibweise machen, die der Kern annimmt.
+ * Turn a key press into the spelling the core accepts.
  *
- * Zusatztasten sind erlaubt, aber nicht verlangt: Wer `F9` allein belegen
- * will, soll das können — so machen es die anderen Aufnahmeprogramme auch.
+ * Modifiers are allowed but not required: whoever wants to bind `F9` on its own
+ * should be able to — that is how the other recorders do it too.
  */
 function accelerator(event: KeyboardEvent): string | null {
   const mods: string[] = [];
@@ -332,12 +316,12 @@ function accelerator(event: KeyboardEvent): string | null {
   if (event.metaKey) mods.push("Super");
 
   const code = event.code;
-  // Eine Zusatztaste allein ist noch keine Belegung — weitertippen lassen.
+  // A modifier alone is not an assignment yet — let them keep typing.
   if (/^(Control|Alt|Shift|Meta|OS)(Left|Right)$/.test(code)) return null;
   if (!supported(code)) return null;
 
-  // `event.code` heißt schon fast überall so wie im Parser; nur die Buchstaben-
-  // und Zifferntasten schreibt man üblicherweise kurz.
+  // `event.code` almost everywhere already matches the parser; only letter and
+  // digit keys are usually written in short form.
   const key = /^Key[A-Z]$/.test(code)
     ? code.slice(3)
     : /^Digit[0-9]$/.test(code)
@@ -346,17 +330,16 @@ function accelerator(event: KeyboardEvent): string | null {
   return [...mods, key].join("+");
 }
 
-/** Zusatztasten, an denen eine Belegung als „nur im Notfall" erkennbar ist. */
+/** Modifiers that mark an assignment as "emergencies only". */
 const MODIFIERS = ["Ctrl", "Alt", "Shift", "Super"];
 
-/** Tasten, die in einem Textfeld ohnehin nichts schreiben. */
+/** Keys that would not type anything in a text field anyway. */
 const HARMLESS =
   /^(F([1-9]|1[0-9]|2[0-4])|PrintScreen|ScrollLock|Pause|NumLock|CapsLock|Insert|AudioVolume|Media)/;
 
 /**
- * Eine Belegung, die beim Tippen dazwischenfunkt: eine einzelne Taste, die
- * auch in einem Textfeld etwas zu suchen hat. `F9` oder `Druck` sind harmlos,
- * ein nacktes `S` ist es nicht.
+ * An assignment that gets in the way while typing: a single key that has a job
+ * in a text field too. `F9` or `PrtSc` are harmless, a bare `S` is not.
  */
 function risky(value: string): boolean {
   const keys = value.split("+");
@@ -386,14 +369,14 @@ function Hotkeys() {
   return (
     <>
       <Card className="divide-y divide-line">
-        <Row label="Clip speichern" hint="Speichert den Inhalt des Replay-Puffers">
+        <Row label="Save clip">
           <HotkeyInput
             value={config.saveClipHotkey}
             busy={saving}
             onChange={(value) => apply(value, config.toggleBufferHotkey)}
           />
         </Row>
-        <Row label="Puffer an/aus">
+        <Row label="Buffer on/off">
           <HotkeyInput
             value={config.toggleBufferHotkey}
             busy={saving}
@@ -402,14 +385,13 @@ function Hotkeys() {
         </Row>
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
-        Anklicken und die gewünschte Taste drücken — mit oder ohne Strg, Alt,
-        Shift und Windows-Taste. Escape bricht ab.
+        Click and press the key you want — with or without Ctrl, Alt, Shift and
+        the Windows key. Escape cancels.
       </p>
       {warn && (
         <p className="mt-2 text-xs text-ink-muted">
-          Eine einzelne Taste, mit der man auch schreiben kann, gilt überall:
-          Sie löst mitten im Chat aus. F-Tasten und Druck sind die ruhigeren
-          Plätze.
+          A single key you can also type with applies everywhere: it fires in the
+          middle of a chat message. F keys and PrtSc are the quieter spots.
         </p>
       )}
       {error && <p className="mt-2 text-xs text-live">{error}</p>}
@@ -417,7 +399,7 @@ function Hotkeys() {
   );
 }
 
-/** Zeigt eine Kombination und nimmt auf Klick eine neue auf. */
+/** Shows a combination and records a new one on click. */
 function HotkeyInput({
   value,
   busy,
@@ -428,12 +410,11 @@ function HotkeyInput({
   onChange: (value: string) => void;
 }) {
   const [recording, setRecording] = useState(false);
-  // In der Ereignisbehandlung liegt sonst der Wert vom Anfang der Aufnahme.
+  // Otherwise the handler would hold the value from when recording started.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
-  // Wurde die Aufnahme mit einer neuen Kombination beendet? Dann meldet der
-  // Kern die Hotkeys selbst wieder an, und ein `resume` hier käme ihm in die
-  // Quere.
+  // Did recording end with a new combination? Then the core re-registers the
+  // hotkeys itself, and a `resume` here would get in its way.
   const committed = useRef(false);
 
   const stop = useCallback(() => setRecording(false), []);
@@ -443,8 +424,8 @@ function HotkeyInput({
     committed.current = false;
     if (inTauri) void api.suspendHotkeys();
     const onKeyDown = (event: KeyboardEvent) => {
-      // Solange aufgenommen wird, gehört jeder Anschlag hierher — auch Tab und
-      // Enter, die sonst durch die Oberfläche wandern würden.
+      // While recording, every keystroke belongs here — including Tab and Enter,
+      // which would otherwise travel through the UI.
       event.preventDefault();
       event.stopPropagation();
       if (event.code === "Escape") {
@@ -453,14 +434,14 @@ function HotkeyInput({
       }
       const next = accelerator(event);
       if (!next) return;
-      // Auch eine unveränderte Kombination geht durch den Kern: der meldet
-      // dabei die stillgelegten Hotkeys wieder an.
+      // Even an unchanged combination goes through the core: that re-registers
+      // the suspended hotkeys along the way.
       committed.current = true;
       stop();
       onChangeRef.current(next);
     };
     window.addEventListener("keydown", onKeyDown, true);
-    // Klick daneben oder Fensterwechsel beendet die Aufnahme ebenfalls.
+    // A click elsewhere or a window switch also ends recording.
     window.addEventListener("mousedown", stop);
     window.addEventListener("blur", stop);
     return () => {
@@ -476,7 +457,7 @@ function HotkeyInput({
       type="button"
       disabled={busy}
       onMouseDown={(event) => {
-        // Ohne das würde der eigene Klick die Aufnahme sofort wieder beenden.
+        // Without this our own click would end recording again immediately.
         event.stopPropagation();
         setRecording((on) => !on);
       }}
@@ -489,7 +470,7 @@ function HotkeyInput({
       )}
     >
       {recording ? (
-        <span className="px-1.5 text-[13px] text-accent">Taste drücken …</span>
+        <span className="px-1.5 text-[13px] text-accent">Press a key …</span>
       ) : (
         <Hotkey value={value} />
       )}
@@ -512,13 +493,13 @@ function Hotkey({ value }: { value: string }) {
   );
 }
 
-/** Ordner für neue Clips — auswählen, zurücksetzen, öffnen. */
+/** Folder for new clips — pick, reset, open. */
 function ClipDir() {
   const { config, setClipDir } = useEngine();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Nur für den Knopf „Zurücksetzen": ohne den Vergleich wüsste die Oberfläche
-  // nicht, ob überhaupt etwas zurückzusetzen ist.
+  // Only for the "Reset" button: without the comparison the UI would not know
+  // whether there is anything to reset at all.
   const [fallback, setFallback] = useState<string | null>(null);
 
   useEffect(() => {
@@ -546,13 +527,13 @@ function ClipDir() {
         directory: true,
         multiple: false,
         defaultPath: config.clipDir,
-        title: "Ordner für neue Clips",
+        title: "Folder for new clips",
       });
     } catch (err) {
       setError(String(err));
       return;
     }
-    // Abbruch im Dialog liefert null.
+    // Cancelling the dialog yields null.
     if (typeof picked !== "string") return;
     await apply(picked);
   };
@@ -573,28 +554,28 @@ function ClipDir() {
               disabled={busy}
               onClick={() => apply(fallback)}
             >
-              Zurücksetzen
+              Reset
             </Button>
           )}
           <Button size="sm" variant="secondary" disabled={!inTauri || busy} onClick={pick}>
-            Ändern
+            Change
           </Button>
         </div>
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
-        Gilt für neue Clips. Bereits gespeicherte bleiben liegen, wo sie sind,
-        und lassen sich weiter abspielen.
+        Applies to new clips. Ones already saved stay where they are and remain
+        playable.
       </p>
       {error && <p className="mt-2 text-xs text-live">{error}</p>}
     </>
   );
 }
 
-/** Version, Update-Suche und Installation. */
+/** Version, update check and installation. */
 function Updates() {
   const [version, setVersion] = useState("0.1.0");
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  // `null` heißt: noch nicht gesucht. Sonst der Text unter der Zeile.
+  // `null` means: not checked yet. Otherwise the text under the row.
   const [state, setState] = useState<"idle" | "checking" | "current" | "failed">(
     "idle",
   );
@@ -604,7 +585,7 @@ function Updates() {
   useEffect(() => {
     if (!inTauri) return;
     api.appVersion().then(setVersion).catch(() => {});
-    // Der Start sucht von sich aus; das Ergebnis kommt als Ereignis herein.
+    // Startup checks by itself; the result arrives as an event.
     let unlisten: (() => void) | undefined;
     events.onUpdateAvailable(setUpdate).then((fn) => (unlisten = fn));
     return () => unlisten?.();
@@ -627,7 +608,7 @@ function Updates() {
     setInstalling(true);
     setError(null);
     try {
-      // Kommt nicht zurück: Windows beendet die App und startet das Setup.
+      // Does not come back: Windows quits the app and starts the installer.
       await api.installUpdate();
     } catch (err) {
       setInstalling(false);
@@ -642,12 +623,12 @@ function Updates() {
           label={`ClippiBoy ${version}`}
           hint={
             update
-              ? `Version ${update.version} ist verfügbar`
+              ? `Version ${update.version} is available`
               : state === "current"
-                ? "Neuester Stand"
+                ? "Up to date"
                 : state === "failed"
-                  ? "Die Update-Prüfung ist fehlgeschlagen"
-                  : "Updates kommen von GitHub Releases und sind signiert"
+                  ? "The update check failed"
+                  : "Updates come from GitHub Releases and are signed"
           }
         >
           <div className="flex gap-2">
@@ -657,11 +638,11 @@ function Updates() {
               disabled={!inTauri || state === "checking" || installing}
               onClick={check}
             >
-              {state === "checking" ? "Suche …" : "Nach Updates suchen"}
+              {state === "checking" ? "Checking …" : "Check for updates"}
             </Button>
             {update && (
               <Button size="sm" variant="primary" disabled={installing} onClick={install}>
-                {installing ? "Installiere …" : `Auf ${update.version} aktualisieren`}
+                {installing ? "Installing …" : `Update to ${update.version}`}
               </Button>
             )}
           </div>
@@ -676,8 +657,8 @@ function Updates() {
       </Card>
       {update && (
         <p className="mt-3 text-xs text-ink-faint">
-          Beim Installieren beendet sich ClippiBoy und das Setup läuft durch —
-          ein laufender Puffer wird vorher sauber gestoppt.
+          Installing quits ClippiBoy and runs the installer — a running buffer is
+          stopped cleanly first.
         </p>
       )}
       {error && <p className="mt-3 text-xs text-live">{error}</p>}

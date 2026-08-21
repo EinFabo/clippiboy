@@ -1,5 +1,5 @@
-// Fallback-Daten, damit die UI auch ohne Tauri-Backend im Browser entwickelt
-// werden kann (`npm run dev`). Im echten Build wird nichts davon benutzt.
+// Fallback data so the UI can be developed in the browser without the Tauri
+// backend (`npm run dev`). None of it is used in a real build.
 import type {
   AppConfig,
   AudioDevice,
@@ -11,7 +11,7 @@ import type {
 } from "./types";
 
 export const mockDevices: AudioDevice[] = [
-  { id: "out-1", name: "Kopfhörer (Realtek USB Audio)", kind: "output", isDefault: true },
+  { id: "out-1", name: "Headphones (Realtek USB Audio)", kind: "output", isDefault: true },
   { id: "out-2", name: "LG HDR 4K (NVIDIA High Definition Audio)", kind: "output", isDefault: false },
   { id: "in-1", name: "Mikrofon (Elgato Wave XLR)", kind: "input", isDefault: true },
   { id: "in-2", name: "Line In (Focusrite Scarlett)", kind: "input", isDefault: false },
@@ -52,7 +52,7 @@ export const mockConfig: AppConfig = {
   sources: [
     {
       id: "src-game",
-      label: "Spiel",
+      label: "Game",
       kind: { type: "process", pid: 8899, mode: "include" },
       enabled: true,
       gainDb: 0,
@@ -110,8 +110,8 @@ export const mockClips: Clip[] = [
     height: 1080,
     sizeBytes: 168_000_000,
     thumbPath: null,
-    title: "Ace auf Mirage",
-    description: "Letzte Runde, 1v3 nach dem Retake.",
+    title: "Ace on Mirage",
+    description: "Last round, 1v3 after the retake.",
     favorite: true,
     edit: null,
     original: null,
@@ -148,9 +148,10 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
   },
-  // Die Galerie muss auch den schlechten Fall aushalten: Ein Clip ohne Spiel
-  // und drei Fehlerkennungen aus der Zeit vor der schärferen Titelprüfung —
-  // daran zeigt sich, ob die Filterleiste kürzt, scrollt und aufräumbar ist.
+  // The gallery has to survive the bad case too: one clip with no game and three
+  // misdetections from before the stricter title check — that is what shows
+  // whether the filter bar truncates, scrolls and can be tidied up. The German
+  // window titles are deliberate: they come from a German-locale Windows.
   {
     id: "c4",
     path: "C:\\Users\\fabia\\Videos\\ClippiBoy\\clip_2026-08-15_19-02-44.mp4",
@@ -189,7 +190,7 @@ export const mockClips: Clip[] = [
   })),
 ];
 
-/** Ohne Backend gibt es keine echten Tonspuren — der Mixer soll trotzdem da sein. */
+/** Without a backend there are no real audio tracks — the mixer should still be there. */
 export const mockTracks: ClipTrack[] = [
   { index: 0, label: "Hauptmix", channels: 2, previewPath: "mock/0.m4a" },
   { index: 1, label: "Discord", channels: 2, previewPath: "mock/1.m4a" },

@@ -4,12 +4,12 @@ import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
 
 /**
- * Was an den Tonquellen gerade nicht stimmt — dort gezeigt, wo aufgenommen
- * wird, nicht nur im Mixer.
+ * What is currently wrong with the audio sources — shown where recording
+ * happens, not only in the mixer.
  *
- * Eine Quelle, die nicht startet, wird trotzdem als Spur mitgeschrieben: Der
- * Clip bekommt sie dann als Stille. Das fällt erst nach dem Spielen auf, wenn
- * die Aufnahme längst gelaufen ist — deshalb muss es vorher jemand sehen.
+ * A source that fails to start is still written as a track: the clip then gets
+ * it as silence. That only shows up after playing, when the recording is long
+ * done — which is why somebody has to see it beforehand.
  */
 export function SourceTrouble({
   onOpenMixer,
@@ -38,7 +38,7 @@ export function SourceTrouble({
         {broken.map((source) => (
           <p key={source.id} className="text-[13px] leading-relaxed text-ink-muted">
             <span className="font-medium text-live">{source.label}</span>{" "}
-            nimmt nicht auf — die Spur bliebe im Clip stumm.{" "}
+            is not recording — the track would be silent in the clip.{" "}
             <span className="text-ink-faint">{sourceErrors[source.id]}</span>
           </p>
         ))}
@@ -50,7 +50,7 @@ export function SourceTrouble({
         ))}
       </div>
       <Button size="sm" className="shrink-0" onClick={onOpenMixer}>
-        Zum Mixer
+        Open mixer
       </Button>
     </Card>
   );
