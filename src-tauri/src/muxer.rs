@@ -139,10 +139,10 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         // Eine Spur stillschweigend wegzulassen wäre das Schlimmste: Der Clip
         // wäre dann einfach stumm, ohne dass irgendwo stünde warum.
         match track.write_wav_window(&path, snapshot.start_100ns, snapshot.audio_frames) {
-            Ok(()) => wavs.push((path, track.label.clone())),
+            Ok(()) => wavs.push((path, track.label())),
             Err(err) => log::warn!(
                 "Tonspur '{}' konnte nicht geschrieben werden: {err}",
-                track.label
+                track.label()
             ),
         }
     }

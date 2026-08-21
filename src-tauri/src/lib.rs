@@ -323,6 +323,12 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             }
 
             tick += 1;
+            // Alle 10 s: Quellen, die nicht starten konnten, noch einmal
+            // versuchen. Ein Headset, das beim Programmstart noch nicht am
+            // Rechner war, läuft sonst bis zum Neustart nicht mit.
+            if tick % 200 == 0 {
+                state.audio.retry_failed(sources.clone());
+            }
             // Alle 2 s nachsehen, welches Spiel im Vordergrund läuft.
             if tick % 40 == 0 {
                 let game = state.track_game();
@@ -348,6 +354,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 tray::refresh(&handle, &status);
                 let _ = handle.emit("engine-status", status);
                 let _ = handle.emit("audio-errors", state.audio.errors());
+                let _ = handle.emit("audio-warnings", state.audio.warnings(&sources));
             }
         }
     });

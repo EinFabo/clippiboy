@@ -51,6 +51,7 @@ export function AudioMixer() {
     processes,
     levels,
     sourceErrors,
+    sourceWarnings,
     upsertSource,
     removeSource,
   } = useEngine();
@@ -137,10 +138,16 @@ export function AudioMixer() {
                     <p
                       className={cn(
                         "mt-0.5 truncate px-1.5 text-xs",
-                        sourceErrors[source.id] ? "text-live" : "text-ink-faint",
+                        sourceErrors[source.id]
+                          ? "text-live"
+                          : sourceWarnings[source.id]
+                            ? "text-warn"
+                            : "text-ink-faint",
                       )}
                     >
-                      {sourceErrors[source.id] ?? sourceHint(source.kind, deviceName)}
+                      {sourceErrors[source.id] ??
+                        sourceWarnings[source.id] ??
+                        sourceHint(source.kind, deviceName)}
                     </p>
                     <div className="mt-2.5 px-1.5">
                       <Meter level={source.muted ? 0 : level} />

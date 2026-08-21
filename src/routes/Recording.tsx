@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
+import { SourceTrouble } from "@/components/SourceTrouble";
+import type { Route } from "@/components/NavBar";
 import { Select, Slider } from "@/components/ui/Controls";
 import { formatBufferSeconds } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -50,7 +52,7 @@ function fit(height: number, source: CaptureTarget | null) {
   return { width: w, height: h };
 }
 
-export function Recording() {
+export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const { config, targets, encoders, patchConfig, refreshTargets } = useEngine();
   const rec = config.recording;
 
@@ -122,6 +124,8 @@ export function Recording() {
       <header className="pt-10">
         <h1 className="display text-4xl">Aufnahme</h1>
       </header>
+
+      <SourceTrouble onOpenMixer={() => onNavigate("audio")} />
 
       <section>
         <SectionTitle

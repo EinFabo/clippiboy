@@ -44,9 +44,42 @@ pub fn now_100ns() -> i64 {
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 
+/// Ab welchem Abstand zur Systemuhr ein Zeitstempel nicht mehr von dieser Uhr
+/// stammen kann. Zwei Sekunden sind großzügig — echte QPC-Stempel liegen im
+/// Millisekundenbereich daneben.
+const IMPLAUSIBLE_100NS: i64 = 2 * 10_000_000;
+
+/// Welcher Zeitstempel gilt für diesen Block?
+///
+/// `stamped` ist, was das Gerät gemeldet hat, `now` die selbst abgelesene Zeit.
+/// Nicht jeder Treiber meldet in `pu64QPCPosition` wirklich QPC; manche
+/// schreiben dorthin eine Position, die bei null anfängt. Der Ring läge damit
+/// auf einer ganz anderen Zeitachse als das Bild, und
+/// [`crate::audio::ring::SampleRing::read_window`] fände in jedem Fenster
+/// nichts — der Pegel schlüge weiter aus, die Spur im Clip bliebe stumm.
+///
+/// `trust` merkt sich das Urteil über das Gerät. Einmal auf `false`, bleibt es
+/// dabei: zwischen zwei Zeitachsen hin- und herzuspringen wäre schlimmer als
+/// durchgehend die gröbere von beiden.
+pub fn usable_stamp(stamped: i64, now: i64, trust: &mut bool) -> i64 {
+    if *trust && stamped != 0 && (stamped - now).abs() > IMPLAUSIBLE_100NS {
+        *trust = false;
+    }
+    // Die 0 heißt nur „nicht ausgefüllt" — das kommt oft vor und ist harmlos,
+    // die selbst abgelesene Zeit stammt von derselben Uhr.
+    if *trust && stamped != 0 {
+        stamped
+    } else {
+        now
+    }
+}
+
 pub struct StreamHandle {
     pub stop: Arc<AtomicBool>,
     pub ring: Arc<SampleRing>,
+    /// Gesetzt, sobald das Gerät unbrauchbare Zeitstempel gemeldet hat und
+    /// dieser Stream auf die Systemuhr ausgewichen ist.
+    pub fallback_clock: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -69,18 +102,20 @@ impl Drop for StreamHandle {
 /// beendet oder keine Berechtigung — der Aufrufer meldet das der UI.
 pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, String> {
     let stop = Arc::new(AtomicBool::new(false));
+    let fallback_clock = Arc::new(AtomicBool::new(false));
 
     #[cfg(windows)]
     {
         let kind = kind.clone();
         let stop_flag = stop.clone();
         let ring_for_thread = ring.clone();
+        let fallback_for_thread = fallback_clock.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
         let thread = std::thread::Builder::new()
             .name("clippiboy-audio".into())
             .spawn(move || {
-                win::run(&kind, stop_flag, ring_for_thread, ready_tx);
+                win::run(&kind, stop_flag, ring_for_thread, ready_tx, fallback_for_thread);
             })
             .map_err(|e| e.to_string())?;
 
@@ -90,6 +125,7 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
             Ok(Ok(())) => Ok(StreamHandle {
                 stop,
                 ring,
+                fallback_clock,
                 thread: Some(thread),
             }),
             Ok(Err(err)) => Err(err),
@@ -99,7 +135,7 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
 
     #[cfg(not(windows))]
     {
-        let _ = (kind, &ring, &stop);
+        let _ = (kind, &ring, &stop, &fallback_clock);
         Err("Audioaufnahme ist nur unter Windows verfügbar".into())
     }
 }
@@ -385,6 +421,7 @@ mod win {
         stop: Arc<AtomicBool>,
         ring: Arc<SampleRing>,
         ready: Sender<Result<(), String>>,
+        fallback_clock: Arc<AtomicBool>,
     ) {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -442,6 +479,9 @@ mod win {
         let mut converted: Vec<f32> = Vec::with_capacity(4096);
         let frame_bytes = format.channels * (format.bits as usize / 8);
 
+        // Siehe `usable_stamp` — nicht jedes Gerät meldet brauchbare Zeiten.
+        let mut trust_qpc = true;
+
         while !stop.load(Ordering::Relaxed) {
             match event {
                 Some(handle) => unsafe {
@@ -480,13 +520,19 @@ mod win {
                 {
                     break;
                 }
-                // Nicht jeder Treiber füllt ihn. Dann selbst ablesen — die Uhr
-                // ist dieselbe, nur der Ablesezeitpunkt etwas später.
-                let qpc_100ns = if qpc_100ns == 0 {
-                    now_100ns()
-                } else {
-                    qpc_100ns as i64
-                };
+                // Die Uhr ist dieselbe, nur der Ablesezeitpunkt etwas später.
+                let now = now_100ns();
+                let stamped = qpc_100ns as i64;
+                let trusted = trust_qpc;
+                let qpc_100ns = usable_stamp(stamped, now, &mut trust_qpc);
+                if trusted && !trust_qpc {
+                    fallback_clock.store(true, Ordering::Relaxed);
+                    log::warn!(
+                        "Audioquelle {kind:?} meldet unbrauchbare Zeitstempel \
+                         ({stamped} statt etwa {now}) — es wird auf die Systemuhr \
+                         ausgewichen."
+                    );
+                }
 
                 if frames > 0 {
                     // AUDCLNT_BUFFERFLAGS_SILENT = 0x2 — Puffer ignorieren und
@@ -511,5 +557,51 @@ mod win {
         if let Some(handle) = event {
             let _ = unsafe { CloseHandle(handle) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Etwa eine Woche Laufzeit — so groß sind echte QPC-Werte.
+    const NOW: i64 = 7 * 24 * 3600 * 10_000_000;
+
+    #[test]
+    fn a_sane_timestamp_is_taken_as_it_is() {
+        let mut trust = true;
+        // 5 ms daneben ist der Normalfall.
+        assert_eq!(usable_stamp(NOW - 50_000, NOW, &mut trust), NOW - 50_000);
+        assert!(trust);
+    }
+
+    #[test]
+    fn an_unfilled_timestamp_falls_back_without_losing_trust() {
+        let mut trust = true;
+        assert_eq!(usable_stamp(0, NOW, &mut trust), NOW);
+        assert!(trust, "die 0 heißt nur „nicht ausgefüllt“");
+        // Danach zählt ein echter Wert wieder.
+        assert_eq!(usable_stamp(NOW, NOW, &mut trust), NOW);
+    }
+
+    /// Der eigentliche Fall: Ein Treiber meldet eine Position, die bei null
+    /// anfängt. Ohne diese Prüfung läge der Ring auf einer eigenen Zeitachse
+    /// und die Spur käme im Clip als Stille an.
+    #[test]
+    fn a_stream_relative_timestamp_switches_to_the_system_clock() {
+        let mut trust = true;
+        assert_eq!(usable_stamp(10_000, NOW, &mut trust), NOW);
+        assert!(!trust, "das Gerät muss als unzuverlässig gelten");
+    }
+
+    /// Einmal misstraut, bleibt es dabei — sonst sprängen die Blöcke zwischen
+    /// zwei Zeitachsen hin und her.
+    #[test]
+    fn distrust_is_permanent() {
+        let mut trust = true;
+        usable_stamp(10_000, NOW, &mut trust);
+        let later = NOW + 10_000_000;
+        assert_eq!(usable_stamp(later, later, &mut trust), later);
+        assert!(!trust);
     }
 }

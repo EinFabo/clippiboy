@@ -2,6 +2,7 @@
 //! Spuren für den Encoder.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -22,6 +23,9 @@ struct Running {
 pub struct AudioEngine {
     running: Mutex<HashMap<String, Running>>,
     errors: Mutex<HashMap<String, String>>,
+    /// Läuft gerade ein Nachstart-Versuch? `capture::start` wartet im
+    /// Fehlerfall bis zu fünf Sekunden — das darf sich nicht stapeln.
+    retrying: std::sync::atomic::AtomicBool,
 }
 
 fn fingerprint(kind: &SourceKind) -> String {
@@ -40,58 +44,101 @@ impl AudioEngine {
     /// Bringt die laufenden Streams mit der Konfiguration in Deckung: neue
     /// Quellen starten, entfernte oder geänderte stoppen. Gain, Mute und Solo
     /// ändern nichts an den Streams — die wirken erst beim Mischen.
+    ///
+    /// Gestartet wird **ohne** die Sperre auf `running`. `capture::start`
+    /// wartet auf ein Gerät, das nicht antwortet, bis zu fünf Sekunden — und
+    /// solange stünde jeder Pegelausschlag still, weil `levels` dieselbe Sperre
+    /// braucht. Bei einem einmaligen Wechsel fiele das kaum auf, beim
+    /// regelmäßigen Nachstarten (siehe [`Self::retry_failed`]) dagegen sehr.
     pub fn apply(&self, sources: &[AudioSource]) {
-        let mut running = self.running.lock();
-        let mut errors = self.errors.lock();
+        let wanted: Vec<&AudioSource> = sources.iter().filter(|s| s.enabled).collect();
 
-        let wanted: HashMap<&str, &AudioSource> = sources
-            .iter()
-            .filter(|s| s.enabled)
-            .map(|s| (s.id.as_str(), s))
-            .collect();
-
-        // Entfernte oder geänderte Streams stoppen.
-        let stale: Vec<String> = running
-            .iter()
-            .filter(|(id, run)| match wanted.get(id.as_str()) {
-                Some(source) => fingerprint(&source.kind) != run.fingerprint,
-                None => true,
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in stale {
-            if let Some(mut run) = running.remove(&id) {
-                if let Some(handle) = run.handle.take() {
-                    handle.stop();
-                }
+        // Entfernte oder geänderte Streams einsammeln …
+        let stale: Vec<(String, Running)> = {
+            let mut running = self.running.lock();
+            let ids: Vec<String> = running
+                .iter()
+                .filter(|(id, run)| {
+                    match wanted.iter().find(|source| &source.id == *id) {
+                        Some(source) => fingerprint(&source.kind) != run.fingerprint,
+                        None => true,
+                    }
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| running.remove(&id).map(|run| (id, run)))
+                .collect()
+        };
+        // … und außerhalb der Sperre auslaufen lassen: `stop` wartet auf den
+        // Faden der Quelle.
+        for (id, mut run) in stale {
+            if let Some(handle) = run.handle.take() {
+                handle.stop();
             }
-            errors.remove(&id);
+            self.errors.lock().remove(&id);
         }
 
-        // Fehlende starten.
-        for (id, source) in wanted {
-            if running.contains_key(id) {
-                continue;
-            }
+        let missing: Vec<&AudioSource> = {
+            let running = self.running.lock();
+            wanted
+                .into_iter()
+                .filter(|source| !running.contains_key(&source.id))
+                .collect()
+        };
+        for source in missing {
             let ring = Arc::new(SampleRing::new(SAMPLE_RATE, CHANNELS));
             match capture::start(&source.kind, ring.clone()) {
                 Ok(handle) => {
-                    errors.remove(id);
+                    let mut running = self.running.lock();
+                    // In der Zwischenzeit kann ein zweiter Aufruf dieselbe
+                    // Quelle gestartet haben. Dann gilt seiner, und dieser hier
+                    // wird wieder abgeräumt — zwei Streams auf demselben Gerät
+                    // schrieben sonst beide in denselben Ring.
+                    if running.contains_key(&source.id) {
+                        drop(running);
+                        handle.stop();
+                        continue;
+                    }
                     running.insert(
-                        id.to_string(),
+                        source.id.clone(),
                         Running {
                             handle: Some(handle),
                             ring,
                             fingerprint: fingerprint(&source.kind),
                         },
                     );
+                    drop(running);
+                    self.errors.lock().remove(&source.id);
                 }
                 Err(err) => {
                     log::warn!("Quelle '{}' konnte nicht gestartet werden: {err}", source.label);
-                    errors.insert(id.to_string(), err);
+                    self.errors.lock().insert(source.id.clone(), err);
                 }
             }
         }
+    }
+
+    /// Quellen, die beim letzten Mal nicht starteten, noch einmal versuchen.
+    ///
+    /// Ein belegtes oder gerade eingestecktes Gerät ist ein paar Sekunden
+    /// später oft da. Ohne das bliebe die Quelle bis zum nächsten Programmstart
+    /// tot — und die Spur im Clip stumm, ohne dass jemand etwas merkt.
+    ///
+    /// Läuft in einem eigenen Faden: `capture::start` wartet im Fehlerfall auf
+    /// eine Zeitüberschreitung, und solange stünden sonst die Pegel still.
+    pub fn retry_failed(self: &Arc<Self>, sources: Vec<AudioSource>) {
+        if self.errors.lock().is_empty() {
+            return;
+        }
+        if self.retrying.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let engine = self.clone();
+        std::thread::spawn(move || {
+            engine.apply(&sources);
+            engine.retrying.store(false, Ordering::SeqCst);
+        });
     }
 
     pub fn stop_all(&self) {
@@ -121,6 +168,28 @@ impl AudioEngine {
 
     pub fn errors(&self) -> HashMap<String, String> {
         self.errors.lock().clone()
+    }
+
+    /// Hinweise, die keine Fehler sind: Die Quelle läuft, aber nicht so, wie
+    /// der Nutzer es erwartet.
+    pub fn warnings(&self, sources: &[AudioSource]) -> HashMap<String, String> {
+        let running = self.running.lock();
+        let mut out = HashMap::new();
+        for source in sources {
+            let uses_fallback = running
+                .get(&source.id)
+                .and_then(|run| run.handle.as_ref())
+                .is_some_and(|handle| handle.fallback_clock.load(Ordering::Relaxed));
+            if uses_fallback {
+                out.insert(
+                    source.id.clone(),
+                    "Das Gerät meldet unbrauchbare Zeitstempel — ClippiBoy rechnet \
+                     mit der Systemuhr weiter."
+                        .to_string(),
+                );
+            }
+        }
+        out
     }
 
     /// Alle Ringe leeren. Muss vor jedem Aufnahmestart passieren: solange nicht

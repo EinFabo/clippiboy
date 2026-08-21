@@ -164,6 +164,7 @@ src/                     React-UI
   components/ui/Menu.tsx      Rechtsklick-Menü (ein Menü, global)
   components/clipMenu.tsx     dessen Einträge für einen Clip
   components/TextMenu.tsx     WebView-Menü aus, eigenes Menü in Textfeldern
+  components/SourceTrouble.tsx Tonquellen, die nicht oder doppelt laufen
   lib/useClipMix.ts      zusätzliche Tonspuren synchron zum Video abspielen
   overlay/               eigenes Fenster: der Banner über dem Spiel
 src-tauri/src/
@@ -318,6 +319,12 @@ beim Speichern als zusätzliche Tonspuren ins MP4 gemuxt — so lässt sich
 z.B. Discord im Schnitt nachträglich stummschalten. Ohne Schnittprogramm geht
 das ebenso: siehe „Clips bearbeiten".
 
+Eine Quelle mit eigener Spur behält diese Spur, solange sie eingeschaltet ist —
+auch wenn sie stumm geschaltet oder eine andere auf Solo gestellt wird. Der
+Mischer schiebt dann Stille hinein. Alles andere hieße, dass Stummschalten die
+Quelle auch **rückwirkend** aus dem Puffer wirft, und dass jeder Schritt eines
+Lautstärkereglers die bis dahin gepufferten Minuten dieser Spur kostet.
+
 ## Clips bearbeiten
 
 Im Player öffnet **Bearbeiten** (oder `E`) einen Bereich neben dem Bild:
@@ -447,9 +454,17 @@ keinen zweiten Zeitstrahl, der davonlaufen kann, und Windows kann einem keine
 offene Datei sperren. Der Preis ist eine Zahl, die stimmen muss — der Versatz
 zwischen Spur und Bild, und das ist genau `original.startMs`.
 
-**Die Vorschau kann nur leiser werden.** WebView2 kommt an `audioTracks` nicht
+**Die Vorschau mischt über WebAudio.** WebView2 kommt an `audioTracks` nicht
 heran, deshalb lässt die UI die Einzelspuren als eigene Audioelemente synchron
-zum Video mitlaufen. Deren Lautstärke lässt sich aber nur dämpfen, nie anheben:
-steht ein Regler über 0 dB, senkt die Vorschau stattdessen die übrigen Spuren
-ab. Die Balance stimmt damit, nur die Gesamtlautstärke liegt tiefer. Beim
-Speichern wird der Pegel wirklich angehoben.
+zum Video mitlaufen. Deren `volume` kann nur dämpfen, nie anheben — jeder
+Regler über 0 dB hätte die übrigen Spuren abgesenkt statt seine eigene
+anzuheben, und wer am Mikrofon drehte, hörte alles andere lauter oder leiser
+werden. Die Spuren laufen deshalb über einen kleinen WebAudio-Graphen: je Spur
+ein `GainNode`, dahinter ein Master und ein hartes Begrenzen auf ±1 — dasselbe,
+was beim Speichern passiert. Vorschau und fertiger Clip klingen damit gleich.
+
+Die Spuren liegen unter `asset.localhost` und damit auf einer anderen Herkunft
+als die Oberfläche; ohne `crossOrigin = "anonymous"` gäbe ein
+`MediaElementSource` **Stille** aus, ohne jede Fehlermeldung. Für den Fall, dass
+es trotzdem einmal so kommt, hört ein `AnalyserNode` mit und fällt nach zwei
+Sekunden ohne ein einziges Sample auf den alten Weg über `volume` zurück.

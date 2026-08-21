@@ -44,11 +44,17 @@ const AUDIO_LAG_100NS: i64 = 80 * 10_000;
 /// Takt des Mischers.
 const MIX_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Quellenkennung der Hauptmix-Spur. Sie gehört keiner Quelle und kollidiert
+/// deshalb mit keiner Kennung aus der Konfiguration.
+const MAIN_TRACK_ID: &str = "__mix";
+
 /// Ringpuffer einer Tonspur (16-bit PCM), auf derselben QPC-Zeitachse wie das
 /// Bild.
 pub struct TrackRing {
     pub source_id: String,
-    pub label: String,
+    /// Änderbar: Wer eine Quelle umbenennt, darf dadurch nicht ihre Spur
+    /// verlieren — der Ring bleibt derselbe, nur die Aufschrift wechselt.
+    label: Mutex<String>,
     inner: Mutex<TrackInner>,
     capacity: usize,
 }
@@ -64,7 +70,7 @@ impl TrackRing {
     fn new(source_id: String, label: String, seconds: u32) -> Self {
         Self {
             source_id,
-            label,
+            label: Mutex::new(label),
             inner: Mutex::new(TrackInner {
                 samples: VecDeque::new(),
                 start_100ns: 0,
@@ -73,6 +79,14 @@ impl TrackRing {
             // Ein Puffer über die volle Cliplänge, plus etwas Luft.
             capacity: (seconds as usize + 2) * SAMPLE_RATE as usize * CHANNELS,
         }
+    }
+
+    pub fn label(&self) -> String {
+        self.label.lock().clone()
+    }
+
+    fn set_label(&self, label: String) {
+        *self.label.lock() = label;
     }
 
     /// Der Mischer erzeugt lückenlos fortlaufende Fenster; `at_100ns` setzt
@@ -413,7 +427,7 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             generation = current;
             sources = shared.sources.lock().clone();
             layout = TrackLayout::from_sources(&sources);
-            sync_tracks(&shared, &sources, &layout);
+            sync_tracks(&shared, &sources);
         }
 
         let target = now_100ns() - AUDIO_LAG_100NS;
@@ -444,16 +458,22 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             main.push(&scratch, from);
         }
 
+        // Jeder Ring bekommt in jedem Fenster etwas — wer gerade hörbar ist
+        // seinen Mix, wer stumm oder ausgesolot ist Stille. Nichts zu schieben
+        // wäre falsch: Der Ring stempelt nur seinen allerersten Block, eine
+        // Lücke zöge deshalb alles Spätere nach vorn und der Ton liefe ab da
+        // vor dem Bild her.
         let offset = usize::from(has_main);
-        for (index, source_id) in layout.separate.iter().enumerate() {
-            let Some(track) = buffers.get(offset + index) else {
-                continue;
-            };
-            let Some(ring) = rings.iter().find(|r| &r.source_id == source_id) else {
-                continue;
-            };
+        for ring in rings.iter().skip(1) {
+            let slot = layout
+                .separate
+                .iter()
+                .position(|id| id == &ring.source_id);
             scratch.clear();
-            scratch.extend(track.iter().map(|s| to_i16(*s)));
+            match slot.and_then(|index| buffers.get(offset + index)) {
+                Some(track) => scratch.extend(track.iter().map(|s| to_i16(*s))),
+                None => scratch.resize(frames * CHANNELS, 0),
+            }
             ring.push(&scratch, from);
         }
         drop(rings);
@@ -462,26 +482,53 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     }
 }
 
-/// Die Spurenliste an ein geändertes Layout angleichen.
+/// Die Spurenliste zu einer Quellenliste — Spur 0 (Hauptmix) und dahinter je
+/// eine Spur pro Quelle mit eigener Tonspur.
 ///
-/// Spur 0 (Hauptmix) bleibt immer stehen; dahinter kommen die Quellen mit
-/// eigener Spur. Wer dazukommt, fängt mit einem leeren Ring an — sein Ton
-/// beginnt dann eben mitten im Puffer.
-fn sync_tracks(shared: &Arc<Shared>, sources: &[AudioSource], layout: &TrackLayout) {
-    let mut rings = shared.tracks.lock();
-    rings.truncate(1);
-    for id in &layout.separate {
-        let label = sources
-            .iter()
-            .find(|s| &s.id == id)
-            .map(|s| s.label.clone())
-            .unwrap_or_else(|| id.clone());
-        rings.push(Arc::new(TrackRing::new(
-            id.clone(),
-            label,
-            shared.buffer_seconds,
-        )));
+/// Ringe, die es schon gibt, werden **weitergereicht**. Sie neu anzulegen wäre
+/// der bequeme Weg, kostet aber den gesamten gepufferten Ton dieser Quelle —
+/// und hier kommt jede Änderung an den Quellen vorbei, auch jeder einzelne
+/// Schritt eines Lautstärkereglers. Vorher hieß das: Wer während der Aufnahme
+/// am Mikrofon dreht, hat im Clip keins mehr.
+///
+/// Bewusst **nicht** nach `muted`/`solo` gefiltert. Eine stumme Quelle behält
+/// ihre Spur, der Mischer schiebt so lange Stille hinein; sonst verschwände sie
+/// mit dem Stummschalten auch rückwirkend aus dem Puffer.
+fn tracks_for(
+    sources: &[AudioSource],
+    existing: &[Arc<TrackRing>],
+    buffer_seconds: u32,
+) -> Vec<Arc<TrackRing>> {
+    let main = existing.first().cloned().unwrap_or_else(|| {
+        Arc::new(TrackRing::new(
+            MAIN_TRACK_ID.into(),
+            "Mix".into(),
+            buffer_seconds,
+        ))
+    });
+
+    let mut out = vec![main];
+    for source in sources.iter().filter(|s| s.enabled && s.separate_track) {
+        match existing.iter().find(|ring| ring.source_id == source.id) {
+            Some(ring) => {
+                ring.set_label(source.label.clone());
+                out.push(ring.clone());
+            }
+            None => out.push(Arc::new(TrackRing::new(
+                source.id.clone(),
+                source.label.clone(),
+                buffer_seconds,
+            ))),
+        }
     }
+    out
+}
+
+/// Die Spurenliste an eine geänderte Konfiguration angleichen.
+fn sync_tracks(shared: &Arc<Shared>, sources: &[AudioSource]) {
+    let mut rings = shared.tracks.lock();
+    let next = tracks_for(sources, &rings, shared.buffer_seconds);
+    *rings = next;
 }
 
 fn to_i16(sample: f32) -> i16 {
@@ -495,26 +542,8 @@ impl Pipeline {
         sources: Vec<AudioSource>,
         audio: Arc<AudioEngine>,
     ) -> Result<Self, String> {
-        let layout = TrackLayout::from_sources(&sources);
-
         // Spur 0 ist der Hauptmix und immer vorhanden.
-        let mut tracks = vec![Arc::new(TrackRing::new(
-            "__mix".into(),
-            "Mix".into(),
-            buffer_seconds,
-        ))];
-        for id in &layout.separate {
-            let label = sources
-                .iter()
-                .find(|s| &s.id == id)
-                .map(|s| s.label.clone())
-                .unwrap_or_else(|| id.clone());
-            tracks.push(Arc::new(TrackRing::new(
-                id.clone(),
-                label,
-                buffer_seconds,
-            )));
-        }
+        let tracks = tracks_for(&sources, &[], buffer_seconds);
 
         // Ohne das steckt in jedem Ring noch der Ton der letzten Minuten, den
         // niemand abgeholt hat.
@@ -669,5 +698,76 @@ mod tests {
             inner.start_100ns > 0,
             "Der Ringanfang muss mitwandern, sonst zeigt jedes Fenster daneben"
         );
+    }
+
+    fn source(id: &str, label: &str, separate: bool) -> AudioSource {
+        AudioSource {
+            id: id.into(),
+            label: label.into(),
+            kind: crate::model::SourceKind::InputDevice {
+                device_id: "d".into(),
+            },
+            enabled: true,
+            gain_db: 0.0,
+            muted: false,
+            solo: false,
+            separate_track: separate,
+        }
+    }
+
+    /// Der eigentliche Fehler hinter „mein Mikrofon ist im Clip stumm": Jede
+    /// Reglerbewegung während der Aufnahme lief hier vorbei und legte die
+    /// Einzelspuren neu an — mitsamt Verlust des gesamten gepufferten Tons.
+    #[test]
+    fn a_changed_source_keeps_its_ring_and_its_audio() {
+        let mut sources = vec![source("mic", "Mikrofon", true)];
+        let first = tracks_for(&sources, &[], 5);
+        first[1].push(&[123, 456], qpc_of_frame(0));
+
+        // Lauter gedreht und umbenannt — beides darf die Spur nicht kosten.
+        sources[0].gain_db = 6.0;
+        sources[0].label = "Mein Mikro".into();
+        let second = tracks_for(&sources, &first, 5);
+
+        assert!(Arc::ptr_eq(&first[0], &second[0]), "Hauptmix neu angelegt");
+        assert!(Arc::ptr_eq(&first[1], &second[1]), "Mikrofonspur neu angelegt");
+        assert_eq!(second[1].label(), "Mein Mikro", "Name nicht übernommen");
+        assert_eq!(second[1].inner.lock().samples.len(), 2, "Ton verloren");
+    }
+
+    /// Stummschalten heißt „ab hier Stille", nicht „die Spur gab es nie".
+    #[test]
+    fn a_muted_source_keeps_its_track() {
+        let mut sources = vec![source("mic", "Mikrofon", true)];
+        let first = tracks_for(&sources, &[], 5);
+        sources[0].muted = true;
+        let second = tracks_for(&sources, &first, 5);
+
+        assert_eq!(second.len(), 2);
+        assert!(Arc::ptr_eq(&first[1], &second[1]));
+    }
+
+    /// Quellen ohne eigene Spur laufen in den Hauptmix und bekommen keinen Ring.
+    #[test]
+    fn only_separate_sources_get_a_track() {
+        let sources = vec![
+            source("spiel", "Spiel", false),
+            source("mic", "Mikrofon", true),
+        ];
+        let tracks = tracks_for(&sources, &[], 5);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].source_id, MAIN_TRACK_ID);
+        assert_eq!(tracks[1].source_id, "mic");
+    }
+
+    /// Eine entfernte Quelle verschwindet, eine neue kommt leer dazu.
+    #[test]
+    fn removed_sources_drop_out_and_new_ones_start_empty() {
+        let first = tracks_for(&[source("mic", "Mikrofon", true)], &[], 5);
+        let second = tracks_for(&[source("discord", "Discord", true)], &first, 5);
+
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[1].source_id, "discord");
+        assert!(!second[1].inner.lock().primed);
     }
 }

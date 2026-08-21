@@ -23,6 +23,9 @@ interface EngineState {
   clips: Clip[];
   levels: LevelMap;
   sourceErrors: Record<string, string>;
+  /** Quelle läuft, aber doppelt oder auf einer Notuhr — kein Fehler, aber
+   *  etwas, das man vor der Aufnahme wissen will. */
+  sourceWarnings: Record<string, string>;
   bufferActive: boolean;
   bufferedSeconds: number;
   /** Im Vordergrund erkanntes Spiel, vom Kern gemeldet. */
@@ -83,6 +86,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   clips: [],
   levels: {},
   sourceErrors: {},
+  sourceWarnings: {},
   bufferActive: false,
   bufferedSeconds: 0,
   detectedGame: null,
@@ -160,6 +164,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         })),
       );
       await events.onAudioErrors((sourceErrors) => set({ sourceErrors }));
+      await events.onAudioWarnings((sourceWarnings) => set({ sourceWarnings }));
     } catch (err) {
       set({ ready: true, lastError: String(err) });
     }

@@ -47,6 +47,49 @@ export function gainFactor(db: number): number {
   return 10 ** (db / 20);
 }
 
+/** Die Regler, ihre Verstärker und der Weg nach draußen. */
+interface Graph {
+  ctx: AudioContext;
+  master: GainNode;
+  gains: Map<number, GainNode>;
+  /** Nur zum Nachhören, ob überhaupt etwas ankommt — siehe `SILENT_TICKS`. */
+  analyser: AnalyserNode;
+}
+
+/** Takt der Stummheitswache. */
+const WATCH_MS = 250;
+
+/**
+ * So viele Messungen in Folge ohne ein einziges Sample ungleich null, bis der
+ * Graph als tot gilt (2 Sekunden).
+ *
+ * Ein `MediaElementSource` über einer fremden Herkunft **ohne** CORS-Freigabe
+ * gibt Stille aus — ohne Fehler, ohne Warnung und ohne dass es sich vorher
+ * abfragen ließe. Das wäre schlimmer als der Fehler, den der Graph behebt: Die
+ * Vorschau wäre schlicht tot. Deshalb wird nachgehört und im Zweifel auf den
+ * alten Weg zurückgefallen.
+ */
+const SILENT_TICKS = 8;
+
+/**
+ * Hartes Begrenzen auf ±1 — dasselbe, was der Kern beim Mischen
+ * (`clamp(-1.0, 1.0)`) und ffmpeg beim Speichern tun. Ohne das klänge die
+ * Vorschau bei aufgedrehten Reglern anders als der fertige Clip.
+ *
+ * Der Kennlinie reicht die Gerade von −1 bis 1: Alles darüber hinaus bildet ein
+ * WaveShaper von sich aus auf den jeweiligen Endwert ab.
+ */
+function hardClip(ctx: AudioContext): WaveShaperNode {
+  const shaper = ctx.createWaveShaper();
+  const points = 1024;
+  const curve = new Float32Array(points);
+  for (let i = 0; i < points; i += 1) {
+    curve[i] = (i / (points - 1)) * 2 - 1;
+  }
+  shaper.curve = curve;
+  return shaper;
+}
+
 /**
  * Der nachträgliche Mixer eines Clips.
  *
@@ -73,6 +116,11 @@ export function useClipMix(
   const [mix, setMix] = useState<Record<number, TrackState>>({});
   const [loading, setLoading] = useState(false);
   const elements = useRef(new Map<number, HTMLAudioElement>());
+  const graph = useRef<Graph | null>(null);
+  /** Steht der Graph? Nur als Zustand merkt es der Lautstärke-Effekt. */
+  const [graphReady, setGraphReady] = useState(false);
+  /** Auf „off" gestellt, sobald sich der Graph als stumm erwiesen hat. */
+  const [graphMode, setGraphMode] = useState<"try" | "off">("try");
 
   const clipId = clip?.id;
   // Liegen alle Spuren als eigene Dateien vor? Nur dann lässt sich mischen —
@@ -93,6 +141,7 @@ export function useClipMix(
   useEffect(() => {
     setTracks([]);
     setMix({});
+    setGraphMode("try");
     if (!clipId) return;
 
     if (!inTauri) {
@@ -119,18 +168,13 @@ export function useClipMix(
   }, [clipId]);
 
   // Für jede Einzelspur ein Audioelement. Es hängt nicht im DOM — es soll nur
-  // klingen, nicht sichtbar sein.
+  // klingen, nicht sichtbar sein. Darüber ein kleiner WebAudio-Graph, weil
+  // `HTMLMediaElement.volume` nur dämpfen kann und die Regler bis +12 dB gehen.
   useEffect(() => {
     const map = elements.current;
     if (!separate) return;
-    for (const track of tracks) {
-      const url = fileUrl(track.previewPath);
-      if (!url || map.has(track.index)) continue;
-      const audio = new Audio(url);
-      audio.preload = "auto";
-      map.set(track.index, audio);
-    }
-    return () => {
+
+    const drop = () => {
       for (const audio of map.values()) {
         audio.pause();
         audio.removeAttribute("src");
@@ -138,12 +182,88 @@ export function useClipMix(
       }
       map.clear();
     };
-  }, [tracks, separate]);
+    const build = () => {
+      for (const track of tracks) {
+        const url = fileUrl(track.previewPath);
+        if (!url || map.has(track.index)) continue;
+        const audio = new Audio();
+        // Muss **vor** `src` stehen. Die Spuren liegen unter
+        // `asset.localhost` und damit auf einer anderen Herkunft als die
+        // Oberfläche; ohne CORS-Freigabe gibt ein MediaElementSource nur
+        // Stille aus, und zwar ohne jede Fehlermeldung.
+        audio.crossOrigin = "anonymous";
+        audio.src = url;
+        audio.preload = "auto";
+        map.set(track.index, audio);
+      }
+    };
+    build();
 
-  // Lautstärken. `HTMLMediaElement.volume` kann nur dämpfen, nie anheben —
-  // deshalb wird der lauteste Regler zum Bezugspunkt. Die Balance in der
-  // Vorschau stimmt damit, nur die Gesamtlautstärke liegt tiefer; beim
-  // Speichern wird der Pegel dann wirklich angehoben.
+    // Hat sich der Graph für diesen Clip schon als stumm erwiesen, wird er gar
+    // nicht erst wieder aufgebaut.
+    let built: Graph | null = null;
+    if (graphMode === "try") {
+      try {
+        const ctx = new AudioContext();
+        const master = ctx.createGain();
+        const analyser = ctx.createAnalyser();
+        master.connect(analyser);
+        analyser.connect(hardClip(ctx)).connect(ctx.destination);
+
+        const gains = new Map<number, GainNode>();
+        for (const [index, audio] of map) {
+          const gain = ctx.createGain();
+          ctx.createMediaElementSource(audio).connect(gain).connect(master);
+          gains.set(index, gain);
+        }
+        built = { ctx, master, gains, analyser };
+      } catch {
+        // Kein WebAudio: Dann bleibt es beim Dämpfen über `volume`. Die
+        // Elemente hängen womöglich schon halb im Graphen und wären damit
+        // stumm — herauslösen lässt sich ein Element nicht, also neu anlegen.
+        built = null;
+        drop();
+        build();
+      }
+    }
+    graph.current = built;
+    setGraphReady(built !== null);
+
+    // Nachhören, ob aus dem Graphen wirklich Ton kommt.
+    let watch = 0;
+    if (built) {
+      const samples = new Float32Array(built.analyser.fftSize);
+      let quiet = 0;
+      watch = window.setInterval(() => {
+        const element = video.current;
+        // Nur zählen, wenn überhaupt Ton zu erwarten ist: Stille bei
+        // angehaltenem Video oder zugedrehten Reglern sagt nichts.
+        if (!element || element.paused || built.ctx.state !== "running") return;
+        if (built.master.gain.value <= 0) return;
+        if ([...built.gains.values()].every((gain) => gain.gain.value <= 0)) return;
+
+        built.analyser.getFloatTimeDomainData(samples);
+        quiet = samples.some((value) => value !== 0) ? 0 : quiet + 1;
+        if (quiet >= SILENT_TICKS) {
+          window.clearInterval(watch);
+          setGraphMode("off");
+        }
+      }, WATCH_MS);
+    }
+
+    return () => {
+      window.clearInterval(watch);
+      graph.current = null;
+      setGraphReady(false);
+      if (built) {
+        built.master.disconnect();
+        void built.ctx.close().catch(() => undefined);
+      }
+      drop();
+    };
+  }, [tracks, separate, graphMode, video]);
+
+  // Lautstärken.
   useEffect(() => {
     const anySolo = Object.values(mix).some((state) => state.solo);
     const factors = new Map(
@@ -153,20 +273,36 @@ export function useClipMix(
         return [track.index, on ? gainFactor(state.gainDb) : 0] as const;
       }),
     );
-    const peak = Math.max(1, ...factors.values());
-    const volume = (index: number) =>
-      Math.min(1, (master * (factors.get(index) ?? 1)) / peak);
 
     // Bei getrennten Spuren kommt der Ton ausschließlich aus den
     // Audioelementen — die Tonspur des Videos enthält dasselbe noch einmal.
     if (video.current) video.current.volume = separate ? 0 : master;
-    for (const [index, audio] of elements.current) audio.volume = volume(index);
+
+    const built = graph.current;
+    if (built) {
+      // Jeder Regler wirkt für sich, genau wie beim Speichern.
+      built.master.gain.value = master;
+      for (const [index, gain] of built.gains) {
+        gain.gain.value = factors.get(index) ?? 1;
+      }
+      return;
+    }
+
+    // Notweg ohne WebAudio: `HTMLMediaElement.volume` kann nur dämpfen, nie
+    // anheben. Der lauteste Regler wird deshalb zum Bezugspunkt — die Balance
+    // stimmt, die Gesamtlautstärke liegt tiefer, und wer eine Spur über 0 dB
+    // zieht, hört alle anderen leiser werden. Genau deshalb ist das nur der
+    // Notweg und nicht mehr der Normalfall.
+    const peak = Math.max(1, ...factors.values());
+    for (const [index, audio] of elements.current) {
+      audio.volume = Math.min(1, (master * (factors.get(index) ?? 1)) / peak);
+    }
     // `bindKey` gehört dazu, obwohl es hier nirgends steht: Nach dem Speichern
     // hängt der Player ein **frisches** Videoelement ein, und das fängt bei
     // voller Lautstärke an. `video` ist ein Ref und ändert seine Identität
     // dabei nicht — ohne diesen Eintrag liefe der Effekt also nicht noch einmal
     // und man hörte alles doppelt, bis jemand den Clip neu öffnet.
-  }, [tracks, mix, master, video, separate, bindKey]);
+  }, [tracks, mix, master, video, separate, bindKey, graphReady]);
 
   // Die Spuren an das Video hängen: starten, anhalten, springen.
   useEffect(() => {
@@ -183,6 +319,9 @@ export function useClipMix(
       }
     };
     const play = () => {
+      // Ein frischer AudioContext ist angehalten, bis ihn eine Nutzeraktion
+      // weckt. Ohne das bliebe die Vorschau stumm.
+      void graph.current?.ctx.resume().catch(() => undefined);
       align();
       for (const audio of all()) void audio.play().catch(() => undefined);
     };
@@ -217,7 +356,10 @@ export function useClipMix(
       element.removeEventListener("ratechange", rate);
       pause();
     };
-  }, [tracks, video, clipId, separate, bindKey, offset]);
+    // `graphMode` gehört dazu: Fällt die Vorschau auf den Weg ohne WebAudio
+    // zurück, sind die Audioelemente frisch angelegt und hängen an nichts mehr.
+    // Ohne diesen Eintrag liefen sie erst wieder, wenn jemand von Hand anhält.
+  }, [tracks, video, clipId, separate, bindKey, offset, graphMode]);
 
   const setTrack = useCallback((index: number, patch: Partial<TrackState>) => {
     setMix((current) => ({

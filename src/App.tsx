@@ -35,7 +35,7 @@ export default function App() {
             {route === "dashboard" && <Dashboard onNavigate={setRoute} />}
             {route === "clips" && <Clips onNavigate={setRoute} />}
             {route === "audio" && <AudioMixer />}
-            {route === "recording" && <Recording />}
+            {route === "recording" && <Recording onNavigate={setRoute} />}
             {route === "settings" && <Settings />}
           </div>
         </main>

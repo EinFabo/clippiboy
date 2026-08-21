@@ -7,6 +7,7 @@ import { IconArrowUpRight, IconScissors } from "@/components/icons";
 import { clipName, formatAgo, formatBufferSeconds, formatDuration } from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
+import { SourceTrouble } from "@/components/SourceTrouble";
 import { cn } from "@/lib/cn";
 
 export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
@@ -82,6 +83,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           onClick={() => onNavigate("audio")}
         />
       </section>
+
+      <SourceTrouble onOpenMixer={() => onNavigate("audio")} />
 
       <section>
         <SectionTitle

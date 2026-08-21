@@ -123,4 +123,9 @@ export const events = {
     cb: (errors: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>
     listen<Record<string, string>>("audio-errors", (e) => cb(e.payload)),
+  /** Quellen, die zwar laufen, aber nicht so, wie man es erwartet. */
+  onAudioWarnings: (
+    cb: (warnings: Record<string, string>) => void,
+  ): Promise<UnlistenFn> =>
+    listen<Record<string, string>>("audio-warnings", (e) => cb(e.payload)),
 };
