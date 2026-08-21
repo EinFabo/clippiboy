@@ -1,14 +1,14 @@
-//! Windows.Graphics.Capture in eigener Regie.
+//! Windows.Graphics.Capture, driven by hand.
 //!
-//! Vorher lief das über `windows-capture`. Dessen Frame-Pool ist auf **einen**
-//! Puffer festgelegt, und sein Encoder reicht nur den COM-Zeiger auf die
-//! Textur weiter und liest sie später — bis dahin hat WGC dieselbe Textur
-//! längst mit dem nächsten Bild überschrieben. Genau daher kamen die
-//! doppelten und zerrissenen Bilder.
+//! This used to run through `windows-capture`. Its frame pool is fixed at
+//! **one** buffer, and its encoder only passes the COM pointer to the texture
+//! along and reads it later — by which time WGC has long overwritten that same
+//! texture with the next frame. That is exactly where the duplicated and torn
+//! frames came from.
 //!
-//! Hier gilt deshalb beides: Der Pool hat zwei Puffer, und der Rückruf
-//! bekommt die Textur **synchron**, solange sie gültig ist. Wer sie behalten
-//! will, kopiert sie dort.
+//! So both things hold here: the pool has two buffers, and the callback gets the
+//! texture **synchronously**, while it is valid. Whoever wants to keep it copies
+//! it there.
 
 #![cfg(windows)]
 
@@ -34,29 +34,28 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use crate::gpu::{GpuDevice, SendPtr};
 use crate::model::TargetKind;
 
-/// Ein aufgenommenes Bild, wie es der Rückruf sieht.
+/// One captured frame as the callback sees it.
 pub struct CapturedFrame<'a> {
     pub texture: &'a ID3D11Texture2D,
     pub width: u32,
     pub height: u32,
-    /// QPC in 100-ns-Einheiten. **Dieselbe Uhr**, die WASAPI über
-    /// `pu64QPCPosition` liefert — darauf beruht die Bild-Ton-Synchronität.
+    /// QPC in 100 ns units. **The same clock** WASAPI supplies through
+    /// `pu64QPCPosition` — audio/video sync rests on that.
     pub qpc_100ns: i64,
 }
 
-/// Läuft, solange die Aufnahme läuft. Beim Fallenlassen wird abgemeldet.
+/// Lives as long as the capture runs. Unregisters when dropped.
 pub struct Capture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     token: windows::Foundation::EventRegistrationToken,
-    /// Muss am Leben bleiben, sonst meldet niemand mehr, dass die Quelle weg
-    /// ist.
+    /// Has to stay alive, otherwise nobody reports that the source is gone.
     item: GraphicsCaptureItem,
     closed_token: windows::Foundation::EventRegistrationToken,
 }
 
-// Alle beteiligten WinRT-Objekte sind agil, und das D3D11-Gerät darunter ist
-// multithread-geschützt (siehe `gpu.rs`).
+// All the WinRT objects involved are agile, and the D3D11 device underneath is
+// multithread-protected (see `gpu.rs`).
 unsafe impl Send for Capture {}
 unsafe impl Sync for Capture {}
 
@@ -69,7 +68,7 @@ impl Drop for Capture {
     }
 }
 
-/// HMONITOR zum Gerätenamen (`\\.\DISPLAY1`), sonst der primäre Bildschirm.
+/// HMONITOR for the device name (`\\.\DISPLAY1`), otherwise the primary screen.
 fn find_monitor(device_name: Option<&str>) -> Result<HMONITOR, String> {
     struct Search {
         wanted: Option<String>,
@@ -89,7 +88,7 @@ fn find_monitor(device_name: Option<&str>) -> Result<HMONITOR, String> {
         if !GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _).as_bool() {
             return TRUE;
         }
-        // MONITORINFOF_PRIMARY — im windows-Crate 0.58 nicht exportiert.
+        // MONITORINFOF_PRIMARY — not exported by the windows crate 0.58.
         if info.monitorInfo.dwFlags & 0x0000_0001 != 0 && search.primary.is_none() {
             search.primary = Some(monitor);
         }
@@ -117,12 +116,12 @@ fn find_monitor(device_name: Option<&str>) -> Result<HMONITOR, String> {
             LPARAM(&mut search as *mut _ as isize),
         );
     }
-    // Abgestöpselter oder umbenannter Bildschirm: lieber den primären
-    // aufnehmen als gar nicht puffern — wie bisher auch.
+    // Unplugged or renamed screen: better to capture the primary one than not to
+    // buffer at all — as before.
     search
         .hit
         .or(search.primary)
-        .ok_or_else(|| "Kein Bildschirm gefunden".to_string())
+        .ok_or_else(|| "no screen found".to_string())
 }
 
 fn capture_item(kind: TargetKind, id: Option<&str>) -> Result<GraphicsCaptureItem, String> {
@@ -139,27 +138,26 @@ fn capture_item(kind: TargetKind, id: Option<&str>) -> Result<GraphicsCaptureIte
                 .map_err(|err| format!("Bildschirm aufnehmen: {err}"))
         }
         TargetKind::Window => {
-            let id = id.ok_or_else(|| "Kein Fenster ausgewählt".to_string())?;
+            let id = id.ok_or_else(|| "no window selected".to_string())?;
             let raw = id
                 .trim_start_matches("0x")
                 .trim_start_matches("0X");
             let handle = usize::from_str_radix(raw, 16)
-                .map_err(|_| format!("Unbrauchbare Fenster-Kennung: {id}"))?;
+                .map_err(|_| format!("unusable window id: {id}"))?;
             if handle == 0 {
-                return Err("Das gewählte Fenster ist nicht mehr offen.".into());
+                return Err("The selected window is no longer open.".into());
             }
             unsafe { interop.CreateForWindow(HWND(handle as *mut _)) }
-                .map_err(|_| "Das gewählte Fenster ist nicht mehr offen.".to_string())
+                .map_err(|_| "The selected window is no longer open.".to_string())
         }
     }
 }
 
-/// Aufnahme starten.
+/// Start capturing.
 ///
-/// `on_frame` läuft auf einem Threadpool-Faden und muss kurz sein — die Textur
-/// ist nur währenddessen gültig. `on_closed` meldet, dass die Quelle
-/// verschwunden ist (Fenster zu, Bildschirm abgestöpselt); danach kommt kein
-/// Bild mehr.
+/// `on_frame` runs on a thread pool thread and has to be short — the texture is
+/// only valid while it does. `on_closed` reports that the source has gone away
+/// (window closed, screen unplugged); no frame arrives after that.
 pub fn start<F, C>(
     gpu: &GpuDevice,
     kind: TargetKind,
@@ -173,10 +171,10 @@ where
     C: Fn() + Send + 'static,
 {
     let item = capture_item(kind, id)?;
-    let size = item.Size().map_err(|err| format!("Quellgröße: {err}"))?;
+    let size = item.Size().map_err(|err| format!("source size: {err}"))?;
 
-    // Zwei Puffer statt einem: WGC darf das nächste Bild schon schreiben,
-    // während der Rückruf noch am vorherigen arbeitet.
+    // Two buffers instead of one: WGC may already write the next frame while the
+    // callback is still working on the previous one.
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &gpu.winrt,
         DirectXPixelFormat::B8G8R8A8UIntNormalized,
@@ -190,8 +188,8 @@ where
         .map_err(|err| format!("Capture-Sitzung: {err}"))?;
 
     let _ = session.SetIsCursorCaptureEnabled(true);
-    // Beide erst ab Windows 11 vorhanden. Fehlen sie, bleibt es beim
-    // Standardverhalten — kein Grund, die Aufnahme scheitern zu lassen.
+    // Both only exist from Windows 11 on. If they are missing, the default
+    // behaviour stands — no reason to let the capture fail.
     let _ = session.SetIsBorderRequired(false);
     if fps > 0 {
         let interval: windows::Foundation::TimeSpan =
@@ -213,9 +211,9 @@ where
             let frame = pool.TryGetNextFrame()?;
             let content = frame.ContentSize()?;
 
-            // Größe geändert (Fenster skaliert, Auflösung gewechselt): Der Pool
-            // muss neu, und dieses Bild hängt noch am alten. Erst freigeben,
-            // dann neu anlegen — sonst bleibt die alte Textur am Leben.
+            // Size changed (window resized, resolution switched): the pool has to
+            // be recreated, and this frame still hangs off the old one. Release
+            // first, then recreate — otherwise the old texture stays alive.
             let (last_w, last_h) = (&state.1, &state.2);
             if content.Width != last_w.load(Ordering::Relaxed)
                 || content.Height != last_h.load(Ordering::Relaxed)
@@ -251,9 +249,9 @@ where
         .FrameArrived(&handler)
         .map_err(|err| format!("FrameArrived: {err}"))?;
 
-    // Ohne das bleibt eine tote Quelle unbemerkt: Der Taktgeber wiederholt
-    // dann bis in alle Ewigkeit das letzte Bild, und aufgenommen wird ein
-    // Standbild, ohne dass irgendwo etwas davon steht.
+    // Without this a dead source goes unnoticed: the clock then repeats the last
+    // frame for all eternity, and what gets recorded is a still image with nothing
+    // anywhere saying so.
     let closed_token = item
         .Closed(&TypedEventHandler::<GraphicsCaptureItem, windows::core::IInspectable>::new(
             move |_, _| {
@@ -265,7 +263,7 @@ where
 
     session
         .StartCapture()
-        .map_err(|err| format!("Aufnahme starten: {err}"))?;
+        .map_err(|err| format!("start capture: {err}"))?;
 
     Ok(Capture {
         pool,

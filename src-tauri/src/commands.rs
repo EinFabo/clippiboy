@@ -1,4 +1,4 @@
-//! Tauri-Commands — die einzige Schnittstelle der UI zum Kern.
+//! Tauri commands — the UI's only interface to the core.
 
 use std::path::Path;
 
@@ -52,27 +52,27 @@ pub fn set_config(
 ) -> AppConfig {
     let previous = state.config_snapshot();
     let next = state.replace_config(config);
-    // Der Player kommt sonst nicht an Clips außerhalb des Videos-Ordners.
+    // Otherwise the player cannot reach clips outside the Videos folder.
     crate::allow_clip_dir(&app, &next.clip_dir);
-    // Ecke oder Bildschirm können sich geändert haben.
+    // The corner or the screen may have changed.
     crate::overlay::reposition(&app);
     crate::apply_autostart(&app, next.auto_start_with_windows);
 
-    // Ein laufendes Capture hängt fest an seinem Monitor bzw. Fenster. Ohne
-    // Neustart bliebe die Auswahl in der Oberfläche wirkungslos: Der Puffer
-    // nähme weiter die alte Quelle auf. Nur beim echten Quellenwechsel — an
-    // Auflösung oder Bitrate wird per Regler gedreht, da wäre ein Neustart je
-    // Mausbewegung fatal.
+    // A running capture is bound to its monitor or window. Without a restart
+    // the selection in the UI would have no effect: the buffer would keep
+    // recording the old source. Only on a real source change — resolution and
+    // bitrate are dragged on a slider, and a restart per mouse move would be
+    // fatal there.
     let target_changed = next.recording.target_kind != previous.recording.target_kind
         || next.recording.target_id != previous.recording.target_id;
     if target_changed && state.is_buffering() {
-        log::info!("Aufnahmequelle gewechselt — Puffer wird neu gestartet");
+        log::info!("capture source changed — restarting the buffer");
         state.stop_pipeline();
         crate::start_buffer_and_notify(&app);
     }
 
-    // Normalerweise gehen Hotkeys über `set_hotkeys`; kommen sie doch einmal
-    // hier durch, dürfen sie nicht bloß im JSON stehen und nirgends gelten.
+    // Hotkeys normally go through `set_hotkeys`; if they do come through here
+    // once, they must not just sit in the JSON and apply nowhere.
     if previous.save_clip_hotkey != next.save_clip_hotkey
         || previous.toggle_buffer_hotkey != next.toggle_buffer_hotkey
     {
@@ -83,12 +83,12 @@ pub fn set_config(
     next
 }
 
-/// Die beiden globalen Hotkeys neu belegen.
+/// Reassign the two global hotkeys.
 ///
-/// Getrennt von `set_config`, weil hier etwas schiefgehen kann: eine
-/// unbrauchbare Kombination oder eine, die schon ein anderes Programm hält.
-/// Schlägt das Registrieren fehl, gilt wieder die vorherige Belegung — sonst
-/// stünde in den Einstellungen ein Hotkey, der nichts auslöst.
+/// Kept apart from `set_config` because something can go wrong here: an
+/// unusable combination, or one another program already holds. If registering
+/// fails, the previous assignment applies again — otherwise the settings would
+/// show a hotkey that triggers nothing.
 #[tauri::command]
 pub fn set_hotkeys(
     state: State<'_, AppState>,
@@ -98,8 +98,8 @@ pub fn set_hotkeys(
 ) -> Result<AppConfig> {
     let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer);
     if result.is_err() {
-        // Auch nach einer abgelehnten Eingabe müssen die bisherigen Hotkeys
-        // wieder greifen — die Einstellungen legen sie fürs Aufnehmen still.
+        // Even after rejected input the previous hotkeys have to take hold
+        // again — the settings suspend them while recording a new one.
         let _ = crate::register_hotkeys(&app);
     }
     result
@@ -116,7 +116,7 @@ fn apply_hotkeys(
     crate::parse_hotkey(&save_clip)?;
     crate::parse_hotkey(&toggle_buffer)?;
     if save_clip.eq_ignore_ascii_case(&toggle_buffer) {
-        return Err("Beide Hotkeys liegen auf derselben Tastenkombination.".into());
+        return Err("Both hotkeys are on the same key combination.".into());
     }
 
     let previous = state.config_snapshot();
@@ -138,19 +138,19 @@ fn apply_hotkeys(
     }
 }
 
-/// Die globalen Hotkeys stilllegen, solange in den Einstellungen eine neue
-/// Kombination aufgenommen wird — sonst speichert das Drücken der alten
-/// Belegung nebenbei einen Clip oder stoppt den Puffer.
+/// Suspend the global hotkeys while a new combination is being recorded in the
+/// settings — otherwise pressing the old assignment would save a clip or stop
+/// the buffer along the way.
 #[tauri::command]
 pub fn suspend_hotkeys(app: tauri::AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     if let Err(err) = app.global_shortcut().unregister_all() {
-        log::warn!("Hotkeys konnten nicht stillgelegt werden: {err}");
+        log::warn!("could not suspend hotkeys: {err}");
     }
 }
 
-/// Gegenstück zu `suspend_hotkeys` — nach einem Abbruch der Aufnahme.
+/// Counterpart to `suspend_hotkeys` — after recording was cancelled.
 #[tauri::command]
 pub fn resume_hotkeys(app: tauri::AppHandle) {
     if let Err(err) = crate::register_hotkeys(&app) {
@@ -158,10 +158,10 @@ pub fn resume_hotkeys(app: tauri::AppHandle) {
     }
 }
 
-/// Den Ordner wechseln, in dem neue Clips landen.
+/// Change the folder new clips land in.
 ///
-/// Angelegt wird er gleich mit, und einmal hineingeschrieben wird auch — ein
-/// Pfad, der erst beim Speichern des ersten Clips auffliegt, hilft niemandem.
+/// It is created right away, and written to once as well — a path that only
+/// blows up when the first clip is saved helps nobody.
 #[tauri::command]
 pub fn set_clip_dir(
     state: State<'_, AppState>,
@@ -170,26 +170,26 @@ pub fn set_clip_dir(
 ) -> Result<AppConfig> {
     let dir = dir.trim();
     if dir.is_empty() {
-        return Err("Kein Ordner ausgewählt.".into());
+        return Err("No folder selected.".into());
     }
     let path = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&path)
-        .map_err(|err| format!("Ordner „{dir}“ lässt sich nicht anlegen: {err}"))?;
+        .map_err(|err| format!("Folder \"{dir}\" cannot be created: {err}"))?;
     let probe = path.join(".clippiboy-schreibtest");
     std::fs::write(&probe, b"")
-        .map_err(|err| format!("In „{dir}“ darf ClippiBoy nicht schreiben: {err}"))?;
+        .map_err(|err| format!("ClippiBoy is not allowed to write in \"{dir}\": {err}"))?;
     let _ = std::fs::remove_file(&probe);
 
     let mut config = state.config_snapshot();
     config.clip_dir = path.to_string_lossy().to_string();
     let next = state.replace_config(config);
-    // Ohne die Freigabe spielt der Player nichts ab, was hier landet.
+    // Without the grant the player will not play anything that lands here.
     crate::allow_clip_dir(&app, &next.clip_dir);
     Ok(next)
 }
 
-/// Der Vorschlag für den Clip-Ordner — Ausgangspunkt des Ordner-Dialogs und
-/// Ziel des Knopfs „Zurücksetzen".
+/// The suggested clip folder — the starting point of the folder dialog and the
+/// target of the "Reset" button.
 #[tauri::command]
 pub fn default_clip_dir() -> String {
     crate::config::default_clip_dir()
@@ -217,11 +217,11 @@ pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
     state.status_snapshot()
 }
 
-/// Puffer starten. Läuft über denselben Pfad wie Hotkey und Tray, damit auch
-/// der Knopf in der App Toast und Banner auslöst.
+/// Start the buffer. Runs through the same path as hotkey and tray, so the
+/// button in the app raises a toast and a banner too.
 ///
-/// `async` aus demselben Grund wie `save_clip`: Das Hochfahren des Capture-
-/// Stacks dauert einige hundert Millisekunden.
+/// `async` for the same reason as `save_clip`: bringing up the capture stack
+/// takes a few hundred milliseconds.
 #[tauri::command(async)]
 pub fn start_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<()> {
     if state.status.lock().buffer_active {
@@ -230,14 +230,14 @@ pub fn start_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result
     crate::toggle_buffer_and_notify(&app);
     match state.status.lock().buffer_active {
         true => Ok(()),
-        // Die Meldung ist schon draußen; der Fehler bringt nur den Store zurück
-        // auf den echten Zustand.
-        false => Err("Der Replay-Puffer konnte nicht gestartet werden.".into()),
+        // The message is already out; the error only brings the store back to
+        // the real state.
+        false => Err("The replay buffer could not be started.".into()),
     }
 }
 
-/// Gegenstück zu `start_buffer`. `async`, weil das Stoppen notfalls auf ein
-/// laufendes Speichern wartet.
+/// Counterpart to `start_buffer`. `async` because stopping waits, if need be,
+/// for a save in progress.
 #[tauri::command(async)]
 pub fn stop_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<()> {
     if state.status.lock().buffer_active {
@@ -246,13 +246,13 @@ pub fn stop_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<
     Ok(())
 }
 
-/// Speichert den Puffer. `seconds` wird derzeit nur vom Trim-Gedanken gebraucht;
-/// der übliche Weg ist der gemeinsame Pfad mit Hotkey und Tray, der zusätzlich
-/// `clip-saved` und den Overlay-Banner auslöst.
+/// Saves the buffer. `seconds` is currently only needed by the trim idea; the
+/// usual route is the shared path with hotkey and tray, which additionally
+/// raises `clip-saved` and the overlay banner.
 ///
-/// `async`, weil Versiegeln und Muxen mehrere Sekunden dauern: als synchroner
-/// Command liefe das auf dem Hauptthread und die Oberfläche stünde solange —
-/// samt der Fensteraufrufe, die der Overlay-Banner dorthin schickt.
+/// `async` because sealing and muxing take several seconds: as a synchronous
+/// command that would run on the main thread and the UI would stand still all
+/// the while — including the window calls the overlay banner sends there.
 #[tauri::command(async)]
 pub fn save_clip(
     state: State<'_, AppState>,
@@ -276,11 +276,11 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
 
 #[tauri::command]
 pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
-    // Einzelspuren und Original gehören zum Clip und haben ohne ihn keinen
-    // Zweck mehr.
+    // The individual tracks and the original belong to the clip and serve no
+    // purpose without it.
     stems::remove(&id);
     edit::remove(&id);
-    // Das Vorschaubild auch dann, wenn in der Datenbank keines vermerkt ist.
+    // The thumbnail too, even when none is recorded in the database.
     crate::thumbs::remove(&id);
 
     let clip_dir = state.config_snapshot().clip_dir;
@@ -292,35 +292,35 @@ pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
         lib.delete(&id).map_err(|e| e.to_string())?;
         Ok(folder)
     })?;
-    // War das der letzte Clip seines Spiels, bleibt sonst ein leerer Ordner
-    // stehen.
+    // If that was the last clip of its game, an empty folder would otherwise be
+    // left standing.
     if let Some(folder) = folder {
         crate::filing::prune(&folder, Path::new(&clip_dir));
     }
     Ok(())
 }
 
-/// Das Herz an einem Clip setzen oder wegnehmen.
+/// Set or take away a clip's heart.
 ///
-/// Die Datei zieht dabei **nicht** von selbst um — das erledigt `file_clip`,
-/// sobald der Clip nicht mehr im Player offen ist. Ein Umzug unter dem
-/// laufenden Video heraus würde die Wiedergabe abreißen lassen.
+/// The file does **not** move by itself — `file_clip` takes care of that once
+/// the clip is no longer open in the player. Moving it out from under the
+/// playing video would tear the playback off.
 #[tauri::command]
 pub fn set_clip_favorite(state: State<'_, AppState>, id: String, favorite: bool) -> Result<Clip> {
     with_library(&state, |lib| {
         lib.set_favorite(&id, favorite).map_err(|e| e.to_string())?;
         lib.get(&id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Clip nicht gefunden".into())
+            .ok_or_else(|| "clip not found".into())
     })
 }
 
-/// Die Datei eines Clips in den Ordner bringen, in den sie gehört.
+/// Move a clip's file into the folder it belongs in.
 ///
-/// Scheitert der Umzug — meist, weil die Datei noch offen ist —, bleibt sie
-/// liegen und der Clip wird unverändert zurückgegeben. Der nächste Start holt
-/// es nach (`filing::tidy`); die Galerie stimmt in der Zwischenzeit trotzdem,
-/// denn sie liest aus der Datenbank.
+/// If the move fails — usually because the file is still open — it stays where
+/// it is and the clip comes back unchanged. The next start catches it up
+/// (`filing::tidy`); the gallery is right in the meantime regardless, because it
+/// reads from the database.
 #[tauri::command]
 pub fn file_clip(state: State<'_, AppState>, id: String) -> Result<Clip> {
     let clip_dir = state.config_snapshot().clip_dir;
@@ -328,14 +328,14 @@ pub fn file_clip(state: State<'_, AppState>, id: String) -> Result<Clip> {
         let clip = lib
             .get(&id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+            .ok_or_else(|| "clip not found".to_string())?;
         match crate::filing::place(&clip, &clip_dir) {
             Ok(Some(target)) => {
                 lib.set_path(&id, &target.to_string_lossy())
                     .map_err(|e| e.to_string())?;
                 lib.get(&id)
                     .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Clip nicht gefunden".into())
+                    .ok_or_else(|| "clip not found".into())
             }
             Ok(None) => Ok(clip),
             Err(err) => {
@@ -355,56 +355,55 @@ pub fn reveal_clip(
     use tauri_plugin_opener::OpenerExt;
 
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
-    // Öffnet den Ordner und markiert die Datei darin.
+        .ok_or_else(|| "clip not found".to_string())?;
+    // Opens the folder and selects the file in it.
     app.opener()
         .reveal_item_in_dir(&clip.path)
         .map_err(|e| e.to_string())
 }
 
-/// Die Videodatei eines Clips in die Zwischenablage legen.
+/// Put a clip's video file on the clipboard.
 ///
-/// Nicht den Pfad, die **Datei**: In Discord oder WhatsApp hängt Strg+V den
-/// Clip danach als Anhang an, im Explorer legt es eine Kopie ab.
+/// Not the path, the **file**: in Discord or WhatsApp, Ctrl+V then attaches the
+/// clip; in Explorer it drops a copy.
 #[tauri::command]
 pub fn copy_clip_file(state: State<'_, AppState>, id: String) -> Result<()> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+        .ok_or_else(|| "clip not found".to_string())?;
     let path = std::path::PathBuf::from(&clip.path);
     if !path.is_file() {
-        return Err("Die Clipdatei ist nicht mehr da.".into());
+        return Err("The clip file is no longer there.".into());
     }
     crate::clipboard::copy_files(&[path])
 }
 
-/// Den Clip in dem Player öffnen, den Windows dafür vorgesehen hat.
+/// Open the clip in whichever player Windows has chosen for it.
 #[tauri::command]
 pub fn open_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri_plugin_opener::OpenerExt;
 
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+        .ok_or_else(|| "clip not found".to_string())?;
     app.opener()
         .open_path(&clip.path, None::<&str>)
         .map_err(|e| e.to_string())
 }
 
-/// Text in die Zwischenablage legen — für „Pfad kopieren" und das Menü in den
-/// Textfeldern.
+/// Put text on the clipboard — for "Copy path" and the text field menu.
 #[tauri::command]
 pub fn clipboard_write_text(text: String) -> Result<()> {
     crate::clipboard::copy_text(&text)
 }
 
-/// Text aus der Zwischenablage holen. Steckt kein Text darin, kommt ein leerer
-/// zurück — dann gibt es eben nichts einzufügen.
+/// Fetch text from the clipboard. If there is no text in it, an empty one comes
+/// back — then there is simply nothing to paste.
 #[tauri::command]
 pub fn clipboard_read_text() -> Result<String> {
     crate::clipboard::read_text()
 }
 
-/// Name, Beschreibung und Spiel eines Clips ändern. Leere Felder löschen den
-/// jeweiligen Eintrag wieder — in der Galerie steht dann wieder der Dateiname.
+/// Change a clip's name, description and game. Empty fields clear the entry in
+/// question — the gallery then shows the file name again.
 #[tauri::command]
 pub fn update_clip(
     state: State<'_, AppState>,
@@ -425,44 +424,45 @@ pub fn update_clip(
             .map_err(|e| e.to_string())?;
         lib.get(&id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Clip nicht gefunden".to_string())
+            .ok_or_else(|| "clip not found".to_string())
     })
 }
 
-/// Bild der Tonspur für die Zeitleiste. Liefert den Pfad zum PNG.
+/// Picture of the audio track for the timeline. Returns the path to the PNG.
 ///
-/// `async`, weil ffmpeg dafür den Ton einmal komplett durchliest.
+/// `async` because ffmpeg reads the audio through once from end to end.
 #[tauri::command(async)]
 pub fn clip_waveform(state: State<'_, AppState>, id: String) -> Result<String> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+        .ok_or_else(|| "clip not found".to_string())?;
     preview::waveform(&clip).map(|path| path.to_string_lossy().to_string())
 }
 
-/// Die Tonspuren eines Clips, jede mit einer eigenen Datei für die Vorschau —
-/// nur so lassen sie sich im Player einzeln aussteuern.
+/// A clip's audio tracks, each with a file of its own for the preview — that is
+/// the only way they can be levelled individually in the player.
 ///
-/// `async`, weil das Nachziehen bei einem Clip aus der Zeit vor der Umstellung
-/// je nach Länge eine Sekunde braucht und der Hauptfaden solange das Fenster
-/// nicht zeichnen würde.
+/// `async` because catching up a clip from before the changeover takes a second
+/// depending on its length, and the main thread would not paint the window all
+/// that while.
 #[tauri::command(async)]
 pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTrack>> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
-    // Aus der unversehrten Aufnahme, falls der Clip geschnitten ist — die
-    // Einzelspuren stehen immer in Koordinaten des Originals.
+        .ok_or_else(|| "clip not found".to_string())?;
+    // From the untouched recording if the clip is trimmed — the individual
+    // tracks are always in coordinates of the original.
     stems::tracks(&clip.id, &edit::source_path(&clip))
 }
 
-/// Den Clip so schreiben, wie er im Editor steht: Mischung eingerechnet,
-/// Zuschnitt ausgeführt.
+/// Write the clip exactly as it stands in the editor: mix applied, trim
+/// carried out.
 ///
-/// Der Zuschnitt landet wirklich in der Datei — wer den Clip verschickt,
-/// verschickt den geschnittenen. Die unversehrte Aufnahme wandert dabei in die
-/// Original-Ablage und kommt über [`restore_clip_original`] jederzeit zurück.
+/// The trim really does land in the file — whoever sends the clip sends the
+/// trimmed one. The untouched recording moves into the originals store on the
+/// way and comes back at any time via [`restore_clip_original`].
 ///
-/// `async`, weil ein Schnitt am Anfang das Bild neu encodiert und das je nach
-/// Länge dauert; solange dürfte der Hauptfaden das Fenster nicht zeichnen.
+/// `async` because a cut at the start re-encodes the picture and that takes a
+/// while depending on length; the main thread would not paint the window in the
+/// meantime.
 #[tauri::command(async)]
 pub fn apply_clip_edit(
     state: State<'_, AppState>,
@@ -473,7 +473,7 @@ pub fn apply_clip_edit(
     tracks: Vec<TrackMix>,
 ) -> Result<Clip> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+        .ok_or_else(|| "clip not found".to_string())?;
     let (encoder, bitrate) = encoder_for(&state);
     let trim = edit::Trim { start_ms, end_ms };
 
@@ -481,10 +481,10 @@ pub fn apply_clip_edit(
     store(&state, &app, &clip, applied, tracks)
 }
 
-/// Den Zuschnitt aufheben: die ganze Aufnahme zurückholen, Mischung behalten.
+/// Undo the trim: pull the whole recording back, keep the mix.
 ///
-/// `async` aus demselben Grund wie [`apply_clip_edit`] — auch wenn hier nur
-/// kopiert wird, dauert das Ummuxen einer langen Aufnahme seine Sekunden.
+/// `async` for the same reason as [`apply_clip_edit`] — even though this only
+/// copies, remuxing a long recording takes its seconds.
 #[tauri::command(async)]
 pub fn restore_clip_original(
     state: State<'_, AppState>,
@@ -492,25 +492,25 @@ pub fn restore_clip_original(
     id: String,
 ) -> Result<Clip> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+        .ok_or_else(|| "clip not found".to_string())?;
     let (encoder, bitrate) = encoder_for(&state);
     let tracks = clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default();
 
-    // Scheitert es, bleibt der Eintrag am Clip stehen: Er trägt den Versatz, in
-    // dem die Einzelspuren liegen. Ihn wegzuwerfen, weil die Aufnahme nicht
-    // auffindbar ist, ließe die Vorschau für immer versetzt laufen.
+    // If it fails, the record stays on the clip: it carries the offset the
+    // individual tracks sit at. Throwing it away because the recording cannot
+    // be found would leave the preview out of sync forever.
     let applied = edit::restore(&clip, &tracks, encoder, bitrate, progress(&app, &id));
     store(&state, &app, &clip, applied, tracks)
 }
 
-/// Encoder und Bitrate für einen Neuencodierlauf, aus den Einstellungen.
+/// Encoder and bitrate for a re-encode run, taken from the settings.
 fn encoder_for(state: &State<'_, AppState>) -> (crate::model::EncoderId, u32) {
     let recording = state.config_snapshot().recording;
     (encode::resolve(recording.encoder), recording.bitrate_kbps)
 }
 
-/// Fortschritt an die Oberfläche melden. ffmpeg meldet oft genug, dass ein
-/// Balken sich sichtbar bewegt.
+/// Report progress to the UI. ffmpeg reports often enough that a bar moves
+/// visibly.
 fn progress<'a>(app: &'a tauri::AppHandle, id: &'a str) -> impl Fn(f32) + 'a {
     use tauri::Emitter;
     move |value| {
@@ -524,7 +524,7 @@ fn progress<'a>(app: &'a tauri::AppHandle, id: &'a str) -> impl Fn(f32) + 'a {
     }
 }
 
-/// Das Ergebnis eines Laufs in die Datenbank schreiben und den Clip neu lesen.
+/// Write a run's result into the database and read the clip back.
 fn store(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
@@ -540,8 +540,8 @@ fn store(
         }
     };
 
-    // Der Zuschnitt steckt jetzt in der Datei — was hier abgelegt wird, ist der
-    // volle Bereich der neuen Datei. Wo der im Original sitzt, steht daneben.
+    // The trim now sits in the file — what is stored here is the full range of
+    // the new file. Where that sits in the original is recorded alongside.
     let edit = ClipEdit {
         start_ms: 0,
         end_ms: applied.duration_ms,
@@ -555,11 +555,11 @@ fn store(
             .map_err(|e| e.to_string())?;
         lib.get(&clip.id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Clip nicht gefunden".to_string())
+            .ok_or_else(|| "clip not found".to_string())
     })
 }
 
-/// Beliebige Datei im Explorer zeigen.
+/// Show any file in Explorer.
 #[tauri::command]
 pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<()> {
     use tauri_plugin_opener::OpenerExt;
@@ -576,23 +576,23 @@ fn with_library<T>(
     let guard = state.library.lock();
     match guard.as_ref() {
         Some(lib) => f(lib),
-        None => Err("Clip-Datenbank ist nicht verfügbar".into()),
+        None => Err("clip database is not available".into()),
     }
 }
 
-/// Version aus `tauri.conf.json` — die Einstellungen zeigen sie an.
+/// Version from `tauri.conf.json` — the settings display it.
 #[tauri::command]
 pub fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-/// Nach einem Update sehen. `None` heißt: schon aktuell.
+/// Look for an update. `None` means already up to date.
 #[tauri::command]
 pub async fn check_update(app: tauri::AppHandle) -> Result<Option<crate::updater::UpdateInfo>> {
     crate::updater::check(&app).await
 }
 
-/// Das gefundene Update installieren. Beendet die App und startet das Setup.
+/// Install the update that was found. Quits the app and starts the installer.
 #[tauri::command]
 pub async fn install_update(app: tauri::AppHandle) -> Result<()> {
     crate::updater::install(&app).await

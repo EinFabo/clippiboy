@@ -1,5 +1,6 @@
-//! Clip-Index in SQLite. Die Videodateien selbst liegen im Clip-Ordner; die
-//! Datenbank hält nur Metadaten, damit die Galerie ohne Dateisystem-Scan lädt.
+//! Clip index in SQLite. The video files themselves live in the clip folder;
+//! the database only holds metadata so the gallery loads without scanning the
+//! file system.
 
 use rusqlite::{params, Connection};
 
@@ -50,23 +51,23 @@ impl Library {
                  PRIMARY KEY (clip_id, tag)
              );",
         )?;
-        // Nachträglich dazugekommen: eine bestehende Datenbank soll ihre Clips
-        // behalten, deshalb angehängt statt Tabelle neu.
+        // Added later on: an existing database should keep its clips, hence
+        // appended instead of a fresh table.
         self.add_column("title", "TEXT")?;
         self.add_column("description", "TEXT")?;
-        // Zuschnitt und Spurenmischung als JSON — ein eigenes Tabellenschema
-        // dafür hätte nur Spalten, die sich mit dem Editor wieder ändern.
+        // Trim and track mix as JSON — a schema of its own for that would only
+        // have columns that change again with the editor.
         self.add_column("edit", "TEXT")?;
-        // Wo der ausgelieferte Ausschnitt im Original sitzt, solange die
-        // unversehrte Aufnahme noch in der Original-Ablage liegt.
+        // Where the delivered excerpt sits inside the original, as long as the
+        // untouched recording is still in the originals store.
         self.add_column("original", "TEXT")?;
-        // Das Herz in der Galerie.
+        // The heart in the gallery.
         self.add_column("favorite", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(())
     }
 
-    /// Spalte anlegen, falls sie fehlt. `ALTER TABLE … ADD COLUMN` kennt kein
-    /// `IF NOT EXISTS`, deshalb der Blick in `pragma_table_info`.
+    /// Add a column if it is missing. `ALTER TABLE … ADD COLUMN` has no
+    /// `IF NOT EXISTS`, hence the look into `pragma_table_info`.
     fn add_column(&self, name: &str, decl: &str) -> rusqlite::Result<()> {
         let exists: bool = self
             .conn
@@ -136,8 +137,8 @@ impl Library {
         Ok(self.list()?.into_iter().find(|c| c.id == id))
     }
 
-    /// Name, Beschreibung und Spiel ändern. Leere Felder kommen als `None` an
-    /// und löschen den Eintrag wieder.
+    /// Change name, description and game. Empty fields arrive as `None` and
+    /// clear the entry again.
     pub fn update_meta(
         &self,
         id: &str,
@@ -152,7 +153,7 @@ impl Library {
         Ok(())
     }
 
-    /// Das Herz setzen oder wegnehmen.
+    /// Set or take away the heart.
     pub fn set_favorite(&self, id: &str, favorite: bool) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET favorite = ?2 WHERE id = ?1",
@@ -161,7 +162,7 @@ impl Library {
         Ok(())
     }
 
-    /// Den Dateipfad nachtragen — nach einem Umzug in einen anderen Ordner.
+    /// Record the file path — after a move into a different folder.
     pub fn set_path(&self, id: &str, path: &str) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET path = ?2 WHERE id = ?1",
@@ -170,8 +171,8 @@ impl Library {
         Ok(())
     }
 
-    /// Das Vorschaubild eintragen. `None` heißt: Es gibt keines mehr — die
-    /// Galerie zeigt dann ihren Farbverlauf statt eines toten Pfades.
+    /// Record the thumbnail. `None` means there is none any more — the gallery
+    /// then shows its gradient instead of a dead path.
     pub fn set_thumb(&self, id: &str, thumb_path: Option<&str>) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET thumb_path = ?2 WHERE id = ?1",
@@ -180,8 +181,8 @@ impl Library {
         Ok(())
     }
 
-    /// Zuschnitt und Spurenmischung ablegen. `None` löscht sie wieder — der
-    /// Clip gilt dann als unangetastet.
+    /// Store trim and track mix. `None` clears them again — the clip then
+    /// counts as untouched.
     pub fn set_edit(&self, id: &str, edit: Option<&ClipEdit>) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET edit = ?2 WHERE id = ?1",
@@ -190,9 +191,9 @@ impl Library {
         Ok(())
     }
 
-    /// Länge und Größe nachtragen. Nötig, sobald die Datei neu geschrieben
-    /// wurde — sonst stünden in der Galerie noch die Werte von vorher, und nach
-    /// einem Zuschnitt wäre die angezeigte Dauer schlicht falsch.
+    /// Record length and size. Needed as soon as the file has been rewritten —
+    /// otherwise the gallery would still show the previous values, and after a
+    /// trim the displayed duration would simply be wrong.
     pub fn set_file_state(
         &self,
         id: &str,
@@ -206,8 +207,8 @@ impl Library {
         Ok(())
     }
 
-    /// Die Original-Ablage vermerken. `None` heißt: Es gibt kein Original mehr,
-    /// der Clip ist wieder (oder immer noch) die ganze Aufnahme.
+    /// Note the originals store. `None` means there is no original any more;
+    /// the clip is (again, or still) the whole recording.
     pub fn set_original(&self, id: &str, original: Option<&ClipOriginal>) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET original = ?2 WHERE id = ?1",
@@ -216,7 +217,7 @@ impl Library {
         Ok(())
     }
 
-    /// Entfernt den Eintrag und die Videodatei.
+    /// Removes the record and the video file.
     pub fn delete(&self, id: &str) -> rusqlite::Result<()> {
         if let Some(clip) = self.get(id)? {
             let _ = std::fs::remove_file(&clip.path);
@@ -230,38 +231,38 @@ impl Library {
     }
 }
 
-/// Der Editor-Stand als JSON. Scheitert das Serialisieren, ist ein fehlender
-/// Zuschnitt besser als ein Clip, der sich nicht mehr speichern lässt.
+/// The editor state as JSON. If serializing fails, a missing trim is better
+/// than a clip that can no longer be saved.
 fn encode_edit(edit: Option<&ClipEdit>) -> Option<String> {
     edit.and_then(|value| serde_json::to_string(value).ok())
 }
 
-/// Unlesbares JSON (etwa aus einer älteren Version) wird verworfen statt die
-/// ganze Galerie scheitern zu lassen.
+/// Unreadable JSON (from an older version, say) is discarded rather than
+/// letting the whole gallery fail.
 fn decode_edit(raw: Option<String>) -> Option<ClipEdit> {
     let raw = raw?;
     match serde_json::from_str(&raw) {
         Ok(edit) => Some(edit),
         Err(err) => {
-            log::warn!("Editor-Stand unlesbar ({err}) — wird verworfen");
+            log::warn!("editor state unreadable ({err}) — discarding it");
             None
         }
     }
 }
 
-/// Die Original-Ablage als JSON.
+/// The originals store as JSON.
 fn encode_original(original: Option<&ClipOriginal>) -> Option<String> {
     original.and_then(|value| serde_json::to_string(value).ok())
 }
 
-/// Unlesbares JSON wird verworfen. Der Clip gilt dann als ungeschnitten — die
-/// Datei daneben findet [`crate::edit::repair`] beim nächsten Start wieder.
+/// Unreadable JSON is discarded. The clip then counts as untrimmed — the file
+/// alongside it is found again by [`crate::edit::repair`] on the next start.
 fn decode_original(raw: Option<String>) -> Option<ClipOriginal> {
     let raw = raw?;
     match serde_json::from_str(&raw) {
         Ok(original) => Some(original),
         Err(err) => {
-            log::warn!("Original-Ablage unlesbar ({err}) — wird verworfen");
+            log::warn!("originals store unreadable ({err}) — discarding it");
             None
         }
     }
@@ -313,14 +314,14 @@ mod tests {
     fn metadata_survives_the_roundtrip() {
         let lib = Library::in_memory().unwrap();
         lib.insert(&clip("a", 1)).unwrap();
-        lib.update_meta("a", Some("Ace"), Some("4k mit Deagle"), Some("CS2"))
+        lib.update_meta("a", Some("Ace"), Some("4k with the Deagle"), Some("CS2"))
             .unwrap();
 
         let stored = lib.get("a").unwrap().unwrap();
         assert_eq!(stored.title.as_deref(), Some("Ace"));
-        assert_eq!(stored.description.as_deref(), Some("4k mit Deagle"));
+        assert_eq!(stored.description.as_deref(), Some("4k with the Deagle"));
 
-        // Leeren Namen wieder loswerden.
+        // Get rid of an empty name again.
         lib.update_meta("a", None, None, None).unwrap();
         assert!(lib.get("a").unwrap().unwrap().title.is_none());
     }
@@ -345,14 +346,14 @@ mod tests {
         lib.set_edit("a", Some(&edit)).unwrap();
         assert_eq!(lib.get("a").unwrap().unwrap().edit, Some(edit));
 
-        // Zurücksetzen macht den Clip wieder unangetastet.
+        // Resetting makes the clip untouched again.
         lib.set_edit("a", None).unwrap();
         assert!(lib.get("a").unwrap().unwrap().edit.is_none());
     }
 
-    /// Der Eintrag trägt den Versatz der Einzelspuren. Ginge er beim Neustart
-    /// verloren, liefe die Vorschau eines geschnittenen Clips versetzt und
-    /// „Zuschnitt aufheben" wäre nicht mehr zu finden.
+    /// The record carries the offset of the individual tracks. If it were lost
+    /// on restart, the preview of a trimmed clip would run out of sync and
+    /// "Undo trim" would no longer be findable.
     #[test]
     fn the_original_survives_the_roundtrip() {
         let lib = Library::in_memory().unwrap();
@@ -371,7 +372,7 @@ mod tests {
         assert!(lib.get("a").unwrap().unwrap().original.is_none());
     }
 
-    /// Nach dem Schneiden steht in der Galerie sonst die alte Länge.
+    /// Otherwise the gallery still shows the old length after a trim.
     #[test]
     fn length_and_size_move_together() {
         let lib = Library::in_memory().unwrap();
@@ -383,7 +384,7 @@ mod tests {
         assert_eq!(stored.size_bytes, 4_711);
     }
 
-    /// Unlesbares JSON darf nicht die ganze Galerie mitreißen.
+    /// Unreadable JSON must not take the whole gallery down with it.
     #[test]
     fn a_broken_entry_is_dropped_not_fatal() {
         assert!(decode_original(Some("{kaputt".into())).is_none());

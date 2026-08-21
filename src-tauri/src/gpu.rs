@@ -1,12 +1,11 @@
-//! Das D3D11-Gerät, auf dem Aufnahme, Farbumwandlung und Encoder gemeinsam
-//! laufen.
+//! The D3D11 device that capture, colour conversion and the encoder all share.
 //!
-//! Es muss allen dreien genügen, und daran ist der frühere Weg gescheitert:
-//! `windows-capture` legt sein Gerät nur mit `BGRA_SUPPORT` an. Ohne
-//! `VIDEO_SUPPORT` gibt es darauf keinen `ID3D11VideoProcessor` (BGRA→NV12),
-//! und ein Hardware-Encoder-MFT nimmt ein Gerät ohne Multithread-Schutz nicht
-//! zuverlässig an — beides zusammen zwang den alten Pfad über den
-//! `MediaTranscoder`, der weder Ratensteuerung noch GOP-Abstand annimmt.
+//! It has to satisfy all three, and that is where the earlier approach failed:
+//! `windows-capture` creates its device with `BGRA_SUPPORT` only. Without
+//! `VIDEO_SUPPORT` there is no `ID3D11VideoProcessor` on it (BGRA→NV12), and a
+//! hardware encoder MFT will not reliably accept a device without multithread
+//! protection — together those two forced the old path through the
+//! `MediaTranscoder`, which accepts neither rate control nor a GOP distance.
 
 #![cfg(windows)]
 
@@ -22,17 +21,17 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 
-/// Gerät samt Kontext. Der Kontext ist multithread-geschützt, es darf ihn
-/// deshalb jeder Faden benutzen.
+/// Device plus context. The context is multithread-protected, so any thread
+/// may use it.
 pub struct GpuDevice {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
-    /// Dieselbe Hardware als WinRT-Gerät — das verlangt der Frame-Pool.
+    /// The same hardware as a WinRT device — that is what the frame pool wants.
     pub winrt: IDirect3DDevice,
 }
 
-// Der Multithread-Schutz unten macht genau diese Zusage: Die COM-Objekte
-// dürfen über Fadengrenzen benutzt werden.
+// The multithread protection below makes exactly this promise: the COM objects
+// may be used across thread boundaries.
 unsafe impl Send for GpuDevice {}
 unsafe impl Sync for GpuDevice {}
 
@@ -48,8 +47,8 @@ impl GpuDevice {
                 None,
                 D3D_DRIVER_TYPE_HARDWARE,
                 None,
-                // BGRA, weil Windows.Graphics.Capture so liefert; VIDEO, weil
-                // der VideoProcessor daraus NV12 macht.
+                // BGRA because that is how Windows.Graphics.Capture delivers;
+                // VIDEO because the VideoProcessor turns that into NV12.
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 Some(&levels),
                 D3D11_SDK_VERSION,
@@ -57,15 +56,15 @@ impl GpuDevice {
                 Some(&mut level),
                 Some(&mut context),
             )
-            .map_err(|err| format!("D3D11-Gerät: {err}"))?;
+            .map_err(|err| format!("D3D11 device: {err}"))?;
         }
 
-        let device = device.ok_or_else(|| "D3D11-Gerät fehlt".to_string())?;
-        let context = context.ok_or_else(|| "D3D11-Kontext fehlt".to_string())?;
+        let device = device.ok_or_else(|| "D3D11 device missing".to_string())?;
+        let context = context.ok_or_else(|| "D3D11 context missing".to_string())?;
 
-        // Pflicht, sobald ein MFT auf demselben Gerät arbeitet: Encoder,
-        // VideoProcessor und der Capture-Rückruf liegen auf verschiedenen
-        // Fäden. Ohne das gibt es sporadische Abstürze tief im Treiber.
+        // Mandatory as soon as an MFT works on the same device: encoder,
+        // VideoProcessor and the capture callback live on different threads.
+        // Without this there are sporadic crashes deep inside the driver.
         let multithread: ID3D11Multithread = context
             .cast()
             .map_err(|err| format!("ID3D11Multithread: {err}"))?;
@@ -76,7 +75,7 @@ impl GpuDevice {
             .map_err(|err| format!("IDXGIDevice: {err}"))?;
         let winrt = unsafe {
             CreateDirect3D11DeviceFromDXGIDevice(&dxgi)
-                .map_err(|err| format!("WinRT-Gerät: {err}"))?
+                .map_err(|err| format!("WinRT device: {err}"))?
         };
         let winrt: IDirect3DDevice = winrt
             .cast()
@@ -90,11 +89,11 @@ impl GpuDevice {
     }
 }
 
-/// Hülle, die ein COM-Objekt über eine Fadengrenze trägt.
+/// Wrapper that carries a COM object across a thread boundary.
 ///
-/// Die WinRT-Objekte hier sind agil und das Gerät darunter ist
-/// multithread-geschützt; das Rust-Typsystem sieht davon nur den rohen Zeiger
-/// und hält ihn für unversendbar.
+/// The WinRT objects here are agile and the device underneath is
+/// multithread-protected; Rust's type system sees only the raw pointer and
+/// takes it for unsendable.
 pub struct SendPtr<T>(pub T);
 
 unsafe impl<T> Send for SendPtr<T> {}

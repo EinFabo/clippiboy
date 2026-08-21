@@ -1,9 +1,9 @@
-//! Aufnahmequellen: Monitore und sichtbare Fenster.
+//! Capture sources: monitors and visible windows.
 //!
-//! Die eigentliche Bildaufnahme (Phase 1) läuft über Windows.Graphics.Capture;
-//! hier werden nur die auswählbaren Ziele ermittelt. Die IDs sind so gewählt,
-//! dass sie später direkt wieder in ein Capture-Handle aufgelöst werden können
-//! (Monitor: Gerätename, Fenster: HWND als Hex).
+//! The actual frame capture (phase 1) runs through Windows.Graphics.Capture;
+//! this module only determines the selectable targets. The ids are chosen so
+//! they can later be resolved straight back into a capture handle (monitor:
+//! device name, window: HWND as hex).
 
 use crate::model::{CaptureTarget, TargetKind};
 
@@ -17,17 +17,17 @@ mod win {
         ENUM_CURRENT_SETTINGS, HDC, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
     };
 
-    /// MONITORINFOF_PRIMARY — im windows-Crate 0.58 nicht exportiert.
+    /// MONITORINFOF_PRIMARY — not exported by the windows crate 0.58.
     const PRIMARY_FLAG: u32 = 0x0000_0001;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
     };
 
-    /// Bildwiederholrate eines Bildschirms in Hertz.
+    /// A screen's refresh rate in hertz.
     ///
-    /// `szDevice` ist der Gerätename (`\\.\DISPLAY1`), nullterminiert. Windows
-    /// meldet die Rate ganzzahlig; laut Doku stehen 0 und 1 für „Standardrate
-    /// des Treibers", also für: unbekannt.
+    /// `szDevice` is the device name (`\\.\DISPLAY1`), null-terminated. Windows
+    /// reports the rate as a whole number; per the docs 0 and 1 mean "the
+    /// driver's default rate", i.e. unknown.
     fn refresh_of_device(device: &[u16]) -> Option<u32> {
         let mut mode = DEVMODEW {
             dmSize: std::mem::size_of::<DEVMODEW>() as u16,
@@ -49,9 +49,9 @@ mod win {
         }
     }
 
-    /// Die Rate des Bildschirms, auf dem das Fenster überwiegend liegt. Ein
-    /// Fenster hat keine eigene — aufgenommen wird trotzdem im Takt des
-    /// Bildschirms darunter.
+    /// The rate of the screen the window mostly sits on. A window has no rate
+    /// of its own — but capture still runs at the cadence of the screen
+    /// underneath it.
     unsafe fn refresh_of_window(hwnd: HWND) -> Option<u32> {
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if monitor.0.is_null() {
@@ -122,7 +122,7 @@ mod win {
         }
         let width = (rect.right - rect.left) as u32;
         let height = (rect.bottom - rect.top) as u32;
-        // Winzige Hilfsfenster interessieren nicht.
+        // Tiny helper windows are of no interest.
         if width < 320 || height < 240 {
             return TRUE;
         }
@@ -164,8 +164,8 @@ pub fn list_targets() -> Vec<CaptureTarget> {
     win::list_targets()
 }
 
-// Das Vordergrundfenster wird in `game.rs` ausgewertet — dort geht es nicht nur
-// um den Titel, sondern um den Prozess dahinter.
+// The foreground window is evaluated in `game.rs` — what matters there is not
+// just the title but the process behind it.
 
 #[cfg(not(windows))]
 pub fn list_targets() -> Vec<CaptureTarget> {
@@ -173,8 +173,8 @@ pub fn list_targets() -> Vec<CaptureTarget> {
     Vec::new()
 }
 
-/// Das eingestellte Ziel in der aktuellen Liste finden. Ohne Auswahl gilt der
-/// primäre Monitor — genau wie in der Pipeline.
+/// Find the configured target in the current list. With no selection the
+/// primary monitor applies — exactly as in the pipeline.
 fn find_target(kind: TargetKind, id: Option<&str>) -> Option<CaptureTarget> {
     let targets = list_targets();
     let hit = match id {
@@ -187,12 +187,12 @@ fn find_target(kind: TargetKind, id: Option<&str>) -> Option<CaptureTarget> {
     Some(hit.clone())
 }
 
-/// Die Bildraten, die zu einem Bildschirm mit dieser Wiederholrate passen.
+/// The frame rates that suit a screen with this refresh rate.
 ///
-/// Mehr Bilder aufzunehmen, als der Bildschirm ausgibt, bringt keine Bewegung
-/// dazu, flüssiger zu sein — es entstehen nur doppelte Bilder. Deshalb die
-/// üblichen Stufen bis zur Rate des Bildschirms und die Rate selbst obendrauf,
-/// damit ein 165-Hz-Panel auch wirklich 165 anbieten kann.
+/// Capturing more frames than the screen puts out does not make any motion
+/// smoother — it only produces duplicate frames. Hence the usual steps up to
+/// the screen's rate, plus that rate itself, so a 165 Hz panel really can offer
+/// 165.
 pub fn fps_choices(refresh_hz: Option<u32>) -> Vec<u32> {
     const STEPS: [u32; 3] = [30, 60, 120];
     let Some(refresh) = refresh_hz.filter(|hz| *hz >= 20) else {
@@ -203,8 +203,8 @@ pub fn fps_choices(refresh_hz: Option<u32>) -> Vec<u32> {
     choices
 }
 
-/// Eine Bildrate auf eine der angebotenen Stufen bringen — nach unten, denn
-/// mehr aufzunehmen als eingestellt wäre eine Überraschung.
+/// Snap a frame rate onto one of the offered steps — downwards, because
+/// capturing more than was configured would be a surprise.
 fn snap_fps(fps: u32, choices: &[u32]) -> u32 {
     if choices.contains(&fps) {
         return fps;
@@ -217,18 +217,17 @@ fn snap_fps(fps: u32, choices: &[u32]) -> u32 {
         .unwrap_or_else(|| choices.first().copied().unwrap_or(fps))
 }
 
-/// Aufnahmegröße und Bildrate an die Quelle angleichen.
+/// Fit capture size and frame rate to the source.
 ///
-/// Hochskalieren bringt kein Bild dazu, ein Detail zu zeigen, das der
-/// Bildschirm nicht hat — es kostet nur Bitrate. Deshalb wird die Höhe auf die
-/// der Quelle gedeckelt und die Breite immer aus deren Seitenverhältnis
-/// gerechnet, statt 16:9 anzunehmen. Beide Werte bleiben gerade, sonst nimmt
-/// H.264 sie nicht an.
+/// Upscaling does not make a frame show a detail the screen does not have — it
+/// only costs bitrate. So the height is capped at the source's, and the width
+/// is always computed from the source's aspect ratio instead of assuming 16:9.
+/// Both values stay even, otherwise H.264 will not accept them.
 ///
-/// Dieselbe Überlegung gilt für die Bildrate: Über der Wiederholrate des
-/// Bildschirms kämen nur doppelte Bilder heraus. Sie landet außerdem auf einer
-/// der angebotenen Stufen — in der Oberfläche steht eine Auswahl, und ein Wert
-/// daneben hätte dort keinen Eintrag.
+/// The same reasoning applies to the frame rate: above the screen's refresh
+/// rate only duplicate frames would come out. It also lands on one of the
+/// offered steps — the UI shows a fixed set of choices, and a value beside them
+/// would have no entry there.
 pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
     let Some(target) = find_target(recording.target_kind, recording.target_id.as_deref()) else {
         return;
@@ -248,17 +247,17 @@ pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
 mod tests {
     use super::*;
 
-    /// Ohne bekannte Wiederholrate bleibt es bei den üblichen Stufen — lieber
-    /// 120 anbieten, als auf einem 240-Hz-Panel bei 60 zu deckeln.
+    /// With no known refresh rate the usual steps stand — better to offer 120
+    /// than to cap at 60 on a 240 Hz panel.
     #[test]
     fn unknown_refresh_keeps_the_usual_steps() {
         assert_eq!(fps_choices(None), vec![30, 60, 120]);
         assert_eq!(fps_choices(Some(0)), vec![30, 60, 120]);
     }
 
-    /// Was zwischen zwei Stufen liegt, rutscht auf die darunter — nach oben
-    /// zu runden hieße, mehr aufzunehmen als eingestellt. Und was gar nicht
-    /// mehr passt, landet auf der kleinsten Stufe statt auf keiner.
+    /// Anything between two steps slides down to the lower one — rounding up
+    /// would mean capturing more than was configured. And whatever fits nowhere
+    /// lands on the smallest step rather than on none.
     #[test]
     fn a_rate_between_two_steps_drops_to_the_lower_one() {
         let on_165 = fps_choices(Some(165));
@@ -270,7 +269,7 @@ mod tests {
         assert_eq!(snap_fps(24, &on_60), 30);
     }
 
-    /// Die Rate des Bildschirms steht immer zur Auswahl, auch die krummen.
+    /// The screen's own rate is always on offer, odd numbers included.
     #[test]
     fn the_screen_rate_is_always_offered() {
         assert_eq!(fps_choices(Some(60)), vec![30, 60]);

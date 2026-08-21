@@ -1,4 +1,4 @@
-//! Persistente Konfiguration als JSON neben der App-Datenbank.
+//! Persistent configuration, stored as JSON next to the app database.
 
 use std::path::PathBuf;
 
@@ -52,12 +52,12 @@ pub fn load() -> AppConfig {
     match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<AppConfig>(&text) {
             Ok(mut config) => {
-                // Encoder gegen die tatsächlich vorhandene Hardware prüfen.
+                // Check the encoder against the hardware actually present.
                 config.recording.encoder = encode::resolve(config.recording.encoder);
                 config
             }
             Err(err) => {
-                log::warn!("Konfiguration unlesbar ({err}) — Standardwerte werden benutzt");
+                log::warn!("config unreadable ({err}) — falling back to defaults");
                 default_config()
             }
         },
@@ -69,7 +69,7 @@ pub fn save(config: &AppConfig) -> std::io::Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
     let text = serde_json::to_string_pretty(config)?;
-    // Erst temporär schreiben, dann umbenennen — kein halb geschriebenes JSON.
+    // Write to a temp file first, then rename — never half-written JSON.
     let tmp = config_path().with_extension("json.tmp");
     std::fs::write(&tmp, text)?;
     std::fs::rename(tmp, config_path())

@@ -31,7 +31,7 @@ use tauri::{Emitter, Manager};
 use overlay::BannerKind;
 use state::AppState;
 
-/// Meldung an die UI (Toast).
+/// Message to the UI (toast).
 #[derive(Clone, serde::Serialize)]
 struct Notice {
     kind: &'static str,
@@ -48,54 +48,54 @@ pub fn notify(app: &tauri::AppHandle, kind: &'static str, message: impl Into<Str
     );
 }
 
-/// Clip speichern und das Ergebnis melden — von Hotkey, Tray und Button
-/// gemeinsam genutzt, damit alle drei Wege identisch reagieren.
+/// Save a clip and report the result — shared by hotkey, tray and button so all
+/// three routes behave identically.
 pub fn save_clip_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
 
-    // Entprellen, bevor irgendetwas passiert: Läuft schon ein Speichervorgang,
-    // ist der Tastendruck die Ungeduld des Nutzers und kein zweiter Clip.
+    // Debounce before anything happens: if a save is already running, the key
+    // press is the user's impatience and not a second clip.
     let Some(_saving) = state.begin_save() else {
-        log::info!("Es wird bereits ein Clip geschrieben — Tastendruck übergangen");
-        return Err("Es wird bereits ein Clip gespeichert.".into());
+        log::info!("a clip is already being written — key press ignored");
+        return Err("A clip is already being saved.".into());
     };
 
-    // Sofort Rückmeldung geben. Versiegeln und Muxen dauern je nach Bitrate und
-    // Pufferlänge mehrere Sekunden; ohne ein Zeichen an der Oberfläche drückt
-    // man in der Zeit ein zweites und drittes Mal.
-    overlay::show(app, BannerKind::Clip, "Clip wird gespeichert…", None);
+    // Give feedback right away. Sealing and muxing take several seconds
+    // depending on bitrate and buffer length; without a sign in the UI you press
+    // a second and a third time in that window.
+    overlay::show(app, BannerKind::Clip, "Saving clip…", None);
 
     match state.save_clip(None) {
         Ok(clip) => {
             let seconds = clip.duration_ms / 1000;
             if let Some(library) = state.library.lock().as_ref() {
                 if let Err(err) = library.insert(&clip) {
-                    log::error!("Clip konnte nicht indexiert werden: {err}");
+                    log::error!("could not index the clip: {err}");
                 }
             }
             let _ = app.emit("clip-saved", clip.clone());
-            notify(app, "ok", format!("Clip gespeichert · {seconds} s"));
+            notify(app, "ok", format!("Clip saved · {seconds} s"));
             overlay::show_with_thumb(
                 app,
                 BannerKind::Clip,
-                clip.game.clone().unwrap_or_else(|| "Clip gespeichert".into()),
-                Some(format!("Clip gespeichert · {seconds} s")),
+                clip.game.clone().unwrap_or_else(|| "Clip saved".into()),
+                Some(format!("Clip saved · {seconds} s")),
                 clip.thumb_path.clone(),
             );
             Ok(clip)
         }
         Err(err) => {
             notify(app, "error", err.clone());
-            overlay::show(app, BannerKind::Error, "Clip fehlgeschlagen", Some(err.clone()));
+            overlay::show(app, BannerKind::Error, "Clip failed", Some(err.clone()));
             Err(err)
         }
     }
 }
 
-/// Replay-Puffer an- oder ausschalten und das Ergebnis melden.
+/// Switch the replay buffer on or off and report the result.
 ///
-/// Der Weg für Hotkey, Tray und Knopf — also immer eine Entscheidung des
-/// Nutzers. Die Automatik meldet sich deshalb hier ab bzw. wieder an.
+/// The route for hotkey, tray and button — so always a decision by the user.
+/// The automation therefore signs off, or back on, here.
 pub fn toggle_buffer_and_notify(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     if state.status.lock().buffer_active {
@@ -107,59 +107,59 @@ pub fn toggle_buffer_and_notify(app: &tauri::AppHandle) {
     }
 }
 
-/// Puffer starten und das Ergebnis melden.
+/// Start the buffer and report the result.
 pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     match state.start_pipeline() {
         Ok(()) => {
-            notify(app, "ok", "Replay-Puffer läuft");
+            notify(app, "ok", "Replay buffer running");
             let seconds = state.config_snapshot().buffer.seconds;
             overlay::show(
                 app,
                 BannerKind::Buffer,
-                "Replay-Puffer läuft",
+                "Replay buffer running",
                 Some(match state.current_game.lock().as_ref() {
-                    Some(game) => format!("{game} · letzte {seconds} s"),
-                    None => format!("Die letzten {seconds} s werden vorgehalten"),
+                    Some(game) => format!("{game} · last {seconds} s"),
+                    None => format!("Keeping the last {seconds} s"),
                 }),
             );
         }
         Err(err) => {
             notify(app, "error", err.clone());
-            overlay::show(app, BannerKind::Error, "Puffer startet nicht", Some(err));
+            overlay::show(app, BannerKind::Error, "Buffer will not start", Some(err));
         }
     }
 }
 
-/// Puffer stoppen und das Ergebnis melden.
+/// Stop the buffer and report the result.
 pub fn stop_buffer_and_notify(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     state.stop_pipeline();
-    notify(app, "ok", "Replay-Puffer gestoppt");
-    overlay::show(app, BannerKind::BufferOff, "Replay-Puffer aus", None);
+    notify(app, "ok", "Replay buffer stopped");
+    overlay::show(app, BannerKind::BufferOff, "Replay buffer off", None);
 }
 
-/// Puffer beim Programmstart einschalten, wenn er dauerhaft laufen soll.
+/// Switch the buffer on at program start when it is meant to run permanently.
 ///
-/// „Nur im Spiel" wird hier bewusst ausgelassen — darum kümmert sich
-/// `apply_auto_buffer`, sobald ein Spiel im Vordergrund auftaucht.
+/// "Only in game" is deliberately left out here — `apply_auto_buffer` takes care
+/// of that as soon as a game shows up in the foreground.
 fn start_buffer_if_configured(app: &tauri::AppHandle) {
     let config = app.state::<AppState>().config_snapshot();
     if !config.buffer.auto_start || config.only_buffer_in_game {
         return;
     }
     let app = app.clone();
-    // Nicht im Setup-Thread: das Hochfahren der Aufnahme dauert einen Moment
-    // und das Fenster soll währenddessen schon da sein.
+    // Not on the setup thread: bringing up the recording takes a moment and the
+    // window should already be there while it happens.
     std::thread::spawn(move || start_buffer_and_notify(&app));
 }
 
-/// Die Puffer-Automatik, im Takt der Spielerkennung (alle zwei Sekunden).
+/// The buffer automation, on the cadence of game detection (every two seconds).
 ///
-/// Deckt beide Betriebsarten ab: „nur im Spiel" folgt dem Vordergrundfenster,
-/// sonst soll der Puffer einfach laufen. Beides gehört in denselben Takt —
-/// wird die Einstellung geändert, greift das dadurch sofort und nicht erst
-/// beim nächsten Programmstart.
+/// Covers both modes: "only in game" follows the foreground window, otherwise
+/// the buffer should simply run. Both belong on the same tick — that way a
+/// changed setting takes hold immediately and not only at the next program
+/// start.
 fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
     let state = app.state::<AppState>();
     let config = state.config_snapshot();
@@ -175,8 +175,8 @@ fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
     if action == state::AutoAction::Nothing {
         return;
     }
-    // Nicht im Statustakt erledigen: Das Hochfahren der Aufnahme dauert einen
-    // Moment, und das Stoppen wartet notfalls auf ein laufendes Speichern.
+    // Do not do it on the status tick: bringing up the recording takes a moment,
+    // and stopping waits, if need be, for a save in progress.
     let app = app.clone();
     std::thread::spawn(move || match action {
         state::AutoAction::Start => start_buffer_and_notify(&app),
@@ -185,16 +185,16 @@ fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
     });
 }
 
-/// Reste wegräumen, die niemand mehr braucht.
+/// Clear away leftovers nobody needs any more.
 ///
-/// `buffer/` stammt aus der Zeit, als der Puffer als MPEG-TS-Segmente auf der
-/// Platte lag. Der Puffer liegt längst im Arbeitsspeicher, aber wer von einer
-/// älteren Fassung kommt, schleppt die Dateien sonst für immer mit — auf einer
-/// Testmaschine waren das 323 MB, bei langem Puffer und hoher Bitrate schnell
-/// ein Vielfaches.
+/// `buffer/` dates from the time the buffer lay on disk as MPEG-TS segments. The
+/// buffer has long since lived in memory, but anyone coming from an older
+/// version drags those files along forever otherwise — on one test machine that
+/// was 323 MB, and with a long buffer and a high bitrate quickly a multiple of
+/// that.
 ///
-/// `temp/` gehört dem Muxer, der seine Zwischendateien selbst wegräumt. Was
-/// hier noch liegt, ist ein abgestürzter Lauf von vorhin.
+/// `temp/` belongs to the muxer, which clears its intermediate files itself.
+/// What is still lying here is a crashed run from earlier.
 fn discard_leftovers() {
     for stale in ["buffer", "temp"] {
         let dir = config::data_dir().join(stale);
@@ -202,20 +202,20 @@ fn discard_leftovers() {
             continue;
         }
         match std::fs::remove_dir_all(&dir) {
-            Ok(()) => log::info!("Reste aus '{stale}' weggeräumt"),
-            Err(err) => log::warn!("'{stale}' ließ sich nicht räumen: {err}"),
+            Ok(()) => log::info!("cleared leftovers from '{stale}'"),
+            Err(err) => log::warn!("could not clear '{stale}': {err}"),
         }
     }
 }
 
-/// Argument, mit dem Windows ClippiBoy beim Anmelden startet.
+/// Argument Windows starts ClippiBoy with on sign-in.
 pub const AUTOSTART_ARG: &str = "--autostart";
 
 fn started_by_autostart() -> bool {
     std::env::args().any(|arg| arg == AUTOSTART_ARG)
 }
 
-/// Den Windows-Autostart an die Einstellung angleichen.
+/// Bring the Windows auto-start in line with the setting.
 pub fn apply_autostart(app: &tauri::AppHandle, wanted: bool) {
     use tauri_plugin_autostart::ManagerExt;
 
@@ -229,39 +229,39 @@ pub fn apply_autostart(app: &tauri::AppHandle, wanted: bool) {
         manager.disable()
     };
     if let Err(err) = result {
-        log::warn!("Autostart konnte nicht gesetzt werden: {err}");
+        log::warn!("could not set auto-start: {err}");
     }
 }
 
-/// Eine Tastenkombination prüfen, bevor sie in der Konfiguration landet.
+/// Check a key combination before it lands in the config.
 ///
-/// Nimmt die Schreibweise des Shortcut-Parsers an (`Ctrl+Shift+S`, `Alt+F9`,
-/// `Ctrl+Numpad1`) — und ebenso eine einzelne Taste wie `F9` oder `PrintScreen`.
-/// Eine Taste ohne Zusatztaste gilt global: Wer `S` belegt, speichert auch
-/// beim Schreiben einer Nachricht einen Clip. Das ist eine Entscheidung des
-/// Nutzers, die Oberfläche warnt davor — abgelehnt wird sie hier nicht mehr.
+/// Accepts the shortcut parser's spelling (`Ctrl+Shift+S`, `Alt+F9`,
+/// `Ctrl+Numpad1`) — and equally a single key like `F9` or `PrintScreen`. A key
+/// without a modifier applies globally: bind `S` and you also save a clip while
+/// typing a message. That is the user's decision, the UI warns about it — it is
+/// no longer rejected here.
 pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
     use std::str::FromStr;
     use tauri_plugin_global_shortcut::Shortcut;
 
     let text = text.trim();
     if text.is_empty() {
-        return Err("Es ist keine Tastenkombination hinterlegt.".into());
+        return Err("No key combination is set.".into());
     }
-    Shortcut::from_str(text).map_err(|_| format!("„{text}“ ist keine gültige Tastenkombination."))
+    Shortcut::from_str(text).map_err(|_| format!("\"{text}\" is not a valid key combination."))
 }
 
-/// Globale Hotkeys registrieren (Speichern und Puffer an/aus).
+/// Register the global hotkeys (save, and buffer on/off).
 ///
-/// Wird beim Start und nach jeder Änderung aufgerufen. Deshalb zuerst alles
-/// abmelden: sonst bliebe die alte Belegung zusätzlich aktiv.
+/// Called at startup and after every change. Hence unregistering everything
+/// first: otherwise the old assignment would stay active as well.
 pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
     let config = app.state::<AppState>().config_snapshot();
     let shortcuts = app.global_shortcut();
     if let Err(err) = shortcuts.unregister_all() {
-        log::warn!("Alte Hotkeys konnten nicht abgemeldet werden: {err}");
+        log::warn!("could not unregister the old hotkeys: {err}");
     }
 
     let mut failed: Vec<String> = Vec::new();
@@ -270,13 +270,13 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     if let Err(err) = shortcuts.on_shortcut(save.as_str(), move |app, _shortcut, event| {
         if event.state() == ShortcutState::Pressed {
             let app = app.clone();
-            // Das Muxen dauert einen Moment — nicht im Hotkey-Thread erledigen.
+            // Muxing takes a moment — do not do it on the hotkey thread.
             std::thread::spawn(move || {
                 let _ = save_clip_and_notify(&app);
             });
         }
     }) {
-        log::warn!("Hotkey '{save}' konnte nicht registriert werden: {err}");
+        log::warn!("could not register hotkey '{save}': {err}");
         failed.push(save);
     }
 
@@ -286,22 +286,22 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
             toggle_buffer_and_notify(app);
         }
     }) {
-        log::warn!("Hotkey '{toggle}' konnte nicht registriert werden: {err}");
+        log::warn!("could not register hotkey '{toggle}': {err}");
         failed.push(toggle);
     }
 
     match failed.len() {
         0 => Ok(()),
-        // Windows meldet nur „schon vergeben" — praktisch immer ein anderes
-        // Programm, das dieselbe Kombination hält.
+        // Windows only reports "already taken" — practically always another
+        // program holding the same combination.
         _ => Err(format!(
-            "{} ist schon von einem anderen Programm belegt.",
-            failed.join(" und ")
+            "{} is already taken by another program.",
+            failed.join(" and ")
         )),
     }
 }
 
-/// Schickt Pegel (20 Hz) und Statusdaten (1 Hz) an die UI.
+/// Sends levels (20 Hz) and status data (1 Hz) to the UI.
 fn spawn_ui_updates(app: &tauri::AppHandle) {
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -313,7 +313,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             let levels = state.audio.levels(&sources);
             let _ = handle.emit("audio-levels", &levels);
 
-            // Diagnose: mit CLIPPIBOY_LOG_LEVELS=1 werden die Pegel mitgeloggt.
+            // Diagnostics: with CLIPPIBOY_LOG_LEVELS=1 the levels get logged.
             if tick % 20 == 0 && std::env::var("CLIPPIBOY_LOG_LEVELS").is_ok() {
                 let summary: Vec<String> = levels
                     .iter()
@@ -323,21 +323,20 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             }
 
             tick += 1;
-            // Alle 10 s: Quellen, die nicht starten konnten, noch einmal
-            // versuchen. Ein Headset, das beim Programmstart noch nicht am
-            // Rechner war, läuft sonst bis zum Neustart nicht mit.
+            // Every 10 s: retry sources that failed to start. A headset that was
+            // not plugged in at program start would otherwise not run along until
+            // the next restart.
             if tick % 200 == 0 {
                 state.audio.retry_failed(sources.clone());
             }
-            // Alle 2 s nachsehen, welches Spiel im Vordergrund läuft.
+            // Every 2 s, look which game is running in the foreground.
             if tick % 40 == 0 {
                 let game = state.track_game();
                 apply_auto_buffer(&handle, game.as_ref());
             }
-            // Meldet die Aufnahme ein Problem, muss das jemand erfahren. Ohne
-            // das puffert die App scheinbar weiter, und erst der Tastendruck
-            // auf „Clip speichern" bringt ans Licht, dass seit Minuten nichts
-            // mehr ankommt.
+            // If the recording reports a problem, somebody has to hear about it.
+            // Without this the app appears to keep buffering, and only pressing
+            // "Save clip" brings to light that nothing has arrived for minutes.
             if tick % 20 == 0 {
                 let trouble = state
                     .shared
@@ -346,7 +345,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     .and_then(|shared| shared.take_unseen_error());
                 if let Some(err) = trouble {
                     notify(&handle, "error", err.clone());
-                    overlay::show(&handle, BannerKind::Error, "Aufnahme gestört", Some(err));
+                    overlay::show(&handle, BannerKind::Error, "Recording disrupted", Some(err));
                 }
             }
             if tick % 20 == 0 {
@@ -360,20 +359,20 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
     });
 }
 
-/// Den eingestellten Clip-Ordner für das `asset:`-Protokoll freigeben.
+/// Grant the configured clip folder to the `asset:` protocol.
 ///
-/// Ohne das spielt der Player nichts ab, sobald `clipDir` außerhalb des
-/// `$VIDEO`-Bereichs aus `tauri.conf.json` liegt.
+/// Without it the player plays nothing as soon as `clipDir` lies outside the
+/// `$VIDEO` scope from `tauri.conf.json`.
 pub fn allow_clip_dir(app: &tauri::AppHandle, dir: &str) {
     if let Err(err) = app.asset_protocol_scope().allow_directory(dir, true) {
-        log::warn!("Clip-Ordner '{dir}' ist für den Player nicht freigegeben: {err}");
+        log::warn!("clip folder '{dir}' is not granted to the player: {err}");
     }
 }
 
-/// Auch die Ordner freigeben, in denen ältere Clips liegen.
+/// Grant the folders older clips live in as well.
 ///
-/// Wer den Speicherort umstellt, lässt seine bisherigen Clips woanders liegen —
-/// ohne das bliebe die halbe Galerie beim nächsten Start ein schwarzes Bild.
+/// Whoever changes the storage location leaves their existing clips elsewhere —
+/// without this, half the gallery would be a black frame on the next start.
 fn allow_existing_clip_dirs(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let clips = match state.library.lock().as_ref() {
@@ -392,29 +391,29 @@ fn allow_existing_clip_dirs(app: &tauri::AppHandle) {
     }
 }
 
-/// Das Fenster verstecken statt schließen — die App lebt im Tray weiter.
+/// Hide the window instead of closing it — the app lives on in the tray.
 fn hide_to_tray(window: &tauri::Window) {
     let _ = window.hide();
 
     let app = window.app_handle();
     let state = app.state::<AppState>();
     {
-        // Nur den Merker setzen und sichern — `replace_config` würde die
-        // Audioquellen neu anwenden und mitten in einer Aufnahme stören.
+        // Only set and persist the flag — `replace_config` would reapply the
+        // audio sources and disturb a recording in progress.
         let mut config = state.config.lock();
         if config.tray_hint_shown {
             return;
         }
         config.tray_hint_shown = true;
         if let Err(err) = config::save(&config) {
-            log::warn!("Tray-Hinweis konnte nicht gemerkt werden: {err}");
+            log::warn!("could not remember the tray hint: {err}");
         }
     }
     overlay::show(
         app,
         BannerKind::Info,
-        "ClippiBoy läuft weiter",
-        Some("Über das Tray-Symbol wieder öffnen".into()),
+        "ClippiBoy keeps running",
+        Some("Reopen it from the tray icon".into()),
     );
 }
 
@@ -428,8 +427,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        // Das Argument landet in der Autostart-Verknüpfung: nur dann startet
-        // ClippiBoy direkt ins Tray, ohne das Fenster aufzuziehen.
+        // The argument lands in the auto-start shortcut: only then does
+        // ClippiBoy start straight into the tray without opening the window.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![AUTOSTART_ARG]),
@@ -442,29 +441,29 @@ pub fn run() {
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);
             discard_leftovers();
-            // Wegwerfbares aus einer alten Sitzung: erst räumen, dann freigeben.
+            // Throwaway files from an old session: clear first, then grant.
             preview::clear();
             allow_clip_dir(handle, &preview::dir().to_string_lossy());
-            // Die Einzelspuren dagegen sind das Original der Mischung und
-            // bleiben liegen — der Player spielt sie direkt von dort ab.
+            // The individual tracks, by contrast, are the master copy of the mix
+            // and stay put — the player plays them straight from there.
             let _ = std::fs::create_dir_all(stems::root());
             allow_clip_dir(handle, &stems::root().to_string_lossy());
-            // Die Vorschaubilder liegen im Datenverzeichnis statt im Ordner des
-            // Nutzers — die Galerie lädt sie von dort.
+            // The thumbnails live in the data directory rather than the user's
+            // folder — the gallery loads them from there.
             let _ = std::fs::create_dir_all(thumbs::dir());
             allow_clip_dir(handle, &thumbs::dir().to_string_lossy());
-            // Die unversehrten Aufnahmen geschnittener Clips bleiben ebenfalls
-            // liegen, werden aber nie abgespielt — also auch nicht freigeben.
+            // The untouched recordings of trimmed clips stay too, but are never
+            // played back — so they are not granted either.
             if let Some(library) = app.state::<AppState>().library.lock().as_ref() {
                 edit::repair(library);
-                // Bilder aus älteren Fassungen liegen noch neben den Videos.
+                // Pictures from older versions still sit next to the videos.
                 thumbs::migrate(library);
-                // Und was seit dem letzten Mal nicht in seinen Spielordner
-                // gefunden hat, wandert jetzt dorthin.
+                // And whatever has not found its way into its game folder since
+                // last time moves there now.
                 filing::tidy(library, &config.clip_dir);
             }
-            // Mitgeliefertes ffmpeg/ffprobe bekannt machen, bevor irgendetwas
-            // einen Clip schreiben will.
+            // Make the bundled ffmpeg/ffprobe known before anything wants to
+            // write a clip.
             if let Ok(dir) = handle.path().resource_dir() {
                 muxer::set_tool_dir(dir.join("resources"));
             }
@@ -476,7 +475,7 @@ pub fn run() {
             }
             overlay::create(handle);
             if let Err(err) = tray::build(handle) {
-                log::error!("Tray-Symbol konnte nicht angelegt werden: {err}");
+                log::error!("could not create the tray icon: {err}");
             }
             spawn_ui_updates(handle);
             if let Err(err) = register_hotkeys(handle) {
@@ -487,8 +486,8 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Gilt für Alt+F4 und die Fensterliste der Taskleiste; das ✕ in der
-            // eigenen Titelleiste versteckt das Fenster direkt.
+            // Applies to Alt+F4 and the taskbar's window list; the ✕ in our own
+            // title bar hides the window directly.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
@@ -535,11 +534,11 @@ pub fn run() {
             commands::install_update,
         ])
         .build(tauri::generate_context!())
-        .expect("ClippiBoy konnte nicht gestartet werden");
+        .expect("could not start ClippiBoy");
 
     app.run(|handle, event| {
-        // Ein verstecktes Fenster darf den Prozess nicht mitnehmen — beendet
-        // wird nur über „Beenden" im Tray.
+        // A hidden window must not take the process with it — quitting only
+        // happens via "Quit" in the tray.
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             if !handle
                 .state::<AppState>()

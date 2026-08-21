@@ -1,39 +1,39 @@
-//! Ringpuffer je Audioquelle — mit Zeitachse.
+//! One ring buffer per audio source — with a timeline.
 //!
-//! Vorher lag hier nur eine Schlange von Samples, und wer las, nahm einfach
-//! vorne weg. Wie viel gelesen wurde, rechnete die Aufnahme aus der Wanduhr
-//! aus (`Instant::now()`). Der WASAPI-Clock läuft aber nicht ganz so schnell
-//! wie die Wanduhr — der Unterschied sammelte sich, musste mit `trim_to`
-//! weggeworfen werden, und genau das hörte man als Aussetzer und als
-//! langsam davonlaufenden Ton.
+//! This used to be nothing but a queue of samples, and whoever read simply took
+//! from the front. How much had been read was worked out by the recording from
+//! the wall clock (`Instant::now()`). But the WASAPI clock does not run quite as
+//! fast as the wall clock — the difference accumulated, had to be thrown away
+//! with `trim_to`, and that is exactly what you heard as dropouts and as audio
+//! slowly running away.
 //!
-//! Jetzt trägt jeder geschriebene Block den QPC-Zeitstempel, den WASAPI
-//! ohnehin mitliefert (`pu64QPCPosition`). Gelesen wird nicht mehr „das
-//! Nächste", sondern **ein Zeitfenster**. Das ist dieselbe Uhr, auf der auch
-//! `Direct3D11CaptureFrame::SystemRelativeTime` liegt — Bild und Ton sind
-//! damit von sich aus synchron, ohne Korrektur.
+//! Now every written block carries the QPC timestamp WASAPI supplies anyway
+//! (`pu64QPCPosition`). Reading no longer means "whatever is next" but **a
+//! window in time**. That is the same clock
+//! `Direct3D11CaptureFrame::SystemRelativeTime` sits on — picture and sound are
+//! therefore in sync of their own accord, without correction.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
-/// Wie viel Ton der Ring vorhält. Der Mischer holt alle paar Millisekunden ab;
-/// eine Sekunde ist reichlich Luft für einen kurzen Hänger und kostet je
-/// Quelle nur ein paar hundert Kilobyte.
+/// How much audio the ring holds on to. The mixer collects every few
+/// milliseconds; a second is ample slack for a brief stall and costs only a few
+/// hundred kilobytes per source.
 const CAPACITY_MS: usize = 1000;
 
-/// Ab welcher Abweichung ein Block als Sprung in der Zeitachse gilt.
+/// From what deviation a block counts as a jump in the timeline.
 const GAP_TOLERANCE_100NS: i64 = 50 * 10_000;
 
-/// So viel Stille wird höchstens eingefügt, um eine Lücke zu überbrücken.
-/// Darüber hinaus war die Quelle schlicht weg — dann fängt die Zeitachse neu
-/// an, statt den Ring mit Stille vollzuschreiben.
+/// At most this much silence is inserted to bridge a gap. Beyond that the source
+/// was simply gone — the timeline then starts over instead of filling the ring
+/// up with silence.
 const MAX_GAP_FILL_100NS: i64 = 1_000 * 10_000;
 
 struct Inner {
     samples: VecDeque<f32>,
-    /// QPC (100 ns) des ersten Samples in `samples`.
+    /// QPC (100 ns) of the first sample in `samples`.
     start_100ns: i64,
     primed: bool,
 }
@@ -43,7 +43,7 @@ pub struct SampleRing {
     sample_rate: u32,
     channels: usize,
     capacity: usize,
-    /// Spitzenpegel als f32-Bits, damit die UI ihn ohne Lock lesen kann.
+    /// Peak level as f32 bits so the UI can read it without a lock.
     peak: AtomicU32,
 }
 
@@ -71,7 +71,7 @@ impl SampleRing {
         span_100ns * self.sample_rate as i64 / 10_000_000
     }
 
-    /// Einen Block mit seinem QPC-Zeitstempel einlegen.
+    /// Put in one block with its QPC timestamp.
     pub fn write(&self, block: &[f32], qpc_100ns: i64) {
         if block.is_empty() {
             return;
@@ -94,26 +94,26 @@ impl SampleRing {
             inner.start_100ns = qpc_100ns;
             inner.primed = true;
         } else {
-            // Wo würde dieser Block liegen, wenn nichts gefehlt hätte?
+            // Where would this block sit if nothing had been missing?
             let held = inner.samples.len() / self.channels;
             let expected = inner.start_100ns + self.frames_to_100ns(held);
             let drift = qpc_100ns - expected;
 
             if drift > GAP_TOLERANCE_100NS {
                 if drift <= MAX_GAP_FILL_100NS {
-                    // Echte Lücke (Gerät hat ausgesetzt): mit Stille auffüllen,
-                    // damit alles danach an seiner richtigen Stelle bleibt.
+                    // A real gap (the device dropped out): fill with silence so
+                    // everything after it stays in its right place.
                     let missing = self.duration_to_frames(drift) as usize * self.channels;
                     inner.samples.extend(std::iter::repeat(0.0).take(missing));
                 } else {
-                    // Die Quelle war lange weg. Die Zeitachse neu ansetzen.
+                    // The source was gone for a long time. Restart the timeline.
                     inner.samples.clear();
                     inner.start_100ns = qpc_100ns;
                 }
             }
-            // Ein negativer Versatz (Block liegt vor dem Erwarteten) heißt
-            // Überlappung. Die paar Samples doppelt zu schreiben ist harmloser,
-            // als sie herauszurechnen.
+            // A negative offset (the block sits before the expected point) means
+            // overlap. Writing those few samples twice is more harmless than
+            // computing them out.
         }
 
         inner.samples.extend(block.iter().copied());
@@ -126,13 +126,13 @@ impl SampleRing {
         }
     }
 
-    /// Ein Zeitfenster auslesen: `out` wird vollständig gefüllt, fehlende
-    /// Stellen mit Stille.
+    /// Read out a window in time: `out` is filled completely, missing stretches
+    /// with silence.
     ///
-    /// Verbraucht nichts — der Ring wirft von selbst weg, was älter ist als
-    /// seine Kapazität. Dadurch kann derselbe Abschnitt nicht je nach
-    /// Lesereihenfolge einmal zu viel und einmal zu wenig geliefert werden,
-    /// was beim alten „vorne wegnehmen" die Quellen gegeneinander verschob.
+    /// Consumes nothing — the ring discards by itself whatever is older than its
+    /// capacity. That way the same stretch cannot be delivered once too much and
+    /// once too little depending on read order, which is what shifted the sources
+    /// against each other with the old "take from the front".
     pub fn read_window(&self, from_100ns: i64, out: &mut [f32]) {
         out.fill(0.0);
 
@@ -141,12 +141,12 @@ impl SampleRing {
             return;
         }
 
-        // Versatz des gewünschten Beginns gegenüber dem Ringanfang, in Samples.
+        // Offset of the wanted start against the ring's start, in samples.
         let offset_frames = self.duration_to_frames(from_100ns - inner.start_100ns);
         let offset = offset_frames * self.channels as i64;
 
-        // `src` läuft über den Ring, `dst` über die Ausgabe. Liegt das Fenster
-        // teilweise vor dem Ringanfang, beginnt `dst` entsprechend später.
+        // `src` runs over the ring, `dst` over the output. If the window lies
+        // partly before the ring's start, `dst` begins correspondingly later.
         let (mut src, mut dst) = if offset < 0 {
             (0usize, (-offset) as usize)
         } else {
@@ -163,13 +163,13 @@ impl SampleRing {
         }
     }
 
-    /// QPC des ersten Samples, das noch im Ring liegt.
+    /// QPC of the first sample still in the ring.
     pub fn start_100ns(&self) -> Option<i64> {
         let inner = self.inner.lock();
         inner.primed.then_some(inner.start_100ns)
     }
 
-    /// QPC hinter dem letzten Sample — bis hierhin gibt es Material.
+    /// QPC past the last sample — there is material up to here.
     pub fn end_100ns(&self) -> Option<i64> {
         let inner = self.inner.lock();
         if !inner.primed {
@@ -179,7 +179,7 @@ impl SampleRing {
         Some(inner.start_100ns + self.frames_to_100ns(held))
     }
 
-    /// Spitzenpegel seit dem letzten Aufruf (0.0–1.0), danach zurückgesetzt.
+    /// Peak level since the last call (0.0–1.0), reset afterwards.
     pub fn take_peak(&self) -> f32 {
         f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
     }
@@ -196,14 +196,14 @@ impl SampleRing {
 mod tests {
     use super::*;
 
-    /// Absichtlich nicht 48 kHz: Ein Sample dauert dort 208,33 QPC-Ticks und
-    /// lässt sich in 100-ns-Auflösung nicht exakt ausdrücken. Für die
-    /// Fensterlogik ist das gleichgültig (echte Blöcke sind hunderte Samples
-    /// lang), für eine Prüfung auf einzelnes Sample genau aber tödlich —
-    /// deshalb hier eine Rate, bei der ein Sample genau 1000 Ticks dauert.
+    /// Deliberately not 48 kHz: a sample there lasts 208.33 QPC ticks and cannot
+    /// be expressed exactly at 100 ns resolution. For the window logic that is
+    /// beside the point (real blocks are hundreds of samples long), but for a
+    /// sample-exact check it is fatal — hence a rate here where one sample lasts
+    /// exactly 1000 ticks.
     const RATE: u32 = 10_000;
 
-    /// QPC (100 ns) für eine Sample-Position bei `RATE`.
+    /// QPC (100 ns) for a sample position at `RATE`.
     fn at(frames: i64) -> i64 {
         frames * 10_000_000 / RATE as i64
     }
@@ -221,7 +221,7 @@ mod tests {
         let ring = SampleRing::new(RATE, 1);
         ring.write(&[1.0, 2.0, 3.0, 4.0], at(100));
 
-        // Genau ab dem zweiten Sample.
+        // Exactly from the second sample on.
         let mut out = vec![0.0; 2];
         ring.read_window(at(101), &mut out);
         assert_eq!(out, vec![2.0, 3.0]);
@@ -247,23 +247,22 @@ mod tests {
         assert_eq!(out, vec![1.0, 2.0, 0.0, 0.0]);
     }
 
-    /// Setzt das Gerät kurz aus, darf alles Spätere nicht nach vorne rutschen —
-    /// sonst liefe der Ton ab da vor dem Bild her.
+    /// If the device drops out briefly, nothing later may slide forward —
+    /// otherwise the audio would run ahead of the picture from there on.
     #[test]
     fn a_gap_is_filled_with_silence_so_later_audio_keeps_its_place() {
         let ring = SampleRing::new(RATE, 1);
         ring.write(&[1.0], at(0));
-        // Nächster Block erst 100 ms später statt nach einem Sample.
+        // The next block only 100 ms later instead of after one sample.
         ring.write(&[2.0], at(0) + 100 * 10_000);
 
         let expected_position = ring.start_100ns().unwrap() + 100 * 10_000;
         let mut out = vec![0.0; 1];
         ring.read_window(expected_position, &mut out);
-        assert_eq!(out, vec![2.0], "Der Block nach der Lücke steht falsch");
+        assert_eq!(out, vec![2.0], "the block after the gap is in the wrong place");
     }
 
-    /// Eine Quelle, die minutenlang weg war, darf den Ring nicht mit Stille
-    /// zuschütten.
+    /// A source that was gone for minutes must not bury the ring in silence.
     #[test]
     fn a_long_absence_restarts_the_timeline() {
         let ring = SampleRing::new(RATE, 1);
@@ -278,14 +277,14 @@ mod tests {
 
     #[test]
     fn the_oldest_material_is_dropped_and_the_start_moves_with_it() {
-        // 1000 Hz mono, 1000 ms Kapazität -> 1000 Samples
+        // 1000 Hz mono, 1000 ms capacity -> 1000 samples
         let ring = SampleRing::new(1000, 1);
         for frame in 0..1500i64 {
             ring.write(&[0.5], frame * 10_000_000 / 1000);
         }
         let start = ring.start_100ns().unwrap();
         let end = ring.end_100ns().unwrap();
-        assert_eq!((end - start) / 10_000, 1000, "Ring hält nicht 1000 ms");
+        assert_eq!((end - start) / 10_000, 1000, "ring does not hold 1000 ms");
     }
 
     #[test]

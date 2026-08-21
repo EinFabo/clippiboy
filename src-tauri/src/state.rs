@@ -1,4 +1,4 @@
-//! Gemeinsamer Zustand zwischen UI-Commands und Aufnahme-Threads.
+//! Shared state between UI commands and the recording threads.
 
 use std::sync::Arc;
 
@@ -16,43 +16,43 @@ pub struct AppState {
     pub status: Mutex<EngineStatus>,
     pub audio: Arc<AudioEngine>,
     pub pipeline: Mutex<Option<Pipeline>>,
-    /// Zweiter Griff auf den Pipeline-Zustand, nur zum Lesen von Kennzahlen.
+    /// A second handle on the pipeline state, for reading metrics only.
     ///
-    /// `save_clip()` hält `pipeline` über den ganzen Seal- und ffmpeg-Lauf; ein
-    /// Statustick, der dort mitlesen wollte, würde eine Sekunde blockieren.
+    /// `save_clip()` holds `pipeline` across the whole seal and ffmpeg run; a
+    /// status tick that wanted to read along there would block for a second.
     pub shared: Mutex<Option<Arc<Shared>>>,
-    /// Zuletzt erkanntes Vordergrundspiel, fortlaufend aktualisiert.
+    /// Foreground game last detected, updated continuously.
     pub current_game: Mutex<Option<String>>,
-    /// Spiel, das lief, als zuletzt gepuffert wurde — der Name am Clip.
+    /// The game that was running when the buffer last ran — the name on the
+    /// clip.
     ///
-    /// Gemerkt wird er, weil beim Speichern über den Button ClippiBoy selbst im
-    /// Vordergrund steht und die Momentaufnahme dann leer wäre.
+    /// It is remembered because when saving via the button ClippiBoy itself is
+    /// in the foreground, and the snapshot would be empty then.
     pub buffering_game: Mutex<Option<String>>,
-    /// Erst wenn im Tray „Beenden" gewählt wurde, darf der Prozess aussteigen —
-    /// sonst versteckt das ✕ das Fenster nur.
+    /// Only once "Quit" was chosen in the tray may the process exit — otherwise
+    /// the ✕ just hides the window.
     pub quitting: std::sync::atomic::AtomicBool,
-    /// Merker für den selbsttätigen Puffer, siehe `AutoBuffer`.
+    /// Bookkeeping for the automatic buffer, see `AutoBuffer`.
     pub auto: AutoBuffer,
-    /// Die Aufnahmeeinstellungen, mit denen der laufende Puffer gestartet
-    /// wurde — an die Quelle angeglichen und damit die echten Maße des Clips.
+    /// The recording settings the running buffer was started with — fitted to
+    /// the source, and therefore the clip's real dimensions.
     pub active_recording: Mutex<Option<RecordingConfig>>,
-    /// Läuft gerade ein Speichervorgang? Siehe `begin_save`.
+    /// Is a save in progress right now? See `begin_save`.
     saving: std::sync::atomic::AtomicBool,
-    /// Umschließt Start und Stopp der Aufnahme.
+    /// Wraps starting and stopping the recording.
     ///
-    /// Die Prüfung „läuft schon?" und das Eintragen der fertigen Pipeline
-    /// liegen weit auseinander — dazwischen wird die Aufnahmehardware
-    /// hochgefahren, was einen Moment dauert. Ohne diese Sperre kämen zwei
-    /// gleichzeitige Starts (Hotkey und Automatik, oder Tray und Fenster)
-    /// beide an der Prüfung vorbei und legten **zwei** Aufnahmen an; die erste
-    /// hinge danach unerreichbar fest und hielte Encoder und Bildschirm
-    /// belegt. Ein Stopp mitten in einem Start hätte ebenso ins Leere
-    /// gegriffen.
+    /// The "already running?" check and registering the finished pipeline are
+    /// far apart — the capture hardware is brought up in between, which takes a
+    /// moment. Without this lock two simultaneous starts (hotkey and automation,
+    /// or tray and window) would both get past the check and create **two**
+    /// recordings; the first would then hang unreachable, holding encoder and
+    /// screen occupied. A stop in the middle of a start would likewise have
+    /// grabbed at nothing.
     lifecycle: Mutex<()>,
 }
 
-/// Lebt so lange, wie ein Clip geschrieben wird, und gibt den Platz beim
-/// Fallenlassen wieder frei — auch wenn zwischendurch ein `?` zuschlägt.
+/// Lives for as long as a clip is being written and releases the slot when
+/// dropped — even if a `?` strikes in between.
 pub struct SavingGuard<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl Drop for SavingGuard<'_> {
@@ -61,23 +61,23 @@ impl Drop for SavingGuard<'_> {
     }
 }
 
-/// Zustand der Automatik „Puffer an, sobald ein Spiel läuft".
+/// State of the "buffer on as soon as a game runs" automation.
 ///
-/// Zwei Dinge muss sie auseinanderhalten: Einen Puffer, den der Nutzer selbst
-/// gestartet hat, darf sie nicht wieder ausschalten. Und einen, den der Nutzer
-/// selbst ausgeschaltet hat, darf sie nicht zwei Sekunden später neu starten —
-/// deshalb bleibt sie bis zum Ende des Spiels stumm.
+/// It has to keep two things apart: a buffer the user started themselves it
+/// must not switch off again. And one the user switched off themselves it must
+/// not restart two seconds later — which is why it stays quiet until the game
+/// ends.
 #[derive(Default)]
 pub struct AutoBuffer {
-    /// Läuft der Puffer, weil die Automatik ihn gestartet hat?
+    /// Is the buffer running because the automation started it?
     started: std::sync::atomic::AtomicBool,
-    /// Vom Nutzer abgeschaltet — bis das Spiel weg ist, nicht wieder anfassen.
+    /// Switched off by the user — do not touch again until the game is gone.
     suppressed: std::sync::atomic::AtomicBool,
-    /// Wie viele Prüfungen in Folge kein Spiel gesehen haben.
+    /// How many checks in a row have seen no game.
     missing: std::sync::atomic::AtomicU32,
 }
 
-/// Was die Automatik als Nächstes tun soll.
+/// What the automation should do next.
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum AutoAction {
     Nothing,
@@ -85,14 +85,14 @@ pub enum AutoAction {
     Stop,
 }
 
-/// So viele Prüfungen ohne erkanntes Spiel gelten als „Spiel beendet".
-/// Geprüft wird alle zwei Sekunden — kurzes Alt-Tab darf den Puffer nicht
-/// abwürgen, sonst ist der Mitschnitt genau dann weg, wenn man zurückkommt.
+/// This many checks without a detected game counts as "game ended". A check
+/// runs every two seconds — a brief alt-tab must not choke the buffer, or the
+/// recording is gone exactly when you come back.
 const GRACE_POLLS: u32 = 15;
 
 impl AutoBuffer {
-    /// Eine Runde der Automatik. Wird im Takt der Spielerkennung aufgerufen und
-    /// nur, wenn „automatisch starten" und „nur im Spiel" beide an sind.
+    /// One round of the automation. Called at the cadence of game detection,
+    /// and only when both "auto start" and "only in game" are on.
     pub fn poll(&self, game_present: bool, buffer_active: bool) -> AutoAction {
         use std::sync::atomic::Ordering::SeqCst;
         if game_present {
@@ -107,8 +107,8 @@ impl AutoBuffer {
         if self.missing.fetch_add(1, SeqCst) + 1 < GRACE_POLLS {
             return AutoAction::Nothing;
         }
-        // Das Spiel ist wirklich beendet: ein neues darf den Puffer wieder
-        // starten, auch wenn der Nutzer ihn zwischendurch abgeschaltet hat.
+        // The game really has ended: a new one may start the buffer again, even
+        // if the user switched it off in between.
         self.suppressed.store(false, SeqCst);
         if buffer_active && self.started.swap(false, SeqCst) {
             AutoAction::Stop
@@ -117,12 +117,12 @@ impl AutoBuffer {
         }
     }
 
-    /// Eine Runde für den Betrieb ohne „nur im Spiel": Der Puffer soll
-    /// laufen, solange ihn niemand von Hand ausgeschaltet hat.
+    /// One round for running without "only in game": the buffer should run as
+    /// long as nobody has switched it off by hand.
     ///
-    /// Das im Takt zu prüfen statt nur beim Programmstart heißt, dass ein
-    /// Umschalten in den Einstellungen sofort wirkt — vorher passierte bis zum
-    /// nächsten Start von ClippiBoy schlicht nichts.
+    /// Checking that on a tick rather than only at program start means a toggle
+    /// in the settings takes effect immediately — before, nothing at all
+    /// happened until the next start of ClippiBoy.
     pub fn poll_always(&self, buffer_active: bool) -> AutoAction {
         use std::sync::atomic::Ordering::SeqCst;
         if buffer_active || self.suppressed.load(SeqCst) {
@@ -132,14 +132,14 @@ impl AutoBuffer {
         AutoAction::Start
     }
 
-    /// Der Nutzer hat den Puffer selbst gestartet.
+    /// The user started the buffer themselves.
     pub fn manual_start(&self) {
         use std::sync::atomic::Ordering::SeqCst;
         self.started.store(false, SeqCst);
         self.suppressed.store(false, SeqCst);
     }
 
-    /// Der Nutzer hat den Puffer selbst gestoppt.
+    /// The user stopped the buffer themselves.
     pub fn manual_stop(&self) {
         use std::sync::atomic::Ordering::SeqCst;
         self.started.store(false, SeqCst);
@@ -153,7 +153,7 @@ impl AppState {
         let library = match Library::open() {
             Ok(lib) => Some(lib),
             Err(err) => {
-                log::error!("Clip-Datenbank konnte nicht geöffnet werden: {err}");
+                log::error!("could not open the clip database: {err}");
                 None
             }
         };
@@ -167,8 +167,8 @@ impl AppState {
             game: None,
         };
 
-        // Die Quellen laufen ab dem Start mit — nur so zeigt der Mixer echte
-        // Pegel, auch bevor der Puffer aktiv ist.
+        // The sources run from startup — that is the only way the mixer shows
+        // real levels even before the buffer is active.
         let audio = Arc::new(AudioEngine::new());
         audio.apply(&config.sources);
 
@@ -193,15 +193,15 @@ impl AppState {
         self.config.lock().clone()
     }
 
-    /// Konfiguration ersetzen, auf Platte schreiben und abhängige Teile
-    /// nachziehen (Pufferlänge und Tonquellen). Die Bildquelle einer laufenden
-    /// Aufnahme wechselt `commands::set_config` — dort lässt sich der Neustart
-    /// auch melden.
+    /// Replace the config, write it to disk and pull the dependent parts along
+    /// (buffer length and audio sources). The video source of a running
+    /// recording is changed by `commands::set_config` — the restart can be
+    /// reported there too.
     pub fn replace_config(&self, mut next: AppConfig) -> AppConfig {
         next.recording.encoder = crate::encode::resolve(next.recording.encoder);
         self.audio.apply(&next.sources);
-        // Läuft gerade eine Aufnahme, muss sie die geänderten Quellen auch
-        // mitbekommen — sonst mischt sie bis zum Neustart die alten.
+        // If a recording is running it has to learn about the changed sources
+        // too — otherwise it mixes the old ones until the next restart.
         if let Some(shared) = self.shared.lock().as_ref() {
             shared.set_sources(next.sources.clone());
         }
@@ -210,18 +210,18 @@ impl AppState {
             *guard = next.clone();
         }
         if let Err(err) = config::save(&next) {
-            log::error!("Konfiguration konnte nicht gespeichert werden: {err}");
+            log::error!("could not save the config: {err}");
         }
         next
     }
 
-    /// Meldet einen Speichervorgang an. `None` heißt: es läuft schon einer.
+    /// Registers a save. `None` means one is already running.
     ///
-    /// Bis ein Clip geschrieben ist, vergehen je nach Bitrate und Länge ein
-    /// paar Sekunden. Ohne diese Sperre startet jeder weitere Tastendruck in
-    /// dieser Zeit einen zweiten Lauf — und genau das war der häufigste Grund
-    /// für „ffmpeg ist fehlgeschlagen": Zwei Läufe kurz hintereinander teilten
-    /// sich Zielpfad und Temp-Dateien und räumten sie sich gegenseitig weg.
+    /// Writing a clip takes a few seconds depending on bitrate and length.
+    /// Without this lock every further key press in that window starts a second
+    /// run — and that was exactly the most common cause of "ffmpeg failed": two
+    /// runs in quick succession shared target path and temp files and cleared
+    /// them out from under each other.
     pub fn begin_save(&self) -> Option<SavingGuard<'_>> {
         use std::sync::atomic::Ordering::SeqCst;
         match self.saving.compare_exchange(false, true, SeqCst, SeqCst) {
@@ -230,7 +230,7 @@ impl AppState {
         }
     }
 
-    /// Läuft gerade eine Aufnahme in den Puffer?
+    /// Is a recording into the buffer running right now?
     pub fn is_buffering(&self) -> bool {
         self.pipeline.lock().is_some()
     }
@@ -252,7 +252,7 @@ impl AppState {
 }
 
 impl AppState {
-    /// Startet die Aufnahme in den Replay-Puffer.
+    /// Starts recording into the replay buffer.
     pub fn start_pipeline(&self) -> Result<(), String> {
         let _lifecycle = self.lifecycle.lock();
         if self.pipeline.lock().is_some() {
@@ -260,15 +260,14 @@ impl AppState {
         }
         if !crate::muxer::available() {
             return Err(
-                "ffmpeg wurde nicht gefunden. Ohne ffmpeg lassen sich keine Clips schreiben."
+                "ffmpeg was not found. Without ffmpeg no clips can be written."
                     .into(),
             );
         }
 
         let mut config = self.config_snapshot();
-        // Der Bildschirm kann seit dem Einstellen gewechselt haben — lieber
-        // hier noch einmal an die Quelle angleichen als hochskaliert
-        // aufnehmen.
+        // The screen may have changed since it was configured — better to fit
+        // to the source once more here than to record upscaled.
         crate::capture::fit_to_target(&mut config.recording);
         let pipeline = Pipeline::start(
             &config.recording,
@@ -279,17 +278,17 @@ impl AppState {
         *self.shared.lock() = Some(pipeline.shared.clone());
         *self.pipeline.lock() = Some(pipeline);
         *self.active_recording.lock() = Some(config.recording.clone());
-        // Erst kopieren, dann setzen: Hielte man beide Sperren gleichzeitig,
-        // liefe das gegen die umgekehrte Reihenfolge in `save_clip` und die
-        // beiden Hotkey-Threads könnten sich gegenseitig blockieren.
+        // Copy first, then set: holding both locks at once would run against
+        // the reverse order in `save_clip`, and the two hotkey threads could
+        // deadlock each other.
         let game = self.current_game.lock().clone();
         *self.buffering_game.lock() = game;
 
         let mut status = self.status.lock();
         status.buffer_active = true;
-        // Der tatsächlich gewählte Encoder, nicht der gewünschte: Ist der
-        // Wunsch-MFT nicht angemeldet, stünde in der Anzeige sonst dauerhaft
-        // etwas anderes, als da läuft.
+        // The encoder actually chosen, not the requested one: if the wanted MFT
+        // is not registered, the display would otherwise permanently show
+        // something other than what is running.
         status.encoder = match self.shared.lock().as_ref() {
             Some(shared) => *shared.encoder.lock(),
             None => None,
@@ -312,11 +311,11 @@ impl AppState {
         status.fps = 0.0;
     }
 
-    /// Vom Statustick aufgerufen: Vordergrundspiel nachführen.
+    /// Called by the status tick: keep the foreground game up to date.
     ///
-    /// Solange gepuffert wird, überschreibt nur eine echte Erkennung den
-    /// gemerkten Namen — wechselt man aus dem Spiel auf den Desktop, bleibt der
-    /// Clip trotzdem dem Spiel zugeordnet.
+    /// While buffering, only a real detection overwrites the remembered name —
+    /// switching from the game to the desktop still leaves the clip assigned to
+    /// the game.
     pub fn track_game(&self) -> Option<String> {
         let detected = crate::game::detect();
         *self.current_game.lock() = detected.clone();
@@ -326,16 +325,16 @@ impl AppState {
         detected
     }
 
-    /// Aktuelle Kennzahlen der laufenden Aufnahme in den Status übernehmen.
+    /// Carry the running recording's current metrics into the status.
     pub fn status_snapshot(&self) -> EngineStatus {
         let mut status = self.status.lock().clone();
         if let Some(shared) = self.shared.lock().as_ref() {
             status.buffered_seconds = shared.buffered_seconds();
             status.buffer_bytes = shared.buffer_bytes();
             status.dropped_frames = shared.dropped.load(std::sync::atomic::Ordering::Relaxed);
-            // Der Encoder bekommt konstant `fps` Bilder — die Zahl allein sagt
-            // also nichts. Interessant ist, wie viele davon echt waren: Der
-            // Rest sind Wiederholungen, weil das Bild stillstand.
+            // The encoder gets a constant `fps` frames — so the number alone
+            // says nothing. What is interesting is how many of them were real:
+            // the rest are repeats because the picture stood still.
             let frames = shared.frames.load(std::sync::atomic::Ordering::Relaxed);
             let duplicated = shared.duplicated.load(std::sync::atomic::Ordering::Relaxed);
             if frames > 0 {
@@ -347,42 +346,42 @@ impl AppState {
         status
     }
 
-    /// Schreibt die letzten `seconds` Sekunden als MP4.
+    /// Writes the last `seconds` seconds as an MP4.
     pub fn save_clip(&self, seconds: Option<u32>) -> Result<Clip, String> {
         let config = self.config_snapshot();
         let seconds = seconds.unwrap_or(config.buffer.seconds).max(1);
 
-        // Alles unter einer kurzen Sperre abgreifen und sie sofort wieder
-        // freigeben: Muxen und Vorschaubild dauern Sekunden, und solange käme
-        // z. B. „Beenden" aus dem Tray nicht an den Puffer heran.
+        // Grab everything under a short lock and release it again right away:
+        // muxing and the thumbnail take seconds, and "Quit" from the tray, say,
+        // would not reach the buffer all that while.
         //
-        // Ein Versiegeln wie früher gibt es nicht mehr: Der Encoder läuft
-        // durch, jedes fertige Paket liegt bereits im Ring. Es gibt also
-        // nichts abzuwarten und nichts, was dabei verloren gehen könnte.
+        // There is no sealing step any more: the encoder runs through, every
+        // finished packet is already in the ring. So there is nothing to wait
+        // for and nothing that could be lost along the way.
         let snapshot = {
             let guard = self.pipeline.lock();
             let pipeline = guard
                 .as_ref()
-                .ok_or_else(|| "Der Replay-Puffer läuft nicht.".to_string())?;
+                .ok_or_else(|| "The replay buffer is not running.".to_string())?;
             pipeline.snapshot(seconds)?
         };
 
-        // Die Maße der Datei stammen von der laufenden Aufnahme, nicht aus der
-        // Konfiguration: gespeichert wird, was der Encoder wirklich bekommen hat.
+        // The file's dimensions come from the running recording, not from the
+        // config: what gets saved is what the encoder really received.
         let recording = self
             .active_recording
             .lock()
             .clone()
             .unwrap_or_else(|| config.recording.clone());
 
-        // Nicht die Momentaufnahme, sondern das während des Puffers erkannte
-        // Spiel — beim Speichern über den Button steht ClippiBoy im Vordergrund.
+        // Not the snapshot but the game detected while buffering — when saving
+        // via the button, ClippiBoy is in the foreground.
         let buffering_game = self.buffering_game.lock().clone();
         let game = buffering_game.or_else(|| self.current_game.lock().clone());
-        // Millisekunden gehören dazu: Zwei Clips in derselben Sekunde bekamen
-        // sonst denselben Pfad. Beide ffmpeg-Läufe schrieben dann dieselbe
-        // Datei, teilten sich die Segmentliste im Temp-Ordner, und in der
-        // Datenbank (`path` ist UNIQUE) blieb am Ende nur einer von beiden übrig.
+        // Milliseconds are part of it: two clips in the same second would
+        // otherwise get the same path. Both ffmpeg runs would then write the
+        // same file, share the segment list in the temp folder, and in the
+        // database (`path` is UNIQUE) only one of the two would remain.
         let now = jiff::Zoned::now();
         let stamp = format!(
             "{}-{:03}",
@@ -394,18 +393,18 @@ impl AppState {
             None => format!("clip_{stamp}.mp4"),
         };
 
-        // Je Spiel ein Ordner. Ein neuer Clip ist noch kein Favorit, also
-        // entscheidet allein das Spiel — ohne eines bleibt er im Clip-Ordner.
+        // One folder per game. A new clip is not a favorite yet, so the game
+        // alone decides — with none it stays in the clip folder.
         let dir = crate::filing::dir_for(
             std::path::Path::new(&config.clip_dir),
             game.as_deref(),
             false,
         );
         std::fs::create_dir_all(&dir)
-            .map_err(|err| format!("Ordner '{}' ließ sich nicht anlegen: {err}", dir.display()))?;
+            .map_err(|err| format!("could not create folder '{}': {err}", dir.display()))?;
 
-        // Die Kennung schon hier: Unter ihr legt der Muxer die Einzelspuren ab,
-        // und die entstehen im selben ffmpeg-Lauf wie der Clip.
+        // The id already here: the muxer files the individual tracks under it,
+        // and those come out of the same ffmpeg run as the clip.
         let id = uuid::Uuid::new_v4().to_string();
         let result = crate::muxer::build(crate::muxer::ClipRequest {
             snapshot,

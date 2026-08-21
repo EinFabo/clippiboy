@@ -1,13 +1,11 @@
-//! Vorschaubilder der Clips.
+//! Clip thumbnails.
 //!
-//! Sie liegen bewusst **nicht** neben dem Video: Der Clip-Ordner gehört dem
-//! Nutzer, und wer ihn öffnet, will Clips sehen und keine halbe Bilddatei je
-//! Aufnahme. Deshalb sammelt ClippiBoy sie hier, benannt nach der Kennung des
-//! Clips.
+//! They deliberately do **not** sit next to the video: the clip folder belongs
+//! to the user, and whoever opens it wants to see clips, not half an image file
+//! per recording. So ClippiBoy collects them here, named after the clip's id.
 //!
-//! Anders als der Wegwerf-Ordner in `preview.rs` bleibt diese Ablage über den
-//! Neustart hinaus liegen — ein Bild neu zu rechnen heißt, ffmpeg über jeden
-//! Clip der Galerie laufen zu lassen.
+//! Unlike the scratch folder in `preview.rs`, this store survives a restart —
+//! regenerating a picture means running ffmpeg over every clip in the gallery.
 
 use std::path::{Path, PathBuf};
 
@@ -15,18 +13,18 @@ use crate::clips::Library;
 use crate::config;
 use crate::muxer::{ffmpeg, run, sanitize};
 
-/// Ordner aller Vorschaubilder.
+/// Folder holding all thumbnails.
 pub fn dir() -> PathBuf {
     config::data_dir().join("thumbs")
 }
 
-/// Das Bild eines Clips. Der Name folgt der Kennung, nicht dem Dateinamen:
-/// Der Clip darf umbenannt oder verschoben werden, ohne sein Bild zu verlieren.
+/// A clip's picture. The name follows the id, not the file name: the clip may
+/// be renamed or moved without losing its picture.
 pub fn path(clip_id: &str) -> PathBuf {
     dir().join(format!("{}.jpg", sanitize(clip_id)))
 }
 
-/// Ein Vorschaubild aus dem Video rechnen und ablegen.
+/// Compute a thumbnail from the video and store it.
 pub fn make(video: &Path, clip_id: &str) -> Result<PathBuf, String> {
     let out = path(clip_id);
     std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
@@ -37,32 +35,32 @@ pub fn make(video: &Path, clip_id: &str) -> Result<PathBuf, String> {
             .arg(video)
             .args(["-frames:v", "1", "-vf", "scale=480:-1", "-q:v", "4"])
             .arg(&out),
-        "Vorschaubild",
+        "thumbnail",
     )?;
     Ok(out)
 }
 
-/// Das Bild eines gelöschten Clips wegräumen.
+/// Clear away the picture of a deleted clip.
 pub fn remove(clip_id: &str) {
     let _ = std::fs::remove_file(path(clip_id));
 }
 
-/// Bilder aus älteren Fassungen einsammeln.
+/// Collect pictures from older versions.
 ///
-/// Bis 0.1.4 lag das Bild als `.jpg` neben dem `.mp4` im Clip-Ordner. Beim
-/// Start wandert es hierher — sonst bliebe für jeden bestehenden Clip eine
-/// Bilddatei im Ordner des Nutzers zurück, und zwar für immer.
+/// Up to 0.1.4 the picture sat as a `.jpg` next to the `.mp4` in the clip
+/// folder. At startup it moves here — otherwise every existing clip would leave
+/// an image file behind in the user's folder, forever.
 pub fn migrate(library: &Library) {
     let clips = match library.list() {
         Ok(clips) => clips,
         Err(err) => {
-            log::warn!("Vorschaubilder nicht umgezogen: {err}");
+            log::warn!("thumbnails not migrated: {err}");
             return;
         }
     };
     let dir = dir();
     if let Err(err) = std::fs::create_dir_all(&dir) {
-        log::warn!("Ordner für Vorschaubilder nicht angelegt: {err}");
+        log::warn!("thumbnail folder not created: {err}");
         return;
     }
 
@@ -78,27 +76,27 @@ pub fn migrate(library: &Library) {
             match move_file(&old, &new) {
                 Ok(()) => Some(new),
                 Err(err) => {
-                    log::warn!("Vorschaubild '{}' blieb liegen: {err}", old.display());
+                    log::warn!("thumbnail '{}' left in place: {err}", old.display());
                     continue;
                 }
             }
         } else if new.is_file() {
-            // Schon umgezogen, nur der Eintrag hinkt hinterher.
+            // Already migrated, only the record is lagging behind.
             Some(new)
         } else {
-            // Das Bild ist weg — dann soll auch der Eintrag nicht ins Leere
-            // zeigen. Die Galerie zeigt dafür ihren Farbverlauf.
+            // The picture is gone — then the record should not point into the
+            // void either. The gallery shows its gradient instead.
             None
         };
         let value = target.map(|path| path.to_string_lossy().to_string());
         if let Err(err) = library.set_thumb(&clip.id, value.as_deref()) {
-            log::warn!("Vorschaubild von '{}' nicht vermerkt: {err}", clip.id);
+            log::warn!("thumbnail of '{}' not recorded: {err}", clip.id);
         }
     }
 }
 
-/// Verschieben über Laufwerksgrenzen hinweg: Der Clip-Ordner liegt gern auf
-/// einer anderen Platte als `%APPDATA%`, und dort scheitert `rename`.
+/// Moving across drive boundaries: the clip folder likes to sit on a different
+/// disk than `%APPDATA%`, and `rename` fails there.
 fn move_file(from: &Path, to: &Path) -> Result<(), String> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
@@ -112,7 +110,7 @@ fn move_file(from: &Path, to: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// Der Ordner des Nutzers bleibt außen vor — genau darum geht es hier.
+    /// The user's folder stays out of it — that is the whole point here.
     #[test]
     fn the_pictures_live_in_the_data_folder() {
         assert!(path("abc").starts_with(config::data_dir()));

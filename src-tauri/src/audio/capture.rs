@@ -1,14 +1,14 @@
-//! WASAPI-Aufnahme je Quelle.
+//! WASAPI capture, one per source.
 //!
-//! Drei Quellentypen:
-//!   * Eingabegerät  — normale Aufnahme (Mikrofon)
-//!   * Ausgabegerät  — Loopback des kompletten Endpunkts
-//!   * Anwendung     — Prozess-Loopback über `ActivateAudioInterfaceAsync`
-//!     (Windows 10 Build 20348+); damit lässt sich z.B. Discord getrennt vom
-//!     Spiel aufnehmen, ohne virtuelle Kabel.
+//! Three source types:
+//!   * input device   — normal capture (microphone)
+//!   * output device  — loopback of the whole endpoint
+//!   * application    — process loopback via `ActivateAudioInterfaceAsync`
+//!     (Windows 10 build 20348+); this is what lets Discord, say, be recorded
+//!     separately from the game without virtual cables.
 //!
-//! Jeder Stream läuft in einem eigenen Thread, schreibt 48 kHz/Stereo/f32 in
-//! einen Ringpuffer und aktualisiert seinen Spitzenpegel für die Anzeige.
+//! Every stream runs on a thread of its own, writes 48 kHz/stereo/f32 into a
+//! ring buffer and updates its peak level for the display.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,9 +16,9 @@ use std::sync::Arc;
 use crate::audio::ring::SampleRing;
 use crate::model::SourceKind;
 
-/// Einheitliches Format aller Quellen nach der Konvertierung.
-/// Aktuelle QPC-Zeit in 100-ns-Einheiten — dieselbe Zeitachse, auf der
-/// Windows.Graphics.Capture seine Bilder stempelt.
+/// The common format all sources share after conversion.
+/// Current QPC time in 100 ns units — the same timeline
+/// Windows.Graphics.Capture stamps its frames on.
 pub fn now_100ns() -> i64 {
     #[cfg(windows)]
     unsafe {
@@ -31,8 +31,9 @@ pub fn now_100ns() -> i64 {
             return 0;
         }
         let _ = QueryPerformanceCounter(&mut counter);
-        // Erst teilen, dann multiplizieren wäre ungenau; erst multiplizieren
-        // liefe bei 64 Bit über. Deshalb getrennt nach ganzen Sekunden und Rest.
+        // Dividing first and then multiplying would be imprecise; multiplying
+        // first would overflow at 64 bits. So whole seconds and remainder are
+        // handled separately.
         let seconds = counter / frequency;
         let rest = counter % frequency;
         seconds * 10_000_000 + rest * 10_000_000 / frequency
@@ -44,29 +45,30 @@ pub fn now_100ns() -> i64 {
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 
-/// Ab welchem Abstand zur Systemuhr ein Zeitstempel nicht mehr von dieser Uhr
-/// stammen kann. Zwei Sekunden sind großzügig — echte QPC-Stempel liegen im
-/// Millisekundenbereich daneben.
+/// From what distance to the system clock a timestamp can no longer come from
+/// that clock. Two seconds is generous — real QPC stamps are off by
+/// milliseconds.
 const IMPLAUSIBLE_100NS: i64 = 2 * 10_000_000;
 
-/// Welcher Zeitstempel gilt für diesen Block?
+/// Which timestamp applies to this block?
 ///
-/// `stamped` ist, was das Gerät gemeldet hat, `now` die selbst abgelesene Zeit.
-/// Nicht jeder Treiber meldet in `pu64QPCPosition` wirklich QPC; manche
-/// schreiben dorthin eine Position, die bei null anfängt. Der Ring läge damit
-/// auf einer ganz anderen Zeitachse als das Bild, und
-/// [`crate::audio::ring::SampleRing::read_window`] fände in jedem Fenster
-/// nichts — der Pegel schlüge weiter aus, die Spur im Clip bliebe stumm.
+/// `stamped` is what the device reported, `now` the time read here. Not every
+/// driver really reports QPC in `pu64QPCPosition`; some write a position there
+/// that starts at zero. The ring would then sit on an entirely different timeline
+/// than the picture, and
+/// [`crate::audio::ring::SampleRing::read_window`] would find nothing in any
+/// window — the meter would keep bouncing while the track in the clip stayed
+/// silent.
 ///
-/// `trust` merkt sich das Urteil über das Gerät. Einmal auf `false`, bleibt es
-/// dabei: zwischen zwei Zeitachsen hin- und herzuspringen wäre schlimmer als
-/// durchgehend die gröbere von beiden.
+/// `trust` remembers the verdict on the device. Once `false`, it stays that way:
+/// jumping back and forth between two timelines would be worse than using the
+/// coarser of the two throughout.
 pub fn usable_stamp(stamped: i64, now: i64, trust: &mut bool) -> i64 {
     if *trust && stamped != 0 && (stamped - now).abs() > IMPLAUSIBLE_100NS {
         *trust = false;
     }
-    // Die 0 heißt nur „nicht ausgefüllt" — das kommt oft vor und ist harmlos,
-    // die selbst abgelesene Zeit stammt von derselben Uhr.
+    // A 0 only means "not filled in" — that happens often and is harmless, the
+    // time read here comes from the same clock.
     if *trust && stamped != 0 {
         stamped
     } else {
@@ -77,8 +79,8 @@ pub fn usable_stamp(stamped: i64, now: i64, trust: &mut bool) -> i64 {
 pub struct StreamHandle {
     pub stop: Arc<AtomicBool>,
     pub ring: Arc<SampleRing>,
-    /// Gesetzt, sobald das Gerät unbrauchbare Zeitstempel gemeldet hat und
-    /// dieser Stream auf die Systemuhr ausgewichen ist.
+    /// Set as soon as the device has reported unusable timestamps and this stream
+    /// has fallen back to the system clock.
     pub fallback_clock: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -98,8 +100,8 @@ impl Drop for StreamHandle {
     }
 }
 
-/// Startet die Aufnahme einer Quelle. Fehler bedeuten: Gerät weg, Prozess
-/// beendet oder keine Berechtigung — der Aufrufer meldet das der UI.
+/// Starts capturing one source. An error means the device is gone, the process
+/// has ended or there is no permission — the caller reports that to the UI.
 pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let fallback_clock = Arc::new(AtomicBool::new(false));
@@ -119,8 +121,8 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
             })
             .map_err(|e| e.to_string())?;
 
-        // Auf das Ergebnis der Initialisierung warten, damit Fehler sofort in
-        // der UI landen statt still im Thread zu verschwinden.
+        // Wait for the result of initialization so errors land in the UI right
+        // away instead of vanishing quietly on the thread.
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(StreamHandle {
                 stop,
@@ -129,14 +131,14 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
                 thread: Some(thread),
             }),
             Ok(Err(err)) => Err(err),
-            Err(_) => Err("Zeitüberschreitung beim Starten der Audioquelle".into()),
+            Err(_) => Err("timed out starting the audio source".into()),
         }
     }
 
     #[cfg(not(windows))]
     {
         let _ = (kind, &ring, &stop, &fallback_clock);
-        Err("Audioaufnahme ist nur unter Windows verfügbar".into())
+        Err("audio capture is only available on Windows".into())
     }
 }
 
@@ -163,13 +165,13 @@ mod win {
     use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
     const REFTIMES_PER_MS: i64 = 10_000;
-    /// WAVE_FORMAT_IEEE_FLOAT — im windows-Crate nicht exportiert.
+    /// WAVE_FORMAT_IEEE_FLOAT — not exported by the windows crate.
     const FORMAT_FLOAT: u16 = 0x0003;
     /// WAVE_FORMAT_EXTENSIBLE
     const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
-    /// Completion-Handler für `ActivateAudioInterfaceAsync` — signalisiert nur
-    /// ein Event, die Auswertung passiert im aufrufenden Thread.
+    /// Completion handler for `ActivateAudioInterfaceAsync` — only signals an
+    /// event; the evaluation happens on the calling thread.
     #[implement(IActivateAudioInterfaceCompletionHandler)]
     struct ActivationHandler {
         event: HANDLE,
@@ -191,8 +193,8 @@ mod win {
         text.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// PROPVARIANT mit VT_BLOB — im windows-Crate nicht direkt konstruierbar,
-    /// deshalb layout-kompatibel selbst gebaut (x64: 24 Byte).
+    /// PROPVARIANT with VT_BLOB — not directly constructible in the windows
+    /// crate, so built by hand layout-compatibly (x64: 24 bytes).
     #[repr(C)]
     struct BlobPropVariant {
         vt: u16,
@@ -220,14 +222,14 @@ mod win {
     struct Format {
         channels: usize,
         sample_rate: u32,
-        /// true = f32-Samples, false = 16-bit PCM
+        /// true = f32 samples, false = 16-bit PCM
         float: bool,
         bits: u16,
     }
 
     unsafe fn read_format(ptr: *const WAVEFORMATEX) -> Format {
         let wf = &*ptr;
-        // WAVE_FORMAT_EXTENSIBLE (0xFFFE) mit 32 Bit ist praktisch immer float.
+        // WAVE_FORMAT_EXTENSIBLE (0xFFFE) at 32 bits is practically always float.
         let float = wf.wFormatTag == FORMAT_FLOAT
             || (wf.wFormatTag == FORMAT_EXTENSIBLE && wf.wBitsPerSample == 32);
         Format {
@@ -238,12 +240,12 @@ mod win {
         }
     }
 
-    /// Rohpuffer in 48 kHz/Stereo/f32 umrechnen.
+    /// Convert a raw buffer to 48 kHz/stereo/f32.
     fn convert(raw: &[u8], frames: usize, format: &Format, out: &mut Vec<f32>) {
         out.clear();
         let src_channels = format.channels.max(1);
 
-        // Erst auf Stereo bringen.
+        // Bring it to stereo first.
         let mut stereo: Vec<f32> = Vec::with_capacity(frames * CHANNELS);
         for frame in 0..frames {
             let mut left = 0.0f32;
@@ -291,8 +293,8 @@ mod win {
             return;
         }
 
-        // Lineare Resampling-Stufe; Geräte laufen fast immer schon auf 48 kHz,
-        // das hier ist der Notnagel für 44,1 kHz und Ähnliches.
+        // A linear resampling step; devices practically always run at 48 kHz
+        // already, this is the stopgap for 44.1 kHz and the like.
         let ratio = SAMPLE_RATE as f64 / format.sample_rate as f64;
         let target_frames = (frames as f64 * ratio) as usize;
         for frame in 0..target_frames {
@@ -392,8 +394,8 @@ mod win {
                 .ok_or_else(windows::core::Error::from_win32)?
                 .cast()?;
 
-            // Für das virtuelle Gerät gibt es kein Mix-Format — es muss gesetzt
-            // werden. Event-Callback ist hier Pflicht.
+            // There is no mix format for the virtual device — it has to be set.
+            // An event callback is mandatory here.
             let format = float_format();
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -439,7 +441,7 @@ mod win {
         let (client, format) = match started {
             Ok(pair) => pair,
             Err(err) => {
-                let _ = ready.send(Err(format!("Audioquelle nicht verfügbar: {err}")));
+                let _ = ready.send(Err(format!("audio source not available: {err}")));
                 return;
             }
         };
@@ -479,7 +481,7 @@ mod win {
         let mut converted: Vec<f32> = Vec::with_capacity(4096);
         let frame_bytes = format.channels * (format.bits as usize / 8);
 
-        // Siehe `usable_stamp` — nicht jedes Gerät meldet brauchbare Zeiten.
+        // See `usable_stamp` — not every device reports usable times.
         let mut trust_qpc = true;
 
         while !stop.load(Ordering::Relaxed) {
@@ -502,10 +504,10 @@ mod win {
                 let mut data: *mut u8 = std::ptr::null_mut();
                 let mut frames = 0u32;
                 let mut flags = 0u32;
-                // Der QPC-Zeitstempel lag hier immer schon bereit und wurde
-                // weggeworfen. Er ist dieselbe Uhr wie
-                // `Direct3D11CaptureFrame::SystemRelativeTime` — damit fällt
-                // die ganze frühere Drift-Korrektur weg.
+                // The QPC timestamp was always available here and used to be
+                // thrown away. It is the same clock as
+                // `Direct3D11CaptureFrame::SystemRelativeTime` — which is what
+                // makes the whole earlier drift correction unnecessary.
                 let mut qpc_100ns = 0u64;
                 if unsafe {
                     capture.GetBuffer(
@@ -520,7 +522,7 @@ mod win {
                 {
                     break;
                 }
-                // Die Uhr ist dieselbe, nur der Ablesezeitpunkt etwas später.
+                // The clock is the same, only read a little later.
                 let now = now_100ns();
                 let stamped = qpc_100ns as i64;
                 let trusted = trust_qpc;
@@ -528,15 +530,15 @@ mod win {
                 if trusted && !trust_qpc {
                     fallback_clock.store(true, Ordering::Relaxed);
                     log::warn!(
-                        "Audioquelle {kind:?} meldet unbrauchbare Zeitstempel \
-                         ({stamped} statt etwa {now}) — es wird auf die Systemuhr \
-                         ausgewichen."
+                        "audio source {kind:?} reports unusable timestamps \
+                         ({stamped} instead of roughly {now}) — falling back to \
+                         the system clock."
                     );
                 }
 
                 if frames > 0 {
-                    // AUDCLNT_BUFFERFLAGS_SILENT = 0x2 — Puffer ignorieren und
-                    // stattdessen Stille einspeisen, sonst driftet die Spur.
+                    // AUDCLNT_BUFFERFLAGS_SILENT = 0x2 — ignore the buffer and
+                    // feed silence instead, otherwise the track drifts.
                     if flags & 0x2 != 0 {
                         converted.clear();
                         converted.resize(frames as usize * CHANNELS, 0.0);
@@ -564,13 +566,13 @@ mod win {
 mod tests {
     use super::*;
 
-    /// Etwa eine Woche Laufzeit — so groß sind echte QPC-Werte.
+    /// Roughly a week of uptime — that is how large real QPC values are.
     const NOW: i64 = 7 * 24 * 3600 * 10_000_000;
 
     #[test]
     fn a_sane_timestamp_is_taken_as_it_is() {
         let mut trust = true;
-        // 5 ms daneben ist der Normalfall.
+        // 5 ms off is the normal case.
         assert_eq!(usable_stamp(NOW - 50_000, NOW, &mut trust), NOW - 50_000);
         assert!(trust);
     }
@@ -579,23 +581,23 @@ mod tests {
     fn an_unfilled_timestamp_falls_back_without_losing_trust() {
         let mut trust = true;
         assert_eq!(usable_stamp(0, NOW, &mut trust), NOW);
-        assert!(trust, "die 0 heißt nur „nicht ausgefüllt“");
-        // Danach zählt ein echter Wert wieder.
+        assert!(trust, "a 0 only means \"not filled in\"");
+        // After that a real value counts again.
         assert_eq!(usable_stamp(NOW, NOW, &mut trust), NOW);
     }
 
-    /// Der eigentliche Fall: Ein Treiber meldet eine Position, die bei null
-    /// anfängt. Ohne diese Prüfung läge der Ring auf einer eigenen Zeitachse
-    /// und die Spur käme im Clip als Stille an.
+    /// The case that really happens: a driver reports a position that starts at
+    /// zero. Without this check the ring would sit on a timeline of its own and
+    /// the track would arrive in the clip as silence.
     #[test]
     fn a_stream_relative_timestamp_switches_to_the_system_clock() {
         let mut trust = true;
         assert_eq!(usable_stamp(10_000, NOW, &mut trust), NOW);
-        assert!(!trust, "das Gerät muss als unzuverlässig gelten");
+        assert!(!trust, "the device has to count as unreliable");
     }
 
-    /// Einmal misstraut, bleibt es dabei — sonst sprängen die Blöcke zwischen
-    /// zwei Zeitachsen hin und her.
+    /// Once distrusted it stays that way — otherwise the blocks would jump back
+    /// and forth between two timelines.
     #[test]
     fn distrust_is_permanent() {
         let mut trust = true;

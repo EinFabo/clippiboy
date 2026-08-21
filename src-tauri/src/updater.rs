@@ -1,13 +1,13 @@
-//! Selbstaktualisierung über GitHub Releases.
+//! Self-update via GitHub Releases.
 //!
-//! Die App fragt beim Start nach, ob eine neuere Fassung veröffentlicht ist,
-//! lädt sie aber nicht von selbst: Installieren heißt unter Windows, dass der
-//! Prozess beendet und das Setup gestartet wird — mitten in einer Aufnahme wäre
-//! das genau das Falsche. Deshalb meldet ClippiBoy den Fund nur, und der Nutzer
-//! entscheidet in den Einstellungen, wann installiert wird.
+//! The app asks at startup whether a newer version has been published, but does
+//! not download it by itself: installing on Windows means the process is ended
+//! and the installer started — in the middle of a recording that would be
+//! exactly the wrong thing. So ClippiBoy only reports the find, and the user
+//! decides in the settings when to install.
 //!
-//! Die Echtheit prüft der Updater selbst: Jedes Paket ist mit dem privaten
-//! Schlüssel signiert, der öffentliche steckt in `tauri.conf.json`.
+//! The updater checks authenticity itself: every package is signed with the
+//! private key, the public one sits in `tauri.conf.json`.
 
 use parking_lot::Mutex;
 use tauri::Manager;
@@ -15,11 +15,11 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::state::AppState;
 
-/// Der zuletzt gefundene, noch nicht installierte Fund.
+/// The most recent find that has not been installed yet.
 #[derive(Default)]
 pub struct Pending(Mutex<Option<Update>>);
 
-/// Was die UI über ein Update wissen muss.
+/// What the UI needs to know about an update.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
@@ -29,23 +29,23 @@ pub struct UpdateInfo {
     pub date: Option<String>,
 }
 
-/// Nachsehen, ob es etwas Neueres gibt.
+/// Look whether there is something newer.
 pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
     let updater = app
         .updater_builder()
-        // Vor dem Neustart die Aufnahme sauber beenden, sonst bleiben
-        // halbfertige Segmentdateien liegen.
+        // End the recording cleanly before the restart, otherwise half-finished
+        // segment files are left behind.
         .on_before_exit({
             let app = app.clone();
             move || app.state::<AppState>().stop_pipeline()
         })
         .build()
-        .map_err(|err| format!("Update-Prüfung nicht möglich: {err}"))?;
+        .map_err(|err| format!("update check not possible: {err}"))?;
 
     let found = updater
         .check()
         .await
-        .map_err(|err| format!("Update-Prüfung fehlgeschlagen: {err}"))?;
+        .map_err(|err| format!("update check failed: {err}"))?;
 
     let pending = app.state::<Pending>();
     match found {
@@ -66,35 +66,35 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
     }
 }
 
-/// Den gefundenen Stand herunterladen und installieren.
+/// Download and install the version that was found.
 ///
-/// Danach kommt die App nicht zurück: Unter Windows startet das Setup und
-/// beendet den laufenden Prozess.
+/// The app does not come back afterwards: on Windows the installer starts and
+/// ends the running process.
 pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
     let update = app.state::<Pending>().0.lock().clone();
     let Some(update) = update else {
-        return Err("Es liegt kein geprüftes Update bereit.".into());
+        return Err("No verified update is ready.".into());
     };
 
     update
         .download_and_install(|_chunk, _total| {}, || {})
         .await
-        .map_err(|err| format!("Update konnte nicht installiert werden: {err}"))?;
+        .map_err(|err| format!("could not install the update: {err}"))?;
     Ok(())
 }
 
-/// Beim Start einmal nachsehen und einen Fund an die UI melden.
+/// Look once at startup and report a find to the UI.
 pub fn check_on_startup(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         match check(&app).await {
             Ok(Some(info)) => {
-                log::info!("Update {} verfügbar", info.version);
+                log::info!("update {} available", info.version);
                 let _ = tauri::Emitter::emit(&app, "update-available", info);
             }
-            Ok(None) => log::info!("Kein Update verfügbar"),
-            // Ohne Netz oder ohne Release ist das kein Fehler, den der Nutzer
-            // sehen müsste.
+            Ok(None) => log::info!("no update available"),
+            // With no network or no release this is not an error the user needs
+            // to see.
             Err(err) => log::info!("{err}"),
         }
     });

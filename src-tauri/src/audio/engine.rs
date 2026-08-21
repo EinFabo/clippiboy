@@ -1,5 +1,5 @@
-//! Hält die laufenden Quellen-Streams, liefert Pegel für die UI und mischt die
-//! Spuren für den Encoder.
+//! Holds the running source streams, supplies levels for the UI and mixes the
+//! tracks for the encoder.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -15,7 +15,7 @@ use crate::model::{AudioSource, SourceKind};
 struct Running {
     handle: Option<StreamHandle>,
     ring: Arc<SampleRing>,
-    /// Erkennt, ob sich die Quelle inhaltlich geändert hat (anderes Gerät/PID).
+    /// Detects whether the source itself changed (different device/PID).
     fingerprint: String,
 }
 
@@ -23,8 +23,8 @@ struct Running {
 pub struct AudioEngine {
     running: Mutex<HashMap<String, Running>>,
     errors: Mutex<HashMap<String, String>>,
-    /// Läuft gerade ein Nachstart-Versuch? `capture::start` wartet im
-    /// Fehlerfall bis zu fünf Sekunden — das darf sich nicht stapeln.
+    /// Is a retry running right now? On failure `capture::start` waits up to five
+    /// seconds — that must not stack up.
     retrying: std::sync::atomic::AtomicBool,
 }
 
@@ -41,19 +41,19 @@ impl AudioEngine {
         Self::default()
     }
 
-    /// Bringt die laufenden Streams mit der Konfiguration in Deckung: neue
-    /// Quellen starten, entfernte oder geänderte stoppen. Gain, Mute und Solo
-    /// ändern nichts an den Streams — die wirken erst beim Mischen.
+    /// Brings the running streams in line with the config: start new sources,
+    /// stop removed or changed ones. Gain, mute and solo change nothing about the
+    /// streams — those only take effect while mixing.
     ///
-    /// Gestartet wird **ohne** die Sperre auf `running`. `capture::start`
-    /// wartet auf ein Gerät, das nicht antwortet, bis zu fünf Sekunden — und
-    /// solange stünde jeder Pegelausschlag still, weil `levels` dieselbe Sperre
-    /// braucht. Bei einem einmaligen Wechsel fiele das kaum auf, beim
-    /// regelmäßigen Nachstarten (siehe [`Self::retry_failed`]) dagegen sehr.
+    /// Starting happens **without** the lock on `running`. `capture::start` waits
+    /// up to five seconds on a device that does not answer — and all that while
+    /// every level meter would stand still, because `levels` needs the same lock.
+    /// On a one-off change that would barely show; on the regular retry (see
+    /// [`Self::retry_failed`]) it very much would.
     pub fn apply(&self, sources: &[AudioSource]) {
         let wanted: Vec<&AudioSource> = sources.iter().filter(|s| s.enabled).collect();
 
-        // Entfernte oder geänderte Streams einsammeln …
+        // Collect removed or changed streams …
         let stale: Vec<(String, Running)> = {
             let mut running = self.running.lock();
             let ids: Vec<String> = running
@@ -70,8 +70,8 @@ impl AudioEngine {
                 .filter_map(|id| running.remove(&id).map(|run| (id, run)))
                 .collect()
         };
-        // … und außerhalb der Sperre auslaufen lassen: `stop` wartet auf den
-        // Faden der Quelle.
+        // … and let them drain outside the lock: `stop` waits on the source's
+        // thread.
         for (id, mut run) in stale {
             if let Some(handle) = run.handle.take() {
                 handle.stop();
@@ -91,10 +91,10 @@ impl AudioEngine {
             match capture::start(&source.kind, ring.clone()) {
                 Ok(handle) => {
                     let mut running = self.running.lock();
-                    // In der Zwischenzeit kann ein zweiter Aufruf dieselbe
-                    // Quelle gestartet haben. Dann gilt seiner, und dieser hier
-                    // wird wieder abgeräumt — zwei Streams auf demselben Gerät
-                    // schrieben sonst beide in denselben Ring.
+                    // In the meantime a second call may have started the same
+                    // source. Then theirs stands and this one is cleared away
+                    // again — two streams on the same device would otherwise both
+                    // write into the same ring.
                     if running.contains_key(&source.id) {
                         drop(running);
                         handle.stop();
@@ -112,21 +112,21 @@ impl AudioEngine {
                     self.errors.lock().remove(&source.id);
                 }
                 Err(err) => {
-                    log::warn!("Quelle '{}' konnte nicht gestartet werden: {err}", source.label);
+                    log::warn!("could not start source '{}': {err}", source.label);
                     self.errors.lock().insert(source.id.clone(), err);
                 }
             }
         }
     }
 
-    /// Quellen, die beim letzten Mal nicht starteten, noch einmal versuchen.
+    /// Try sources that failed to start last time once more.
     ///
-    /// Ein belegtes oder gerade eingestecktes Gerät ist ein paar Sekunden
-    /// später oft da. Ohne das bliebe die Quelle bis zum nächsten Programmstart
-    /// tot — und die Spur im Clip stumm, ohne dass jemand etwas merkt.
+    /// A device that was busy or has just been plugged in is often there a few
+    /// seconds later. Without this the source would stay dead until the next
+    /// program start — and the track in the clip silent, without anyone noticing.
     ///
-    /// Läuft in einem eigenen Faden: `capture::start` wartet im Fehlerfall auf
-    /// eine Zeitüberschreitung, und solange stünden sonst die Pegel still.
+    /// Runs on a thread of its own: on failure `capture::start` waits for a
+    /// timeout, and the level meters would otherwise stand still all that time.
     pub fn retry_failed(self: &Arc<Self>, sources: Vec<AudioSource>) {
         if self.errors.lock().is_empty() {
             return;
@@ -150,7 +150,7 @@ impl AudioEngine {
         }
     }
 
-    /// Spitzenpegel je Quelle (0.0–1.0), Gain und Mute berücksichtigt.
+    /// Peak level per source (0.0–1.0), with gain and mute taken into account.
     pub fn levels(&self, sources: &[AudioSource]) -> HashMap<String, f32> {
         let running = self.running.lock();
         let mut out = HashMap::with_capacity(sources.len());
@@ -170,8 +170,8 @@ impl AudioEngine {
         self.errors.lock().clone()
     }
 
-    /// Hinweise, die keine Fehler sind: Die Quelle läuft, aber nicht so, wie
-    /// der Nutzer es erwartet.
+    /// Notices that are not errors: the source runs, but not the way the user
+    /// expects.
     pub fn warnings(&self, sources: &[AudioSource]) -> HashMap<String, String> {
         let running = self.running.lock();
         let mut out = HashMap::new();
@@ -183,8 +183,8 @@ impl AudioEngine {
             if uses_fallback {
                 out.insert(
                     source.id.clone(),
-                    "Das Gerät meldet unbrauchbare Zeitstempel — ClippiBoy rechnet \
-                     mit der Systemuhr weiter."
+                    "This device reports unusable timestamps — ClippiBoy carries \
+                     on with the system clock."
                         .to_string(),
                 );
             }
@@ -192,21 +192,20 @@ impl AudioEngine {
         out
     }
 
-    /// Alle Ringe leeren. Muss vor jedem Aufnahmestart passieren: solange nicht
-    /// aufgenommen wird, schreiben die WASAPI-Threads weiter, aber niemand holt
-    /// ab — die Ringe stehen dann am Anschlag und der Ton wäre von der ersten
-    /// Sekunde an um die volle Ringlänge hinter dem Bild.
+    /// Empty all rings. Has to happen before every recording start: while nothing
+    /// is being recorded the WASAPI threads keep writing but nobody collects — the
+    /// rings then stand at their limit and the audio would be a full ring length
+    /// behind the picture from the very first second.
     pub fn reset_rings(&self) {
         for run in self.running.lock().values() {
             run.ring.clear();
         }
     }
 
-    /// Bis wohin auf der QPC-Zeitachse alle laufenden Quellen Material haben.
+    /// How far along the QPC timeline every running source has material.
     ///
-    /// Der Mischer darf nur bis hierhin arbeiten: Was er einmal erzeugt hat,
-    /// ist geschrieben — käme der Ton einer Quelle danach noch an, wäre sein
-    /// Platz schon vergeben.
+    /// The mixer may only work up to here: whatever it has produced is written —
+    /// if a source's audio arrived after that, its slot would already be taken.
     pub fn ready_until_100ns(&self) -> Option<i64> {
         let running = self.running.lock();
         running
@@ -215,17 +214,17 @@ impl AudioEngine {
             .min()
     }
 
-    /// Mischt das Zeitfenster ab `from_100ns` über `frames` Frames nach `out`:
-    /// Index 0 ist der Hauptmix, danach die Quellen mit eigener Spur
-    /// (Reihenfolge wie im Layout).
+    /// Mixes the window starting at `from_100ns` over `frames` frames into `out`:
+    /// index 0 is the main mix, then the sources with their own track (in layout
+    /// order).
     ///
-    /// Es wird ausdrücklich **nach Zeit** gelesen, nicht „das Nächste". Vorher
-    /// nahm jede Quelle vorne von ihrem Ring weg, und wie viel, ergab sich aus
-    /// der Wanduhr — Quellen mit leicht unterschiedlichem Gerätetakt drifteten
-    /// dadurch gegeneinander und gegen das Bild.
+    /// Reading is explicitly **by time**, not "whatever is next". Previously each
+    /// source took from the front of its ring, and how much was worked out from
+    /// the wall clock — sources with slightly different device clocks therefore
+    /// drifted against each other and against the picture.
     ///
-    /// Schreibt in mitgebrachte Puffer statt neue anzulegen: Das hier läuft im
-    /// Millisekundentakt.
+    /// Writes into buffers handed in rather than allocating new ones: this runs on
+    /// a millisecond tick.
     pub fn mix_window(
         &self,
         sources: &[AudioSource],
@@ -245,7 +244,7 @@ impl AudioEngine {
 
         let running = self.running.lock();
         let find = |id: &str| sources.iter().find(|s| s.id == id);
-        // Nur nötig, wenn mehrere Quellen in denselben Mix summiert werden.
+        // Only needed when several sources are summed into the same mix.
         let mut scratch: Vec<f32> = Vec::new();
         let mut index = 0;
 
@@ -258,7 +257,7 @@ impl AudioEngine {
                 };
                 let gain = gain_factor(source.gain_db);
                 if first {
-                    // Die erste Quelle darf direkt in den Zielpuffer schreiben.
+                    // The first source may write straight into the target buffer.
                     run.ring.read_window(from_100ns, mix);
                     for sample in mix.iter_mut() {
                         *sample *= gain;
@@ -274,8 +273,8 @@ impl AudioEngine {
                     *target += sample * gain;
                 }
             }
-            // Summieren kann übersteuern — hart begrenzen ist hier besser als
-            // ein Knacken durch Wrap-around beim Encoder.
+            // Summing can overshoot — hard clipping here is better than a crack
+            // from wrap-around at the encoder.
             for sample in mix.iter_mut() {
                 *sample = sample.clamp(-1.0, 1.0);
             }

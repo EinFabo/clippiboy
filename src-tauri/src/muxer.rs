@@ -1,15 +1,15 @@
-//! Aus dem Paket-Ringpuffer ein fertiges MP4 bauen.
+//! Build a finished MP4 out of the packet ring buffer.
 //!
-//! Das Video wird nur kopiert (`-c copy`), nicht neu encodiert — Speichern
-//! kostet damit weder Zeit noch Qualität.
+//! The video is only copied (`-c copy`), not re-encoded — so saving costs
+//! neither time nor quality.
 //!
-//! Früher lagen hier MPEG-TS-Segmentdateien, die der `concat`-Demuxer
-//! zusammensetzen musste. Weil jeder Segment-Encoder seine Zeitrechnung wieder
-//! bei null begann, brauchte es `+genpts`, und `-ss` war wirkungslos — der
-//! Clip fing immer an einer Segmentgrenze an und war bis zu zehn Sekunden zu
-//! lang. Jetzt kommt das Video als ein durchgehender Elementarstrom aus einem
-//! einzigen Encoder: Der Schnitt sitzt auf dem Keyframe davor, und die
-//! Zeitstempel ergeben sich aus der konstanten Bildrate.
+//! This used to hold MPEG-TS segment files that the `concat` demuxer had to
+//! stitch together. Because every segment encoder started its timekeeping over
+//! at zero, `+genpts` was needed and `-ss` had no effect — the clip always began
+//! at a segment boundary and was up to ten seconds too long. Now the video comes
+//! out of a single encoder as one continuous elementary stream: the cut sits on
+//! the keyframe before it, and the timestamps follow from the constant frame
+//! rate.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,19 +21,20 @@ use crate::stems;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Ordner, in dem die mitgelieferten Programme liegen — im Installationspaket
-/// der Ressourcenordner der App. Wird beim Start einmal gesetzt.
+/// Folder holding the bundled programs — in the installed package that is the
+/// app's resource folder. Set once at startup.
 static TOOL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Wo ffmpeg und ffprobe zu finden sind. Ohne Aufruf sucht sie nur der PATH ab.
+/// Where to find ffmpeg and ffprobe. Without a call only PATH is searched.
 pub fn set_tool_dir(dir: PathBuf) {
     let _ = TOOL_DIR.set(dir);
 }
 
-/// Mitgeliefertes Programm, sonst der Name für die PATH-Suche.
+/// The bundled program, otherwise the name for the PATH search.
 ///
-/// Mitgeliefert schlägt PATH bewusst: eine zufällig installierte ffmpeg-Version
-/// kann andere Vorgaben haben, und getestet ist die beigelegte.
+/// Bundled deliberately beats PATH: some ffmpeg version that happens to be
+/// installed may have different defaults, and the one shipped alongside is the
+/// one that was tested.
 fn tool(name: &str) -> PathBuf {
     let file = if cfg!(windows) {
         format!("{name}.exe")
@@ -63,19 +64,19 @@ pub fn ffmpeg() -> Command {
 pub fn run(command: &mut Command, what: &str) -> Result<(), String> {
     let output = command
         .output()
-        .map_err(|err| format!("ffmpeg konnte nicht gestartet werden ({what}): {err}"))?;
+        .map_err(|err| format!("could not start ffmpeg ({what}): {err}"))?;
     if output.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
     Err(format!(
-        "ffmpeg ist bei '{what}' fehlgeschlagen: {}",
+        "ffmpeg failed at '{what}': {}",
         tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
     ))
 }
 
-/// Ist ffmpeg auffindbar?
+/// Can ffmpeg be found?
 pub fn available() -> bool {
     ffmpeg()
         .arg("-version")
@@ -86,8 +87,8 @@ pub fn available() -> bool {
 
 pub struct ClipRequest {
     pub snapshot: ClipSnapshot,
-    /// Die Kennung, unter der der Clip gleich in der Datenbank landet — die
-    /// Einzelspuren werden danach abgelegt.
+    /// The id the clip will land under in the database — the individual tracks
+    /// are filed by it.
     pub clip_id: String,
     pub output: PathBuf,
     pub temp_dir: PathBuf,
@@ -103,7 +104,7 @@ pub struct ClipResult {
 pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     let snapshot = request.snapshot;
     if snapshot.packets.is_empty() {
-        return Err("Der Replay-Puffer ist noch leer.".into());
+        return Err("The replay buffer is still empty.".into());
     }
 
     std::fs::create_dir_all(&request.temp_dir).map_err(|e| e.to_string())?;
@@ -111,49 +112,48 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // Aus dem Ziel-Clip abgeleitet und damit eindeutig je Speichervorgang: Zwei
-    // gleichzeitige Speicherungen dürfen sich die Zwischendateien nicht unter
-    // den Händen wegschreiben.
+    // Derived from the target clip and therefore unique per save: two concurrent
+    // saves must not write each other's intermediate files out from under them.
     let stem = sanitize(&request.output.file_stem().unwrap_or_default().to_string_lossy());
 
-    // Videopakete als roher H.264-Elementarstrom.
+    // Video packets as a raw H.264 elementary stream.
     let video_path = request.temp_dir.join(format!("clip_{stem}.h264"));
     let mut stream: Vec<u8> = Vec::with_capacity(
         snapshot.packets.iter().map(|p| p.data.len()).sum::<usize>()
             + snapshot.sequence_header.len(),
     );
-    // SPS/PPS voranstellen. Die meisten Encoder schicken sie ohnehin vor jedem
-    // IDR mit — doppelt überliest jeder Decoder, ganz fehlen dürfen sie nicht.
+    // Prepend SPS/PPS. Most encoders send them before every IDR anyway — any
+    // decoder skips a duplicate, but they must not be missing entirely.
     stream.extend_from_slice(&snapshot.sequence_header);
     for packet in &snapshot.packets {
         stream.extend_from_slice(&packet.data);
     }
     std::fs::write(&video_path, &stream).map_err(|e| e.to_string())?;
 
-    // Tonspuren als WAV, geschnitten auf denselben QPC wie das erste Bild.
+    // Audio tracks as WAV, cut to the same QPC as the first frame.
     let mut wavs: Vec<(PathBuf, String)> = Vec::new();
     for track in &snapshot.tracks {
         let path = request
             .temp_dir
             .join(format!("track_{stem}_{}.wav", sanitize(&track.source_id)));
-        // Eine Spur stillschweigend wegzulassen wäre das Schlimmste: Der Clip
-        // wäre dann einfach stumm, ohne dass irgendwo stünde warum.
+        // Silently dropping a track would be the worst outcome: the clip would
+        // simply be mute with nothing anywhere saying why.
         match track.write_wav_window(&path, snapshot.start_100ns, snapshot.audio_frames) {
             Ok(()) => wavs.push((path, track.label())),
             Err(err) => log::warn!(
-                "Tonspur '{}' konnte nicht geschrieben werden: {err}",
+                "could not write audio track '{}': {err}",
                 track.label()
             ),
         }
     }
 
-    // Der Clip bekommt **eine** Tonspur, in der alles steckt. Discord, Browser
-    // und die meisten Player spielen von einem MP4 stur die erste Tonspur ab —
-    // lagen die Quellen wie früher auf eigenen Spuren daneben, waren sie
-    // überall außerhalb des Editors stumm.
+    // The clip gets **one** audio track with everything in it. Discord, browsers
+    // and most players stubbornly play only the first audio track of an MP4 — with
+    // the sources on separate tracks alongside, as they used to be, they were
+    // silent everywhere outside the editor.
     //
-    // Die Pegel aus dem Aufnahme-Mixer stecken bereits in den WAVs
-    // (`AudioEngine::mix_window`), hier wird also bei 0 dB summiert.
+    // The levels from the recording mixer are already baked into the WAVs
+    // (`AudioEngine::mix_window`), so this sums at 0 dB.
     let inputs: Vec<(String, f32)> = (1..=wavs.len())
         .map(|index| (format!("{index}:a"), 0.0))
         .collect();
@@ -161,8 +161,8 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
 
     let mut command = ffmpeg();
     command.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
-    // Der Elementarstrom trägt keine Zeitstempel — die Bildrate liefert sie.
-    // Sie stimmt exakt, weil der Taktgeber echtes CFR erzeugt.
+    // The elementary stream carries no timestamps — the frame rate supplies them.
+    // It is exact because the clock generates true CFR.
     command.arg("-f").arg("h264").arg("-r").arg(snapshot.fps.to_string());
     command.arg("-i").arg(&video_path);
     for (path, _) in &wavs {
@@ -172,15 +172,14 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         command.arg("-filter_complex").arg(filter);
     }
 
-    // Erste Ausgabe: der Clip selbst.
+    // First output: the clip itself.
     command.arg("-map").arg("0:v:0");
     match &filter {
         Some(_) => {
             command.arg("-map").arg(stems::MIX_LABEL);
             command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
-            // Zweimal derselbe Name mit Absicht: MP4 kennt kein einheitliches
-            // Feld für Spurnamen, und je nach Programm wird das eine oder das
-            // andere gelesen.
+            // The same name twice on purpose: MP4 has no single agreed field for
+            // track names, and depending on the program one or the other is read.
             command.arg("-metadata:s:a:0").arg("title=Mix");
             command.arg("-metadata:s:a:0").arg("handler_name=Mix");
         }
@@ -189,22 +188,21 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         }
     }
     command.arg("-c:v").arg("copy");
-    // Kein `-shortest`: Der Videostrom wird nur kopiert und ist deshalb in
-    // Sekundenbruchteilen durch. ffmpeg hält den Output dann für fertig und
-    // beendet ihn, bevor der AAC-Encoder sein erstes Paket geliefert hat — die
-    // Datei kam nachweislich ganz ohne Tonspur heraus. Gebraucht wird es auch
-    // nicht: `write_wav_window` schneidet den Ton bereits auf die Länge des
-    // Bildes zu.
+    // No `-shortest`: the video stream is only copied and is therefore done in
+    // fractions of a second. ffmpeg then considers the output finished and closes
+    // it before the AAC encoder has delivered its first packet — the file
+    // demonstrably came out with no audio track at all. It is not needed either:
+    // `write_wav_window` already cuts the audio to the length of the video.
     command.arg("-avoid_negative_ts").arg("make_zero");
-    // Kein `+faststart`: Das schiebt das moov-Atom nach vorn und liest dafür
-    // die fertige Datei noch einmal komplett durch — bei 40 Mbit/s und zwei
-    // Minuten Puffer glatt die doppelte Wartezeit nach dem Tastendruck. Zum
-    // Abspielen und Schneiden braucht es das nicht.
+    // No `+faststart`: that moves the moov atom to the front and reads the
+    // finished file through once more to do it — at 40 Mbit/s and a two-minute
+    // buffer, flatly twice the wait after the key press. Playback and trimming do
+    // not need it.
     command.arg(&request.output);
 
-    // Weitere Ausgaben: die Einzelspuren, damit sich die Mischung später noch
-    // ändern lässt. Bei nur einer Spur wäre das eine Kopie der Tonspur des
-    // Clips — die tut es dann auch.
+    // Further outputs: the individual tracks, so the mix can still be changed
+    // later. With only one track that would be a copy of the clip's audio track —
+    // and that one will do.
     let keep_stems = wavs.len() > 1;
     let stems_dir = stems::dir(&request.clip_id);
     if keep_stems {
@@ -223,8 +221,8 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         let _ = std::fs::remove_file(path);
     }
     if let Err(err) = outcome {
-        // Halb geschriebene Einzelspuren wären schlimmer als gar keine: Der
-        // Editor hielte sie für vollständig und mischte daraus.
+        // Half-written individual tracks would be worse than none at all: the
+        // editor would take them for complete and mix from them.
         if keep_stems {
             stems::remove(&request.clip_id);
         }
@@ -234,7 +232,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     if keep_stems {
         let labels: Vec<String> = wavs.iter().map(|(_, label)| label.clone()).collect();
         if let Err(err) = stems::write_index(&request.clip_id, &labels) {
-            log::warn!("Spurenverzeichnis nicht geschrieben: {err}");
+            log::warn!("track index not written: {err}");
             stems::remove(&request.clip_id);
         }
     }
@@ -243,7 +241,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         .map(|meta| meta.len())
         .unwrap_or(0);
     if size_bytes == 0 {
-        return Err("Der Clip ist leer geblieben.".into());
+        return Err("The clip came out empty.".into());
     }
 
     let duration_ms = probe_duration_ms(&request.output)
@@ -258,11 +256,11 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     })
 }
 
-/// Eine frisch geschriebene Datei an die Stelle einer bestehenden schieben.
+/// Move a freshly written file into the place of an existing one.
 ///
-/// Windows lässt eine geöffnete Datei nicht ersetzen; der Player gibt sie
-/// vorher frei, aber das Handle verschwindet nicht immer im selben Augenblick
-/// — deshalb ein paar Anläufe, bevor aufgegeben wird.
+/// Windows will not let an open file be replaced; the player releases it
+/// beforehand, but the handle does not always vanish in the same instant — hence
+/// a few attempts before giving up.
 pub fn replace_file(temp: &Path, target: &Path) -> Result<(), String> {
     let mut last = None;
     for attempt in 0..10 {
@@ -275,7 +273,7 @@ pub fn replace_file(temp: &Path, target: &Path) -> Result<(), String> {
         }
     }
     Err(format!(
-        "Der Clip ließ sich nicht ersetzen ({}). Ist er gerade woanders geöffnet?",
+        "Could not replace the clip ({}). Is it open somewhere right now?",
         last.map(|err| err.to_string()).unwrap_or_default()
     ))
 }

@@ -1,5 +1,5 @@
-//! Audio-Teilsystem: Geräte-/Prozess-Enumeration und (ab Phase 3) die
-//! WASAPI-Clients je Quelle sowie der Mixer.
+//! Audio subsystem: device/process enumeration and (from phase 3) the per-source
+//! WASAPI clients plus the mixer.
 
 pub mod capture;
 pub mod devices;
@@ -8,8 +8,8 @@ pub mod ring;
 
 use crate::model::AudioSource;
 
-/// Fasst zusammen, welche Quellen in den Hauptmix und welche auf eine eigene
-/// Tonspur gehen. Spur 0 ist Video, Spur 1 der Hauptmix.
+/// Summarizes which sources go into the main mix and which onto a track of their
+/// own. Track 0 is video, track 1 the main mix.
 pub struct TrackLayout {
     pub main_mix: Vec<String>,
     pub separate: Vec<String>,
@@ -32,13 +32,13 @@ impl TrackLayout {
         Self { main_mix, separate }
     }
 
-    /// Anzahl der Tonspuren im Ergebnis-MP4.
+    /// Number of audio tracks in the resulting MP4.
     pub fn track_count(&self) -> usize {
         usize::from(!self.main_mix.is_empty()) + self.separate.len()
     }
 }
 
-/// dB in linearen Faktor.
+/// dB to a linear factor.
 pub fn gain_factor(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }

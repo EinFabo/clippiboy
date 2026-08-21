@@ -1,36 +1,36 @@
-//! Wo eine Clipdatei im Clip-Ordner liegt.
+//! Where a clip file sits inside the clip folder.
 //!
-//! Je Spiel ein Ordner, Favoriten in ihrem eigenen, alles ohne Spiel bleibt
-//! direkt im Clip-Ordner. Die Datenbank bleibt dabei die Wahrheit über den
-//! Clip: Der Ordner ist nur die Ordnung, die man im Explorer sieht — in der
-//! App findet man einen Favoriten weiterhin unter seinem Spiel.
+//! One folder per game, favorites in their own, anything without a game stays
+//! directly in the clip folder. The database remains the truth about a clip:
+//! the folder is only the order you see in Explorer — inside the app a favorite
+//! is still found under its game.
 //!
-//! Verschoben wird nur, was **im eingestellten Clip-Ordner** liegt. Wer den
-//! Speicherort umstellt, lässt seine bisherigen Clips bewusst liegen, wo sie
-//! sind; die räumt hier niemand hinterher.
+//! Only what lies **in the configured clip folder** is moved. Whoever changes
+//! the storage location deliberately leaves their existing clips where they
+//! are; nobody tidies those up afterwards.
 
 use std::path::{Path, PathBuf};
 
 use crate::clips::Library;
 use crate::model::Clip;
 
-/// Ordner der mit dem Herz markierten Clips.
-pub const FAVORITES: &str = "Favoriten";
+/// Folder for the clips marked with a heart.
+pub const FAVORITES: &str = "Favorites";
 
-/// Zeichen, die Windows in einem Ordnernamen nicht zulässt.
+/// Characters Windows does not allow in a folder name.
 const FORBIDDEN: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
-/// Gerätenamen, die Windows für sich behält — als Ordnername unbrauchbar.
+/// Device names Windows keeps for itself — unusable as a folder name.
 const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "COM", "LPT"];
 
-/// Länger wird ein Ordnername nicht. Spielnamen kommen teils aus
-/// Fenstertiteln, und die können ganze Sätze sein.
+/// A folder name gets no longer than this. Game names sometimes come from
+/// window titles, and those can be whole sentences.
 const MAX_LEN: usize = 60;
 
-/// Aus einem Spielnamen einen Ordnernamen machen, den Windows annimmt.
+/// Turn a game name into a folder name Windows will accept.
 ///
-/// `None` heißt: Von dem Namen bleibt nichts Brauchbares übrig — dann kommt
-/// der Clip in den Clip-Ordner selbst, wie einer ganz ohne Spiel.
+/// `None` means nothing usable is left of the name — the clip then goes into
+/// the clip folder itself, like one with no game at all.
 pub fn folder_name(game: &str) -> Option<String> {
     let cleaned: String = game
         .chars()
@@ -43,12 +43,12 @@ pub fn folder_name(game: &str) -> Option<String> {
             .map(|(at, _)| at)
             .unwrap_or(name.len()),
     );
-    // Windows verträgt am Ende weder Punkt noch Leerzeichen.
+    // Windows tolerates neither a dot nor a space at the end.
     let name = name.trim_end_matches(['.', ' ']).to_string();
     if name.is_empty() {
         return None;
     }
-    // `CON.mp4` lässt sich unter Windows nicht anlegen, `_CON` schon.
+    // `CON.mp4` cannot be created on Windows, `_CON` can.
     let stem = name.split('.').next().unwrap_or(&name).to_ascii_uppercase();
     let reserved = RESERVED.iter().any(|word| {
         stem == *word
@@ -59,7 +59,7 @@ pub fn folder_name(game: &str) -> Option<String> {
     Some(if reserved { format!("_{name}") } else { name })
 }
 
-/// Der Ordner, in den ein Clip mit diesem Spiel und diesem Herz gehört.
+/// The folder a clip with this game and this heart belongs in.
 pub fn dir_for(clip_dir: &Path, game: Option<&str>, favorite: bool) -> PathBuf {
     if favorite {
         return clip_dir.join(FAVORITES);
@@ -70,7 +70,7 @@ pub fn dir_for(clip_dir: &Path, game: Option<&str>, favorite: bool) -> PathBuf {
     }
 }
 
-/// Liegt die Datei im Clip-Ordner — direkt darin oder eine Ebene tiefer?
+/// Is the file in the clip folder — directly in it or one level down?
 fn inside(clip_dir: &Path, file: &Path) -> bool {
     match file.parent() {
         Some(parent) => parent == clip_dir || parent.parent() == Some(clip_dir),
@@ -78,11 +78,11 @@ fn inside(clip_dir: &Path, file: &Path) -> bool {
     }
 }
 
-/// Die Datei eines Clips dorthin bringen, wo sie hingehört.
+/// Move a clip's file to where it belongs.
 ///
-/// Gibt den neuen Pfad zurück; `None` heißt, dass nichts zu tun war. Ein Clip,
-/// dessen Datei gerade nicht auffindbar ist oder außerhalb des Clip-Ordners
-/// liegt, bleibt unangetastet.
+/// Returns the new path; `None` means there was nothing to do. A clip whose
+/// file cannot be found right now, or that lies outside the clip folder, is
+/// left untouched.
 pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
     let file = PathBuf::from(&clip.path);
     let clip_dir = Path::new(clip_dir);
@@ -95,31 +95,31 @@ pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
     }
     let name = file
         .file_name()
-        .ok_or_else(|| "Der Clip hat keinen Dateinamen.".to_string())?;
+        .ok_or_else(|| "The clip has no file name.".to_string())?;
 
     std::fs::create_dir_all(&dir).map_err(|err| {
-        format!("Ordner '{}' ließ sich nicht anlegen: {err}", dir.display())
+        format!("could not create folder '{}': {err}", dir.display())
     })?;
     let target = free_name(&dir, name.to_string_lossy().as_ref());
     move_file(&file, &target)?;
-    // War das der letzte Clip seines Spiels, soll der Ordner nicht leer
-    // stehen bleiben.
+    // If that was the last clip of its game, the folder should not be left
+    // standing empty.
     if let Some(parent) = file.parent() {
         prune(parent, clip_dir);
     }
     Ok(Some(target))
 }
 
-/// Alle Clips einsammeln, die nicht in ihrem Ordner liegen.
+/// Collect every clip that is not in its folder.
 ///
-/// Läuft beim Start: Ein Umzug, der scheiterte, weil die Datei gerade offen
-/// war, wird so nachgeholt — und Clips aus älteren Fassungen finden ohne
-/// Zutun in ihren Spielordner.
+/// Runs at startup: a move that failed because the file was open at the time is
+/// caught up here — and clips from older versions find their way into their
+/// game folder without anyone doing anything.
 pub fn tidy(library: &Library, clip_dir: &str) {
     let clips = match library.list() {
         Ok(clips) => clips,
         Err(err) => {
-            log::warn!("Clips nicht einsortiert: {err}");
+            log::warn!("clips not filed: {err}");
             return;
         }
     };
@@ -130,22 +130,22 @@ pub fn tidy(library: &Library, clip_dir: &str) {
             Ok(Some(target)) => {
                 let path = target.to_string_lossy().to_string();
                 if let Err(err) = library.set_path(&clip.id, &path) {
-                    log::warn!("Neuer Pfad von '{}' nicht vermerkt: {err}", clip.id);
+                    log::warn!("new path of '{}' not recorded: {err}", clip.id);
                 } else {
                     moved += 1;
                 }
             }
-            Err(err) => log::warn!("Clip '{}' blieb liegen: {err}", clip.id),
+            Err(err) => log::warn!("clip '{}' left in place: {err}", clip.id),
         }
     }
     if moved > 0 {
-        log::info!("{moved} Clip(s) in ihren Ordner einsortiert");
+        log::info!("filed {moved} clip(s) into their folder");
     }
 }
 
-/// Einen leer gewordenen Unterordner wegräumen. Der Clip-Ordner selbst bleibt
-/// immer stehen, und ein Ordner mit Inhalt ebenfalls: `remove_dir` scheitert
-/// dann von sich aus.
+/// Clear away a subfolder that has become empty. The clip folder itself always
+/// stays, and so does a folder with content: `remove_dir` fails of its own
+/// accord then.
 pub fn prune(dir: &Path, clip_dir: &Path) {
     if dir == clip_dir || !dir.starts_with(clip_dir) {
         return;
@@ -153,8 +153,8 @@ pub fn prune(dir: &Path, clip_dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-/// Ein freier Dateiname im Zielordner. Die Namen tragen Millisekunden, ein
-/// Zusammenstoß ist also die Ausnahme — überschrieben wird trotzdem nichts.
+/// A free file name in the target folder. The names carry milliseconds, so a
+/// collision is the exception — but nothing gets overwritten regardless.
 fn free_name(dir: &Path, name: &str) -> PathBuf {
     let target = dir.join(name);
     if !target.exists() {
@@ -175,8 +175,8 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
     target
 }
 
-/// Verschieben mit ein paar Anläufen: Der Player kann die Datei noch einen
-/// Wimpernschlag lang offen halten, und Windows lässt sie dann nicht los.
+/// Moving with a few attempts: the player can hold the file open for another
+/// blink of an eye, and Windows will not let go of it then.
 fn move_file(from: &Path, to: &Path) -> Result<(), String> {
     let mut last = None;
     for attempt in 0..5 {
@@ -189,7 +189,7 @@ fn move_file(from: &Path, to: &Path) -> Result<(), String> {
         }
     }
     Err(format!(
-        "Die Datei ließ sich nicht nach '{}' verschieben ({}). Ist sie gerade geöffnet?",
+        "Could not move the file to '{}' ({}). Is it open right now?",
         to.display(),
         last.map(|err| err.to_string()).unwrap_or_default()
     ))
@@ -202,13 +202,13 @@ mod tests {
     #[test]
     fn a_game_becomes_a_readable_folder() {
         assert_eq!(folder_name("Counter-Strike 2").as_deref(), Some("Counter-Strike 2"));
-        // Verbotene Zeichen werden zu Leerraum und der fällt zusammen.
-        assert_eq!(folder_name("Tom: Der / Film").as_deref(), Some("Tom Der Film"));
+        // Forbidden characters turn into whitespace, and that collapses.
+        assert_eq!(folder_name("Tom: The / Movie").as_deref(), Some("Tom The Movie"));
         assert_eq!(folder_name("  Bodycam  ").as_deref(), Some("Bodycam"));
     }
 
-    /// Windows legt weder einen Ordner mit Punkt am Ende an noch einen, der
-    /// wie ein Gerät heißt.
+    /// Windows creates neither a folder ending in a dot nor one named like a
+    /// device.
     #[test]
     fn windows_quirks_are_taken_care_of() {
         assert_eq!(folder_name("Portal 2.").as_deref(), Some("Portal 2"));
@@ -223,22 +223,22 @@ mod tests {
         let root = Path::new("C:/clips");
         assert_eq!(dir_for(root, Some("Bodycam"), false), root.join("Bodycam"));
         assert_eq!(dir_for(root, Some("Bodycam"), true), root.join(FAVORITES));
-        // Ohne Spiel bleibt der Clip, wo er ist.
+        // With no game the clip stays where it is.
         assert_eq!(dir_for(root, None, false), root);
     }
 
-    /// Nur der eigene Ordner und eine Ebene darunter werden umgeräumt — sonst
-    /// zöge ein Wechsel des Speicherorts die alten Clips hinterher.
+    /// Only our own folder and one level below get rearranged — otherwise
+    /// changing the storage location would drag the old clips along.
     #[test]
     fn only_files_in_the_clip_folder_are_moved() {
         let root = Path::new("C:/clips");
         assert!(inside(root, Path::new("C:/clips/a.mp4")));
         assert!(inside(root, Path::new("C:/clips/Bodycam/a.mp4")));
         assert!(!inside(root, Path::new("C:/clips/Bodycam/alt/a.mp4")));
-        assert!(!inside(root, Path::new("D:/woanders/a.mp4")));
+        assert!(!inside(root, Path::new("D:/elsewhere/a.mp4")));
     }
 
-    /// Der Clip-Ordner selbst darf nie verschwinden, auch wenn er leer ist.
+    /// The clip folder itself must never disappear, even when empty.
     #[test]
     fn pruning_stops_at_the_clip_folder() {
         let dir = std::env::temp_dir().join("clippiboy-prune-test");

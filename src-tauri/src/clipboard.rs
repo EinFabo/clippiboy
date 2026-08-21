@@ -1,12 +1,12 @@
-//! Die Windows-Zwischenablage.
+//! The Windows clipboard.
 //!
-//! Zwei Dinge liegen hier: eine **Datei** ablegen, damit ein Clip in Discord
-//! oder im Explorer mit Strg+V landet, und **Text** lesen und schreiben für das
-//! Menü in den Textfeldern.
+//! Two things live here: putting a **file** on the clipboard so a clip lands in
+//! Discord or Explorer with Ctrl+V, and reading and writing **text** for the
+//! context menu in text fields.
 //!
-//! Warum nicht aus dem WebView heraus? Lesen aus der Zwischenablage fragt dort
-//! um Erlaubnis, und dieser Dialog gehört nicht in eine App, die ohnehin schon
-//! nativ ist. Die Datei-Ablage (`CF_HDROP`) kann das WebView überhaupt nicht.
+//! Why not from inside the WebView? Reading the clipboard asks for permission
+//! there, and that dialog does not belong in an app that is native anyway. And
+//! the WebView cannot put files (`CF_HDROP`) on the clipboard at all.
 
 #[cfg(windows)]
 mod win {
@@ -21,17 +21,17 @@ mod win {
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Shell::DROPFILES;
 
-    /// Dateiliste, wie sie Explorer und Discord beim Einfügen erwarten. Im
-    /// windows-Crate 0.58 nicht als Konstante exportiert.
+    /// File list as Explorer and Discord expect it on paste. Not exported as a
+    /// constant by the windows crate 0.58.
     const CF_HDROP: u32 = 15;
     /// Text in UTF-16.
     const CF_UNICODETEXT: u32 = 13;
 
-    /// Die Zwischenablage öffnen — mit ein paar Anläufen.
+    /// Open the clipboard — with a few attempts.
     ///
-    /// Hält sie gerade ein anderes Programm (jedes Kopieren tut das für einen
-    /// Wimpernschlag), ist das kein Fehler, sondern eine Sache von
-    /// Millisekunden. Der Rückgabewert schließt sie beim Verlassen wieder.
+    /// If another program is holding it right now (every copy does, for the
+    /// blink of an eye), that is not an error but a matter of milliseconds. The
+    /// returned value closes it again on the way out.
     struct Clipboard;
 
     impl Clipboard {
@@ -42,7 +42,7 @@ mod win {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(15 * (attempt + 1)));
             }
-            Err("Die Zwischenablage ist gerade von einem anderen Programm belegt.".into())
+            Err("Another program is holding the clipboard right now.".into())
         }
     }
 
@@ -52,34 +52,34 @@ mod win {
         }
     }
 
-    /// Einen Speicherblock anlegen und füllen. Gibt ihn wieder frei, wenn das
-    /// Ablegen scheitert — sonst gehört er ab `SetClipboardData` dem System.
+    /// Allocate a block of memory and fill it. Frees it again if handing it
+    /// over fails — from `SetClipboardData` on it belongs to the system.
     fn put(format: u32, bytes: &[u8]) -> Result<(), String> {
         let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
-            .map_err(|err| format!("Kein Speicher für die Zwischenablage: {err}"))?;
+            .map_err(|err| format!("out of memory for the clipboard: {err}"))?;
 
         let target = unsafe { GlobalLock(handle) };
         if target.is_null() {
             let _ = unsafe { GlobalFree(handle) };
-            return Err("Der Speicher für die Zwischenablage ließ sich nicht sperren.".into());
+            return Err("Could not lock the clipboard memory.".into());
         }
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), target as *mut u8, bytes.len());
             let _ = GlobalUnlock(handle);
         }
 
-        // Ab hier gehört der Block dem System — freigeben würde die
-        // Zwischenablage zerlegen.
+        // From here the block belongs to the system — freeing it would take
+        // the clipboard apart.
         match unsafe { SetClipboardData(format, HANDLE(handle.0)) } {
             Ok(_) => Ok(()),
             Err(err) => {
                 let _ = unsafe { GlobalFree(handle) };
-                Err(format!("Die Zwischenablage nahm die Daten nicht an: {err}"))
+                Err(format!("The clipboard did not accept the data: {err}"))
             }
         }
     }
 
-    /// UTF-16 mit abschließender Null, wie Windows es überall erwartet.
+    /// UTF-16 with a trailing null, the way Windows expects it everywhere.
     fn wide(text: &str) -> Vec<u16> {
         std::ffi::OsStr::new(text)
             .encode_wide()
@@ -89,9 +89,9 @@ mod win {
 
     pub fn copy_files(paths: &[&Path]) -> Result<(), String> {
         if paths.is_empty() {
-            return Err("Es ist keine Datei zum Kopieren da.".into());
+            return Err("There is no file to copy.".into());
         }
-        // Kopf, dann alle Pfade hintereinander, am Ende eine zweite Null.
+        // Header, then all paths back to back, and a second null at the end.
         let mut names: Vec<u16> = Vec::new();
         for path in paths {
             names.extend(wide(&path.to_string_lossy()));
@@ -99,7 +99,7 @@ mod win {
         names.push(0);
 
         let header = DROPFILES {
-            // Wo hinter dem Kopf die Namen anfangen.
+            // Where the names start behind the header.
             pFiles: std::mem::size_of::<DROPFILES>() as u32,
             fWide: true.into(),
             ..Default::default()
@@ -116,7 +116,7 @@ mod win {
         }
 
         let _clipboard = Clipboard::open()?;
-        unsafe { EmptyClipboard() }.map_err(|err| format!("Zwischenablage leeren: {err}"))?;
+        unsafe { EmptyClipboard() }.map_err(|err| format!("empty clipboard: {err}"))?;
         put(CF_HDROP, &bytes)
     }
 
@@ -128,26 +128,26 @@ mod win {
         }
 
         let _clipboard = Clipboard::open()?;
-        unsafe { EmptyClipboard() }.map_err(|err| format!("Zwischenablage leeren: {err}"))?;
+        unsafe { EmptyClipboard() }.map_err(|err| format!("empty clipboard: {err}"))?;
         put(CF_UNICODETEXT, &bytes)
     }
 
     pub fn read_text() -> Result<String, String> {
         let _clipboard = Clipboard::open()?;
         if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) }.is_err() {
-            // Kein Text darin ist kein Fehler — dann gibt es eben nichts
-            // einzufügen.
+            // No text in there is not an error — there is simply nothing to
+            // paste.
             return Ok(String::new());
         }
         let handle = unsafe { GetClipboardData(CF_UNICODETEXT) }
-            .map_err(|err| format!("Zwischenablage lesen: {err}"))?;
+            .map_err(|err| format!("read clipboard: {err}"))?;
         let block = HGLOBAL(handle.0);
         let source = unsafe { GlobalLock(block) } as *const u16;
         if source.is_null() {
-            return Err("Der Inhalt der Zwischenablage ließ sich nicht lesen.".into());
+            return Err("Could not read the clipboard contents.".into());
         }
-        // Bis zur abschließenden Null. Eine Obergrenze, damit ein kaputter
-        // Block nicht endlos gelesen wird.
+        // Up to the trailing null. With an upper bound so a broken block is
+        // not read forever.
         let mut units: Vec<u16> = Vec::new();
         unsafe {
             for offset in 0..4_000_000isize {
@@ -174,12 +174,12 @@ pub fn copy_files(paths: &[std::path::PathBuf]) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn copy_files(_paths: &[std::path::PathBuf]) -> Result<(), String> {
-    Err("Die Zwischenablage gibt es nur unter Windows.".into())
+    Err("The clipboard is only available on Windows.".into())
 }
 
 #[cfg(not(windows))]
 pub fn copy_text(_text: &str) -> Result<(), String> {
-    Err("Die Zwischenablage gibt es nur unter Windows.".into())
+    Err("The clipboard is only available on Windows.".into())
 }
 
 #[cfg(not(windows))]

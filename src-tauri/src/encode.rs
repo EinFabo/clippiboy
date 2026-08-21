@@ -1,14 +1,13 @@
-//! Encoder-Auswahl.
+//! Encoder selection.
 //!
-//! Gefragt wird die Media-Foundation-Registrierung, nicht die GPU. Das ist ein
-//! Unterschied: Früher wurde über DXGI nur der Hersteller der Grafikkarte
-//! ermittelt und daraus geschlossen, dass ihr Encoder verfügbar sei. Eine
-//! NVIDIA-Karte im Rechner heißt aber nicht, dass ihr H.264-MFT angemeldet ist
-//! — bei fehlendem oder abgespecktem Treiber steht dann in der Oberfläche ein
-//! Encoder, den es nicht gibt.
+//! We ask the Media Foundation registry, not the GPU. That distinction
+//! matters: the old code only asked DXGI for the graphics card vendor and
+//! concluded from that its encoder was available. But an NVIDIA card in the
+//! machine does not mean its H.264 MFT is registered — with a missing or
+//! stripped-down driver the UI would then list an encoder that does not exist.
 //!
-//! Erschwerend kam hinzu, dass die Aufnahme diese Auswahl ohnehin nie gelesen
-//! hat. Das tut sie jetzt (siehe `mft.rs`), also muss die Liste stimmen.
+//! What made it worse: recording never read that selection anyway. It does now
+//! (see `mft.rs`), so the list has to be right.
 
 use crate::model::{EncoderId, EncoderInfo};
 
@@ -46,17 +45,17 @@ pub fn list_encoders() -> Vec<EncoderInfo> {
             hardware: true,
         },
         EncoderInfo {
-            // Bei der Aufnahme ist das der Software-H.264-MFT von Windows,
-            // beim Export x264. Beide sind immer da.
+            // For recording this is the Windows software H.264 MFT, for export
+            // it is x264. Both are always there.
             id: EncoderId::X264,
-            name: "Software (CPU, Fallback)".into(),
+            name: "Software (CPU, fallback)".into(),
             available: true,
             hardware: false,
         },
     ]
 }
 
-/// Bester verfügbarer Encoder — Hardware vor CPU.
+/// Best available encoder — hardware before CPU.
 pub fn preferred_encoder() -> EncoderId {
     list_encoders()
         .into_iter()
@@ -65,8 +64,8 @@ pub fn preferred_encoder() -> EncoderId {
         .unwrap_or(EncoderId::X264)
 }
 
-/// Fällt auf einen verfügbaren Encoder zurück, falls der gewünschte fehlt
-/// (z.B. Konfiguration von einem anderen Rechner übernommen).
+/// Falls back to an available encoder if the requested one is missing (a
+/// config carried over from another machine, for instance).
 pub fn resolve(requested: EncoderId) -> EncoderId {
     let available = list_encoders();
     if available.iter().any(|e| e.id == requested && e.available) {
@@ -89,7 +88,7 @@ mod tests {
 
     #[test]
     fn unavailable_request_falls_back() {
-        // Ohne passenden Encoder darf nie ein nicht vorhandener zurückkommen.
+        // With no matching encoder, one that is not there must never come back.
         let resolved = resolve(EncoderId::Nvenc);
         let encoders = list_encoders();
         assert!(encoders.iter().any(|e| e.id == resolved && e.available));

@@ -1,16 +1,16 @@
-//! Ring-Puffer über *bereits encodete* Pakete.
+//! Ring buffer over *already encoded* packets.
 //!
-//! Rohframes zu puffern wäre nicht bezahlbar (5 min 1080p60 BGRA ≈ 90 GB),
-//! encodet sind es bei 40 Mbit/s ≈ 1,5 GB. Das Speichern eines Clips ist damit
-//! reines Muxen ohne Re-Encode.
+//! Buffering raw frames would be unaffordable (5 min of 1080p60 BGRA ≈ 90 GB);
+//! encoded at 40 Mbit/s it is ≈ 1.5 GB. Saving a clip is therefore pure muxing
+//! with no re-encode.
 //!
-//! Wichtig: Der Puffer darf vorne nur bis zu einem Video-Keyframe beschnitten
-//! werden, sonst ist der Anfang des Clips nicht dekodierbar.
+//! Important: the buffer may only be trimmed at the front up to a video
+//! keyframe, otherwise the start of the clip is not decodable.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-/// Spur 0 ist immer Video, ab 1 folgen die Audiospuren.
+/// Track 0 is always video, the audio tracks follow from 1.
 pub const VIDEO_TRACK: u32 = 0;
 
 #[derive(Debug, Clone)]
@@ -31,10 +31,10 @@ impl EncodedPacket {
 pub struct ReplayBuffer {
     capacity_us: i64,
     packets: VecDeque<EncodedPacket>,
-    /// Laufende Nummer des vordersten Pakets — für stabile Keyframe-Positionen.
+    /// Sequence number of the frontmost packet — for stable keyframe positions.
     head_seq: u64,
     next_seq: u64,
-    /// (seq, pts) jedes Video-Keyframes, der noch im Puffer liegt.
+    /// (seq, pts) of every video keyframe still in the buffer.
     keyframes: VecDeque<(u64, i64)>,
     bytes: u64,
     newest_pts: i64,
@@ -69,8 +69,8 @@ impl ReplayBuffer {
         self.trim();
     }
 
-    /// Verwirft von vorne, solange auch nach dem Verwerfen noch die volle
-    /// Pufferlänge ab dem *nächsten* Keyframe vorhanden bleibt.
+    /// Drops from the front as long as the full buffer length starting at the
+    /// *next* keyframe still remains afterwards.
     fn trim(&mut self) {
         while self.keyframes.len() > 1 {
             let (seq, pts) = self.keyframes[1];
@@ -108,7 +108,7 @@ impl ReplayBuffer {
         self.packets.is_empty()
     }
 
-    /// Tatsächlich gepufferte Dauer in Sekunden (ab erstem Keyframe).
+    /// Duration actually buffered, in seconds (from the first keyframe).
     pub fn buffered_seconds(&self) -> f32 {
         match self.keyframes.front() {
             Some((_, pts)) => (self.newest_pts - pts) as f32 / 1_000_000.0,
@@ -116,8 +116,8 @@ impl ReplayBuffer {
         }
     }
 
-    /// Schnappschuss der letzten `seconds` Sekunden, beginnend beim letzten
-    /// Keyframe *vor* dem Startzeitpunkt (damit das Video dekodierbar ist).
+    /// Snapshot of the last `seconds` seconds, starting at the last keyframe
+    /// *before* that point in time (so the video is decodable).
     pub fn snapshot(&self, seconds: u32) -> Vec<EncodedPacket> {
         let want_from = self.newest_pts - seconds as i64 * 1_000_000;
         let start_pts = self
@@ -154,7 +154,7 @@ mod tests {
         }
     }
 
-    /// 60 fps, Keyframe alle 2 s, dazu eine Audiospur.
+    /// 60 fps, a keyframe every 2 s, plus one audio track.
     fn fill(buf: &mut ReplayBuffer, seconds: i64) {
         for frame in 0..seconds * 60 {
             let pts_ms = frame * 1000 / 60;
@@ -173,9 +173,9 @@ mod tests {
         let secs = buf.buffered_seconds();
         assert!(
             (10.0..=12.1).contains(&secs),
-            "Puffer sollte gut 10 s halten, war {secs}"
+            "buffer should hold a good 10 s, was {secs}"
         );
-        // Erstes Paket muss ein Video-Keyframe sein.
+        // The first packet has to be a video keyframe.
         let first = buf.packets.front().unwrap();
         assert!(first.is_video() && first.keyframe);
     }
@@ -190,8 +190,8 @@ mod tests {
         assert!(clip[0].is_video() && clip[0].keyframe);
 
         let span = (clip.last().unwrap().pts_us - clip[0].pts_us) as f32 / 1e6;
-        assert!(span >= 10.0, "Clip zu kurz: {span} s");
-        assert!(span <= 12.0, "Clip unnötig lang: {span} s");
+        assert!(span >= 10.0, "clip too short: {span} s");
+        assert!(span <= 12.0, "clip needlessly long: {span} s");
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
         fill(&mut buf, 30);
         let before = buf.bytes();
         buf.set_capacity(5);
-        assert!(buf.bytes() < before / 2, "Puffer wurde nicht verkleinert");
+        assert!(buf.bytes() < before / 2, "buffer was not shrunk");
     }
 
     #[test]

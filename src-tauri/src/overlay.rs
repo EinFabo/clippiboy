@@ -1,13 +1,13 @@
-//! Der Banner, der über dem Spiel eingeblendet wird — Medal/ShadowPlay-Stil.
+//! The banner shown over the game — Medal/ShadowPlay style.
 //!
-//! Technisch ein zweites, randloses und durchsichtiges Fenster, das immer oben
-//! liegt, keinen Fokus annimmt und keine Mausklicks abfängt. Solange nichts
-//! anzuzeigen ist, bleibt es versteckt.
+//! Technically a second window: borderless, transparent, always on top, taking
+//! no focus and catching no mouse clicks. As long as there is nothing to show,
+//! it stays hidden.
 //!
-//! Grenze: über einem Spiel im *exklusiven* Vollbild kann ein WebView2-Fenster
-//! nicht zeichnen — dafür bräuchte es einen Present-Hook im Spielprozess, und
-//! genau das macht ClippiBoy bewusst nicht. Im randlosen Vollbild und im
-//! Fenstermodus, also bei praktisch allen aktuellen Spielen, klappt es.
+//! The limit: over a game in *exclusive* fullscreen a WebView2 window cannot
+//! draw — that would need a present hook inside the game process, and that is
+//! exactly what ClippiBoy deliberately does not do. In borderless fullscreen and
+//! in windowed mode, so in practically every current game, it works.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,21 +20,21 @@ use crate::state::AppState;
 
 pub const LABEL: &str = "overlay";
 
-// Etwas größer als die Karte: der Glow der Umrandung braucht Rand, sonst
-// schneidet ihn der Fensterrand ab.
+// A little larger than the card: the outline's glow needs margin, otherwise the
+// window edge clips it.
 const WIDTH: f64 = 416.0;
 const HEIGHT: f64 = 128.0;
 const MARGIN: f64 = 24.0;
 
-/// Welche Art von Meldung — entscheidet über Farbe im Banner und darüber,
-/// welcher Schalter in den Einstellungen sie abschaltet.
+/// Which kind of message — decides the banner's colour and which switch in the
+/// settings turns it off.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BannerKind {
     Clip,
     Buffer,
-    /// Puffer aus. Eigene Art, damit die Umrandung rückwärts laufen und dabei
-    /// ausgrauen kann — sonst sieht An und Aus identisch aus.
+    /// Buffer off. A kind of its own so the outline can run backwards and grey
+    /// out along the way — otherwise on and off look identical.
     BufferOff,
     Error,
     Info,
@@ -50,11 +50,11 @@ pub struct Banner {
     pub duration_ms: u32,
 }
 
-/// Zählt die gezeigten Banner mit, damit ein nachgereichter Verstecken-Auftrag
-/// einen inzwischen neu erschienenen Banner nicht wegräumt.
+/// Counts the banners shown so a late hide order does not clear away a banner
+/// that has appeared in the meantime.
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Das Overlay-Fenster anlegen. Wird beim Start einmal aufgerufen.
+/// Create the overlay window. Called once at startup.
 pub fn create(app: &tauri::AppHandle) {
     if app.get_webview_window(LABEL).is_some() {
         return;
@@ -65,10 +65,10 @@ pub fn create(app: &tauri::AppHandle) {
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
-        // Das Banner gehört auf den Bildschirm, nicht in den Clip. Windows
-        // nimmt ein Fenster mit dieser Anzeigezugehörigkeit aus jeder
-        // Bildschirmaufnahme heraus — auch aus Windows.Graphics.Capture, mit
-        // dem hier aufgenommen wird. Zu sehen ist es dadurch nur noch live.
+        // The banner belongs on the screen, not in the clip. Windows excludes a
+        // window with this display affinity from every screen capture — including
+        // Windows.Graphics.Capture, which is what records here. As a result it is
+        // only visible live.
         .content_protected(true)
         .skip_taskbar(true)
         .shadow(false)
@@ -79,31 +79,31 @@ pub fn create(app: &tauri::AppHandle) {
 
     match window {
         Ok(window) => {
-            // Klicks gehen durch das Fenster hindurch ins Spiel.
+            // Clicks pass through the window into the game.
             if let Err(err) = window.set_ignore_cursor_events(true) {
                 log::warn!("Overlay bleibt klickbar: {err}");
             }
-            // Einmal jetzt platzieren: beim Einblenden soll nichts mehr
-            // gerechnet oder verschoben werden.
+            // Place it once now: nothing should be computed or moved when it
+            // fades in.
             reposition(app);
         }
-        Err(err) => log::error!("Overlay-Fenster konnte nicht angelegt werden: {err}"),
+        Err(err) => log::error!("could not create the overlay window: {err}"),
     }
 }
 
-/// Banner an die eingestellte Stelle setzen. Beim Start und nach jeder
-/// Änderung an den Einstellungen aufgerufen — nicht bei jedem Banner.
+/// Put the banner at the configured spot. Called at startup and after every
+/// change to the settings — not for every banner.
 pub fn reposition(app: &tauri::AppHandle) {
     let config = app.state::<AppState>().config_snapshot().overlay;
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
     if let Err(err) = place(&window, &config) {
-        log::warn!("Overlay konnte nicht positioniert werden: {err}");
+        log::warn!("could not position the overlay: {err}");
     }
 }
 
-/// Banner anzeigen, sofern er in den Einstellungen nicht abgeschaltet ist.
+/// Show the banner, provided it is not switched off in the settings.
 pub fn show(app: &tauri::AppHandle, kind: BannerKind, title: impl Into<String>, detail: Option<String>) {
     show_with_thumb(app, kind, title, detail, None);
 }
@@ -129,7 +129,7 @@ pub fn show_with_thumb(
         return;
     }
 
-    // Fehler stehen länger, sie sind sonst im Spiel schlicht zu übersehen.
+    // Errors stay longer, otherwise they are simply missed while playing.
     let duration_ms = if kind == BannerKind::Error {
         config.duration_ms.max(6000)
     } else {
@@ -137,20 +137,20 @@ pub fn show_with_thumb(
     };
 
     let Some(window) = app.get_webview_window(LABEL) else {
-        log::warn!("Overlay-Fenster fehlt — Banner wird verworfen");
+        log::warn!("overlay window missing — dropping the banner");
         return;
     };
 
-    // Bei festem Bildschirm steht die Position schon — das spart beim
-    // Einblenden ein Resize plus Move und damit sichtbares Ruckeln.
+    // With a fixed screen the position already stands — that saves a resize plus
+    // a move on fade-in, and with it visible stutter.
     if config.follow_active_screen {
         if let Err(err) = place(&window, &config) {
-            log::warn!("Overlay konnte nicht positioniert werden: {err}");
+            log::warn!("could not position the overlay: {err}");
         }
     }
     let _ = window.show();
-    // Nach dem Anzeigen erneut nach oben holen: Spiele reißen die Z-Reihenfolge
-    // beim Moduswechsel gern an sich.
+    // Bring it to the top again after showing: games like to grab the z-order
+    // when they switch modes.
     let _ = window.set_always_on_top(true);
 
     let banner = Banner {
@@ -162,13 +162,13 @@ pub fn show_with_thumb(
     };
     let _ = window.emit("overlay-banner", banner);
 
-    // Verstecken, sobald der Banner ausgeblendet ist (plus Zeit für die Animation).
+    // Hide once the banner has faded out (plus time for the animation).
     let ticket = SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
     let handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(duration_ms as u64 + 600));
         if SEQUENCE.load(Ordering::SeqCst) != ticket {
-            return; // Inzwischen kam ein neuer Banner.
+            return; // A new banner has arrived in the meantime.
         }
         if let Some(window) = handle.get_webview_window(LABEL) {
             let _ = window.hide();
@@ -176,8 +176,8 @@ pub fn show_with_thumb(
     });
 }
 
-/// Fenster in die gewünschte Ecke setzen — auf dem Monitor, auf dem gerade
-/// gespielt wird, sonst auf dem primären.
+/// Put the window in the desired corner — on the monitor currently being played
+/// on, otherwise on the primary one.
 fn place(window: &tauri::WebviewWindow, config: &OverlayConfig) -> tauri::Result<()> {
     let chosen = if config.follow_active_screen {
         match crate::game::foreground_center() {
@@ -196,11 +196,11 @@ fn place(window: &tauri::WebviewWindow, config: &OverlayConfig) -> tauri::Result
         return Ok(());
     };
     let corner = config.corner;
-    // Physische Pixel, nicht logische: bei zwei Monitoren mit verschiedener
-    // Skalierung rechnet Tauri logische Angaben mit dem Faktor des *alten*
-    // Monitors um — der Banner landet dann daneben.
-    // Arbeitsbereich statt Monitorgröße — sonst liegt der Banner unten hinter
-    // der Taskleiste.
+    // Physical pixels, not logical: with two monitors at different scaling,
+    // Tauri converts logical values using the *old* monitor's factor — the banner
+    // then lands beside where it should.
+    // Work area instead of monitor size — otherwise the banner sits behind the
+    // taskbar at the bottom.
     let scale = monitor.scale_factor();
     let area = monitor.work_area();
     let origin = area.position;

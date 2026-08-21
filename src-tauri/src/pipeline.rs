@@ -1,23 +1,22 @@
-//! Aufnahme-Pipeline: Bildschirm → NV12 → Hardware-Encoder → Paket-Ring.
+//! Recording pipeline: screen → NV12 → hardware encoder → packet ring.
 //!
-//! Aufgenommen wird mit **einem** durchlaufenden Encoder. Die fertigen
-//! H.264-Pakete landen im Ringpuffer aus `buffer.rs`, der Ton parallel als PCM
-//! in Ringen mit derselben Zeitachse. Beim Speichern wird nur noch gemuxt —
-//! kein Neuencodieren, kein Zusammenkleben von Dateien.
+//! Recording runs through **one** continuous encoder. The finished H.264 packets
+//! land in the ring buffer from `buffer.rs`, the audio alongside as PCM in rings
+//! on the same timeline. Saving is nothing but muxing — no re-encoding, no
+//! gluing files together.
 //!
-//! Vorher lief das anders: alle zehn Sekunden wurde ein neuer Encoder
-//! aufgesetzt, in eine MPEG-TS-Datei geschrieben und beim Speichern per
-//! `ffmpeg concat` zusammengesetzt. Jeder Wechsel kostete einen erzwungenen
-//! Keyframe und die Zeit zwischen Tausch und erstem neuen Bild — der Encoder
-//! stempelt sein erstes Bild immer auf null, diese Lücke fiel also still unter
-//! den Tisch. Das war der regelmäßige Hitch, und es war der Grund für den
-//! ganzen Aufwand um Segmentgrenzen, `+genpts` und das nicht funktionierende
-//! `-ss`.
+//! It used to work differently: every ten seconds a new encoder was set up,
+//! written into an MPEG-TS file, and stitched together with `ffmpeg concat` on
+//! save. Every changeover cost a forced keyframe plus the time between the swap
+//! and the first new frame — the encoder always stamps its first frame at zero,
+//! so that gap quietly fell under the table. That was the regular hitch, and it
+//! was the reason for all the effort around segment boundaries, `+genpts` and
+//! the `-ss` that did not work.
 //!
-//! Bild und Ton hängen jetzt beide am QPC: Windows.Graphics.Capture stempelt
-//! seine Bilder mit `SystemRelativeTime`, WASAPI seine Blöcke mit
-//! `pu64QPCPosition` — dieselbe Uhr. Damit ist Synchronität keine Rechnung
-//! mehr, sondern ergibt sich.
+//! Video and audio now both hang off the QPC: Windows.Graphics.Capture stamps
+//! its frames with `SystemRelativeTime`, WASAPI its blocks with
+//! `pu64QPCPosition` — the same clock. Sync is therefore no longer a
+//! calculation; it simply follows.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -33,27 +32,27 @@ use crate::audio::TrackLayout;
 use crate::buffer::{EncodedPacket, ReplayBuffer};
 use crate::model::{AudioSource, EncoderId, RecordingConfig};
 
-/// Wie weit der Mischer hinter der Gegenwart bleibt.
+/// How far behind the present the mixer stays.
 ///
-/// WASAPI liefert einen Block erst, wenn er voll ist; bis er im Ring liegt,
-/// vergehen ein paar Millisekunden. Wer näher an der Gegenwart mischt, holt
-/// sich Stille, die später durch echten Ton hätte ersetzt werden müssen —
-/// und der Platz ist dann schon vergeben.
+/// WASAPI only delivers a block once it is full; a few milliseconds pass before
+/// it is in the ring. Mixing closer to the present fetches silence that would
+/// later have had to be replaced by real audio — and the slot is already taken
+/// by then.
 const AUDIO_LAG_100NS: i64 = 80 * 10_000;
 
-/// Takt des Mischers.
+/// The mixer's tick.
 const MIX_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Quellenkennung der Hauptmix-Spur. Sie gehört keiner Quelle und kollidiert
-/// deshalb mit keiner Kennung aus der Konfiguration.
+/// Source id of the main mix track. It belongs to no source and therefore
+/// collides with no id from the config.
 const MAIN_TRACK_ID: &str = "__mix";
 
-/// Ringpuffer einer Tonspur (16-bit PCM), auf derselben QPC-Zeitachse wie das
-/// Bild.
+/// Ring buffer of one audio track (16-bit PCM), on the same QPC timeline as the
+/// video.
 pub struct TrackRing {
     pub source_id: String,
-    /// Änderbar: Wer eine Quelle umbenennt, darf dadurch nicht ihre Spur
-    /// verlieren — der Ring bleibt derselbe, nur die Aufschrift wechselt.
+    /// Changeable: renaming a source must not cost it its track — the ring stays
+    /// the same, only the label changes.
     label: Mutex<String>,
     inner: Mutex<TrackInner>,
     capacity: usize,
@@ -61,7 +60,7 @@ pub struct TrackRing {
 
 struct TrackInner {
     samples: VecDeque<i16>,
-    /// QPC des ersten Samples im Ring.
+    /// QPC of the first sample in the ring.
     start_100ns: i64,
     primed: bool,
 }
@@ -76,7 +75,7 @@ impl TrackRing {
                 start_100ns: 0,
                 primed: false,
             }),
-            // Ein Puffer über die volle Cliplänge, plus etwas Luft.
+            // One buffer across the full clip length, plus some slack.
             capacity: (seconds as usize + 2) * SAMPLE_RATE as usize * CHANNELS,
         }
     }
@@ -89,8 +88,8 @@ impl TrackRing {
         *self.label.lock() = label;
     }
 
-    /// Der Mischer erzeugt lückenlos fortlaufende Fenster; `at_100ns` setzt
-    /// deshalb nur beim allerersten Block die Zeitachse.
+    /// The mixer produces gapless consecutive windows; `at_100ns` therefore only
+    /// sets the timeline on the very first block.
     fn push(&self, block: &[i16], at_100ns: i64) {
         let mut inner = self.inner.lock();
         if !inner.primed {
@@ -106,10 +105,10 @@ impl TrackRing {
         }
     }
 
-    /// Das Zeitfenster ab `from_100ns` über `frames` Frames als WAV schreiben.
+    /// Write the window starting at `from_100ns` over `frames` frames as WAV.
     ///
-    /// Fehlende Stellen werden zu Stille — das hält die Spur genau so lang wie
-    /// das Bild, auch wenn eine Quelle erst später dazukam.
+    /// Missing stretches become silence — that keeps the track exactly as long as
+    /// the video, even when a source only joined later.
     pub fn write_wav_window(
         &self,
         path: &Path,
@@ -161,37 +160,37 @@ impl TrackRing {
     }
 }
 
-/// Von Aufnahme, Encoder und Mischer gemeinsam genutzter Zustand.
+/// State shared by capture, encoder and mixer.
 pub struct Shared {
     pub buffer_seconds: u32,
     pub fps: u32,
-    /// Die encodeten Videopakete.
+    /// The encoded video packets.
     pub packets: Mutex<ReplayBuffer>,
-    /// Hauptmix (Index 0) und die Quellen mit eigener Spur.
+    /// Main mix (index 0) and the sources with a track of their own.
     pub tracks: Mutex<Vec<Arc<TrackRing>>>,
     pub sources: Mutex<Vec<AudioSource>>,
     pub audio: Arc<AudioEngine>,
-    /// QPC, auf den PTS 0 des Videostroms fällt. Damit lässt sich zu jedem
-    /// Paket der echte Aufnahmezeitpunkt bestimmen — und der Ton an genau
-    /// derselben Stelle schneiden.
+    /// The QPC that PTS 0 of the video stream falls on. This is what lets the
+    /// real capture time be determined for every packet — and the audio cut at
+    /// exactly the same point.
     pub base_100ns: AtomicI64,
     pub anchored: AtomicBool,
     pub frames: AtomicU64,
     pub dropped: AtomicU64,
-    /// Bilder, die der Taktgeber wiederholen musste, weil das Bild stillstand.
+    /// Frames the clock had to repeat because the picture stood still.
     pub duplicated: AtomicU64,
     pub error: Mutex<Option<String>>,
-    /// Wurde der erste Fehler dieses Laufs schon gemeldet? Ein Encoder, der
-    /// dauernd stolpert, soll die Oberfläche nicht zumüllen — aber *einmal*
-    /// muss es jemand erfahren, sonst puffert die App scheinbar weiter und
-    /// erst der Tastendruck bringt es ans Licht.
+    /// Has this run's first error already been reported? An encoder that keeps
+    /// stumbling should not flood the UI — but *once* somebody has to hear about
+    /// it, otherwise the app appears to keep buffering and only the key press
+    /// brings it to light.
     pub error_seen: AtomicBool,
-    /// Wird hochgezählt, wenn sich `sources` ändert. Der Mischer hält eine
-    /// Kopie und liest nur nach, wenn sich die Zahl bewegt hat.
+    /// Bumped when `sources` changes. The mixer keeps a copy and only re-reads
+    /// when the number has moved.
     pub sources_generation: AtomicU64,
-    /// Welcher Encoder wirklich läuft — nicht der gewünschte.
+    /// Which encoder is really running — not the requested one.
     pub encoder: Mutex<Option<EncoderId>>,
-    /// SPS/PPS, die beim Speichern vor den Elementarstrom gehören.
+    /// SPS/PPS that belong in front of the elementary stream when saving.
     pub sequence_header: Mutex<Vec<u8>>,
 }
 
@@ -204,19 +203,19 @@ impl Shared {
         self.packets.lock().bytes()
     }
 
-    /// Neue Quellenliste übernehmen und den Mischer darüber informieren.
+    /// Take on a new source list and let the mixer know.
     pub fn set_sources(&self, sources: Vec<AudioSource>) {
         *self.sources.lock() = sources;
         self.sources_generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Ein Problem der laufenden Aufnahme festhalten.
+    /// Record a problem with the running capture.
     pub fn report(&self, message: String) {
-        log::warn!("Aufnahme: {message}");
+        log::warn!("capture: {message}");
         *self.error.lock() = Some(message);
     }
 
-    /// Den ersten noch ungemeldeten Fehler abholen.
+    /// Collect the first error not yet reported.
     pub fn take_unseen_error(&self) -> Option<String> {
         if self.error_seen.swap(true, Ordering::SeqCst) {
             return None;
@@ -224,27 +223,26 @@ impl Shared {
         self.error.lock().clone()
     }
 
-    /// QPC-Zeitpunkt zu einem Paket-Zeitstempel.
+    /// QPC time for a packet timestamp.
     pub fn qpc_of(&self, pts_us: i64) -> i64 {
         self.base_100ns.load(Ordering::Acquire) + pts_us * 10
     }
 }
 
-/// Alles, was zum Schreiben eines Clips gebraucht wird — in einem Rutsch
-/// abgegriffen, damit die Sperren nicht über den ganzen ffmpeg-Lauf gehalten
-/// werden.
+/// Everything needed to write a clip — grabbed in one go so the locks are not
+/// held across the whole ffmpeg run.
 pub struct ClipSnapshot {
     pub packets: Vec<EncodedPacket>,
     pub tracks: Vec<Arc<TrackRing>>,
     pub sequence_header: Vec<u8>,
-    /// QPC des ersten Bildes im Clip — der Ton wird auf genau diesen Wert
-    /// geschnitten.
+    /// QPC of the first frame in the clip — the audio is cut at exactly this
+    /// value.
     pub start_100ns: i64,
     pub audio_frames: usize,
     pub fps: u32,
 }
 
-/// Laufende Aufnahme.
+/// A running capture.
 pub struct Pipeline {
     pub shared: Arc<Shared>,
     #[cfg(windows)]
@@ -262,7 +260,7 @@ mod win {
     use crate::wgc::{self, Capture};
 
     pub struct Running {
-        /// Muss vor dem Encoder fallen: Erst darf kein Bild mehr kommen.
+        /// Has to drop before the encoder: no frame may arrive after that.
         _capture: Capture,
         latest: Arc<Latest>,
         pacer: Option<std::thread::JoinHandle<()>>,
@@ -271,7 +269,7 @@ mod win {
         encoder: Option<Arc<VideoEncoder>>,
     }
 
-    /// Reicht die getakteten Bilder an den Encoder weiter.
+    /// Passes the clocked frames on to the encoder.
     struct EncoderSink {
         encoder: Arc<VideoEncoder>,
         shared: Arc<Shared>,
@@ -280,9 +278,9 @@ mod win {
 
     impl FrameSink for EncoderSink {
         fn on_frame(&mut self, texture: &ID3D11Texture2D, pts_100ns: i64, duplicate: bool) {
-            // Beim allerersten Bild die Ausgabezeitachse an der echten
-            // Aufnahmezeit verankern. Ohne das wüsste beim Speichern niemand,
-            // welcher Tonabschnitt zu welchem Bild gehört.
+            // On the very first frame, anchor the output timeline to the real
+            // capture time. Without it nobody would know at save time which
+            // stretch of audio belongs to which frame.
             if !self.shared.anchored.load(Ordering::Acquire) {
                 let qpc = self.latest.frame_qpc();
                 self.shared
@@ -346,7 +344,7 @@ mod win {
                     let shared = closed_shared.clone();
                     move || {
                         shared.report(
-                            "Die Aufnahmequelle ist verschwunden — es kommt kein Bild mehr."
+                            "The capture source has gone away — no more frames are arriving."
                                 .into(),
                         );
                     }
@@ -389,8 +387,8 @@ mod win {
     }
 
     pub fn stop(mut running: Running) {
-        // Reihenfolge: erst keine neuen Bilder mehr takten, dann den Encoder
-        // auslaufen lassen. Umgekehrt liefe der Taktgeber ins Leere.
+        // Order: stop clocking new frames first, then let the encoder drain. The
+        // other way round the clock would run into nothing.
         running.latest.stop();
         if let Some(pacer) = running.pacer.take() {
             let _ = pacer.join();
@@ -400,14 +398,14 @@ mod win {
             let _ = mixer.join();
         }
         if let Some(encoder) = running.encoder.take() {
-            // Der Sink hält den zweiten Verweis; der ist mit dem Taktgeber
-            // gefallen, hier fällt der letzte und der Encoder läuft aus.
+            // The sink holds the second reference; that dropped with the clock,
+            // here the last one drops and the encoder drains.
             drop(encoder);
         }
     }
 }
 
-/// Der Mischer: erzeugt lückenlos fortlaufende Tonfenster auf der QPC-Achse.
+/// The mixer: produces gapless consecutive audio windows on the QPC axis.
 fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     let mut sources = shared.sources.lock().clone();
     let mut layout = TrackLayout::from_sources(&sources);
@@ -415,8 +413,8 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
 
     let mut buffers: Vec<Vec<f32>> = Vec::new();
     let mut scratch: Vec<i16> = Vec::new();
-    // Gegen die Uhr gerechnet, nicht aufsummiert: So kann sich kein Fehler
-    // ansammeln, egal wie ungenau der Faden aufwacht.
+    // Computed against the clock, not accumulated: that way no error can build
+    // up, however imprecisely the thread wakes.
     let mut next_100ns: Option<i64> = None;
 
     while !stop.load(Ordering::Relaxed) {
@@ -446,9 +444,9 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
 
         let rings = shared.tracks.lock();
         let has_main = !layout.main_mix.is_empty();
-        // Spur 0 ist immer der Hauptmix — auch wenn gerade keine Quelle darauf
-        // liegt. Sonst hätte der Clip mal eine Tonspur mehr, mal eine weniger,
-        // je nachdem was beim Speichern eingeschaltet war.
+        // Track 0 is always the main mix — even when no source is on it right
+        // now. Otherwise the clip would sometimes have one audio track more and
+        // sometimes one less, depending on what was switched on at save time.
         if let Some(main) = rings.first() {
             scratch.clear();
             match (has_main, buffers.first()) {
@@ -458,11 +456,11 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             main.push(&scratch, from);
         }
 
-        // Jeder Ring bekommt in jedem Fenster etwas — wer gerade hörbar ist
-        // seinen Mix, wer stumm oder ausgesolot ist Stille. Nichts zu schieben
-        // wäre falsch: Der Ring stempelt nur seinen allerersten Block, eine
-        // Lücke zöge deshalb alles Spätere nach vorn und der Ton liefe ab da
-        // vor dem Bild her.
+        // Every ring gets something in every window — whatever is audible right
+        // now gets its mix, whatever is muted or soloed out gets silence. Pushing
+        // nothing would be wrong: the ring only stamps its very first block, so a
+        // gap would pull everything after it forward and from there on the audio
+        // would run ahead of the picture.
         let offset = usize::from(has_main);
         for ring in rings.iter().skip(1) {
             let slot = layout
@@ -482,18 +480,18 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     }
 }
 
-/// Die Spurenliste zu einer Quellenliste — Spur 0 (Hauptmix) und dahinter je
-/// eine Spur pro Quelle mit eigener Tonspur.
+/// The track list for a source list — track 0 (main mix) and behind it one track
+/// per source that has an audio track of its own.
 ///
-/// Ringe, die es schon gibt, werden **weitergereicht**. Sie neu anzulegen wäre
-/// der bequeme Weg, kostet aber den gesamten gepufferten Ton dieser Quelle —
-/// und hier kommt jede Änderung an den Quellen vorbei, auch jeder einzelne
-/// Schritt eines Lautstärkereglers. Vorher hieß das: Wer während der Aufnahme
-/// am Mikrofon dreht, hat im Clip keins mehr.
+/// Rings that already exist are **passed through**. Creating them anew would be
+/// the convenient route but costs all of that source's buffered audio — and
+/// every change to the sources comes past here, including every single step of a
+/// volume slider. Previously that meant: turn the microphone up during recording
+/// and there is no microphone left in the clip.
 ///
-/// Bewusst **nicht** nach `muted`/`solo` gefiltert. Eine stumme Quelle behält
-/// ihre Spur, der Mischer schiebt so lange Stille hinein; sonst verschwände sie
-/// mit dem Stummschalten auch rückwirkend aus dem Puffer.
+/// Deliberately **not** filtered by `muted`/`solo`. A muted source keeps its
+/// track and the mixer pushes silence into it; otherwise muting would make it
+/// disappear from the buffer retroactively as well.
 fn tracks_for(
     sources: &[AudioSource],
     existing: &[Arc<TrackRing>],
@@ -524,7 +522,7 @@ fn tracks_for(
     out
 }
 
-/// Die Spurenliste an eine geänderte Konfiguration angleichen.
+/// Bring the track list in line with a changed config.
 fn sync_tracks(shared: &Arc<Shared>, sources: &[AudioSource]) {
     let mut rings = shared.tracks.lock();
     let next = tracks_for(sources, &rings, shared.buffer_seconds);
@@ -542,11 +540,11 @@ impl Pipeline {
         sources: Vec<AudioSource>,
         audio: Arc<AudioEngine>,
     ) -> Result<Self, String> {
-        // Spur 0 ist der Hauptmix und immer vorhanden.
+        // Track 0 is the main mix and always present.
         let tracks = tracks_for(&sources, &[], buffer_seconds);
 
-        // Ohne das steckt in jedem Ring noch der Ton der letzten Minuten, den
-        // niemand abgeholt hat.
+        // Without this, every ring still holds the last few minutes of audio that
+        // nobody collected.
         audio.reset_rings();
 
         let shared = Arc::new(Shared {
@@ -581,7 +579,7 @@ impl Pipeline {
         {
             let _ = recording;
             let _ = shared;
-            Err("Aufnahme ist nur unter Windows verfügbar".into())
+            Err("recording is only available on Windows".into())
         }
     }
 
@@ -593,16 +591,16 @@ impl Pipeline {
         self.shared.packets.lock().clear();
     }
 
-    /// Die letzten `seconds` Sekunden abgreifen.
+    /// Grab the last `seconds` seconds.
     ///
-    /// Der Schnitt sitzt auf dem letzten Keyframe **vor** dem gewünschten
-    /// Startzeitpunkt — sonst wäre der Anfang nicht dekodierbar. Der Ton wird
-    /// auf genau denselben QPC geschnitten; daher braucht es keine Korrektur
-    /// mehr, damit Bild und Ton zusammenpassen.
+    /// The cut sits on the last keyframe **before** the wanted start time —
+    /// otherwise the beginning would not be decodable. The audio is cut at exactly
+    /// the same QPC; so no correction is needed any more for picture and sound to
+    /// line up.
     pub fn snapshot(&self, seconds: u32) -> Result<ClipSnapshot, String> {
         let packets = self.shared.packets.lock().snapshot(seconds);
         if packets.is_empty() {
-            return Err("Der Replay-Puffer ist noch leer.".into());
+            return Err("The replay buffer is still empty.".into());
         }
 
         let first_pts = packets.first().map(|p| p.pts_us).unwrap_or(0);
@@ -631,22 +629,23 @@ impl Drop for Pipeline {
 mod tests {
     use super::*;
 
-    /// QPC (100 ns) für eine Frame-Position.
+    /// QPC (100 ns) for a frame position.
     ///
-    /// Nur Vielfache von 6 Frames sind bei 48 kHz exakt in 100 ns darstellbar
-    /// (6 Frames = 1250 Ticks). Die Tests unten rechnen deshalb in solchen
-    /// Schritten — sonst prüften sie die Rundung statt der Fensterlogik.
+    /// At 48 kHz only multiples of 6 frames are exactly representable in 100 ns
+    /// (6 frames = 1250 ticks). The tests below therefore work in such steps —
+    /// otherwise they would be checking the rounding rather than the window
+    /// logic.
     const STEP: i64 = 6;
 
     fn qpc_of_frame(frame: i64) -> i64 {
-        assert_eq!(frame % STEP, 0, "nur exakt darstellbare Abstände testen");
+        assert_eq!(frame % STEP, 0, "only test exactly representable distances");
         frame * 10_000_000 / SAMPLE_RATE as i64
     }
 
     #[test]
     fn a_track_window_lands_where_its_timestamp_says() {
         let ring = TrackRing::new("a".into(), "A".into(), 5);
-        // Sechs Frames stereo, aufsteigend, damit die Stelle erkennbar ist.
+        // Six stereo frames, ascending, so the position is recognizable.
         let block: Vec<i16> = (1..=(STEP as i16 * CHANNELS as i16)).collect();
         ring.push(&block, qpc_of_frame(0));
         ring.push(&[77, 88], qpc_of_frame(STEP));
@@ -661,13 +660,13 @@ mod tests {
             &bytes[44..],
             &77i16.to_le_bytes()[..].iter().chain(88i16.to_le_bytes().iter())
                 .copied().collect::<Vec<u8>>()[..],
-            "Fenster sitzt an der falschen Stelle"
+            "the window sits in the wrong place"
         );
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Ein Fenster vor dem ersten Ton muss Stille liefern, nicht den Anfang —
-    /// sonst rutschte der Ton beim Speichern nach vorn.
+    /// A window before the first audio has to deliver silence, not the beginning
+    /// — otherwise the audio would slide forward on save.
     #[test]
     fn a_window_before_the_audio_is_silence() {
         let ring = TrackRing::new("a".into(), "A".into(), 5);
@@ -685,18 +684,18 @@ mod tests {
 
     #[test]
     fn the_oldest_audio_is_dropped_and_the_start_moves_with_it() {
-        // 1 s Kapazität + 2 s Luft = 3 s.
+        // 1 s capacity + 2 s slack = 3 s.
         let ring = TrackRing::new("a".into(), "A".into(), 1);
         let block = vec![0i16; SAMPLE_RATE as usize * CHANNELS];
         for second in 0..5 {
             ring.push(&block, qpc_of_frame(second * SAMPLE_RATE as i64));
         }
-        // 48000 ist durch 6 teilbar — die Sekundenschritte sind also exakt.
+        // 48000 is divisible by 6 — so the one-second steps are exact.
         let inner = ring.inner.lock();
         assert_eq!(inner.samples.len(), ring.capacity);
         assert!(
             inner.start_100ns > 0,
-            "Der Ringanfang muss mitwandern, sonst zeigt jedes Fenster daneben"
+            "the ring start has to move along, otherwise every window points beside"
         );
     }
 
@@ -715,30 +714,30 @@ mod tests {
         }
     }
 
-    /// Der eigentliche Fehler hinter „mein Mikrofon ist im Clip stumm": Jede
-    /// Reglerbewegung während der Aufnahme lief hier vorbei und legte die
-    /// Einzelspuren neu an — mitsamt Verlust des gesamten gepufferten Tons.
+    /// The actual bug behind "my microphone is silent in the clip": every slider
+    /// movement during recording came past here and recreated the individual
+    /// tracks — losing all of the buffered audio along with them.
     #[test]
     fn a_changed_source_keeps_its_ring_and_its_audio() {
-        let mut sources = vec![source("mic", "Mikrofon", true)];
+        let mut sources = vec![source("mic", "Microphone", true)];
         let first = tracks_for(&sources, &[], 5);
         first[1].push(&[123, 456], qpc_of_frame(0));
 
-        // Lauter gedreht und umbenannt — beides darf die Spur nicht kosten.
+        // Turned up and renamed — neither may cost it its track.
         sources[0].gain_db = 6.0;
-        sources[0].label = "Mein Mikro".into();
+        sources[0].label = "My mic".into();
         let second = tracks_for(&sources, &first, 5);
 
-        assert!(Arc::ptr_eq(&first[0], &second[0]), "Hauptmix neu angelegt");
-        assert!(Arc::ptr_eq(&first[1], &second[1]), "Mikrofonspur neu angelegt");
-        assert_eq!(second[1].label(), "Mein Mikro", "Name nicht übernommen");
+        assert!(Arc::ptr_eq(&first[0], &second[0]), "main mix was recreated");
+        assert!(Arc::ptr_eq(&first[1], &second[1]), "microphone track was recreated");
+        assert_eq!(second[1].label(), "My mic", "name was not carried over");
         assert_eq!(second[1].inner.lock().samples.len(), 2, "Ton verloren");
     }
 
-    /// Stummschalten heißt „ab hier Stille", nicht „die Spur gab es nie".
+    /// Muting means "silence from here on", not "the track never existed".
     #[test]
     fn a_muted_source_keeps_its_track() {
-        let mut sources = vec![source("mic", "Mikrofon", true)];
+        let mut sources = vec![source("mic", "Microphone", true)];
         let first = tracks_for(&sources, &[], 5);
         sources[0].muted = true;
         let second = tracks_for(&sources, &first, 5);
@@ -747,12 +746,12 @@ mod tests {
         assert!(Arc::ptr_eq(&first[1], &second[1]));
     }
 
-    /// Quellen ohne eigene Spur laufen in den Hauptmix und bekommen keinen Ring.
+    /// Sources without a track of their own run into the main mix and get no ring.
     #[test]
     fn only_separate_sources_get_a_track() {
         let sources = vec![
             source("spiel", "Spiel", false),
-            source("mic", "Mikrofon", true),
+            source("mic", "Microphone", true),
         ];
         let tracks = tracks_for(&sources, &[], 5);
         assert_eq!(tracks.len(), 2);
@@ -760,10 +759,10 @@ mod tests {
         assert_eq!(tracks[1].source_id, "mic");
     }
 
-    /// Eine entfernte Quelle verschwindet, eine neue kommt leer dazu.
+    /// A removed source disappears, a new one joins empty.
     #[test]
     fn removed_sources_drop_out_and_new_ones_start_empty() {
-        let first = tracks_for(&[source("mic", "Mikrofon", true)], &[], 5);
+        let first = tracks_for(&[source("mic", "Microphone", true)], &[], 5);
         let second = tracks_for(&[source("discord", "Discord", true)], &first, 5);
 
         assert_eq!(second.len(), 2);

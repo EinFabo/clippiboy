@@ -1,17 +1,17 @@
-//! Spielerkennung über das Vordergrundfenster.
+//! Game detection via the foreground window.
 //!
-//! Der Weg ist immer derselbe: Vordergrundfenster → PID → EXE-Name. Steht die
-//! EXE in der mitgelieferten Liste, ist der Name damit sicher; sonst gilt eine
-//! unbekannte Anwendung dann als Spiel, wenn ihr Fenster den ganzen Monitor
-//! ausfüllt — dann wird der aufgeräumte Fenstertitel benutzt.
+//! The route is always the same: foreground window → PID → exe name. If the exe
+//! is in the bundled list, the name is certain; otherwise an unknown application
+//! counts as a game when its window fills the whole monitor — the tidied-up
+//! window title is then used.
 //!
-//! Der Fenstertitel allein reicht nicht: er ändert sich im Spiel (Menü, Karte,
-//! Server) und viele Spiele setzen gar keinen.
+//! The window title alone is not enough: it changes during play (menu, map,
+//! server) and many games do not set one at all.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-/// Anwendungen, die nie als Spiel zählen — egal wie groß ihr Fenster ist.
+/// Applications that never count as a game — no matter how large their window.
 const IGNORED: &[&str] = &[
     "clippiboy.exe",
     "explorer.exe",
@@ -60,9 +60,8 @@ const IGNORED: &[&str] = &[
     "notepad.exe",
     "notepad++.exe",
     "explorerframe.exe",
-    // Werkzeuge, deren Fenster den ganzen Monitor bedecken und deshalb ohne
-    // diese Zeilen als „Spiel" durchgingen — der Snipping-Tool-Schleier ist
-    // der Klassiker.
+    // Tools whose windows cover the whole monitor and would therefore pass as a
+    // "game" without these lines — the Snipping Tool veil is the classic.
     "snippingtool.exe",
     "screenclippinghost.exe",
     "screensketch.exe",
@@ -76,7 +75,7 @@ const IGNORED: &[&str] = &[
     "textinputhost.exe",
     "rundll32.exe",
     "logonui.exe",
-    // Videowiedergabe: ein Film im Vollbild ist kein Spielstand.
+    // Video playback: a film in fullscreen is not a game.
     "mpv.exe",
     "mpc-hc.exe",
     "mpc-hc64.exe",
@@ -85,7 +84,7 @@ const IGNORED: &[&str] = &[
     "wmplayer.exe",
     "video.ui.exe",
     "photos.exe",
-    // Weitere Browser und Chromium-Hüllen.
+    // Further browsers and Chromium shells.
     "opera_gx.exe",
     "chromium.exe",
     "librewolf.exe",
@@ -94,7 +93,7 @@ const IGNORED: &[&str] = &[
     "arc.exe",
     "msedgewebview2.exe",
     "chrome_proxy.exe",
-    // Kommunikation und Büro.
+    // Communication and office.
     "whatsapp.exe",
     "telegram.exe",
     "signal.exe",
@@ -107,7 +106,7 @@ const IGNORED: &[&str] = &[
     "powerpnt.exe",
     "acrord32.exe",
     "acrobat.exe",
-    // Aufnahme- und Overlay-Werkzeuge.
+    // Recording and overlay tools.
     "obs.exe",
     "streamlabs obs.exe",
     "xsplit.core.exe",
@@ -117,12 +116,12 @@ const IGNORED: &[&str] = &[
     "sublime_text.exe",
 ];
 
-/// Titelendungen, die eine fremde Anwendung verraten. Trifft eine davon zu,
-/// gilt das Fenster als kein Spiel — auch wenn es den Monitor ausfüllt.
+/// Title endings that give away a foreign application. If one of them matches,
+/// the window counts as not a game — even when it fills the monitor.
 ///
-/// Zweite Sicherung hinter `IGNORED`: Diese Liste kann nie vollständig sein —
-/// portable, umbenannte oder noch unbekannte Anwendungen stehen nicht darin.
-/// Der Titel verrät sie trotzdem.
+/// A second safeguard behind `IGNORED`: that list can never be complete —
+/// portable, renamed or still unknown applications are not in it. The title
+/// gives them away regardless.
 const FOREIGN_TITLES: &[&str] = &[
     " - youtube",
     " – youtube",
@@ -142,17 +141,18 @@ const FOREIGN_TITLES: &[&str] = &[
     " – discord",
     " - visual studio code",
     " – visual studio code",
+    // German-locale Windows says "Überlagerung" where English says "overlay".
     " überlagerung",
     " overlay",
 ];
 
-/// Dateiendungen am Titel: Ein Fenster, das eine Datei zeigt, spielt nichts.
+/// File extensions in the title: a window showing a file is not playing anything.
 const FILE_TITLES: &[&str] = &[
     ".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".mp3", ".flac", ".wav", ".png", ".jpg",
     ".jpeg", ".gif", ".webp", ".pdf", ".txt", ".log", ".json", ".docx", ".xlsx",
 ];
 
-/// Endungen am Fenstertitel, die nichts über das Spiel aussagen.
+/// Suffixes on the window title that say nothing about the game.
 const TITLE_SUFFIXES: &[&str] = &[
     " - steam",
     " - epic games",
@@ -176,17 +176,17 @@ fn ignored() -> &'static HashSet<&'static str> {
     SET.get_or_init(|| IGNORED.iter().copied().collect())
 }
 
-/// EXE-Name (klein geschrieben) → Anzeigename.
+/// Exe name (lower-cased) → display name.
 ///
-/// Grundlage ist die eingebaute `games.json`; eine gleichnamige Datei im
-/// Datenverzeichnis wird darübergelegt, sodass sich die Liste ohne Neubau
-/// erweitern oder korrigieren lässt.
+/// The built-in `games.json` is the base; a file of the same name in the data
+/// directory is layered on top, so the list can be extended or corrected without
+/// a rebuild.
 fn games() -> &'static HashMap<String, String> {
     static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
     MAP.get_or_init(|| {
         let mut map: HashMap<String, String> =
             serde_json::from_str(include_str!("games.json")).unwrap_or_else(|err| {
-                log::error!("Eingebaute games.json ist kaputt: {err}");
+                log::error!("the built-in games.json is broken: {err}");
                 HashMap::new()
             });
 
@@ -194,10 +194,10 @@ fn games() -> &'static HashMap<String, String> {
         if let Ok(text) = std::fs::read_to_string(&user) {
             match serde_json::from_str::<HashMap<String, String>>(&text) {
                 Ok(extra) => {
-                    log::info!("{} eigene Spielnamen aus {}", extra.len(), user.display());
+                    log::info!("{} custom game names from {}", extra.len(), user.display());
                     map.extend(extra);
                 }
-                Err(err) => log::warn!("{} ist unlesbar: {err}", user.display()),
+                Err(err) => log::warn!("{} is unreadable: {err}", user.display()),
             }
         }
 
@@ -211,13 +211,14 @@ pub fn is_ignored(exe: &str) -> bool {
     ignored().contains(exe.to_lowercase().as_str())
 }
 
-/// Verrät der Fenstertitel, dass hier gar kein Spiel läuft?
+/// Does the window title give away that no game is running here at all?
 pub fn is_foreign_title(title: &str) -> bool {
     let lower = title.trim().to_lowercase();
     if lower.is_empty() {
         return false;
     }
-    // Ein Pfad ist nie ein Spielname — „C:\\…\\clip.mp4" kam so in die Galerie.
+    // A path is never a game name — "C:\\…\\clip.mp4" made it into the gallery
+    // that way.
     if lower.contains(":\\") || lower.starts_with("\\\\") {
         return true;
     }
@@ -225,11 +226,11 @@ pub fn is_foreign_title(title: &str) -> bool {
         || FOREIGN_TITLES.iter().any(|end| lower.ends_with(end))
 }
 
-/// Fenstertitel auf den nackten Spielnamen zurechtstutzen.
+/// Trim a window title down to the bare game name.
 pub fn clean_title(title: &str) -> String {
     let mut text = title.trim().to_string();
 
-    // Ungelesen-Zähler am Anfang: „(102) …" sagt nichts über das Spiel.
+    // Unread counter at the front: "(102) …" says nothing about the game.
     if let Some(rest) = text.strip_prefix('(') {
         if let Some((count, tail)) = rest.split_once(')') {
             if !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()) {
@@ -238,7 +239,7 @@ pub fn clean_title(title: &str) -> String {
         }
     }
 
-    // Bekannte Endungen abschneiden — mehrfach, „Spiel (64-bit) - Steam".
+    // Cut off known suffixes — repeatedly, "Game (64-bit) - Steam".
     loop {
         let lower = text.to_lowercase();
         let Some(suffix) = TITLE_SUFFIXES.iter().find(|s| lower.ends_with(*s)) else {
@@ -248,7 +249,7 @@ pub fn clean_title(title: &str) -> String {
         text = text.trim().to_string();
     }
 
-    // Versionsnummern am Ende: „Minecraft 1.21.4", „Spiel v2.0".
+    // Version numbers at the end: "Minecraft 1.21.4", "Game v2.0".
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() > 1 && looks_like_version(words[words.len() - 1]) {
         text = words[..words.len() - 1].join(" ");
@@ -265,7 +266,7 @@ fn looks_like_version(word: &str) -> bool {
         && core.contains('.')
 }
 
-/// „eldenring.exe" → „Eldenring" — letzter Ausweg, wenn es keinen Titel gibt.
+/// "eldenring.exe" → "Eldenring" — the last resort when there is no title.
 fn from_exe(exe: &str) -> String {
     let stem = exe.trim_end_matches(".exe").replace(['_', '-'], " ");
     stem.split_whitespace()
@@ -280,9 +281,9 @@ fn from_exe(exe: &str) -> String {
         .join(" ")
 }
 
-/// Aus EXE, Fenstertitel und „füllt den Monitor" einen Spielnamen ableiten.
+/// Derive a game name from exe, window title and "fills the monitor".
 ///
-/// Reine Funktion, damit die Regeln auch ohne Windows testbar sind.
+/// A pure function, so the rules are testable without Windows too.
 pub fn resolve_name(exe: &str, title: &str, fullscreen: bool) -> Option<String> {
     if exe.is_empty() || is_ignored(exe) {
         return None;
@@ -290,13 +291,12 @@ pub fn resolve_name(exe: &str, title: &str, fullscreen: bool) -> Option<String> 
     if let Some(name) = games().get(exe.to_lowercase().as_str()) {
         return Some(name.clone());
     }
-    // Unbekannte Anwendung: nur im Vollbild als Spiel durchgehen lassen.
+    // Unknown application: only let it pass as a game in fullscreen.
     if !fullscreen {
         return None;
     }
-    // Und auch dann nicht, wenn der Titel eine fremde Anwendung verrät. Lieber
-    // „Unbekannt" als ein Browsertab, der für immer als Filter in der Galerie
-    // steht.
+    // And not even then if the title gives away a foreign application. Better
+    // "Unknown" than a browser tab that stands as a gallery filter forever.
     if is_foreign_title(title) {
         return None;
     }
@@ -323,12 +323,12 @@ mod win {
         GetWindowThreadProcessId,
     };
 
-    /// Vollständiger EXE-Pfad eines Prozesses, auf den Dateinamen reduziert.
+    /// A process's full exe path, reduced to the file name.
     ///
-    /// `QueryFullProcessImageNameW` kommt mit `PROCESS_QUERY_LIMITED_INFORMATION`
-    /// aus und funktioniert deshalb auch bei Spielen, die als Administrator
-    /// laufen — anders als der `GetModuleBaseNameW`-Weg in `audio/devices.rs`,
-    /// der zusätzlich `PROCESS_VM_READ` braucht.
+    /// `QueryFullProcessImageNameW` gets by with
+    /// `PROCESS_QUERY_LIMITED_INFORMATION` and therefore works for games running
+    /// as administrator too — unlike the `GetModuleBaseNameW` route in
+    /// `audio/devices.rs`, which additionally needs `PROCESS_VM_READ`.
     fn exe_name(pid: u32) -> Option<String> {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
@@ -360,8 +360,8 @@ mod win {
         }
     }
 
-    /// Deckt das Fenster den Monitor vollständig ab? Trifft auf echtes Vollbild
-    /// genauso zu wie auf randloses Fenster — beides sind Spiel-Indizien.
+    /// Does the window cover the monitor completely? True for real fullscreen as
+    /// well as for a borderless window — both are signs of a game.
     fn covers_monitor(hwnd: HWND) -> bool {
         unsafe {
             let mut rect = RECT::default();
@@ -384,10 +384,10 @@ mod win {
         }
     }
 
-    /// Mittelpunkt des Vordergrundfensters in physischen Bildschirmkoordinaten.
+    /// Centre of the foreground window in physical screen coordinates.
     ///
-    /// Damit landet der Overlay-Banner auf dem Monitor, auf dem gespielt wird,
-    /// und nicht stur auf dem primären.
+    /// This is what puts the overlay banner on the monitor being played on rather
+    /// than stubbornly on the primary one.
     pub fn foreground_center() -> Option<(f64, f64)> {
         unsafe {
             let hwnd = GetForegroundWindow();
@@ -403,7 +403,7 @@ mod win {
         }
     }
 
-    /// EXE-Name, Fenstertitel und Vollbild-Flag des Vordergrundfensters.
+    /// Exe name, window title and fullscreen flag of the foreground window.
     pub fn foreground() -> Option<(String, String, bool)> {
         unsafe {
             let hwnd = GetForegroundWindow();
@@ -421,7 +421,7 @@ mod win {
     }
 }
 
-/// Welches Spiel läuft gerade im Vordergrund? `None`, wenn keins erkennbar ist.
+/// Which game is in the foreground right now? `None` if none is recognizable.
 #[cfg(windows)]
 pub fn detect() -> Option<String> {
     let (exe, title, fullscreen) = win::foreground()?;
@@ -433,7 +433,7 @@ pub fn detect() -> Option<String> {
     None
 }
 
-/// Mittelpunkt des Vordergrundfensters — für die Monitorwahl des Overlays.
+/// Centre of the foreground window — for the overlay's monitor choice.
 #[cfg(windows)]
 pub fn foreground_center() -> Option<(f64, f64)> {
     win::foreground_center()
@@ -473,10 +473,10 @@ mod tests {
 
     #[test]
     fn unknown_app_counts_only_in_fullscreen() {
-        assert_eq!(resolve_name("unbekannt.exe", "Irgendein Spiel", false), None);
+        assert_eq!(resolve_name("unknown.exe", "Some Game", false), None);
         assert_eq!(
-            resolve_name("unbekannt.exe", "Irgendein Spiel", true).as_deref(),
-            Some("Irgendein Spiel")
+            resolve_name("unknown.exe", "Some Game", true).as_deref(),
+            Some("Some Game")
         );
     }
 
@@ -491,24 +491,26 @@ mod tests {
     #[test]
     fn suffixes_and_versions_are_trimmed() {
         assert_eq!(clean_title("Minecraft 1.21.4"), "Minecraft");
-        assert_eq!(clean_title("Mein Spiel (64-bit) - Steam"), "Mein Spiel");
+        assert_eq!(clean_title("My Game (64-bit) - Steam"), "My Game");
         assert_eq!(clean_title("Assetto Corsa - DirectX 11"), "Assetto Corsa");
-        assert_eq!(clean_title("  Spiel v2.0  "), "Spiel");
+        assert_eq!(clean_title("  Game v2.0  "), "Game");
     }
 
     #[test]
     fn a_number_that_belongs_to_the_name_survives() {
-        // Keine Versionsnummer — kein Punkt, also Teil des Namens.
+        // Not a version number — no dot, so part of the name.
         assert_eq!(clean_title("Counter-Strike 2"), "Counter-Strike 2");
         assert_eq!(clean_title("Half-Life 2"), "Half-Life 2");
     }
 
     #[test]
     fn foreign_windows_do_not_become_a_game() {
-        // Genau die Einträge, die vorher als Filter in der Galerie standen.
+        // Exactly the entries that used to stand as filters in the gallery.
         assert_eq!(
             resolve_name(
-                "unbekannt.exe",
+                "unknown.exe",
+                // A German-locale window title on purpose: the heuristic has to
+                // hold up in any Windows language.
                 "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
                 true
             ),
@@ -516,14 +518,14 @@ mod tests {
         );
         assert_eq!(
             resolve_name(
-                "unbekannt.exe",
+                "unknown.exe",
                 "C:\\Users\\fabia\\projects\\clippiboy\\synctest.mp4",
                 true
             ),
             None
         );
         assert_eq!(
-            resolve_name("unbekannt.exe", "Snipping Tool Überlagerung", true),
+            resolve_name("unknown.exe", "Snipping Tool Überlagerung", true),
             None
         );
         assert!(is_ignored("SnippingTool.exe"));
@@ -531,19 +533,19 @@ mod tests {
 
     #[test]
     fn a_known_game_survives_a_foreign_looking_title() {
-        // Die Liste wiegt schwerer als der Titel — sonst verlöre ein Spiel
-        // seinen Namen, nur weil es gerade ein Video abspielt.
+        // The list weighs more than the title — otherwise a game would lose its
+        // name just because it happens to be playing a video.
         assert_eq!(
-            resolve_name("cs2.exe", "irgendwas.mp4", true).as_deref(),
+            resolve_name("cs2.exe", "whatever.mp4", true).as_deref(),
             Some("Counter-Strike 2")
         );
     }
 
     #[test]
     fn unread_counters_are_trimmed() {
-        assert_eq!(clean_title("(3) Mein Spiel"), "Mein Spiel");
-        // Keine Klammerzahl, sondern Teil des Namens.
-        assert_eq!(clean_title("(Beta) Mein Spiel"), "(Beta) Mein Spiel");
+        assert_eq!(clean_title("(3) My Game"), "My Game");
+        // Not a bracketed number but part of the name.
+        assert_eq!(clean_title("(Beta) My Game"), "(Beta) My Game");
     }
 
     #[test]

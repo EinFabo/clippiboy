@@ -1,4 +1,4 @@
-// Kein Konsolenfenster im Release-Build unter Windows.
+// No console window in the Windows release build.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {

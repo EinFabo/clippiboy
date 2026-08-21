@@ -1,53 +1,53 @@
-//! Schneidet einen echten Clip und misst nach, ob dabei herauskommt, was
-//! herauskommen soll — und ob „Zuschnitt aufheben" ihn wirklich zurückbringt.
+//! Trims a real clip and measures whether what comes out is what should come
+//! out — and whether "undo trim" really brings it back.
 //!
-//! Die Keyframe- und Synchronfragen lassen sich im Unit-Test nicht belegen:
-//! Dafür braucht es ffmpeg, eine echte Datei und ffprobe, das nachmisst.
+//! The keyframe and sync questions cannot be settled in a unit test: that needs
+//! ffmpeg, a real file, and ffprobe to measure afterwards.
 //!
-//!     cargo run --example schnitt-probe -- "C:\\Pfad\\zum\\clip.mp4"
+//!     cargo run --example trim-probe -- "C:\\path\\to\\clip.mp4"
 //!
-//! **Achtung:** Der Lauf schreibt die übergebene Datei um. Er legt sie dabei in
-//! die Original-Ablage und holt sie am Ende zurück — sicherheitshalber trotzdem
-//! auf einer Kopie laufen lassen.
+//! **Careful:** the run rewrites the file it is given. It moves it into the
+//! originals store and fetches it back at the end — but run it on a copy to be
+//! safe.
 
 use std::path::Path;
 
 use clippiboy_lib::model::{Clip, ClipOriginal, EncoderId, TrackMix};
 use clippiboy_lib::{edit, muxer, stems};
 
-/// So weit darf die gemessene Länge danebenliegen. Ein Bild bei 60 fps sind
-/// 17 ms; der Container rundet auf ganze Ticks, und der letzte Ton reicht oft
-/// ein paar Millisekunden über das letzte Bild hinaus.
+/// How far the measured length may be off. One frame at 60 fps is 17 ms; the
+/// container rounds to whole ticks, and the last audio often reaches a few
+/// milliseconds past the last frame.
 const TOLERANCE_MS: i64 = 120;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let Some(path) = std::env::args().nth(1) else {
-        eprintln!("Aufruf: schnitt-probe <clip.mp4>");
+        eprintln!("usage: trim-probe <clip.mp4>");
         std::process::exit(2);
     };
     let resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
     muxer::set_tool_dir(resources);
 
-    let id = "schnitt-probe";
-    // Mit sauberem Stand anfangen — sonst prüft der Lauf einen halben Rest von
-    // vorhin.
+    let id = "trim-probe";
+    // Start from a clean state — otherwise the run checks half a leftover from
+    // earlier.
     stems::remove(id);
     edit::remove(id);
 
     let full = match muxer::probe_duration_ms(Path::new(&path)) {
         Some(ms) if ms > 8_000 => ms,
         Some(ms) => {
-            eprintln!("Der Clip ist mit {ms} ms zu kurz zum Schneiden — mindestens 8 s.");
+            eprintln!("At {ms} ms the clip is too short to trim — 8 s minimum.");
             std::process::exit(2);
         }
         None => {
-            eprintln!("Länge nicht lesbar. Ist die Datei da?");
+            eprintln!("length not readable. Is the file there?");
             std::process::exit(2);
         }
     };
-    println!("Ausgangsclip: {path}\n  {full} ms");
+    println!("Source clip: {path}\n  {full} ms");
 
     let mut clip = Clip {
         id: id.into(),
@@ -68,36 +68,36 @@ fn main() {
     let mix = mix_for(&clip);
     let mut failures = 0;
 
-    // 1. Nur hinten kürzen. Verlustfrei, in ein bis zwei Sekunden durch — und
-    //    das Bild muss dabei Bild für Bild dasselbe bleiben.
+    // 1. Shorten at the back only. Lossless, done in a second or two — and the
+    //    video has to stay identical frame for frame.
     let want = full - 3_000;
-    println!("\n1. Hinten kürzen auf {want} ms (Kopie, kein Neuencodieren)");
+    println!("\n1. Shorten at the back to {want} ms (copy, no re-encode)");
     let plan = edit::plan(None, true, full, edit::Trim { start_ms: 0, end_ms: want });
-    assert!(!plan.reencode, "Kürzen am Ende darf nicht encodieren");
+    assert!(!plan.reencode, "shortening at the end must not encode");
     failures += step(&mut clip, edit::Trim { start_ms: 0, end_ms: want }, &mix, want);
 
-    // 2. Vorne schneiden. Muss bildgenau sitzen — beim Kopieren rutschte der
-    //    Anfang auf das Keyframe davor, also bis zu zwei Sekunden zu früh.
-    println!("\n2. Vorne 2000 ms abschneiden (bildgenau, wird neu encodiert)");
+    // 2. Cut at the front. Has to be frame-accurate — when copying, the start
+    //    slid to the keyframe before it, so up to two seconds too early.
+    println!("\n2. Cut 2000 ms off the front (frame-accurate, gets re-encoded)");
     let before = clip.duration_ms;
     let trim = edit::Trim { start_ms: 2_000, end_ms: before };
     failures += step(&mut clip, trim, &mix, before - 2_000);
     match clip.original {
         Some(ClipOriginal { start_ms, duration_ms, .. }) => {
-            println!("  Ausschnitt sitzt bei {start_ms} ms von {duration_ms} ms");
+            println!("  excerpt sits at {start_ms} ms of {duration_ms} ms");
             if start_ms != 2_000 {
-                eprintln!("  FEHLER: erwartet 2000 ms");
+                eprintln!("  ERROR: expected 2000 ms");
                 failures += 1;
             }
         }
         None => {
-            eprintln!("  FEHLER: kein Original vermerkt");
+            eprintln!("  ERROR: no original recorded");
             failures += 1;
         }
     }
 
-    // 3. Aufheben. Muss die volle Länge zurückbringen, verlustfrei.
-    println!("\n3. Zuschnitt aufheben");
+    // 3. Undo. Has to bring the full length back, losslessly.
+    println!("\n3. Undo trim");
     match edit::restore(&clip, &mix, EncoderId::X264, 40_000, |_| {}) {
         Ok(applied) => {
             report(applied.duration_ms, full);
@@ -105,16 +105,16 @@ fn main() {
                 failures += 1;
             }
             if applied.original.is_some() {
-                eprintln!("  FEHLER: das Original hätte weg sein müssen");
+                eprintln!("  ERROR: the original should have been gone");
                 failures += 1;
             }
             if edit::has_original(id) {
-                eprintln!("  FEHLER: die Ablage liegt noch da");
+                eprintln!("  ERROR: the store is still there");
                 failures += 1;
             }
         }
         Err(err) => {
-            eprintln!("  FEHLER: {err}");
+            eprintln!("  ERROR: {err}");
             failures += 1;
         }
     }
@@ -123,13 +123,13 @@ fn main() {
     edit::remove(id);
 
     if failures > 0 {
-        eprintln!("\n{failures} Prüfung(en) fehlgeschlagen.");
+        eprintln!("\n{failures} check(s) failed.");
         std::process::exit(1);
     }
-    println!("\nSchnitt, Nachschnitt und Aufheben stimmen.");
+    println!("\nTrim, re-trim and undo all add up.");
 }
 
-/// Alle Spuren auf Anschlag — die Mischung soll hier nichts verfälschen.
+/// Every track at full — the mix should not distort anything here.
 fn mix_for(clip: &Clip) -> Vec<TrackMix> {
     stems::tracks(&clip.id, &edit::source_path(clip))
         .unwrap_or_default()
@@ -142,11 +142,11 @@ fn mix_for(clip: &Clip) -> Vec<TrackMix> {
         .collect()
 }
 
-/// Einen Schnitt ausführen, nachmessen und den Clip auf den neuen Stand ziehen.
+/// Carry out one cut, measure afterwards and bring the clip to the new state.
 fn step(clip: &mut Clip, trim: edit::Trim, mix: &[TrackMix], want_ms: u64) -> u32 {
     match edit::apply(clip, trim, mix, EncoderId::X264, 40_000, |value| {
         if value >= 1.0 {
-            println!("  fertig");
+            println!("  done");
         }
     }) {
         Ok(applied) => {
@@ -157,7 +157,7 @@ fn step(clip: &mut Clip, trim: edit::Trim, mix: &[TrackMix], want_ms: u64) -> u3
             u32::from(off)
         }
         Err(err) => {
-            eprintln!("  FEHLER: {err}");
+            eprintln!("  ERROR: {err}");
             1
         }
     }
@@ -165,6 +165,6 @@ fn step(clip: &mut Clip, trim: edit::Trim, mix: &[TrackMix], want_ms: u64) -> u3
 
 fn report(got: u64, want: u64) {
     let delta = got as i64 - want as i64;
-    let mark = if delta.abs() <= TOLERANCE_MS { "ok" } else { "DANEBEN" };
-    println!("  gemessen {got} ms, erwartet {want} ms ({delta:+} ms) — {mark}");
+    let mark = if delta.abs() <= TOLERANCE_MS { "ok" } else { "OFF" };
+    println!("  measured {got} ms, expected {want} ms ({delta:+} ms) — {mark}");
 }

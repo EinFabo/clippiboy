@@ -1,7 +1,7 @@
-//! Tray-Icon: der einzige Weg zurück, wenn das Fenster versteckt ist.
+//! Tray icon: the only way back when the window is hidden.
 //!
-//! Menü und Hotkeys rufen dieselben Funktionen auf (`crate::save_clip_and_notify`,
-//! `crate::toggle_buffer_and_notify`), damit beide Wege identisch reagieren.
+//! Menu and hotkeys call the same functions (`crate::save_clip_and_notify`,
+//! `crate::toggle_buffer_and_notify`) so both routes behave identically.
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -13,30 +13,30 @@ use crate::state::AppState;
 
 pub const ID: &str = "main";
 
-/// Menüeinträge und Icons, die im laufenden Betrieb umgeschaltet werden.
+/// Menu entries and icons that get toggled while running.
 pub struct TrayHandles {
     toggle: CheckMenuItem<tauri::Wry>,
     save: MenuItem<tauri::Wry>,
     active_icon: Image<'static>,
     idle_icon: Image<'static>,
-    /// Zuletzt gesetzter Tooltip — spart das Neusetzen im Sekundentakt.
+    /// Tooltip last set — saves resetting it once a second.
     last_tooltip: parking_lot::Mutex<String>,
     last_active: std::sync::atomic::AtomicBool,
 }
 
-/// Bildpuffer vom App-Handle lösen, damit er in `TrayHandles` liegen kann.
+/// Detach the image buffer from the app handle so it can live in `TrayHandles`.
 fn owned(icon: &Image<'_>) -> Image<'static> {
     Image::new_owned(icon.rgba().to_vec(), icon.width(), icon.height())
 }
 
-/// Eigenes Tray-Icon: nur die Bildmarke, rund freigestellt. Das volle Logo
-/// enthält den Schriftzug, und der ist bei 16 px nur noch ein Fleck.
+/// A tray icon of its own: just the mark, cut out round. The full logo carries
+/// the wordmark, and at 16 px that is nothing but a smudge.
 const TRAY_PNG: &[u8] = include_bytes!("../icons/tray.png");
 
-/// Graustufen-Variante des App-Icons für „Puffer aus".
+/// Greyscale variant of the app icon for "buffer off".
 ///
-/// Arbeitet direkt auf den RGBA-Daten des schon dekodierten Icons — deshalb
-/// braucht es dafür kein zusätzliches Asset.
+/// Works directly on the RGBA data of the already decoded icon — which is why
+/// it needs no extra asset.
 fn dimmed(icon: &Image<'_>) -> Image<'static> {
     let mut rgba = icon.rgba().to_vec();
     for pixel in rgba.chunks_exact_mut(4) {
@@ -50,17 +50,17 @@ fn dimmed(icon: &Image<'_>) -> Image<'static> {
 }
 
 pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "ClippiBoy öffnen", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open ClippiBoy", true, None::<&str>)?;
     let toggle = CheckMenuItem::with_id(
         app,
         "toggle",
-        "Replay-Puffer läuft",
+        "Replay buffer running",
         true,
         false,
         None::<&str>,
     )?;
-    let save = MenuItem::with_id(app, "save", "Clip speichern", false, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
+    let save = MenuItem::with_id(app, "save", "Save clip", false, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -74,7 +74,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
     )?;
 
     let active_icon = Image::from_bytes(TRAY_PNG).map(|icon| owned(&icon)).unwrap_or_else(|err| {
-        log::warn!("Tray-Icon konnte nicht gelesen werden: {err}");
+        log::warn!("could not read the tray icon: {err}");
         app.default_window_icon()
             .map(owned)
             .unwrap_or_else(|| Image::new_owned(vec![0; 4], 1, 1))
@@ -83,9 +83,9 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(ID)
         .icon(idle_icon.clone())
-        .tooltip("ClippiBoy · Puffer aus")
+        .tooltip("ClippiBoy · buffer off")
         .menu(&menu)
-        // Ohne das öffnet ein Linksklick unter Windows das Menü statt das Fenster.
+        // Without this a left click on Windows opens the menu, not the window.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
@@ -95,7 +95,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "save" => {
                 let app = app.clone();
-                // Das Muxen dauert einen Moment — nicht im Menü-Thread erledigen.
+                // Muxing takes a moment — do not do it on the menu thread.
                 std::thread::spawn(move || crate::save_clip_and_notify(&app));
             }
             "quit" => {
@@ -139,7 +139,7 @@ pub fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Tooltip, Icon und Menüzustand an den Status angleichen. Läuft im Sekundentakt.
+/// Bring tooltip, icon and menu state in line with the status. Runs once a second.
 pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
     let Some(handles) = app.try_state::<TrayHandles>() else {
         return;
@@ -150,7 +150,7 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
 
     let tooltip = if status.buffer_active {
         let mut text = format!(
-            "ClippiBoy · Puffer läuft — {} s",
+            "ClippiBoy · buffer running — {} s",
             status.buffered_seconds.round() as u32
         );
         if let Some(game) = &status.game {
@@ -160,8 +160,8 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
         text
     } else {
         match &status.game {
-            Some(game) => format!("ClippiBoy · Puffer aus · {game}"),
-            None => "ClippiBoy · Puffer aus".to_string(),
+            Some(game) => format!("ClippiBoy · buffer off · {game}"),
+            None => "ClippiBoy · buffer off".to_string(),
         }
     };
 

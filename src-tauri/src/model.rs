@@ -1,4 +1,4 @@
-//! Datentypen der IPC-Schnittstelle. Muss zu src/lib/types.ts passen.
+//! Data types of the IPC interface. Must match src/lib/types.ts.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub struct AudioSource {
     pub gain_db: f32,
     pub muted: bool,
     pub solo: bool,
-    /// Eigene Tonspur im MP4 statt Hauptmix.
+    /// Its own audio track in the MP4 instead of the main mix.
     pub separate_track: bool,
 }
 
@@ -91,8 +91,8 @@ pub struct CaptureTarget {
     pub width: u32,
     pub height: u32,
     pub is_primary: bool,
-    /// Bildwiederholrate des Bildschirms in Hertz — bei einem Fenster die des
-    /// Bildschirms, auf dem es liegt. `None`, wenn Windows sie nicht meldet.
+    /// The screen's refresh rate in hertz — for a window, that of the screen
+    /// it sits on. `None` if Windows does not report it.
     pub refresh_hz: Option<u32>,
 }
 
@@ -112,14 +112,14 @@ pub struct RecordingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BufferConfig {
-    /// Puffer selbsttätig einschalten — beim Start von ClippiBoy, oder erst
-    /// sobald ein Spiel im Vordergrund ist (siehe `only_buffer_in_game`).
+    /// Switch the buffer on by itself — at ClippiBoy's start, or only once a
+    /// game is in the foreground (see `only_buffer_in_game`).
     #[serde(default)]
     pub auto_start: bool,
     pub seconds: u32,
 }
 
-/// In welcher Bildschirmecke der Overlay-Banner erscheint.
+/// Which screen corner the overlay banner appears in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OverlayCorner {
@@ -129,8 +129,9 @@ pub enum OverlayCorner {
     BottomRight,
 }
 
-/// Der Banner, der über dem Spiel eingeblendet wird (Medal/ShadowPlay-Stil).
-/// Jede Meldungsart ist einzeln abschaltbar — im Zweifel stört sie beim Spielen.
+/// The banner shown over the game (Medal/ShadowPlay style). Every kind of
+/// message can be switched off on its own — in doubt it gets in the way while
+/// playing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayConfig {
@@ -140,13 +141,12 @@ pub struct OverlayConfig {
     pub on_error: bool,
     pub corner: OverlayCorner,
     pub duration_ms: u32,
-    /// Bildschirm, auf dem der Banner klebt (Gerätename wie `\\.\DISPLAY1`).
-    /// `None` heißt: der primäre Bildschirm.
+    /// The screen the banner sticks to (device name like `\\.\DISPLAY1`).
+    /// `None` means the primary screen.
     #[serde(default)]
     pub monitor: Option<String>,
-    /// Statt eines festen Bildschirms dem Fenster im Vordergrund folgen.
-    /// Praktisch beim Zocken auf wechselnden Monitoren, aber der Banner
-    /// springt dann.
+    /// Follow the foreground window instead of a fixed screen. Handy when
+    /// playing across changing monitors, but the banner jumps around then.
     #[serde(default)]
     pub follow_active_screen: bool,
 }
@@ -177,11 +177,11 @@ pub struct AppConfig {
     pub toggle_buffer_hotkey: String,
     pub auto_start_with_windows: bool,
     pub only_buffer_in_game: bool,
-    // Neu hinzugekommene Felder brauchen `default` — sonst wirft `config::load()`
-    // beim Update die komplette gespeicherte Konfiguration weg (samt Audioquellen).
+    // Newly added fields need `default` — otherwise `config::load()` throws away
+    // the entire saved config on update (audio sources included).
     #[serde(default)]
     pub overlay: OverlayConfig,
-    /// Wurde schon einmal erklärt, dass die App beim Schließen im Tray weiterläuft?
+    /// Has it already been explained that closing leaves the app in the tray?
     #[serde(default)]
     pub tray_hint_shown: bool,
 }
@@ -191,7 +191,7 @@ pub struct AppConfig {
 pub struct Clip {
     pub id: String,
     pub path: String,
-    /// Unix-Millisekunden.
+    /// Unix milliseconds.
     pub created_at: i64,
     pub duration_ms: u64,
     pub game: Option<String>,
@@ -199,86 +199,87 @@ pub struct Clip {
     pub height: u32,
     pub size_bytes: u64,
     pub thumb_path: Option<String>,
-    /// Selbst vergebener Name. Ohne ihn zeigt die Galerie den Dateinamen.
+    /// A name given by hand. Without it the gallery shows the file name.
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// Mit dem Herz markiert. Ist zugleich eine eigene Kategorie: Die Datei
-    /// liegt dann im Ordner `Favoriten`, in der App bleibt der Clip unter
-    /// seinem Spiel auffindbar.
+    /// Marked with the heart. Doubles as its own category: the file then lives
+    /// in the `Favorites` folder, while inside the app the clip stays findable
+    /// under its game.
     #[serde(default)]
     pub favorite: bool,
-    /// Zuschnitt und Spurenmischung, wie sie im Editor zuletzt standen.
-    /// `None` heißt: unangetastet, also ganzer Clip mit allen Spuren.
+    /// Trim and track mix as they last stood in the editor. `None` means
+    /// untouched, i.e. the whole clip with all tracks.
     #[serde(default)]
     pub edit: Option<ClipEdit>,
-    /// Liegt die unversehrte Aufnahme noch in der Original-Ablage? Dann ist
-    /// dieser Clip geschnitten und lässt sich jederzeit wieder aufziehen.
+    /// Is the untouched recording still in the originals store? Then this clip
+    /// has been trimmed and can be pulled open again at any time.
     #[serde(default)]
     pub original: Option<ClipOriginal>,
 }
 
-/// Was im Editor eingestellt wurde.
+/// What was set in the editor.
 ///
-/// Der Zuschnitt steckt nach dem Speichern **in der Datei** — `start_ms` und
-/// `end_ms` beschreiben deshalb nur noch den vollen Bereich der aktuellen
-/// Datei, also `0 .. Dauer`. Wo dieser Bereich im Original saß, steht in
-/// [`ClipOriginal`]. Die Pegel dagegen sind hier die Wahrheit: Sie lassen sich
-/// jederzeit ändern, weil die Einzelspuren daneben liegen bleiben.
+/// After saving, the trim sits **in the file** — so `start_ms` and `end_ms`
+/// only describe the full range of the current file, i.e. `0 .. duration`.
+/// Where that range sat in the original is recorded in [`ClipOriginal`]. The
+/// levels, by contrast, are the truth here: they can be changed at any time
+/// because the individual tracks stay put alongside.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipEdit {
-    /// Zuschnitt in Millisekunden ab Clipanfang.
+    /// Trim in milliseconds from the start of the clip.
     pub start_ms: u64,
     pub end_ms: u64,
     #[serde(default)]
     pub tracks: Vec<TrackMix>,
 }
 
-/// Die weggeschnittene Aufnahme, die unter `<data>/originals/<clip-id>/`
-/// weiterlebt — und wo in ihr der ausgelieferte Ausschnitt sitzt.
+/// The recording that was trimmed away and lives on under
+/// `<data>/originals/<clip-id>/` — and where inside it the delivered excerpt
+/// sits.
 ///
-/// Diese Angaben sind der Nullpunkt für alles Weitere: Die Einzelspuren stehen
-/// immer in Koordinaten des **Originals**, die Griffe im Player dagegen in
-/// Koordinaten der **aktuellen** Datei. `start_ms` ist der Versatz zwischen
-/// beiden.
+/// These numbers are the zero point for everything else: the individual tracks
+/// are always in coordinates of the **original**, while the handles in the
+/// player are in coordinates of the **current** file. `start_ms` is the offset
+/// between the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipOriginal {
-    /// Volle Länge der unversehrten Aufnahme.
+    /// Full length of the untouched recording.
     pub duration_ms: u64,
-    /// Wo der ausgelieferte Ausschnitt im Original anfängt und aufhört.
+    /// Where the delivered excerpt starts and ends inside the original.
     pub start_ms: u64,
     pub end_ms: u64,
 }
 
-/// Wie weit das Neuschreiben eines Clips ist. Wandert als Event
-/// `clip-progress` an die Oberfläche — ein Schnitt am Anfang encodiert das Bild
-/// neu, und das dauert zu lange für einen Knopf ohne Lebenszeichen.
+/// How far along rewriting a clip is. Travels to the UI as the `clip-progress`
+/// event — a cut at the start re-encodes the picture, and that takes too long
+/// for a button with no sign of life.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipProgress {
     pub clip_id: String,
-    /// 0 bis 1.
+    /// 0 to 1.
     pub progress: f32,
 }
 
-/// Eine Tonspur, wie sie in der fertigen MP4-Datei liegt. Spur 0 ist der
-/// Hauptmix, danach folgen die Quellen, die auf eigene Spuren gelegt wurden.
+/// An audio track as it sits in the finished MP4 file. Track 0 is the main mix,
+/// followed by the sources that were given their own tracks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipTrack {
-    /// Index unter den Tonspuren der Datei, nicht der ffmpeg-Streamindex.
+    /// Index among the file's audio tracks, not the ffmpeg stream index.
     pub index: u32,
     pub label: String,
     pub channels: u32,
-    /// Für die Vorschau entpackte Einzeldatei. Spur 0 braucht keine — die
-    /// spielt das Videoelement ohnehin ab.
+    /// A file extracted for preview. Track 0 needs none — the video element
+    /// plays that one anyway.
     pub preview_path: Option<String>,
 }
 
-/// Wie eine Spur beim Export gewichtet wird.
+/// How a track is weighted on export.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackMix {
@@ -296,6 +297,6 @@ pub struct EngineStatus {
     pub dropped_frames: u64,
     pub encoder: Option<EncoderId>,
     pub fps: f32,
-    /// Zuletzt im Vordergrund erkanntes Spiel, `None` wenn keins läuft.
+    /// Game last detected in the foreground, `None` when none is running.
     pub game: Option<String>,
 }

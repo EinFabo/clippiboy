@@ -1,30 +1,30 @@
-//! Den Clip so schreiben, wie er im Editor steht — Mischung **und** Zuschnitt.
+//! Write the clip exactly as it stands in the editor — mix **and** trim.
 //!
-//! Der Zuschnitt war früher nur eine Markierung in der Datenbank: Wer den Clip
-//! verschickte, verschickte den ungeschnittenen. Jetzt steckt er in der Datei.
-//! Damit trotzdem nichts verlorengeht, wandert die unversehrte Aufnahme beim
-//! ersten echten Schnitt in eine Ablage neben den Einzelspuren:
+//! The trim used to be nothing but a marker in the database: whoever sent the
+//! clip sent the untrimmed one. Now it sits in the file. So nothing is lost
+//! regardless, the untouched recording moves into a store beside the individual
+//! tracks on the first real cut:
 //!
 //! ```text
-//! <data>/originals/<clip-id>/video.mp4     die unversehrte Aufnahme
-//! <data>/originals/<clip-id>/schnitt.json  wo der Ausschnitt in ihr sitzt
+//! <data>/originals/<clip-id>/video.mp4  the untouched recording
+//! <data>/originals/<clip-id>/trim.json  where the excerpt sits inside it
 //! ```
 //!
-//! Der Beipackzettel wird **vor** dem Video geschrieben und **nach** ihm
-//! gelöscht. Er ist damit das Signal „dieses Original lebt", und [`repair`]
-//! kann jeden Zustand aufräumen, den ein Absturz mitten im Tausch hinterlässt.
+//! The note is written **before** the video and deleted **after** it. That makes
+//! it the signal "this original is alive", and [`repair`] can clean up any state
+//! a crash in the middle of the swap leaves behind.
 //!
-//! # Drei Invarianten
+//! # Three invariants
 //!
-//! 1. **Die Einzelspuren bleiben ungeschnitten** und stehen immer in
-//!    Koordinaten des Originals. Sie werden nie ersetzt — kein Handle-Problem
-//!    unter Windows, kein zweiter Zeitstrahl, der davonlaufen kann.
-//! 2. **Ton, der noch in der Datei steckt** (Altbestand, oder eine Aufnahme mit
-//!    nur einer Quelle) steht in Koordinaten der Datei, die gerade Eingabe 0
-//!    ist, und erbt deshalb den *Bild*versatz, nicht den Spurenversatz.
-//! 3. **Neu encodiert wird immer aus dem Original**, nie aus der schon
-//!    geschnittenen Datei. Der Qualitätsverlust bleibt damit bei genau einer
-//!    Generation, egal wie oft man nachschneidet.
+//! 1. **The individual tracks stay untrimmed** and are always in coordinates of
+//!    the original. They are never replaced — no handle problem on Windows, no
+//!    second timeline that can run away.
+//! 2. **Audio still sitting in the file** (legacy, or a recording with only one
+//!    source) is in coordinates of the file that is currently input 0, and
+//!    therefore inherits the *video* offset, not the stems offset.
+//! 3. **Re-encoding always happens from the original**, never from the
+//!    already-trimmed file. The quality loss thus stays at exactly one
+//!    generation, however often you trim again.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -37,45 +37,53 @@ use crate::model::{Clip, ClipOriginal, EncoderId, TrackMix};
 use crate::muxer::{ffmpeg, probe_duration_ms, replace_file, sanitize};
 use crate::stems;
 
-/// Ab hier gilt eine Grenze als bewusst gesetzt. Darunter ist sie das Ergebnis
-/// eines Griffs, der nicht ganz am Anschlag saß — dafür soll niemand auf einen
-/// Neuencodierlauf warten.
+/// From here on a boundary counts as deliberately set. Below that it is the
+/// result of a handle that did not quite sit at the end stop — nobody should
+/// wait on a re-encode run for that.
 const EDGE_TOLERANCE_MS: u64 = 250;
 
-/// Kürzer ergibt kein Video mehr.
+/// Any shorter and there is no video left.
 const MIN_LENGTH_MS: u64 = 200;
 
-/// Nur ein Rendern und Tauschen auf einmal.
+/// Only one render-and-swap at a time.
 ///
-/// Zwei schnelle Klicks auf Speichern kämpften sonst um dieselbe Zwischendatei
-/// — und schlimmer: der zweite Lauf läse die Clipdatei, während der erste sie
-/// gerade ersetzt.
+/// Two quick clicks on save would otherwise fight over the same intermediate
+/// file — and worse: the second run would read the clip file while the first is
+/// replacing it.
 static WORKING: Mutex<()> = Mutex::new(());
 
-/// Wurzel aller Originale. **Dauerhaft**, wie die Einzelspuren.
+/// Root of all originals. **Permanent**, like the individual tracks.
 pub fn root() -> PathBuf {
     config::data_dir().join("originals")
 }
 
-/// Ordner eines Clips.
+/// A clip's folder.
 pub fn dir(clip_id: &str) -> PathBuf {
     root().join(sanitize(clip_id))
 }
 
-/// Die unversehrte Aufnahme.
+/// The untouched recording.
 pub fn video_path(clip_id: &str) -> PathBuf {
     dir(clip_id).join("video.mp4")
 }
 
-/// Der Beipackzettel daneben.
+/// The note beside it.
+///
+/// Up to 0.1.7 this file was called `schnitt.json`. A store written back then
+/// keeps that name — every path goes through this function, so reading, writing
+/// and deleting all agree on it.
 fn note_path(clip_id: &str) -> PathBuf {
-    dir(clip_id).join("schnitt.json")
+    let legacy = dir(clip_id).join("schnitt.json");
+    if legacy.is_file() {
+        return legacy;
+    }
+    dir(clip_id).join("trim.json")
 }
 
-/// Woraus gelesen wird: das Original, sonst die Clipdatei.
+/// What we read from: the original, otherwise the clip file.
 ///
-/// Alles, was die volle Aufnahme braucht — Einzelspuren entpacken, neu
-/// encodieren, den Zuschnitt aufheben — geht über diesen Pfad.
+/// Everything that needs the full recording — extracting the individual tracks,
+/// re-encoding, undoing the trim — goes through this path.
 pub fn source_path(clip: &Clip) -> PathBuf {
     let original = video_path(&clip.id);
     if original.is_file() {
@@ -85,7 +93,7 @@ pub fn source_path(clip: &Clip) -> PathBuf {
     }
 }
 
-/// Liegt zu diesem Clip ein vollständiges Original? Nur mit Zettel *und* Video.
+/// Is there a complete original for this clip? Only with note *and* video.
 pub fn has_original(clip_id: &str) -> bool {
     note_path(clip_id).is_file() && video_path(clip_id).is_file()
 }
@@ -101,16 +109,16 @@ fn write_note(clip_id: &str, original: &ClipOriginal) -> Result<(), String> {
     std::fs::write(note_path(clip_id), text).map_err(|err| err.to_string())
 }
 
-/// Alles zu einem Clip wegräumen. Erst der Zettel, dann das Video — solange der
-/// Zettel liegt, gilt das Original als lebendig.
+/// Clear away everything belonging to a clip. The note first, then the video —
+/// as long as the note is there the original counts as alive.
 pub fn remove(clip_id: &str) {
     let _ = std::fs::remove_file(note_path(clip_id));
     let _ = std::fs::remove_file(video_path(clip_id));
     let _ = std::fs::remove_dir_all(dir(clip_id));
 }
 
-/// Der Ausschnitt, den der Editor gerade zeigt — in Sekunden der **aktuellen**
-/// Datei, umgerechnet in Millisekunden.
+/// The excerpt the editor is showing right now — in seconds of the **current**
+/// file, converted to milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trim {
     pub start_ms: u64,
@@ -118,7 +126,7 @@ pub struct Trim {
 }
 
 impl Trim {
-    /// Der ganze Bereich, also „nichts wegschneiden".
+    /// The whole range, i.e. "cut nothing away".
     pub fn whole(duration_ms: u64) -> Self {
         Self {
             start_ms: 0,
@@ -127,45 +135,45 @@ impl Trim {
     }
 }
 
-/// Woher das Bild kommt.
+/// Where the video comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoSource {
-    /// Die ausgelieferte Datei — sie ist schon so weit geschnitten, wie sie
-    /// sein soll, und wird nur kopiert.
+    /// The delivered file — it is already trimmed as far as it should be and is
+    /// only copied.
     Clip,
-    /// Die unversehrte Aufnahme. Nur von hier wird neu encodiert.
+    /// The untouched recording. Re-encoding only ever happens from here.
     Original,
 }
 
-/// Was der eine ffmpeg-Lauf tun soll. Reine Daten, damit sich die Entscheidung
-/// ohne ffmpeg prüfen lässt.
+/// What the single ffmpeg run should do. Pure data, so the decision can be
+/// checked without ffmpeg.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderPlan {
     pub video: VideoSource,
-    /// Versatz auf der Videoquelle.
+    /// Offset into the video source.
     pub video_start_ms: u64,
-    /// Versatz auf den Einzelspuren — die stehen immer im Original.
+    /// Offset into the individual tracks — those are always in the original.
     pub stems_start_ms: u64,
     pub length_ms: u64,
-    /// Muss das Bild neu gerechnet werden? Nur wenn vorne geschnitten wird.
+    /// Does the video have to be recomputed? Only when cutting at the front.
     pub reencode: bool,
-    /// Wie der Clip danach in der Datenbank steht. `None` heißt: ganze
-    /// Aufnahme, kein Original nötig.
+    /// How the clip stands in the database afterwards. `None` means the whole
+    /// recording, no original needed.
     pub original: Option<ClipOriginal>,
 }
 
-/// Den Auftrag aus dem Editor-Stand ableiten.
+/// Derive the job from the editor state.
 ///
-/// `base` ist der Schnitt, der schon in der Datei steckt; `trim` der Ausschnitt,
-/// den der Nutzer auf der Zeitachse **dieser** Datei markiert hat. Der neue
-/// Schnitt in Originalkoordinaten ist also `base.start + trim.start ..
-/// base.start + trim.end` — dadurch lässt sich beliebig weiter hineinschneiden.
-/// Aufziehen geht nur über [`restore_plan`].
+/// `base` is the cut already sitting in the file; `trim` is the excerpt the user
+/// marked on **this** file's timeline. The new cut in original coordinates is
+/// therefore `base.start + trim.start .. base.start + trim.end` — which allows
+/// trimming further inwards indefinitely. Pulling the range back open only works
+/// through [`restore_plan`].
 ///
-/// `base` kommt aus der Datenbank und nicht von der Platte: Es trägt den
-/// Versatz, in dem die Einzelspuren stehen, und muss auch dann noch stimmen,
-/// wenn jemand die Ablage von Hand ausgeräumt hat. `has_original` sagt, ob dazu
-/// auch noch eine Datei liegt — nur dann kann aus ihr encodiert werden.
+/// `base` comes from the database and not from disk: it carries the offset the
+/// individual tracks sit at, and has to remain correct even if somebody cleared
+/// the store out by hand. `has_original` says whether a file is still there as
+/// well — only then can it be encoded from.
 pub fn plan(
     base: Option<&ClipOriginal>,
     has_original: bool,
@@ -187,14 +195,14 @@ pub fn plan(
     let absolute_end = offset + if cuts_back { end } else { clip_duration_ms };
     let length_ms = absolute_end.saturating_sub(absolute_start).max(MIN_LENGTH_MS);
 
-    // Bleibt vorne alles stehen, ist die ausgelieferte Datei schon der richtige
-    // Anfang — dann wird aus ihr kopiert und das Bild nicht angefasst. Das ist
-    // der häufige Fall: nur die Mischung ändern, oder nur hinten kürzen.
+    // If everything at the front stays, the delivered file already is the right
+    // beginning — then it is copied from and the video is not touched. That is
+    // the common case: only change the mix, or only shorten at the back.
     //
-    // Wird vorne geschnitten, kommt das Bild aus dem Original: So bleibt der
-    // Verlust bei einer Generation, auch wenn jemand dreimal nachschneidet.
-    // Ist die Ablage weg, muss die geschnittene Datei herhalten — dann ist der
-    // Versatz auf ihr relativ, nicht absolut.
+    // If the front is cut, the video comes from the original: that keeps the loss
+    // at one generation even if somebody trims three times over. If the store is
+    // gone, the already-trimmed file has to do — then the offset into it is
+    // relative, not absolute.
     let (video, video_start_ms) = match (cuts_front, has_original) {
         (false, _) => (VideoSource::Clip, 0),
         (true, true) => (VideoSource::Original, absolute_start),
@@ -216,7 +224,7 @@ pub fn plan(
     }
 }
 
-/// Der Auftrag fürs Aufheben: die ganze Aufnahme, verlustfrei kopiert.
+/// The job for undoing: the whole recording, copied losslessly.
 pub fn restore_plan(base: &ClipOriginal) -> RenderPlan {
     RenderPlan {
         video: VideoSource::Original,
@@ -228,15 +236,15 @@ pub fn restore_plan(base: &ClipOriginal) -> RenderPlan {
     }
 }
 
-/// Was nach dem Schreiben in der Datenbank landet.
+/// What lands in the database after writing.
 pub struct Applied {
     pub duration_ms: u64,
     pub size_bytes: u64,
     pub original: Option<ClipOriginal>,
 }
 
-/// Den Clip neu schreiben: Mischung einrechnen, Zuschnitt ausführen, Original
-/// sichern. Gibt zurück, was danach in der Datenbank stehen muss.
+/// Rewrite the clip: apply the mix, carry out the trim, save the original.
+/// Returns what has to stand in the database afterwards.
 pub fn apply(
     clip: &Clip,
     trim: Trim,
@@ -245,8 +253,8 @@ pub fn apply(
     bitrate_kbps: u32,
     on_progress: impl Fn(f32),
 ) -> Result<Applied, String> {
-    // Der Eintrag am Clip ist die Wahrheit über die Koordinaten; die Ablage
-    // sagt nur, ob es dazu noch eine Datei gibt.
+    // The record on the clip is the truth about the coordinates; the store only
+    // says whether there is still a file to go with it.
     let plan = plan(
         clip.original.as_ref(),
         has_original(&clip.id),
@@ -256,7 +264,7 @@ pub fn apply(
     run(clip, &plan, mix, encoder, bitrate_kbps, &on_progress)
 }
 
-/// Den Zuschnitt aufheben: die ganze Aufnahme zurückholen, Mischung behalten.
+/// Undo the trim: pull the whole recording back, keep the mix.
 pub fn restore(
     clip: &Clip,
     mix: &[TrackMix],
@@ -267,7 +275,7 @@ pub fn restore(
     let base = clip
         .original
         .filter(|_| has_original(&clip.id))
-        .ok_or_else(|| "Das Original ist nicht mehr auffindbar.".to_string())?;
+        .ok_or_else(|| "The original can no longer be found.".to_string())?;
     let plan = restore_plan(&base);
     run(clip, &plan, mix, encoder, bitrate_kbps, &on_progress)
 }
@@ -284,17 +292,17 @@ fn run(
 
     let target = PathBuf::from(&clip.path);
     if !target.is_file() {
-        return Err("Die Clipdatei ist nicht mehr da.".into());
+        return Err("The clip file is no longer there.".into());
     }
 
-    // Die Einzelspuren vor allem anderen holen: Liegen sie noch nicht in der
-    // Ablage, werden sie hier aus der unversehrten Aufnahme gezogen — und die
-    // ist bis zum Tausch weiter unter `source_path` erreichbar.
+    // Fetch the individual tracks before anything else: if they are not in the
+    // store yet they get pulled out of the untouched recording here — and that
+    // stays reachable under `source_path` until the swap.
     let source = source_path(clip);
     let list = match stems::tracks(&clip.id, &source) {
         Ok(list) => list,
         Err(err) if recoverable(&source) => {
-            log::warn!("Spuren unbrauchbar ({err}) — sie werden neu entpackt");
+            log::warn!("tracks unusable ({err}) — extracting them again");
             stems::remove(&clip.id);
             stems::tracks(&clip.id, &source)?
         }
@@ -306,20 +314,20 @@ fn run(
         VideoSource::Original => source.clone(),
     };
     if !video.is_file() {
-        return Err("Die unversehrte Aufnahme ist nicht mehr auffindbar.".into());
+        return Err("The untouched recording can no longer be found.".into());
     }
 
-    // ffmpeg darf nicht in seine eigene Eingabe schreiben — also daneben und
-    // danach darüber. Der Prozessname macht die Datei je Lauf eindeutig.
+    // ffmpeg must not write into its own input — so beside it, and over it
+    // afterwards. The process id makes the file unique per run.
     let temp = target.with_extension(format!("{}.neu.mp4", std::process::id()));
     let args = arguments(plan, &video, &list, mix, &temp, encoder, bitrate_kbps);
 
     match run_with_progress(&args, plan.length_ms, on_progress) {
         Ok(()) => {}
         Err(err) if plan.reencode && encoder != EncoderId::X264 => {
-            // Hardware-Encoder streiken gern mal: Treiber, oder alle Sitzungen
-            // belegt, weil nebenan der Replay-Puffer läuft.
-            log::warn!("Schnitt mit {encoder:?} fehlgeschlagen ({err}) — jetzt mit x264");
+            // Hardware encoders like to refuse: driver trouble, or all sessions
+            // occupied because the replay buffer is running next door.
+            log::warn!("trim with {encoder:?} failed ({err}) — retrying with x264");
             let _ = std::fs::remove_file(&temp);
             let fallback = arguments(
                 plan,
@@ -344,8 +352,9 @@ fn run(
     swap_in(clip, plan, &temp, &target)?;
     on_progress(1.0);
 
-    // Gebucht wird, was wirklich herauskam — nicht, was gewünscht war. Sonst
-    // driftet die Buchführung mit jedem weiteren Schnitt von der Datei weg.
+    // What gets recorded is what really came out — not what was asked for.
+    // Otherwise the bookkeeping drifts away from the file with every further
+    // cut.
     let duration_ms = probe_duration_ms(&target).unwrap_or(plan.length_ms);
     let original = plan.original.map(|original| ClipOriginal {
         end_ms: original.start_ms + duration_ms,
@@ -355,10 +364,10 @@ fn run(
         write_note(&clip.id, original)?;
     }
 
-    // Das Vorschaubild zeigte sonst ein Bild, das im Clip gar nicht mehr
-    // vorkommt.
+    // Otherwise the thumbnail would show a frame that no longer appears in the
+    // clip at all.
     if let Err(err) = crate::thumbs::make(&target, &clip.id) {
-        log::warn!("Vorschaubild ließ sich nicht erneuern: {err}");
+        log::warn!("could not refresh the thumbnail: {err}");
     }
 
     Ok(Applied {
@@ -368,33 +377,33 @@ fn run(
     })
 }
 
-/// Die fertige Datei an ihren Platz bringen — und dabei, wenn es der erste
-/// echte Schnitt ist, die unversehrte Aufnahme retten.
+/// Move the finished file into its place — and, if this is the first real cut,
+/// rescue the untouched recording along the way.
 ///
-/// Die Reihenfolge ist der springende Punkt: Jeder Schritt ist für sich
-/// abbrechbar, und der letzte rollt zurück. So kann der Clip an keiner Stelle
-/// ganz verschwinden.
+/// The order is the crux: every step can be interrupted on its own, and the last
+/// one rolls back. That way the clip can never disappear entirely at any point.
 fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result<(), String> {
     let archive = video_path(&clip.id);
     let keep_original = plan.original.is_some();
     let first_cut = keep_original && !archive.is_file();
 
     if first_cut {
-        // Zettel zuerst: Stirbt der Prozess gleich, findet `repair` die Datei
-        // daran wieder. Umgekehrt läge ein Video ohne jede Zuordnung da.
-        write_note(&clip.id, plan.original.as_ref().expect("geprüft"))?;
+        // Note first: if the process dies right away, `repair` finds the file
+        // again by it. The other way round a video would lie there with nothing
+        // to tie it to.
+        write_note(&clip.id, plan.original.as_ref().expect("checked"))?;
         if let Err(err) = std::fs::rename(target, &archive) {
             let _ = std::fs::remove_file(temp);
             let _ = std::fs::remove_file(note_path(&clip.id));
             return Err(format!(
-                "Das Original ließ sich nicht sichern ({err}). Ist der Clip gerade woanders geöffnet?"
+                "Could not save the original ({err}). Is the clip open somewhere right now?"
             ));
         }
     }
 
     if let Err(err) = replace_file(temp, target) {
         if first_cut {
-            // Zurück auf Anfang: Lieber ein ungeschnittener Clip als gar keiner.
+            // Back to the start: better an untrimmed clip than none at all.
             let _ = std::fs::rename(&archive, target);
             let _ = std::fs::remove_file(note_path(&clip.id));
             let _ = std::fs::remove_dir_all(dir(&clip.id));
@@ -409,7 +418,7 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
     Ok(())
 }
 
-/// Die ffmpeg-Zeile. Ausgelagert, damit sie sich ohne Lauf prüfen lässt.
+/// The ffmpeg line. Pulled out so it can be checked without a run.
 fn arguments(
     plan: &RenderPlan,
     video: &Path,
@@ -421,8 +430,8 @@ fn arguments(
 ) -> Vec<String> {
     let gains = stems::levels(list, mix);
 
-    // Woher der Ton kommt: aus den abgelegten Einzelspuren, oder — wenn es
-    // keine gibt — aus der Videodatei selbst.
+    // Where the audio comes from: from the stored individual tracks, or — if
+    // there are none — from the video file itself.
     let stem_files: Vec<PathBuf> = list
         .iter()
         .filter_map(|track| track.preview_path.as_ref().map(PathBuf::from))
@@ -441,13 +450,13 @@ fn arguments(
         "-nostats".into(),
     ];
 
-    // `-ss` ist eine Option **je Eingabe** und gehört vor ihr `-i`. Ein
-    // einzelnes `-ss` vor dem ersten `-i` wirkte nur auf das Video, und die
-    // Einzelspuren liefen um den Zuschnitt versetzt weiter.
+    // `-ss` is a **per-input** option and belongs before that input's `-i`. A
+    // single `-ss` before the first `-i` would only affect the video, and the
+    // individual tracks would run on offset by the trim.
     //
-    // Beim Kopieren ist `video_start_ms` immer 0 — ein `-ss` mit `-c:v copy`
-    // rutschte auf das Keyframe davor (bis zu zwei Sekunden) und stünde hinter
-    // `-i` sogar ganz ohne führendes Keyframe da.
+    // When copying, `video_start_ms` is always 0 — an `-ss` with `-c:v copy`
+    // would slide to the keyframe before it (up to two seconds) and, placed after
+    // `-i`, would even end up with no leading keyframe at all.
     if plan.video_start_ms > 0 {
         args.push("-ss".into());
         args.push(seconds(plan.video_start_ms));
@@ -466,8 +475,8 @@ fn arguments(
         }
     }
 
-    // Steckt der Ton noch in der Videodatei, teilt er sich deren Zeitachse und
-    // ist damit schon durch das `-ss` des Bildes geschnitten (Invariante 2).
+    // If the audio still sits in the video file it shares that file's timeline
+    // and is therefore already cut by the video's `-ss` (invariant 2).
     let inputs: Vec<(String, f32)> = if from_stems {
         gains
             .iter()
@@ -487,7 +496,7 @@ fn arguments(
         args.push(filter.clone());
     }
 
-    // Bild zuerst abbilden, damit es auch im Ergebnis Spur 0 ist.
+    // Map the video first so it is track 0 in the result too.
     args.push("-map".into());
     args.push("0:v:0".into());
     match &filter {
@@ -498,7 +507,7 @@ fn arguments(
             args.extend(["-metadata:s:a:0", "title=Mix"].map(String::from));
             args.extend(["-metadata:s:a:0", "handler_name=Mix"].map(String::from));
         }
-        // Alles stumm geschaltet: Dann bekommt der Clip eben keine Tonspur.
+        // Everything muted: then the clip simply gets no audio track.
         None => args.push("-an".into()),
     }
 
@@ -510,18 +519,18 @@ fn arguments(
     args.extend(["-avoid_negative_ts", "make_zero"].map(String::from));
     args.extend(["-movflags", "+faststart"].map(String::from));
 
-    // `-t` gilt für die ganze Ausgabe und gehört deshalb hinter alle Eingaben.
+    // `-t` applies to the whole output and therefore belongs after all inputs.
     args.push("-t".into());
     args.push(seconds(plan.length_ms));
     args.push(output.to_string_lossy().to_string());
     args
 }
 
-/// Lassen sich die Einzelspuren notfalls neu ziehen?
+/// Can the individual tracks be pulled again if need be?
 ///
-/// Nur dann darf die Ablage weggeworfen werden. Bei Clips aus der neuen
-/// Aufnahme ist sie die **einzige** Fassung der getrennten Quellen — sie zu
-/// löschen hieße, die Mischung für immer festzunageln.
+/// Only then may the store be thrown away. For clips from the new recording path
+/// it is the **only** copy of the separated sources — deleting it would mean
+/// nailing the mix down forever.
 fn recoverable(source: &Path) -> bool {
     stems::tracks_in_file(source)
         .map(|list| list.len() > 1)
@@ -556,8 +565,8 @@ fn video_args(encoder: EncoderId, bitrate_kbps: u32) -> Vec<String> {
     }
 }
 
-/// ffmpeg starten und dabei `-progress` mitlesen. Ohne das stünde die App bei
-/// einem neu encodierten Clip minutenlang ohne Lebenszeichen da.
+/// Start ffmpeg and read `-progress` along the way. Without it the app would
+/// stand there for minutes with no sign of life on a re-encoded clip.
 fn run_with_progress(
     args: &[String],
     length_ms: u64,
@@ -568,10 +577,10 @@ fn run_with_progress(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("ffmpeg konnte nicht gestartet werden: {err}"))?;
+        .map_err(|err| format!("could not start ffmpeg: {err}"))?;
 
-    // stderr in einem eigenen Faden leeren: bliebe die Röhre stehen, könnte
-    // ffmpeg beim Schreiben hängen bleiben.
+    // Drain stderr on a thread of its own: if the pipe filled up, ffmpeg could
+    // hang while writing.
     let stderr = child.stderr.take();
     let collector = std::thread::spawn(move || {
         let mut text = String::new();
@@ -602,12 +611,12 @@ fn run_with_progress(
     }
     let tail: Vec<&str> = stderr.lines().rev().take(4).collect();
     Err(format!(
-        "ffmpeg ist beim Schreiben des Clips fehlgeschlagen: {}",
+        "ffmpeg failed while writing the clip: {}",
         tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
     ))
 }
 
-/// `00:01:02.500000` in Millisekunden.
+/// `00:01:02.500000` in milliseconds.
 fn parse_timestamp_ms(text: &str) -> Option<u64> {
     let mut parts = text.trim().split(':');
     let hours: f64 = parts.next()?.parse().ok()?;
@@ -616,17 +625,17 @@ fn parse_timestamp_ms(text: &str) -> Option<u64> {
     Some(((hours * 3600.0 + minutes * 60.0 + seconds) * 1000.0) as u64)
 }
 
-/// Was ein Absturz mitten im Tausch hinterlassen hat, beim Start aufräumen.
+/// Clean up at startup whatever a crash in the middle of the swap left behind.
 ///
-/// Der Beipackzettel unterscheidet die Fälle. Die Regel darunter ist immer
-/// dieselbe: **Der Eintrag am Clip darf nie verlorengehen, solange die Datei
-/// geschnitten ist** — er trägt den Versatz, in dem die Einzelspuren stehen,
-/// und ohne ihn liefe die Vorschau für immer versetzt.
+/// The note tells the cases apart. The rule underneath is always the same:
+/// **the record on the clip must never be lost while the file is trimmed** — it
+/// carries the offset the individual tracks sit at, and without it the preview
+/// would run out of sync forever.
 pub fn repair(library: &crate::clips::Library) {
     let clips = match library.list() {
         Ok(clips) => clips,
         Err(err) => {
-            log::warn!("Original-Ablage nicht prüfbar: {err}");
+            log::warn!("originals store not checkable: {err}");
             return;
         }
     };
@@ -636,49 +645,49 @@ pub fn repair(library: &crate::clips::Library) {
         let target = Path::new(&clip.path);
 
         match (target.is_file(), note, video.is_file()) {
-            // Zwischen Sichern und Tauschen gestorben: Die Clipdatei fehlt, die
-            // unversehrte Aufnahme liegt in der Ablage. Zurückschieben — ein
-            // ungeschnittener Clip ist unendlich viel besser als gar keiner.
+            // Died between saving and swapping: the clip file is missing, the
+            // untouched recording lies in the store. Push it back — an untrimmed
+            // clip is infinitely better than none at all.
             (false, Some(_), true) => {
                 if std::fs::rename(&video, target).is_ok() {
-                    log::info!("Clip '{}' aus der Original-Ablage zurückgeholt", clip.id);
+                    log::info!("clip '{}' recovered from the originals store", clip.id);
                     remove(&clip.id);
                     let _ = library.set_original(&clip.id, None);
                 }
             }
 
-            // Zettel ohne Aufnahme. Zwei Möglichkeiten, und die Länge des Clips
-            // sagt welche: Steht sie noch auf der vollen Dauer, kam der Absturz
-            // vor dem Sichern und es wurde nie geschnitten. Sonst hat jemand die
-            // Ablage von Hand ausgeräumt — dann ist die Aufnahme verloren, der
-            // Versatz der Spuren aber nicht.
+            // Note without a recording. Two possibilities, and the clip's length
+            // says which: if it still stands at the full duration, the crash came
+            // before the save and nothing was ever trimmed. Otherwise somebody
+            // cleared the store out by hand — then the recording is lost, but the
+            // tracks' offset is not.
             (_, Some(note), false) => {
                 remove(&clip.id);
                 if clip.duration_ms == note.duration_ms {
-                    log::info!("Zettel ohne Original bei '{}' — weggeräumt", clip.id);
+                    log::info!("note without an original at '{}' — cleared away", clip.id);
                     let _ = library.set_original(&clip.id, None);
                 } else {
-                    log::warn!("Original von '{}' ist weg — der Clip bleibt geschnitten", clip.id);
+                    log::warn!("original of '{}' is gone — the clip stays trimmed", clip.id);
                     let _ = library.set_original(&clip.id, Some(&note));
                 }
             }
 
-            // Getauscht, aber die Datenbank kam nicht mehr dran.
+            // Swapped, but the database never got its turn.
             (true, Some(note), true) if clip.original.is_none() => {
-                log::info!("Original von '{}' nachgetragen", clip.id);
+                log::info!("original of '{}' recorded after the fact", clip.id);
                 let _ = library.set_original(&clip.id, Some(&note));
             }
 
-            // Aufnahme ohne Zettel. Weiß die Datenbank noch, wo der Ausschnitt
-            // sitzt, wird der Zettel daraus nachgezogen — sonst ist es der Rest
-            // eines fertigen „Aufheben" und darf weg.
+            // Recording without a note. If the database still knows where the
+            // excerpt sits, the note is reconstructed from it — otherwise this is
+            // the remainder of a completed "undo" and may go.
             (true, None, true) => match clip.original.as_ref() {
                 Some(original) => {
-                    log::info!("Zettel für '{}' nachgezogen", clip.id);
+                    log::info!("note for '{}' reconstructed", clip.id);
                     let _ = write_note(&clip.id, original);
                 }
                 None => {
-                    log::info!("Original von '{}' ohne Zuordnung — weggeräumt", clip.id);
+                    log::info!("original of '{}' with nothing to tie it to — cleared away", clip.id);
                     remove(&clip.id);
                 }
             },
@@ -696,14 +705,14 @@ mod tests {
     fn track(index: u32, stem: bool) -> ClipTrack {
         ClipTrack {
             index,
-            label: format!("Spur {index}"),
+            label: format!("Track {index}"),
             channels: 2,
             preview_path: stem.then(|| format!("C:/data/tracks/x/{index}.m4a")),
         }
     }
 
-    /// Der häufigste Fall: nur an den Reglern gedreht. Dann bleibt das Bild
-    /// unangetastet und die Datei ist in Sekunden neu geschrieben.
+    /// The most common case: only the sliders were moved. Then the video stays
+    /// untouched and the file is rewritten in seconds.
     #[test]
     fn only_mixing_leaves_the_picture_alone() {
         let plan = plan(None, true, 30_000, Trim::whole(30_000));
@@ -712,11 +721,11 @@ mod tests {
         assert_eq!(plan.video_start_ms, 0);
         assert_eq!(plan.stems_start_ms, 0);
         assert_eq!(plan.length_ms, 30_000);
-        assert_eq!(plan.original, None, "ohne Zuschnitt braucht es kein Original");
+        assert_eq!(plan.original, None, "with no trim no original is needed");
     }
 
-    /// Hinten kürzen ist verlustfrei und schnell — und genau das ist der
-    /// übliche Zuschnitt.
+    /// Shortening at the back is lossless and fast — and that is exactly the
+    /// usual trim.
     #[test]
     fn trimming_only_the_tail_stays_a_copy() {
         let plan = plan(None, true, 30_000, Trim { start_ms: 0, end_ms: 12_000 });
@@ -729,9 +738,9 @@ mod tests {
         );
     }
 
-    /// Vorne schneiden muss bildgenau sitzen. Beim Kopieren rutschte der Schnitt
-    /// auf das Keyframe davor — deshalb neu encodieren, und zwar aus dem
-    /// Original, damit der Verlust bei einer Generation bleibt.
+    /// Cutting at the front has to be frame-accurate. When copying, the cut
+    /// would slide to the keyframe before it — hence re-encoding, and from the
+    /// original at that, so the loss stays at one generation.
     #[test]
     fn trimming_the_head_re_encodes_from_the_original() {
         let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 });
@@ -742,22 +751,22 @@ mod tests {
         assert_eq!(plan.length_ms, 8_000);
     }
 
-    /// Ist die Ablage von Hand ausgeräumt worden, muss der Schnitt trotzdem
-    /// gehen — dann eben aus der schon geschnittenen Datei, mit **relativem**
-    /// Versatz. Die Einzelspuren behalten ihren absoluten.
+    /// If the store was cleared out by hand the cut still has to work — then
+    /// from the already-trimmed file, with a **relative** offset. The individual
+    /// tracks keep their absolute one.
     #[test]
     fn a_missing_original_falls_back_to_the_clip() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
         let plan = plan(Some(&base), false, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 });
         assert_eq!(plan.video, VideoSource::Clip);
         assert!(plan.reencode, "bildgenau muss es trotzdem sein");
-        assert_eq!(plan.video_start_ms, 2_000, "die Clipdatei fängt schon bei 5s an");
-        assert_eq!(plan.stems_start_ms, 7_000, "die Spuren stehen im Original");
+        assert_eq!(plan.video_start_ms, 2_000, "the clip file already starts at 5 s");
+        assert_eq!(plan.stems_start_ms, 7_000, "the tracks are in the original");
         assert_eq!(plan.length_ms, 6_000);
     }
 
-    /// Ein Griff, der nicht ganz am Anschlag saß, darf keinen Encodierlauf
-    /// auslösen.
+    /// A handle that did not quite sit at the end stop must not trigger an
+    /// encode run.
     #[test]
     fn a_hair_off_the_edge_is_not_a_cut() {
         let plan = plan(None, true, 30_000, Trim { start_ms: 120, end_ms: 29_900 });
@@ -767,8 +776,8 @@ mod tests {
         assert_eq!(plan.length_ms, 30_000);
     }
 
-    /// Weiter hineinschneiden geht ohne Aufheben: Die Griffe stehen auf der
-    /// Zeitachse der geschnittenen Datei, gerechnet wird im Original.
+    /// Trimming further inwards works without undoing: the handles are on the
+    /// trimmed file's timeline, the arithmetic happens in the original.
     #[test]
     fn cuts_compose_in_original_coordinates() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
@@ -782,7 +791,7 @@ mod tests {
         );
     }
 
-    /// Dreimal nachgeschnitten und die Buchführung stimmt immer noch.
+    /// Trimmed three times over and the bookkeeping still adds up.
     #[test]
     fn three_cuts_in_a_row_still_add_up() {
         let mut base = None;
@@ -798,17 +807,16 @@ mod tests {
         assert_eq!(duration, 54_000);
     }
 
-    /// Nur die Mischung ändern, obwohl der Clip längst geschnitten ist: Der
-    /// Ausschnitt darf dabei nicht wandern, und die Spuren brauchen weiterhin
-    /// ihren Versatz.
+    /// Only change the mix although the clip has long been trimmed: the excerpt
+    /// must not wander, and the tracks still need their offset.
     #[test]
     fn remixing_a_trimmed_clip_keeps_its_bounds() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
         let plan = plan(Some(&base), true, 15_000, Trim::whole(15_000));
         assert_eq!(plan.video, VideoSource::Clip);
         assert!(!plan.reencode);
-        assert_eq!(plan.video_start_ms, 0, "die Clipdatei fängt schon richtig an");
-        assert_eq!(plan.stems_start_ms, 5_000, "die Spuren stehen im Original");
+        assert_eq!(plan.video_start_ms, 0, "the clip file already starts in the right place");
+        assert_eq!(plan.stems_start_ms, 5_000, "the tracks are in the original");
         assert_eq!(plan.length_ms, 15_000);
         assert_eq!(plan.original, Some(base));
     }
@@ -824,9 +832,9 @@ mod tests {
         assert_eq!(plan.original, None);
     }
 
-    /// `-ss` gilt je Eingabe. Steht es nur einmal vorn, laufen die Spuren um
-    /// den Zuschnitt versetzt weiter — der Ton käme aus einer anderen Stelle
-    /// des Spiels als das Bild.
+    /// `-ss` applies per input. Placed only once at the front, the tracks run on
+    /// offset by the trim — the audio would come from a different point in the
+    /// game than the picture.
     #[test]
     fn every_input_gets_its_own_seek() {
         let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 });
@@ -854,8 +862,8 @@ mod tests {
         }
     }
 
-    /// `-t` gilt für die Ausgabe und muss hinter alle Eingaben — vorn gelesen
-    /// wäre es eine Option von Eingabe 0.
+    /// `-t` applies to the output and has to come after all inputs — read at the
+    /// front it would be an option of input 0.
     #[test]
     fn the_length_comes_after_the_last_input() {
         let plan = plan(None, true, 30_000, Trim { start_ms: 0, end_ms: 12_000 });
@@ -876,8 +884,8 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "copy"]), "{args:?}");
     }
 
-    /// Steckt der Ton noch in der Videodatei, teilt er deren Zeitachse — ein
-    /// eigenes `-ss` für ihn schnitte ihn ein zweites Mal.
+    /// If the audio still sits in the video file it shares that timeline — an
+    /// `-ss` of its own would cut it a second time.
     #[test]
     fn audio_inside_the_file_inherits_the_picture_offset() {
         let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 });
@@ -897,8 +905,8 @@ mod tests {
         assert!(args[filter + 1].contains("0:a:0"), "{}", args[filter + 1]);
     }
 
-    /// Die Ablage darf nicht dort liegen, wo beim Start aufgeräumt wird —
-    /// sonst wäre das Original nach dem nächsten Programmstart weg.
+    /// The store must not sit where startup cleans up — otherwise the original
+    /// would be gone after the next program start.
     #[test]
     fn originals_live_outside_the_scratch_folders() {
         assert!(!root().starts_with(crate::preview::dir()));
@@ -914,8 +922,8 @@ mod tests {
         assert_eq!(parse_timestamp_ms("kaputt"), None);
     }
 
-    /// x264 ist der Rückfall, wenn die Hardware streikt — er muss immer eine
-    /// vollständige Zeile liefern.
+    /// x264 is the fallback when the hardware refuses — it always has to produce
+    /// a complete command line.
     #[test]
     fn every_encoder_yields_a_complete_line() {
         for encoder in [EncoderId::Nvenc, EncoderId::Amf, EncoderId::Qsv, EncoderId::X264] {

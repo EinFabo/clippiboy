@@ -1,14 +1,13 @@
-//! Der H.264-Encoder, direkt als Media-Foundation-Transform.
+//! The H.264 encoder, directly as a Media Foundation Transform.
 //!
-//! Vorher lief die Aufnahme über den WinRT-`MediaTranscoder`. Der nimmt außer
-//! einer Bitrate **nichts** entgegen: keine Ratensteuerung, keinen
-//! GOP-Abstand, kein Profil, kein CABAC. Deshalb sahen 40 Mbit/s aus wie
-//! deutlich weniger, und deshalb tat der Encoder-Schalter in den
-//! Einstellungen nichts — welcher MFT lief, entschied Windows.
+//! Recording used to run through the WinRT `MediaTranscoder`. That accepts
+//! **nothing** beyond a bitrate: no rate control, no GOP distance, no profile,
+//! no CABAC. Which is why 40 Mbit/s looked like considerably less, and why the
+//! encoder switch in the settings did nothing — Windows decided which MFT ran.
 //!
-//! Hier wird der MFT selbst gesucht, selbst konfiguriert und selbst gefüttert.
-//! Er bekommt NV12-Texturen direkt von der GPU (kein Readback) und liefert
-//! fertige H.264-Pakete, die in den Ringpuffer aus `buffer.rs` wandern.
+//! Here the MFT is found, configured and fed by hand. It gets NV12 textures
+//! straight from the GPU (no readback) and delivers finished H.264 packets that
+//! travel into the ring buffer from `buffer.rs`.
 
 #![cfg(windows)]
 
@@ -29,18 +28,18 @@ const VENDOR_NVIDIA: &str = "VEN_10DE";
 const VENDOR_AMD: &str = "VEN_1002";
 const VENDOR_INTEL: &str = "VEN_8086";
 
-/// Wie viele Bilder auf die Einreichung warten dürfen. Bei 60 fps sind vier
-/// Plätze gut 66 ms Spielraum für einen kurzen Hänger des Encoders.
+/// How many frames may wait to be submitted. At 60 fps four slots are a good
+/// 66 ms of headroom for a brief stall of the encoder.
 const QUEUE_DEPTH: usize = 4;
 
-/// So lange wartet der Taktgeber, wenn die Warteschlange voll ist.
+/// How long the clock waits when the queue is full.
 ///
-/// Warten statt wegwerfen: Der fertige Clip wird als roher Elementarstrom
-/// gemuxt, dessen Zeitachse allein aus der Bildrate entsteht (`-r` in
-/// `muxer.rs`). Fehlt darin auch nur ein Bild, ist die Datei kürzer als ihr
-/// Ton — das Bild liefe dem Ton davon. Ein Tick Verzögerung kostet dagegen
-/// nichts: Der Taktgeber rechnet seine Zeitstempel aus einem Zähler und holt
-/// den Rückstand von selbst wieder auf.
+/// Waiting rather than dropping: the finished clip is muxed as a raw elementary
+/// stream whose timeline comes from the frame rate alone (`-r` in `muxer.rs`).
+/// If even one frame is missing from it, the file is shorter than its audio —
+/// the picture would run away from the sound. A tick of delay, by contrast,
+/// costs nothing: the clock computes its timestamps from a counter and catches
+/// up by itself.
 const SUBMIT_WAIT: Duration = Duration::from_millis(500);
 
 pub struct EncoderSettings {
@@ -52,7 +51,7 @@ pub struct EncoderSettings {
     pub requested: EncoderId,
 }
 
-/// Media Foundation einmal je Prozess hochfahren.
+/// Bring Media Foundation up once per process.
 pub fn startup() -> Result<(), String> {
     static STATE: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     STATE
@@ -86,7 +85,7 @@ fn vendor_to_encoder(vendor: &str) -> Option<EncoderId> {
     }
 }
 
-/// Alle H.264-Encoder-MFTs auflisten, Hardware zuerst.
+/// List all H.264 encoder MFTs, hardware first.
 fn enumerate() -> Result<Vec<(Option<EncoderId>, IMFActivate)>, String> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
@@ -119,7 +118,7 @@ fn enumerate() -> Result<Vec<(Option<EncoderId>, IMFActivate)>, String> {
                 found.push((id, activate));
             }
         }
-        // Das Feld gehört uns; die Verweise darin haben wir oben geklont.
+        // The array is ours; we cloned the references in it above.
         for index in 0..count as usize {
             let _ = (*array.add(index)).take();
         }
@@ -128,10 +127,10 @@ fn enumerate() -> Result<Vec<(Option<EncoderId>, IMFActivate)>, String> {
     Ok(found)
 }
 
-/// Welche Hardware-Encoder es auf diesem Rechner wirklich gibt.
+/// Which hardware encoders really exist on this machine.
 ///
-/// Ersetzt die frühere Vermutung über die DXGI-Hersteller-ID: Eine NVIDIA-Karte
-/// im Rechner heißt noch nicht, dass ihr Encoder-MFT auch angemeldet ist.
+/// Replaces the earlier guess based on the DXGI vendor id: an NVIDIA card in the
+/// machine does not yet mean its encoder MFT is registered.
 pub fn available_encoders() -> Vec<EncoderId> {
     let Ok(list) = enumerate() else {
         return Vec::new();
@@ -147,18 +146,18 @@ pub fn available_encoders() -> Vec<EncoderId> {
     out
 }
 
-/// Eine Eigenschaft setzen. `false` heißt: Der Treiber kennt sie nicht.
+/// Set one property. `false` means the driver does not know it.
 ///
-/// Nicht jeder Encoder kennt jede Eigenschaft. Was nicht angenommen wird,
-/// bleibt auf dem Standard — das ist kein Grund, die Aufnahme scheitern zu
-/// lassen. Gemeldet gehört es trotzdem: Wenn ein Clip schlechter aussieht als
-/// erwartet, ist genau das die erste Frage.
+/// Not every encoder knows every property. Whatever is not accepted stays at its
+/// default — that is no reason to let the recording fail. It should still be
+/// reported: if a clip looks worse than expected, that is exactly the first
+/// question.
 fn set_codec_property(codec: &ICodecAPI, name: &str, api: &GUID, value: VARIANT) -> bool {
     unsafe {
         match codec.SetValue(api, &value) {
             Ok(()) => true,
             Err(err) => {
-                log::debug!("Encoder nimmt '{name}' nicht an: {err}");
+                log::debug!("encoder does not accept '{name}': {err}");
                 false
             }
         }
@@ -167,13 +166,13 @@ fn set_codec_property(codec: &ICodecAPI, name: &str, api: &GUID, value: VARIANT)
 
 fn configure_codec(transform: &IMFTransform, settings: &EncoderSettings) {
     let Ok(codec) = transform.cast::<ICodecAPI>() else {
-        log::warn!("Encoder bietet kein ICodecAPI — Qualitätseinstellungen bleiben aus");
+        log::warn!("encoder offers no ICodecAPI — quality settings stay off");
         return;
     };
 
     let mean = settings.bitrate_kbps.saturating_mul(1000);
-    // Spitzen dürfen über den Mittelwert hinaus: Bei einer schnellen Drehung
-    // im Spiel braucht ein Bild ein Vielfaches eines ruhigen.
+    // Peaks may exceed the mean: on a fast turn in the game one frame needs a
+    // multiple of a still one.
     let peak = mean.saturating_add(mean / 2);
     let gop = settings.fps.max(1) * settings.keyframe_seconds.max(1);
 
@@ -186,15 +185,15 @@ fn configure_codec(transform: &IMFTransform, settings: &EncoderSettings) {
         ("Bitrate", &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(mean)),
         ("Spitzenbitrate", &CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(peak)),
         ("Keyframe-Abstand", &CODECAPI_AVEncMPVGOPSize, VARIANT::from(gop)),
-        // 0 = schnellstmöglich, 100 = beste Qualität. Ein Replay-Puffer läuft
-        // im Hintergrund, aber nicht in Echtzeit-Not — 70 ist der Punkt, an dem
-        // NVENC und AMF spürbar besser werden, ohne Bilder zu verlieren.
-        ("Qualität/Tempo", &CODECAPI_AVEncCommonQualityVsSpeed, VARIANT::from(70u32)),
-        // CABAC statt CAVLC: bei gleicher Bitrate rund 10 % weniger Artefakte.
+        // 0 = as fast as possible, 100 = best quality. A replay buffer runs in
+        // the background but is not in real-time distress — 70 is the point where
+        // NVENC and AMF get noticeably better without losing frames.
+        ("quality/speed", &CODECAPI_AVEncCommonQualityVsSpeed, VARIANT::from(70u32)),
+        // CABAC instead of CAVLC: around 10 % fewer artefacts at the same bitrate.
         ("CABAC", &CODECAPI_AVEncH264CABACEnable, VARIANT::from(true)),
-        // Low-Latency schaltet Lookahead und B-Frames ab. Für einen
-        // Replay-Puffer ist Latenz gleichgültig, Qualität nicht.
-        ("Low-Latency aus", &CODECAPI_AVLowLatencyMode, VARIANT::from(false)),
+        // Low latency switches off lookahead and B-frames. For a replay buffer
+        // latency is beside the point; quality is not.
+        ("low latency off", &CODECAPI_AVLowLatencyMode, VARIANT::from(false)),
     ];
 
     let rejected: Vec<&str> = wanted
@@ -204,21 +203,20 @@ fn configure_codec(transform: &IMFTransform, settings: &EncoderSettings) {
         .collect();
     if !rejected.is_empty() {
         log::warn!(
-            "Encoder kennt diese Einstellungen nicht: {} — sie bleiben auf dem Standard",
+            "encoder does not know these settings: {} — they stay at their defaults",
             rejected.join(", ")
         );
     }
 
-    // Angenommen heißt nicht übernommen. Der NVIDIA-MFT etwa quittiert jeden
-    // Keyframe-Abstand mit Erfolg, deckelt ihn aber auf die Bildrate — aus
-    // „alle 2 s" wird stillschweigend „jede Sekunde". Genau solche stummen
-    // Abweichungen waren der Grund, dass die Einstellungen vorher nichts taten,
-    // ohne dass es jemandem auffiel.
+    // Accepted does not mean applied. The NVIDIA MFT, for one, acknowledges any
+    // keyframe distance with success but caps it at the frame rate — "every 2 s"
+    // silently becomes "every second". Exactly those silent deviations were the
+    // reason the settings previously did nothing without anyone noticing.
     if let Some(effective) = read_u32(&codec, &CODECAPI_AVEncMPVGOPSize) {
         if effective != gop {
             log::info!(
-                "Encoder hält sich nicht an den Keyframe-Abstand: gewünscht alle {} Bilder, \
-                 tatsächlich alle {effective}",
+                "encoder does not honour the keyframe distance: asked for every {} frames, \
+                 actually every {effective}",
                 gop
             );
         }
@@ -246,20 +244,20 @@ fn media_type_video(
                 &MF_MT_FRAME_SIZE,
                 ((settings.width as u64) << 32) | settings.height as u64,
             )
-            .map_err(|err| format!("Bildgröße: {err}"))?;
+            .map_err(|err| format!("frame size: {err}"))?;
         media
             .SetUINT64(&MF_MT_FRAME_RATE, ((settings.fps.max(1) as u64) << 32) | 1)
             .map_err(|err| format!("Bildrate: {err}"))?;
         media
             .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)
-            .map_err(|err| format!("Pixelseitenverhältnis: {err}"))?;
+            .map_err(|err| format!("pixel aspect ratio: {err}"))?;
         media
             .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
             .map_err(|err| format!("Interlace: {err}"))?;
 
-        // Farbmetadaten mitschreiben, passend zu dem, was `convert.rs`
-        // tatsächlich erzeugt. Ohne diese Angaben rät der Player, und derselbe
-        // Clip sieht in Discord anders aus als im Schnittprogramm.
+        // Write the colour metadata along, matching what `convert.rs` actually
+        // produces. Without them the player guesses, and the same clip looks
+        // different in Discord than in an editor.
         let _ = media.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
         let _ = media.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
         let _ = media.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
@@ -274,9 +272,9 @@ struct Transform {
     events: Option<IMFMediaEventGenerator>,
     provides_samples: bool,
     chosen: EncoderId,
-    /// SPS/PPS aus dem Ausgabetyp. Die meisten Encoder schicken sie ohnehin vor
-    /// jedem IDR mit; fehlen sie, ist der Elementarstrom ohne diesen Vorspann
-    /// nicht dekodierbar. Doppelt schadet nicht, gar nicht schon.
+    /// SPS/PPS from the output type. Most encoders send them before every IDR
+    /// anyway; if they are missing, the elementary stream is not decodable
+    /// without this preamble. A duplicate does no harm; an absence does.
     sequence_header: Vec<u8>,
 }
 
@@ -284,11 +282,11 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     startup()?;
     let candidates = enumerate()?;
     if candidates.is_empty() {
-        return Err("Kein H.264-Encoder gefunden".into());
+        return Err("no H.264 encoder found".into());
     }
 
-    // Gewünschten Encoder zuerst; sonst der erste Hardware-Encoder; sonst der
-    // erste überhaupt (Software-Fallback).
+    // The requested encoder first; otherwise the first hardware encoder;
+    // otherwise the first one at all (software fallback).
     let pick = candidates
         .iter()
         .position(|(id, _)| *id == Some(settings.requested))
@@ -300,8 +298,8 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     let transform: IMFTransform = unsafe { activate.ActivateObject() }
         .map_err(|err| format!("Encoder starten: {err}"))?;
 
-    // Hardware-Encoder sind asynchron und müssen dafür erst freigeschaltet
-    // werden — sonst weist `SetOutputType` sie zurück.
+    // Hardware encoders are asynchronous and have to be unlocked for that first —
+    // otherwise `SetOutputType` rejects them.
     let mut is_async = false;
     if let Ok(attributes) = unsafe { transform.GetAttributes() } {
         is_async = unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) == 1;
@@ -311,38 +309,38 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
         }
     }
 
-    // Das D3D11-Gerät durchreichen — nur so nimmt der Encoder Texturen
-    // entgegen, statt ein Readback über den Hauptspeicher zu verlangen.
+    // Hand the D3D11 device through — that is the only way the encoder accepts
+    // textures instead of demanding a readback through main memory.
     let mut token = 0u32;
     let mut manager: Option<IMFDXGIDeviceManager> = None;
     unsafe {
         MFCreateDXGIDeviceManager(&mut token, &mut manager)
-            .map_err(|err| format!("DXGI-Gerätemanager: {err}"))?;
+            .map_err(|err| format!("DXGI device manager: {err}"))?;
     }
-    let manager = manager.ok_or_else(|| "DXGI-Gerätemanager fehlt".to_string())?;
+    let manager = manager.ok_or_else(|| "DXGI device manager missing".to_string())?;
     unsafe {
         manager
             .ResetDevice(&gpu.device, token)
-            .map_err(|err| format!("Gerät anmelden: {err}"))?;
+            .map_err(|err| format!("register device: {err}"))?;
         transform
             .ProcessMessage(
                 MFT_MESSAGE_SET_D3D_MANAGER,
                 manager.as_raw() as usize,
             )
-            .map_err(|err| format!("Gerät an Encoder: {err}"))?;
+            .map_err(|err| format!("device to encoder: {err}"))?;
     }
 
-    // Reihenfolge ist vorgeschrieben: Ausgabetyp vor Eingabetyp.
+    // The order is prescribed: output type before input type.
     let output = media_type_video(MFVideoFormat_H264, settings)?;
     unsafe {
         output
             .SetUINT32(&MF_MT_AVG_BITRATE, settings.bitrate_kbps.saturating_mul(1000))
             .map_err(|err| format!("Bitrate: {err}"))?;
         let _ = output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32);
-        // Keyframe-Abstand gehört hierher, nicht nur an ICodecAPI: Der
-        // NVIDIA-MFT nimmt `CODECAPI_AVEncMPVGOPSize` zwar widerspruchslos an,
-        // richtet sich aber nach diesem Feld. Ohne das blieb es bei einem
-        // Keyframe pro Sekunde, egal was eingestellt war.
+        // The keyframe distance belongs here, not only on ICodecAPI: the NVIDIA
+        // MFT accepts `CODECAPI_AVEncMPVGOPSize` without complaint but goes by
+        // this field. Without it there was one keyframe per second no matter what
+        // was configured.
         let _ = output.SetUINT32(
             &MF_MT_MAX_KEYFRAME_SPACING,
             settings.fps.max(1) * settings.keyframe_seconds.max(1),
@@ -401,7 +399,7 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     })
 }
 
-/// Ein Bild auf dem Weg zum Encoder.
+/// One frame on its way to the encoder.
 struct Job {
     texture: SendPtr<ID3D11Texture2D>,
     pts_100ns: i64,
@@ -418,7 +416,7 @@ impl Transform {
             )
             .map_err(|err| format!("Texturpuffer: {err}"))?;
 
-            // Ohne gesetzte Länge hält der Encoder den Puffer für leer.
+            // Without a length set the encoder takes the buffer for empty.
             if let Ok(two_d) = buffer.cast::<IMF2DBuffer>() {
                 if let Ok(len) = two_d.GetContiguousLength() {
                     let _ = buffer.SetCurrentLength(len);
@@ -428,19 +426,19 @@ impl Transform {
             let sample = MFCreateSample().map_err(|err| format!("Sample: {err}"))?;
             sample
                 .AddBuffer(&buffer)
-                .map_err(|err| format!("Sample füllen: {err}"))?;
+                .map_err(|err| format!("fill sample: {err}"))?;
             sample
                 .SetSampleTime(job.pts_100ns)
-                .map_err(|err| format!("Sample-Zeit: {err}"))?;
+                .map_err(|err| format!("sample time: {err}"))?;
             let _ = sample.SetSampleDuration(duration_100ns);
 
             self.transform
                 .ProcessInput(0, &sample, 0)
-                .map_err(|err| format!("Bild einreichen: {err}"))
+                .map_err(|err| format!("submit frame: {err}"))
         }
     }
 
-    /// Ein fertiges Paket abholen. `Ok(None)` heißt: gerade nichts da.
+    /// Collect a finished packet. `Ok(None)` means there is nothing right now.
     fn take_output(&self, duration_100ns: i64) -> Result<Option<EncodedPacket>, String> {
         unsafe {
             let mut data = MFT_OUTPUT_DATA_BUFFER {
@@ -450,7 +448,7 @@ impl Transform {
                 pEvents: std::mem::ManuallyDrop::new(None),
             };
 
-            // Manche Encoder liefern das Sample selbst, andere erwarten eines.
+            // Some encoders supply the sample themselves, others expect one.
             if !self.provides_samples {
                 let info = self
                     .transform
@@ -458,10 +456,10 @@ impl Transform {
                     .map_err(|err| format!("Ausgabeinfo: {err}"))?;
                 let buffer = MFCreateMemoryBuffer(info.cbSize.max(1))
                     .map_err(|err| format!("Ausgabepuffer: {err}"))?;
-                let sample = MFCreateSample().map_err(|err| format!("Ausgabesample: {err}"))?;
+                let sample = MFCreateSample().map_err(|err| format!("output sample: {err}"))?;
                 sample
                     .AddBuffer(&buffer)
-                    .map_err(|err| format!("Ausgabesample füllen: {err}"))?;
+                    .map_err(|err| format!("fill output sample: {err}"))?;
                 data.pSample = std::mem::ManuallyDrop::new(Some(sample));
             }
 
@@ -476,9 +474,9 @@ impl Transform {
                 Ok(()) => {}
                 Err(err) if err.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
                 Err(err) if err.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-                    // Der Encoder hat seinen Ausgabetyp geändert (kommt bei
-                    // manchen Treibern einmal zu Beginn vor). Neu abholen und
-                    // erneut anfragen — sonst steht der Strom.
+                    // The encoder changed its output type (some drivers do this
+                    // once at the beginning). Fetch it again and ask once more —
+                    // otherwise the stream stalls.
                     if let Ok(media) = self.transform.GetOutputAvailableType(0, 0) {
                         let _ = self.transform.SetOutputType(0, &media, 0);
                     }
@@ -516,20 +514,20 @@ impl Transform {
     }
 }
 
-/// Griff auf den laufenden Encoder.
+/// Handle on the running encoder.
 pub struct VideoEncoder {
     jobs: crossbeam_channel::Sender<Job>,
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
-    /// Welcher Encoder es tatsächlich geworden ist — die Statusanzeige zeigt
-    /// damit die Wahrheit statt der Wunschvorstellung aus der Konfiguration.
+    /// Which encoder it actually turned out to be — so the status display shows
+    /// the truth rather than the wish from the config.
     pub chosen: EncoderId,
-    /// SPS/PPS, die beim Speichern vor den Strom gehören.
+    /// SPS/PPS that belong in front of the stream when saving.
     pub sequence_header: Vec<u8>,
 }
 
 impl VideoEncoder {
-    /// `on_packet` läuft auf dem Encoder-Faden und muss kurz sein.
+    /// `on_packet` runs on the encoder thread and has to be short.
     pub fn start<F>(
         gpu: Arc<GpuDevice>,
         settings: EncoderSettings,
@@ -543,8 +541,8 @@ impl VideoEncoder {
             crossbeam_channel::bounded::<Result<(EncoderId, Vec<u8>), String>>(1);
         let running = Arc::new(AtomicBool::new(true));
 
-        // Der MFT wird im eigenen Faden gebaut und benutzt: COM-Objekte bleiben
-        // damit dort, wo sie erzeugt wurden.
+        // The MFT is built and used on its own thread: that keeps the COM objects
+        // where they were created.
         let thread = {
             let running = running.clone();
             let gpu = gpu.clone();
@@ -582,17 +580,16 @@ impl VideoEncoder {
             }
             Err(_) => {
                 running.store(false, Ordering::Relaxed);
-                Err("Encoder antwortet nicht".into())
+                Err("encoder is not responding".into())
             }
         }
     }
 
-    /// Ein Bild einreichen.
+    /// Submit one frame.
     ///
-    /// Wartet kurz, wenn der Encoder im Rückstand ist — siehe [`SUBMIT_WAIT`].
-    /// Gibt `false` zurück, wenn das Bild wirklich verloren ging; dann stimmt
-    /// die Bildrate der Aufnahme nicht mehr und der Clip wäre gegenüber seinem
-    /// Ton verschoben.
+    /// Waits briefly if the encoder has fallen behind — see [`SUBMIT_WAIT`].
+    /// Returns `false` when the frame really was lost; the recording's frame rate
+    /// is then no longer right and the clip would be shifted against its audio.
     pub fn submit(&self, texture: &ID3D11Texture2D, pts_100ns: i64) -> bool {
         let job = Job {
             texture: SendPtr(texture.clone()),
@@ -601,7 +598,7 @@ impl VideoEncoder {
         match self.jobs.send_timeout(job, SUBMIT_WAIT) {
             Ok(()) => true,
             Err(_) => {
-                log::warn!("Encoder kommt nicht nach — ein Bild ist verloren");
+                log::warn!("encoder cannot keep up — one frame is lost");
                 false
             }
         }
@@ -624,7 +621,7 @@ impl Drop for VideoEncoder {
     }
 }
 
-/// Die Schleife auf dem Encoder-Faden.
+/// The loop on the encoder thread.
 fn run<F>(
     transform: Transform,
     settings: EncoderSettings,
@@ -637,12 +634,12 @@ fn run<F>(
     let duration = 10_000_000 / settings.fps.max(1) as i64;
 
     match transform.events.clone() {
-        // Hardware-Encoder: Er sagt, wann er ein Bild will und wann eines
-        // fertig ist.
+        // Hardware encoder: it says when it wants a frame and when one is
+        // finished.
         Some(events) => {
-            // Offene „Ich will ein Bild"-Aufforderungen. Der Zähler ist nötig,
-            // weil das Warten auf das nächste Bild sonst eine Aufforderung
-            // verschlucken würde — der Encoder schickt sie kein zweites Mal.
+            // Outstanding "I want a frame" requests. The counter is needed
+            // because waiting for the next frame would otherwise swallow a request
+            // — the encoder does not send it a second time.
             let mut pending_input = 0u32;
 
             while running.load(Ordering::Relaxed) {
@@ -654,7 +651,7 @@ fn run<F>(
                             }
                             pending_input -= 1;
                         }
-                        // Nichts da — die Aufforderung bleibt bestehen.
+                        // Nothing there — the request stands.
                         Err(_) => continue,
                     }
                     continue;
@@ -677,7 +674,7 @@ fn run<F>(
                 }
             }
         }
-        // Software-Encoder: einreichen, dann abholen, bis nichts mehr kommt.
+        // Software encoder: submit, then collect until nothing more comes.
         None => {
             while running.load(Ordering::Relaxed) {
                 let Ok(job) = jobs.recv_timeout(Duration::from_millis(100)) else {
@@ -701,7 +698,7 @@ fn run<F>(
         }
     }
 
-    // Auslaufen lassen, damit die letzten Bilder noch herauskommen.
+    // Let it drain so the last frames still come out.
     unsafe {
         let _ = transform
             .transform

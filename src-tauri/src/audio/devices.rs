@@ -1,5 +1,5 @@
-//! Enumeration von Audio-Endpunkten (Ein- und Ausgänge) und von Prozessen,
-//! die gerade eine Audio-Session halten.
+//! Enumeration of audio endpoints (inputs and outputs) and of processes that
+//! currently hold an audio session.
 
 use crate::model::{AudioDevice, AudioProcess, DeviceKind};
 
@@ -21,7 +21,7 @@ mod win {
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
     };
 
-    /// COM je Thread initialisieren; ein bereits initialisierter Thread ist ok.
+    /// Initialize COM per thread; an already-initialized thread is fine.
     pub fn ensure_com() {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -34,7 +34,7 @@ mod win {
                 .OpenPropertyStore(STGM_READ)
                 .and_then(|store| store.GetValue(&PKEY_Device_FriendlyName))
                 .map(|value| value.to_string())
-                .unwrap_or_else(|_| "Unbekanntes Gerät".to_string())
+                .unwrap_or_else(|_| "Unknown device".to_string())
         }
     }
 
@@ -98,7 +98,7 @@ mod win {
         }
     }
 
-    /// Alle Prozesse, die am Standard-Ausgabegerät eine Audio-Session halten.
+    /// Every process holding an audio session on the default output device.
     pub fn list_processes() -> Vec<AudioProcess> {
         ensure_com();
         unsafe {
@@ -167,7 +167,7 @@ pub fn list_processes() -> Vec<AudioProcess> {
     win::list_processes()
 }
 
-// Nicht-Windows: leere Listen, damit `cargo test` überall läuft.
+// Non-Windows: empty lists so `cargo test` runs everywhere.
 #[cfg(not(windows))]
 pub fn list_devices() -> Vec<AudioDevice> {
     let _ = DeviceKind::Output;

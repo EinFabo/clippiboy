@@ -1,8 +1,8 @@
-//! Wegwerfbare Hilfsdateien für den Player.
+//! Throwaway helper files for the player.
 //!
-//! Alles hier lässt sich in einer Sekunde neu erzeugen und wird beim Start
-//! weggeräumt. **Nicht** hierher gehören die Einzelspuren eines Clips — die
-//! sind das Original der Mischung und liegen in `stems.rs`.
+//! Everything here can be regenerated in a second and is cleared out at
+//! startup. What does **not** belong here are a clip's individual tracks —
+//! those are the master copy of the mix and live in `stems.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -11,26 +11,26 @@ use crate::model::Clip;
 use crate::muxer::{ffmpeg, run, sanitize};
 use crate::stems::is_newer;
 
-/// Ordner für die Hilfsdateien. Liegt im Datenverzeichnis, weil der
-/// Clip-Ordner dem Nutzer gehört und keine Hilfsdateien vertragen soll.
+/// Folder for the helper files. It sits in the data directory because the clip
+/// folder belongs to the user and should not have to put up with scratch files.
 pub fn dir() -> PathBuf {
     config::data_dir().join("preview")
 }
 
-/// Beim Start aufräumen: Die Dateien gehören zu Clips, die es womöglich nicht
-/// mehr gibt.
+/// Clean up at startup: these files belong to clips that may not exist any
+/// more.
 pub fn clear() {
     let _ = std::fs::remove_dir_all(dir());
-    // Gleich wieder anlegen: der Player bekommt den Ordner beim Start
-    // freigegeben, und ein fehlender Ordner ist unnötig zu erklären.
+    // Recreate it right away: the player gets the folder whitelisted at
+    // startup, and a missing folder is needless to explain.
     let _ = std::fs::create_dir_all(dir());
 }
 
-/// Ein Bild der Tonspur für die Zeitleiste. Wo etwas passiert, sieht man damit
-/// vor dem Hinhören — das Suchen nach der richtigen Stelle ist sonst reines
-/// Blindtasten.
+/// A picture of the audio track for the timeline. It shows where something
+/// happens before you have to listen for it — otherwise finding the right spot
+/// is pure guesswork.
 ///
-/// Ein transparentes PNG, damit die Leiste ihre eigene Farbe behält.
+/// A transparent PNG, so the timeline keeps its own colour.
 pub fn waveform(clip: &Clip) -> Result<PathBuf, String> {
     let dir = dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -43,9 +43,9 @@ pub fn waveform(clip: &Clip) -> Result<PathBuf, String> {
     draw.args(["-y", "-hide_banner", "-loglevel", "error"])
         .arg("-i")
         .arg(&clip.path)
-        // `split_channels=0` legt links und rechts übereinander: Die Leiste ist
-        // 40 Pixel hoch, zwei getrennte Kanäle wären darin nicht mehr zu
-        // unterscheiden.
+        // `split_channels=0` lays left and right on top of each other: the
+        // timeline is 40 pixels tall, two separate channels would no longer be
+        // distinguishable in there.
         .args([
             "-filter_complex",
             "[0:a:0]aformat=channel_layouts=mono,\
@@ -56,7 +56,7 @@ pub fn waveform(clip: &Clip) -> Result<PathBuf, String> {
             "1",
         ])
         .arg(&out);
-    run(&mut draw, "Wellenform zeichnen")?;
+    run(&mut draw, "draw waveform")?;
     Ok(out)
 }
 
@@ -65,14 +65,14 @@ mod tests {
     use super::*;
     use crate::stems;
 
-    /// `clear()` löscht seinen Ordner mitsamt Inhalt. Läge die Ablage der
-    /// Einzelspuren darin, wären nach jedem App-Start sämtliche Mischungen für
-    /// immer unveränderbar — und zwar ohne Fehlermeldung.
+    /// `clear()` deletes its folder along with everything in it. If the stems
+    /// lived inside it, every mix would be permanently unchangeable after each
+    /// app start — and without an error message at that.
     #[test]
     fn the_stems_are_not_inside_the_scratch_folder() {
         assert!(
             !stems::root().starts_with(dir()),
-            "Die Einzelspuren dürfen nicht im Wegwerf-Ordner liegen"
+            "the stems must not live in the scratch folder"
         );
         assert_ne!(stems::root(), dir());
     }

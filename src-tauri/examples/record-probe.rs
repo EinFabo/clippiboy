@@ -1,8 +1,8 @@
-//! Probeaufnahme: startet die Pipeline, puffert ein paar Sekunden und schreibt
-//! einen Clip. Prüft damit in einem Lauf, was sich nicht in Unit-Tests fassen
-//! lässt — Capture, Farbumwandlung, Encoder-MFT, Taktgeber und Muxen.
+//! Trial recording: starts the pipeline, buffers a few seconds and writes a
+//! clip. Checks in one run what unit tests cannot capture — capture, colour
+//! conversion, the encoder MFT, the clock and muxing.
 //!
-//!     cargo run --example aufnahme-probe -- [sekunden]
+//!     cargo run --example record-probe -- [seconds]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,12 +23,12 @@ fn main() {
 
     let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
     muxer::set_tool_dir(resources);
-    println!("ffmpeg gefunden: {}", muxer::available());
+    println!("ffmpeg found: {}", muxer::available());
 
-    println!("\nEncoder laut Media Foundation:");
+    println!("\nEncoders according to Media Foundation:");
     for info in encode::list_encoders() {
         println!(
-            "  {:<28} verfügbar={} hardware={}",
+            "  {:<28} available={} hardware={}",
             info.name, info.available, info.hardware
         );
     }
@@ -43,19 +43,19 @@ fn main() {
         encoder: encode::preferred_encoder(),
         keyframe_seconds: 2,
     };
-    println!("\nGewünschter Encoder: {:?}", recording.encoder);
+    println!("\nRequested encoder: {:?}", recording.encoder);
 
-    // Zwei Quellen mit eigener Spur. Sie liefern nichts (die WASAPI-Ströme
-    // laufen hier gar nicht), aber sie erzeugen die zusätzlichen Spuren — und
-    // genau deren Weg durch Muxer, Ablage und Speichern soll geprüft werden.
-    let sources: Vec<AudioSource> = ["Mikrofon", "Discord"]
+    // Two sources with a track of their own. They deliver nothing (the WASAPI
+    // streams do not run here at all), but they create the extra tracks — and it
+    // is exactly their path through muxer, store and save that is being checked.
+    let sources: Vec<AudioSource> = ["Microphone", "Discord"]
         .iter()
         .enumerate()
         .map(|(index, label)| AudioSource {
             id: format!("probe-{index}"),
             label: (*label).into(),
             kind: SourceKind::InputDevice {
-                device_id: format!("nicht-vorhanden-{index}"),
+                device_id: format!("not-present-{index}"),
             },
             enabled: true,
             gain_db: 0.0,
@@ -69,11 +69,11 @@ fn main() {
     let mut pipeline = match Pipeline::start(&recording, 60, sources, audio) {
         Ok(pipeline) => pipeline,
         Err(err) => {
-            eprintln!("Pipeline startet nicht: {err}");
+            eprintln!("pipeline will not start: {err}");
             std::process::exit(1);
         }
     };
-    println!("Tatsächlicher Encoder: {:?}", *pipeline.shared.encoder.lock());
+    println!("Actual encoder: {:?}", *pipeline.shared.encoder.lock());
 
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(seconds) {
@@ -82,8 +82,8 @@ fn main() {
         let frames = shared.frames.load(std::sync::atomic::Ordering::Relaxed);
         let duplicated = shared.duplicated.load(std::sync::atomic::Ordering::Relaxed);
         println!(
-            "  {:>2}s  Bilder={frames:<5} davon wiederholt={duplicated:<5} \
-             gepuffert={:.1}s {:.1} MB",
+            "  {:>2}s  frames={frames:<5} of those repeated={duplicated:<5} \
+             buffered={:.1}s {:.1} MB",
             started.elapsed().as_secs(),
             shared.buffered_seconds(),
             shared.buffer_bytes() as f64 / 1_048_576.0,
@@ -91,24 +91,24 @@ fn main() {
     }
 
     if let Some(err) = pipeline.shared.error.lock().take() {
-        eprintln!("Fehler aus der Aufnahme: {err}");
+        eprintln!("error from the recording: {err}");
     }
 
     let snapshot = match pipeline.snapshot(5) {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            eprintln!("Kein Schnappschuss: {err}");
+            eprintln!("no snapshot: {err}");
             std::process::exit(1);
         }
     };
     let keyframes = snapshot.packets.iter().filter(|p| p.keyframe).count();
     println!(
-        "\nSchnappschuss: {} Pakete, {keyframes} Keyframes, SPS/PPS {} Bytes",
+        "\nSnapshot: {} packets, {keyframes} keyframes, SPS/PPS {} bytes",
         snapshot.packets.len(),
         snapshot.sequence_header.len()
     );
     println!(
-        "Tonspuren: {} ({:?}), {} Frames ab QPC {}",
+        "Audio tracks: {} ({:?}), {} frames from QPC {}",
         snapshot.tracks.len(),
         snapshot.tracks.iter().map(|t| t.label.clone()).collect::<Vec<_>>(),
         snapshot.audio_frames,
@@ -134,13 +134,13 @@ fn main() {
             probe(&result.path);
             check_save(&result.path, result.duration_ms);
         }
-        Err(err) => eprintln!("Clip nicht geschrieben: {err}"),
+        Err(err) => eprintln!("clip not written: {err}"),
     }
 
     pipeline.stop();
 }
 
-/// Was ffprobe über die fertige Datei sagt — Bildrate, Codec, Spuren.
+/// What ffprobe says about the finished file — frame rate, codec, tracks.
 fn probe(path: &std::path::Path) {
     let output = muxer::command("ffprobe")
         .args([
@@ -157,8 +157,8 @@ fn probe(path: &std::path::Path) {
     }
 }
 
-/// Den Speichern-Weg prüfen: Mischung neu einrechnen und dabei nachmessen,
-/// dass die Bildspur unangetastet bleibt und genau eine Tonspur übrig ist.
+/// Check the save path: reapply the mix and measure that the video track stays
+/// untouched and exactly one audio track is left.
 fn check_save(path: &std::path::Path, duration_ms: u64) {
     let before = video_frames(path);
     let clip = Clip {
@@ -180,17 +180,17 @@ fn check_save(path: &std::path::Path, duration_ms: u64) {
     let tracks = match stems::tracks(&clip.id, &edit::source_path(&clip)) {
         Ok(tracks) => tracks,
         Err(err) => {
-            eprintln!("Spuren nicht lesbar: {err}");
+            eprintln!("tracks not readable: {err}");
             return;
         }
     };
     println!(
-        "\nSpeichern-Probe: {} Spur(en){}",
+        "\nSave probe: {} track(s){}",
         tracks.len(),
         if tracks.iter().all(|t| t.preview_path.is_some()) {
-            ", einzeln abgelegt"
+            ", stored individually"
         } else {
-            ", nur in der Datei"
+            ", only in the file"
         }
     );
 
@@ -203,20 +203,20 @@ fn check_save(path: &std::path::Path, duration_ms: u64) {
         })
         .collect();
 
-    // Ohne Zuschnitt: Das Bild muss dabei Bild für Bild dasselbe bleiben.
+    // With no trim: the video has to stay identical frame for frame.
     let whole = edit::Trim::whole(clip.duration_ms);
     match edit::apply(&clip, whole, &mix, EncoderId::X264, 40_000, |_| {}) {
         Ok(applied) => {
             let after = video_frames(path);
             println!(
-                "  neu geschrieben: {:.1} MB",
+                "  rewritten: {:.1} MB",
                 applied.size_bytes as f64 / 1_048_576.0
             );
-            println!("  Bilder vorher {before:?}, nachher {after:?}");
-            assert_eq!(before, after, "Die Bildspur wurde angefasst!");
+            println!("  frames before {before:?}, after {after:?}");
+            assert_eq!(before, after, "the video track was touched!");
             probe(path);
         }
-        Err(err) => eprintln!("  Speichern fehlgeschlagen: {err}"),
+        Err(err) => eprintln!("  save failed: {err}"),
     }
     stems::remove("probe");
 }
