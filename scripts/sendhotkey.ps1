@@ -20,4 +20,4 @@ Start-Sleep -Milliseconds 60
 [Keyb]::keybd_event($vk, 0, $KEYUP, [UIntPtr]::Zero)
 [Keyb]::keybd_event($VK_SHIFT, 0, $KEYUP, [UIntPtr]::Zero)
 [Keyb]::keybd_event($VK_CONTROL, 0, $KEYUP, [UIntPtr]::Zero)
-Write-Output "Ctrl+Shift+$Key gesendet"
+Write-Output "sent Ctrl+Shift+$Key"

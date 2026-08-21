@@ -13,7 +13,7 @@ public class Ui2 {
 '@
 
 $proc = Get-Process -Name clippiboy -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-if (-not $proc) { Write-Output "ClippiBoy-Fenster nicht gefunden"; exit 1 }
+if (-not $proc) { Write-Output "ClippiBoy window not found"; exit 1 }
 $hwnd = $proc.MainWindowHandle
 
 [void][Ui2]::ShowWindow($hwnd, 9)
@@ -28,4 +28,4 @@ $gfx = [System.Drawing.Graphics]::FromImage($bmp)
 $gfx.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
 $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
 $gfx.Dispose(); $bmp.Dispose()
-Write-Output "gespeichert: $Out ($w x $h)"
+Write-Output "saved: $Out ($w x $h)"

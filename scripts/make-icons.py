@@ -1,24 +1,24 @@
-"""Erzeugt alle Icon-Größen aus `src-tauri/icons/icon.png` (1024x1024, RGBA).
+"""Generates every icon size from `src-tauri/icons/icon.png` (1024x1024, RGBA).
 
-Aufruf aus dem Projektwurzelverzeichnis: `python3 scripts/make-icons.py`
+Run from the project root: `python3 scripts/make-icons.py`
 
-Das Tray-Icon ist ein runder Ausschnitt der Bildmarke ohne den Schriftzug —
-bei 16 px wäre „Clippiboy" nur noch ein Fleck. Das Logo in der Titelleiste ist
-davon unabhängig: `src/assets/logo.svg` ist von Hand gezeichnet und bleibt bei
-jeder Größe scharf.
+The tray icon is a round crop of the mark without the wordmark —
+at 16 px "Clippiboy" would be nothing but a smudge. The logo in the title bar is
+independent of this: `src/assets/logo.svg` is drawn by hand and stays sharp at
+any size.
 """
 
 from PIL import Image, ImageDraw
 
 MASTER = "src-tauri/icons/icon.png"
 ICONS = "src-tauri/icons/"
-# Ausschnitt der Bildmarke im 1024er Master.
+# Crop of the mark within the 1024 master.
 MARK = (185, 60, 755, 630)
 
 
 def round_mark(master: Image.Image, size: int) -> Image.Image:
     crop = master.crop(MARK)
-    # Maske vierfach überabgetastet, sonst franst der Rand aus.
+    # The mask is supersampled 4x, otherwise the edge frays.
     mask = Image.new("L", (crop.width * 4, crop.height * 4), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, mask.width - 1, mask.height - 1), fill=255)
     crop.putalpha(mask.resize(crop.size, Image.LANCZOS))

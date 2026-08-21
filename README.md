@@ -1,118 +1,116 @@
 # ClippiBoy
 
-Clip-Recorder für Windows: Replay-Puffer wie bei Medal, aber mit einem
-Audio-System, das mehrere Quellen gleichzeitig kann — Ausgabegeräte, einzelne
-Anwendungen (Prozess-Loopback) und Mikrofone, jede Quelle wahlweise im Hauptmix
-oder auf einer eigenen Tonspur im Clip.
+A clip recorder for Windows: a replay buffer like Medal's, but with an audio
+system that handles several sources at once — output devices, individual
+applications (process loopback) and microphones, each source either in the main
+mix or on a track of its own in the clip.
 
-## Stand
+## Status
 
-| Bereich | Stand |
+| Area | Status |
 |---|---|
-| UI-Shell, Design-System, alle Screens | ✅ fertig |
-| Geräte-, Prozess- und Monitor-/Fenster-Enumeration | ✅ fertig (Windows) |
-| Encoder-Erkennung über DXGI (NVENC/AMF/QSV/x264) | ✅ fertig |
-| Konfiguration + Clip-Datenbank (SQLite) | ✅ fertig |
-| Replay-Ring-Puffer (keyframe-sicher, getestet) | ✅ fertig |
-| Video-Capture (Windows.Graphics.Capture, zero-copy) | ✅ fertig |
-| Encoder (Media Foundation, H.264 + AAC) | ✅ fertig |
-| WASAPI-Aufnahme aller Quellentypen + Mixer | ✅ fertig |
-| Clip speichern (Paket-Ring → MP4, kein Re-Encode) | ✅ fertig |
-| Globale Hotkeys | ✅ fertig |
-| Clip-Player in der App | ✅ fertig |
-| Tray-Symbol, Schließen ins Tray | ✅ fertig |
-| Banner über dem Spiel | ✅ fertig |
-| Spielerkennung (Prozess-EXE) | ✅ fertig |
-| Einzelspuren neben dem Clip, Mischung nachträglich änderbar | ✅ fertig |
-| Icon, Installer (NSIS), Auto-Update | ✅ fertig |
-| Puffer-Automatik (beim Start / im Spiel) | ✅ fertig |
-| Clip bearbeiten: Name, Beschreibung, Spurmischung, Zuschnitt | ✅ fertig |
-| Upload | ⏳ offen |
+| UI shell, design system, all screens | ✅ done |
+| Device, process and monitor/window enumeration | ✅ done (Windows) |
+| Encoder detection via DXGI (NVENC/AMF/QSV/x264) | ✅ done |
+| Configuration + clip database (SQLite) | ✅ done |
+| Replay ring buffer (keyframe-safe, tested) | ✅ done |
+| Video capture (Windows.Graphics.Capture, zero-copy) | ✅ done |
+| Encoder (Media Foundation, H.264 + AAC) | ✅ done |
+| WASAPI capture of every source type + mixer | ✅ done |
+| Save clip (packet ring → MP4, no re-encode) | ✅ done |
+| Global hotkeys | ✅ done |
+| In-app clip player | ✅ done |
+| Tray icon, close to tray | ✅ done |
+| Banner over the game | ✅ done |
+| Game detection (process exe) | ✅ done |
+| Individual tracks beside the clip, mix changeable afterwards | ✅ done |
+| Icon, installer (NSIS), auto-update | ✅ done |
+| Buffer automation (at startup / in game) | ✅ done |
+| Clip editing: name, description, track mix, trim | ✅ done |
+| Upload | ⏳ open |
 
-## Entwickeln
+## Developing
 
-Gebaut wird **auf der Windows-Seite** (WSL kann keine Windows-Binaries bauen).
+Builds happen **on the Windows side** (WSL cannot build Windows binaries).
 In PowerShell:
 
 ```powershell
 cd C:\Users\fabia\projects\clippiboy
 npm install
-npm run ffmpeg       # holt ffmpeg.exe/ffprobe.exe nach src-tauri\resources
-npm run app          # Tauri-Dev-Modus mit Hot Reload
-npm run app:build    # NSIS-Installer nach src-tauri\target\release\bundle
+npm run ffmpeg       # fetches ffmpeg.exe/ffprobe.exe into src-tauri\resources
+npm run app          # Tauri dev mode with hot reload
+npm run app:build    # NSIS installer into src-tauri\target\release\bundle
 ```
 
-Voraussetzungen: Node 20+, Rust (MSVC-Toolchain), Visual Studio 2022 Build
-Tools mit C++-Workload und WebView2 (ab Windows 11 vorinstalliert).
+Requirements: Node 20+, Rust (MSVC toolchain), Visual Studio 2022 Build Tools
+with the C++ workload, and WebView2 (pre-installed from Windows 11 on).
 
-ffmpeg muss **nicht** installiert sein: `npm run ffmpeg` legt eine
-getestete Fassung neben die App, und die hat Vorrang vor einer im PATH.
+ffmpeg does **not** have to be installed: `npm run ffmpeg` puts a tested build
+next to the app, and that one takes precedence over any on the PATH.
 
-Hotkeys: `Strg+Shift+B` Puffer an/aus, `Strg+Shift+S` Clip speichern. Beide
-lassen sich in den Einstellungen auf jede Taste legen — auch auf eine ohne
-Zusatztaste, etwa `F9`. Eine einzelne Buchstabentaste gilt dann allerdings
-überall, auch im Chat.
+Hotkeys: `Ctrl+Shift+B` buffer on/off, `Ctrl+Shift+S` save clip. Both can be
+bound to any key in the settings — including one with no modifier, `F9` for
+instance. A single letter key then applies everywhere, chat included.
 
-Das ✕ schließt die App nicht, sondern legt sie ins Tray — dort lässt sie sich
-wieder öffnen, der Puffer an- und ausschalten und ein Clip speichern; der
-Tooltip zeigt Pufferstand und erkanntes Spiel. Beendet wird über „Beenden" im
-Tray-Menü.
+The ✕ does not close the app but puts it in the tray — from there it can be
+reopened, the buffer switched on and off and a clip saved; the tooltip shows the
+buffer level and the detected game. Quitting happens via "Quit" in the tray
+menu.
 
-### Nur die UI (auch unter Linux/WSL möglich)
+### UI only (works on Linux/WSL too)
 
 ```bash
-npm run dev          # http://localhost:1420 mit Mock-Daten aus src/lib/mock.ts
+npm run dev          # http://localhost:1420 with mock data from src/lib/mock.ts
 ```
 
-### Prüfen ohne Windows
+### Checking without Windows
 
 ```bash
 cd src-tauri
-cargo test --lib                            # Puffer-, Mixer- und DB-Logik
-cargo check --target x86_64-pc-windows-gnu  # typprüft auch den Windows-Code
+cargo test --lib                            # buffer, mixer and DB logic
+cargo check --target x86_64-pc-windows-gnu  # type-checks the Windows code too
 ```
 
-Bricht der Typcheck mit `Inconsistency detected by ld.so` in einem
-Build-Skript ab, liegt das Zielverzeichnis auf der Windows-Platte — WSL kann
-von dort nicht jede Binärdatei starten. Dann einmal umlenken:
+If the type check aborts with `Inconsistency detected by ld.so` inside a build
+script, the target directory sits on the Windows disk — WSL cannot start every
+binary from there. Redirect it once:
 
 ```bash
 export CARGO_TARGET_DIR=~/.cache/clippiboy-target
 ```
 
-## Weitergeben und aktualisieren
+## Shipping and updating
 
-`npm run app:build` erzeugt `ClippiBoy_<version>_x64-setup.exe` — eine Datei,
-die man verschicken kann. Sie installiert pro Benutzer (kein Administrator
-nötig), legt einen Startmenü-Eintrag an und bringt ffmpeg mit; auf der
-Gegenseite braucht es nur WebView2, das auf Windows 10/11 vorhanden ist.
-Dadurch, dass ffmpeg mit im Paket steckt, ist das Setup rund 90 MB groß.
+`npm run app:build` produces `ClippiBoy_<version>_x64-setup.exe` — one file you
+can send around. It installs per user (no administrator needed), creates a Start
+menu entry and brings ffmpeg along; on the other end all it needs is WebView2,
+which is present on Windows 10/11. Because ffmpeg is in the package, the
+installer is about 90 MB.
 
-**Updates** kommen aus den GitHub Releases von `EinFabo/clippiboy`. Jedes Paket
-ist signiert; der öffentliche Schlüssel steht in `tauri.conf.json`, der private
-liegt unter `%USERPROFILE%\.clippiboy\updater.key` samt Passwort daneben in
-`updater.password`. Beides gehört als Repository-Secret hinterlegt und **nicht**
-ins Repo:
+**Updates** come from the GitHub releases of `EinFabo/clippiboy`. Every package
+is signed; the public key sits in `tauri.conf.json`, the private one under
+`%USERPROFILE%\.clippiboy\updater.key` with its password beside it in
+`updater.password`. Both belong in repository secrets and **not** in the repo:
 
-| Secret | Inhalt |
+| Secret | Contents |
 |---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | Inhalt von `updater.key` |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Inhalt von `updater.password` |
+| `TAURI_SIGNING_PRIVATE_KEY` | contents of `updater.key` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | contents of `updater.password` |
 
-Geht der Schlüssel verloren, kann keine bestehende Installation mehr ein Update
-annehmen — dann bleibt nur, allen ein neues Setup zu schicken.
+If the key is lost, no existing installation can accept an update any more —
+then all that is left is sending everyone a new installer.
 
-Veröffentlichen:
+Publishing:
 
 ```powershell
-# 1. Version in src-tauri/tauri.conf.json und package.json hochzählen
-# 2. Tag setzen und schieben — der Workflow baut, signiert und veröffentlicht
+# 1. Bump the version in src-tauri/tauri.conf.json and package.json
+# 2. Tag and push — the workflow builds, signs and publishes
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Lokal von Hand bauen und signieren (das Passwort muss gesetzt sein, sonst
-fragt der Build interaktiv danach):
+Building and signing locally by hand (the password has to be set, otherwise the
+build asks for it interactively):
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.clippiboy\updater.key"
@@ -120,351 +118,341 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content "$env:USERPROFILE\.clippib
 npm run app:build
 ```
 
-Die App fragt beim Start einmal nach, ob es etwas Neueres gibt, installiert
-aber nichts von selbst: Unter Windows heißt Installieren, dass sich die App
-beendet und das Setup startet — mitten in einer Aufnahme wäre das genau das
-Falsche. Der Fund landet in den Einstellungen unter „Version", dort läuft die
-Installation auf Knopfdruck (ein laufender Puffer wird vorher sauber
-gestoppt).
+The app asks once at startup whether there is something newer, but installs
+nothing by itself: on Windows, installing means the app quits and the installer
+starts — in the middle of a recording that would be exactly the wrong thing. The
+find shows up in the settings under "Version", where the installation runs at
+the press of a button (a running buffer is stopped cleanly first).
 
-## Wann der Puffer läuft
+## When the buffer runs
 
-Standardmäßig gar nicht von selbst — der Puffer geht über Hotkey, Tray oder
-den Knopf in der App an. In den Einstellungen unter „Verhalten" lässt sich das
-umstellen:
+By default not on its own — the buffer goes on via hotkey, tray or the button in
+the app. Under "Behaviour" in the settings that can be changed:
 
-* **Puffer automatisch einschalten** — die Automatik übernimmt.
-* zusätzlich **Nur im Spiel puffern** an: der Puffer startet, sobald ein Spiel
-  im Vordergrund erkannt wird, und stoppt 30 Sekunden nachdem keines mehr da
-  ist. Die halbe Minute Nachlauf ist Absicht: kurzes Alt-Tab darf den
-  Mitschnitt nicht abwürgen.
-* zusätzlich **Nur im Spiel puffern** aus: der Puffer läuft ab dem Start von
-  ClippiBoy durch, egal was im Vordergrund ist.
+* **Start the buffer automatically** — the automation takes over.
+* plus **Only buffer in game** on: the buffer starts as soon as a game is
+  detected in the foreground and stops 30 seconds after none is left. The half
+  minute of run-on is deliberate: a brief alt-tab must not choke the recording.
+* plus **Only buffer in game** off: the buffer runs from ClippiBoy's start
+  onwards, whatever is in the foreground.
 
-Was der Nutzer selbst schaltet, hat immer Vorrang: Ein von Hand gestarteter
-Puffer wird nie automatisch gestoppt, und ein von Hand gestoppter nicht zwei
-Sekunden später wieder gestartet — die Automatik hält sich zurück, bis das
-Spiel beendet ist.
+What the user switches themselves always wins: a buffer started by hand is never
+stopped automatically, and one stopped by hand is not restarted two seconds
+later — the automation holds back until the game has ended.
 
-Mit **Mit Windows starten** trägt sich ClippiBoy in den Autostart ein und
-startet dann versteckt im Tray (`--autostart`). Zusammen mit der Automatik
-läuft der Mitschnitt damit, ohne dass man je ein Fenster sieht.
+**Start with Windows** registers ClippiBoy for auto-start, and it then starts
+hidden in the tray (`--autostart`). Together with the automation, recording runs
+without you ever seeing a window.
 
-## Aufbau
+## Layout
 
 ```
-src/                     React-UI
-  lib/types.ts           IPC-Typen — Gegenstück zu src-tauri/src/model.rs
-  lib/ipc.ts             typisierte Command-Wrapper
-  lib/mock.ts            Mock-Daten für den Browser-Modus
-  store.ts               Zustand-Store, spricht mit dem Kern
-  routes/                Übersicht, Clips, Audio-Mixer, Aufnahme, Einstellungen
-  components/ClipPlayer.tsx   Player über der Galerie
-  components/ClipEditor.tsx   Bearbeiten-Bereich: Metadaten, Spuren, Export
-  components/ui/Menu.tsx      Rechtsklick-Menü (ein Menü, global)
-  components/clipMenu.tsx     dessen Einträge für einen Clip
-  components/TextMenu.tsx     WebView-Menü aus, eigenes Menü in Textfeldern
-  components/SourceTrouble.tsx Tonquellen, die nicht oder doppelt laufen
-  lib/useClipMix.ts      zusätzliche Tonspuren synchron zum Video abspielen
-  overlay/               eigenes Fenster: der Banner über dem Spiel
+src/                     React UI
+  lib/types.ts           IPC types — counterpart to src-tauri/src/model.rs
+  lib/ipc.ts             typed command wrappers
+  lib/mock.ts            mock data for browser mode
+  store.ts               Zustand store, talks to the core
+  routes/                Overview, Clips, Audio mixer, Recording, Settings
+  components/ClipPlayer.tsx   player over the gallery
+  components/ClipEditor.tsx   editing pane: metadata, tracks, export
+  components/ui/Menu.tsx      right-click menu (one menu, global)
+  components/clipMenu.tsx     its entries for a clip
+  components/TextMenu.tsx     WebView menu off, own menu in text fields
+  components/SourceTrouble.tsx audio sources that do not run, or run doubled
+  lib/useClipMix.ts      play the extra audio tracks in sync with the video
+  overlay/               a window of its own: the banner over the game
 src-tauri/src/
-  model.rs               gemeinsame Datentypen
-  pipeline.rs            Capture → Encoder → Paket-Ring
-  wgc.rs                 Windows.Graphics.Capture, Bilder als D3D11-Texturen
-  gpu.rs                 D3D11-Gerät, von Capture und Encoder geteilt
-  convert.rs             BGRA→NV12 auf der GPU + Taktgeber für echtes CFR
-  mft.rs                 H.264-Encoder als Media Foundation Transform
-  buffer.rs              keyframe-sicherer Paket-Ring (+ Unit-Tests)
-  muxer.rs               Pakete + Tonspuren → MP4 (ffmpeg, ohne Re-Encode)
-  stems.rs               Einzelspuren ablegen, entpacken, mischen (+ Tests)
-  edit.rs                Clip neu schreiben: Mischung + Zuschnitt (+ Tests)
-  preview.rs             Wegwerf-Hilfsdateien (Wellenform für die Zeitleiste)
-  audio/capture.rs       WASAPI je Quelle (Gerät, Loopback, Prozess)
-  audio/engine.rs        laufende Streams, Pegel, Mischen
-  audio/ring.rs          Ringpuffer je Quelle (+ Unit-Tests)
-  audio/devices.rs       WASAPI-Endpunkte und Prozesse mit Audio-Session
-  audio/mod.rs           Spur-Layout, Gain (+ Unit-Tests)
-  capture.rs             Monitore und Fenster als Aufnahmeziele, samt Hz
-  game.rs                Spielerkennung (+ Unit-Tests)
-  games.json             EXE → Spielname
-  tray.rs                Tray-Symbol, Menü, Tooltip
-  overlay.rs             Overlay-Fenster ansteuern
-  encode.rs              Encoder-Erkennung
-  clipboard.rs           Windows-Zwischenablage: Datei (CF_HDROP) und Text
-  clips.rs               SQLite-Clip-Index
-  filing.rs              Ordnung im Clip-Ordner: je Spiel ein Ordner (+ Tests)
-  thumbs.rs              Vorschaubilder (im Datenverzeichnis, nicht beim Clip)
-  config.rs              Konfiguration als JSON
-  commands.rs            Tauri-Commands
-  updater.rs             Update-Prüfung und Installation
+  model.rs               shared data types
+  pipeline.rs            capture → encoder → packet ring
+  wgc.rs                 Windows.Graphics.Capture, frames as D3D11 textures
+  gpu.rs                 D3D11 device, shared by capture and encoder
+  convert.rs             BGRA→NV12 on the GPU + clock for true CFR
+  mft.rs                 H.264 encoder as a Media Foundation Transform
+  buffer.rs              keyframe-safe packet ring (+ unit tests)
+  muxer.rs               packets + audio tracks → MP4 (ffmpeg, no re-encode)
+  stems.rs               store, extract and mix individual tracks (+ tests)
+  edit.rs                rewrite a clip: mix + trim (+ tests)
+  preview.rs             throwaway helper files (waveform for the timeline)
+  audio/capture.rs       WASAPI per source (device, loopback, process)
+  audio/engine.rs        running streams, levels, mixing
+  audio/ring.rs          ring buffer per source (+ unit tests)
+  audio/devices.rs       WASAPI endpoints and processes with an audio session
+  audio/mod.rs           track layout, gain (+ unit tests)
+  capture.rs             monitors and windows as capture targets, incl. Hz
+  game.rs                game detection (+ unit tests)
+  games.json             exe → game name
+  tray.rs                tray icon, menu, tooltip
+  overlay.rs             driving the overlay window
+  encode.rs              encoder detection
+  clipboard.rs           Windows clipboard: file (CF_HDROP) and text
+  clips.rs               SQLite clip index
+  filing.rs              order in the clip folder: one folder per game (+ tests)
+  thumbs.rs              thumbnails (in the data directory, not beside the clip)
+  config.rs              configuration as JSON
+  commands.rs            Tauri commands
+  updater.rs             update check and installation
 src-tauri/examples/
-  aufnahme-probe.rs      Capture → Encoder → Muxer einmal von Hand durchspielen
-  spuren-probe.rs        zwei parallele Spurenabfragen auf denselben Clip
-  schnitt-probe.rs       schneiden, nachmessen, aufheben, nachmessen
-scripts/fetch-ffmpeg.mjs ffmpeg/ffprobe für das Paket holen
-scripts/make-icons.py    alle Icon-Größen aus icons/icon.png
+  record-probe.rs        run capture → encoder → muxer once by hand
+  tracks-probe.rs        two parallel track requests on the same clip
+  trim-probe.rs          trim, measure, undo, measure
+scripts/fetch-ffmpeg.mjs fetch ffmpeg/ffprobe for the package
+scripts/make-icons.py    every icon size from icons/icon.png
 ```
 
-## Auflösung und Bildrate
+## Resolution and frame rate
 
-Beides folgt der gewählten Quelle. Die Auflösung wird auf deren Höhe gedeckelt
-und die Breite aus ihrem Seitenverhältnis gerechnet, nicht aus einem
-angenommenen 16:9. Die Bildrate bietet die üblichen Stufen nur bis zur
-Wiederholrate des Bildschirms an — und dessen eigene Rate obendrauf, damit ein
-165-Hz-Panel auch wirklich 165 hergibt. Mehr Bilder aufzunehmen, als der
-Bildschirm ausgibt, bringt keine Bewegung dazu, flüssiger zu sein; es entstehen
-nur doppelte Bilder, die Bitrate kosten. Bei einem Fenster zählt der
-Bildschirm, auf dem es liegt.
+Both follow the chosen source. The resolution is capped at the source's height
+and the width computed from its aspect ratio, not from an assumed 16:9. The
+frame rate offers the usual steps only up to the screen's refresh rate — plus
+that rate itself, so a 165 Hz panel really does give 165. Capturing more frames
+than the screen puts out does not make any motion smoother; it only produces
+duplicate frames that cost bitrate. For a window, the screen it sits on counts.
 
-Der Kern rückt eine Einstellung, die nicht mehr passt, selbst zurecht
-(`capture::fit_to_target`) — wer von einem 165-Hz-Monitor auf einen 60-Hz-
-Zweitschirm wechselt, findet dort 60 vor statt einer Zahl, die das Panel nie
-zeigen kann.
+The core straightens out a setting that no longer fits
+(`capture::fit_to_target`) — switching from a 165 Hz monitor to a 60 Hz second
+screen leaves you with 60 there rather than a number the panel can never show.
 
-## Spielerkennung
+## Game detection
 
-Erkannt wird über den **Prozess** hinter dem Vordergrundfenster, nicht über
-dessen Titel: Titel ändern sich im Spiel, und viele Spiele setzen gar keinen.
-Steht die EXE in `src-tauri/src/games.json`, ist der Name damit sicher. Eine
-unbekannte Anwendung gilt als Spiel, wenn ihr Fenster den ganzen Monitor
-ausfüllt — dann wird der aufgeräumte Fenstertitel benutzt.
+Detection goes by the **process** behind the foreground window, not by its
+title: titles change during play, and many games do not set one at all. If the
+exe is in `src-tauri/src/games.json`, the name is certain. An unknown
+application counts as a game when its window fills the whole monitor — the
+tidied-up window title is used then.
 
-Eigene Namen ohne Neubau: eine `games.json` nach `%APPDATA%\ClippiBoy\` legen,
-sie wird über die eingebaute Liste gelegt.
+Custom names without a rebuild: put a `games.json` into
+`%APPDATA%\ClippiBoy\`; it is layered on top of the built-in list.
 
 ```json
-{ "meinspiel.exe": "Mein Spiel" }
+{ "mygame.exe": "My Game" }
 ```
 
-Nachgesehen wird alle zwei Sekunden. Beim Speichern zählt das Spiel, das
-*während des Pufferns* lief — sonst stünde am Clip „ClippiBoy", wenn man ihn
-über den Knopf im Fenster speichert.
+The check runs every two seconds. On save, what counts is the game that was
+running *while buffering* — otherwise the clip would say "ClippiBoy" whenever
+you save it via the button in the window.
 
-## Der Banner über dem Spiel
+## The banner over the game
 
-Ein zweites, durchsichtiges Fenster, das immer oben liegt, keinen Fokus annimmt
-und keine Mausklicks abfängt. Es erscheint auf dem Monitor, auf dem gerade
-gespielt wird, und meldet gespeicherte Clips, Puffer an/aus und Fehler — jedes
-davon in den Einstellungen einzeln abschaltbar.
+A second, transparent window that stays on top, takes no focus and catches no
+mouse clicks. It appears on the monitor currently being played on and reports
+saved clips, buffer on/off and errors — each of them switchable off individually
+in the settings.
 
-Der Banner klebt auf einem festen Bildschirm (einstellbar, Standard: der
-primäre), damit er nicht zwischen Monitoren springt; wahlweise folgt er dem
-Fenster im Vordergrund. Die Einblendung ist eine Umrandung, die sich einmal um
-die Karte zieht und danach ausglüht — reine Compositor-Animation, damit sie
-nicht ruckelt, wenn das Spiel die GPU braucht.
+The banner sticks to a fixed screen (configurable, default: the primary one) so
+it does not jump between monitors; optionally it follows the foreground window.
+The fade-in is an outline that draws itself once around the card and then fades
+out — pure compositor animation, so it does not stutter when the game needs the
+GPU.
 
-Über einem Spiel im **exklusiven** Vollbild kann er nicht erscheinen: dafür
-bräuchte es einen Present-Hook im Spielprozess, und genau das macht ClippiBoy
-bewusst nicht. Im randlosen Vollbild und im Fenstermodus — also bei praktisch
-allen aktuellen Spielen — funktioniert es.
+Over a game in **exclusive** fullscreen it cannot appear: that would need a
+present hook inside the game process, and that is exactly what ClippiBoy
+deliberately does not do. In borderless fullscreen and windowed mode — so in
+practically every current game — it works.
 
-## Wie der Replay-Puffer funktioniert
+## How the replay buffer works
 
-**Ein** Encoder läuft durch, und seine fertigen Pakete landen in einem Ring im
-Arbeitsspeicher (`buffer.rs`). Beim Speichern werden die passenden Pakete
-herausgeschnitten, als roher H.264-Elementarstrom abgelegt und mit dem Ton in
-einem einzigen ffmpeg-Lauf zu einem MP4 gepackt (`-c:v copy`) — nichts wird neu
-encodiert, ein Clip steht in ein bis zwei Sekunden.
+**One** encoder runs continuously, and its finished packets land in a ring in
+memory (`buffer.rs`). On save the matching packets are cut out, written as a raw
+H.264 elementary stream and packed together with the audio into an MP4 in a
+single ffmpeg run (`-c:v copy`) — nothing is re-encoded, a clip is ready in one
+to two seconds.
 
-Der Ring schneidet vorne immer auf ein Keyframe: Ein Clip, der mitten in einer
-Bildgruppe anfinge, hätte am Anfang Klötzchen. Ältere Pakete fallen fortlaufend
-weg, sodass genau die eingestellte Pufferlänge vorgehalten wird.
+The ring always cuts at a keyframe at the front: a clip starting in the middle
+of a group of pictures would have blocky artefacts at the beginning. Older
+packets fall away continuously, so exactly the configured buffer length is kept.
 
-Das Bild geht als Direct3D-Textur direkt in den Hardware-Encoder — es wird nie
-über die CPU kopiert. Capture und Encoder teilen sich dafür dasselbe D3D11-Gerät
-(`gpu.rs`), die Umwandlung BGRA→NV12 macht der Video-Prozessor der Grafikkarte.
+The video goes into the hardware encoder directly as a Direct3D texture — it is
+never copied through the CPU. Capture and encoder share the same D3D11 device
+for that (`gpu.rs`), and the graphics card's video processor does the BGRA→NV12
+conversion.
 
-Vorher lag der Puffer als **MPEG-TS-Segmente** von 10 Sekunden auf der Platte,
-die beim Speichern per `ffmpeg concat` zusammengesetzt wurden. Das hatte drei
-Kosten, die alle weg sind:
+The buffer used to sit on disk as 10-second **MPEG-TS segments**, stitched
+together with `ffmpeg concat` on save. That had three costs, all of them now
+gone:
 
-* Jeder Segmentwechsel brauchte einen neuen Encoder. Der Aufbau dauert länger
-  als ein Bildabstand, also musste der nächste im Hintergrund vorgebaut werden —
-  und trotzdem riss an jeder Grenze ein Loch von 60 bis 300 ms ins Bild, das
-  sich über einen Clip zum Versatz zwischen Bild und Ton summierte.
-* Ein Segment, das keine Datei mehr hergab — etwa weil bei stehendem Bild kein
-  einziges Frame ankam — brachte **jedes** weitere Speichern zum Scheitern,
-  solange es im Ring lag: `Impossible to open '…/segment_001124.ts'`.
-* Der Puffer stand ständig auf der Platte. Eine ältere Fassung, die abstürzte,
-  ließ ihn dort liegen; beim ersten Start der neuen wird `buffer/` deshalb
-  weggeräumt (auf einer Testmaschine 323 MB).
+* Every segment change needed a new encoder. Setting one up takes longer than a
+  frame interval, so the next one had to be pre-built in the background — and
+  even then a hole of 60 to 300 ms tore into the video at every boundary, adding
+  up over a clip into a drift between picture and sound.
+* A segment that no longer produced a file — because not a single frame arrived
+  with a still picture, say — made **every** further save fail as long as it was
+  in the ring: `Impossible to open '…/segment_001124.ts'`.
+* The buffer was constantly on disk. An older version that crashed left it lying
+  there; on the first start of a new one `buffer/` is therefore cleared away (on
+  one test machine, 323 MB).
 
-Ton und die Uhr des Puffers hängen an einem eigenen Thread, der alle 10 ms
-läuft — nicht am Frame-Callback. Windows.Graphics.Capture liefert nämlich nur
-bei Bildänderung ein Frame: hinge alles am Callback, würde bei ruhigem Bild der
-Ton verhungern und der Puffer stehenbleiben. Aus demselben Grund taktet ein
-eigener Faden die Bilder auf `1/fps` und schickt bei ruhigem Bild das letzte
-noch einmal los — der Encoder sieht dadurch echtes CFR statt einer Bildrate,
-die er selbst umrechnen müsste. Genau das war der Judder. Der Nullpunkt für
-beide Spuren ist das erste eingetroffene Bild, damit Ton und Bild denselben
-Zeitursprung haben.
+Audio and the buffer's clock hang off a thread of their own that runs every
+10 ms — not off the frame callback. Windows.Graphics.Capture only delivers a
+frame when the picture changes: if everything hung off the callback, a still
+picture would starve the audio and stall the buffer. For the same reason a
+thread of its own clocks the frames at `1/fps` and sends the last one again with
+a still picture — the encoder therefore sees true CFR instead of a frame rate it
+would have to convert itself. That was exactly the judder. The zero point for
+both tracks is the first frame that arrived, so audio and video share the same
+time origin.
 
-Die Ringpuffer der Audioquellen laufen ab Programmstart mit (für die
-Pegelanzeige), werden aber vor jeder Aufnahme geleert und währenddessen auf
-40 ms Rückstand begrenzt. Ohne das stünde in ihnen alter Ton, den nie jemand
-abgeholt hat — der Clip liefe von der ersten Sekunde an hinter dem Bild her.
+The audio sources' ring buffers run from program start (for the level meters)
+but are emptied before every recording and limited to 40 ms of lag while it
+runs. Without that they would hold old audio nobody ever collected — the clip
+would run behind the picture from the very first second.
 
-## Das Audio-System
+## The audio system
 
-Drei Quellentypen, beliebig kombinierbar:
+Three source types, combinable at will:
 
-* **Ausgabegerät (Loopback)** — kompletter Ton eines Endpunkts
-* **Anwendung** — Prozess-Loopback über `ActivateAudioInterfaceAsync`
-  (Windows 10 Build 20348+), z.B. Discord getrennt vom Spiel
-* **Eingabegerät** — Mikrofon
+* **Output device (loopback)** — an endpoint's complete audio
+* **Application** — process loopback via `ActivateAudioInterfaceAsync`
+  (Windows 10 build 20348+), e.g. Discord separate from the game
+* **Input device** — microphone
 
-Jede Quelle hat Gain, Mute, Solo und Live-Pegel. Quellen ohne „eigene Spur"
-laufen in den Hauptmix, die anderen werden parallel als PCM mitgeschrieben und
-beim Speichern als zusätzliche Tonspuren ins MP4 gemuxt — so lässt sich
-z.B. Discord im Schnitt nachträglich stummschalten. Ohne Schnittprogramm geht
-das ebenso: siehe „Clips bearbeiten".
+Every source has gain, mute, solo and a live level. Sources without "own track"
+run into the main mix, the others are written along in parallel as PCM and muxed
+into the MP4 as extra audio tracks on save — so Discord, for instance, can be
+muted afterwards in an editor. It works without an editor too: see "Editing
+clips".
 
-Eine Quelle mit eigener Spur behält diese Spur, solange sie eingeschaltet ist —
-auch wenn sie stumm geschaltet oder eine andere auf Solo gestellt wird. Der
-Mischer schiebt dann Stille hinein. Alles andere hieße, dass Stummschalten die
-Quelle auch **rückwirkend** aus dem Puffer wirft, und dass jeder Schritt eines
-Lautstärkereglers die bis dahin gepufferten Minuten dieser Spur kostet.
+A source with its own track keeps that track as long as it is enabled — even
+when it is muted or another one is soloed. The mixer pushes silence into it
+then. Anything else would mean that muting throws the source out of the buffer
+**retroactively** too, and that every step of a volume slider costs the minutes
+of that track buffered so far.
 
-## Clips bearbeiten
+## Editing clips
 
-Im Player öffnet **Bearbeiten** (oder `E`) einen Bereich neben dem Bild:
+In the player, **Edit** (or `E`) opens a pane beside the picture:
 
-* **Name, Beschreibung, Spiel** — landen in der Clip-Datenbank, nicht im
-  Dateinamen; die Datei behält ihren. Die Suche in der Galerie findet alle
-  drei. Der Name lässt sich auch ohne Player ändern: In der Galerie ein Klick
-  auf den Namen, er steht markiert da, Enter speichert, Escape verwirft. Wer das Spiel ändert, während die Galerie danach filtert, bleibt
-  im Player trotzdem auf seinem Clip: Die Wiedergabeliste wird beim Öffnen
-  eingefroren.
-* **Tonspuren** — je Spur ein Regler von −30 bis +12 dB und ein Stummschalter.
-* **Zuschnitt** — `I` und `O` setzen Anfang und Ende auf die aktuelle Stelle,
-  die Griffe in der Zeitleiste lassen sich auch ziehen. Die Wiedergabe springt
-  am Ende der Auswahl zurück an ihren Anfang.
-* **Speichern** — schreibt beides in die Datei: die Mischung **und** den
-  Zuschnitt. Was danach im Ordner liegt, ist der fertige Clip — man kann ihn
-  ohne weiteres Zutun verschicken.
+* **Name, description, game** — these land in the clip database, not in the file
+  name; the file keeps its own. The gallery's search finds all three. The name
+  can also be changed without the player: click the name in the gallery, it
+  comes up selected, Enter saves, Escape discards. Changing the game while the
+  gallery filters by it still leaves you on your clip in the player: the playlist
+  is frozen when it opens.
+* **Audio tracks** — one slider per track from −30 to +12 dB, plus a mute
+  switch.
+* **Trim** — `I` and `O` set start and end to the current position, and the
+  handles on the timeline can be dragged too. Playback jumps back to the start of
+  the selection when it reaches the end.
+* **Save** — writes both into the file: the mix **and** the trim. What is in the
+  folder afterwards is the finished clip — you can send it as is.
 
-## Das Rechtsklick-Menü
+## The right-click menu
 
-Das eingebaute Menü von WebView2 — „Zurück", „Aktualisieren", „Drucken",
-„Untersuchen" — ist in der ganzen App abgeschaltet. Es bietet keine einzige
-nützliche Aktion und sieht aus wie ein Browser, der sich verlaufen hat.
+WebView2's built-in menu — "Back", "Reload", "Print", "Inspect" — is switched
+off throughout the app. It offers not a single useful action and looks like a
+browser that got lost.
 
-An seine Stelle treten zwei eigene Menüs im Stil der Oberfläche:
+Two menus of our own in the UI's style take its place:
 
-**Auf einem Clip** (Kachel in der Galerie und Bild im Player): Öffnen · Mit
-Standardplayer öffnen · Umbenennen · Favorit · **Clip kopieren** · Pfad
-kopieren · Im Ordner zeigen · Löschen. „Clip kopieren" legt die **Datei** in
-die Zwischenablage, nicht ihren Pfad — in Discord oder WhatsApp hängt Strg+V
-den Clip danach als Anhang an, im Explorer legt es eine Kopie ab. Das Format
-dafür ist `CF_HDROP`, und das kann kein WebView: Es kommt aus
+**On a clip** (tile in the gallery, picture in the player): Open · Open in
+default player · Rename · Favorite · **Copy clip** · Copy path · Show in
+folder · Delete. "Copy clip" puts the **file** on the clipboard, not its path —
+in Discord or WhatsApp, Ctrl+V then attaches the clip; in Explorer it drops a
+copy. The format for that is `CF_HDROP`, and no WebView can do it: it comes from
 `src-tauri/src/clipboard.rs`.
 
-**In Textfeldern**: Ausschneiden · Kopieren · Einfügen · Alles markieren. Auch
-der Text geht über den Kern statt über `navigator.clipboard` — Lesen aus der
-Zwischenablage fragt im WebView um Erlaubnis, und dieser Dialog gehört nicht in
-eine App, die ohnehin schon nativ ist. Eingefügt wird über den Setter des
-Prototyps plus `input`-Ereignis, sonst bekäme React die Änderung nicht mit und
-der Entwurf spränge beim nächsten Render zurück.
+**In text fields**: Cut · Copy · Paste · Select all. The text goes through the
+core rather than `navigator.clipboard` too — reading the clipboard asks for
+permission in the WebView, and that dialog does not belong in an app that is
+native anyway. Pasting goes through the prototype's setter plus an `input`
+event, otherwise React would not notice the change and the draft would jump back
+on the next render.
 
-Das Menü nimmt bewusst keinen Fokus (`onMouseDown` abgefangen): Sonst verlöre
-das Textfeld darunter seine Auswahl, und der Editor speicherte beim Blur mitten
-im Vorgang. Die Tastatur (↑/↓/Enter/Escape) läuft deshalb über das Dokument.
-Gerendert wird in `document.fullscreenElement ?? document.body` — im Vollbild
-des Players ist alles andere unsichtbar.
+The menu deliberately takes no focus (`onMouseDown` swallowed): the text field
+underneath would otherwise lose its selection, and the editor would save on blur
+mid-operation. So the keyboard (↑/↓/Enter/Escape) runs through the document.
+Rendering happens into `document.fullscreenElement ?? document.body` — in the
+player's fullscreen everything else is invisible.
 
-## Ordnung im Clip-Ordner
+## Order in the clip folder
 
-Jedes Spiel bekommt seinen eigenen Ordner, Favoriten kommen in `Favoriten`,
-und was kein Spiel hat, bleibt direkt im Clip-Ordner liegen:
+Every game gets a folder of its own, favorites go into `Favorites`, and whatever
+has no game stays directly in the clip folder:
 
 ```
 Videos\ClippiBoy\
-  clip_2026-08-18_11-37.mp4      ← ohne Spiel
+  clip_2026-08-18_11-37.mp4      ← no game
   Bodycam\
   Counter-Strike 2\
-  Favoriten\                     ← alles mit Herz, quer über die Spiele
+  Favorites\                     ← everything with a heart, across all games
 ```
 
-Ändert sich das Spiel eines Clips oder sein Herz, wandert die Datei mit. Zwei
-Regeln dazu:
+If a clip's game or its heart changes, the file moves along. Two rules for that:
 
-**Verschoben wird erst, wenn der Clip nicht mehr offen ist.** Der Player hält
-die Datei während der Wiedergabe; sie ihm unter den Füßen wegzuziehen, ließe
-das Video abreißen. Die Galerie holt es nach, sobald der Player zugeht — und
-was dabei schiefging (Datei gesperrt, Absturz), räumt `filing::tidy` beim
-nächsten Start auf. Die Galerie stimmt in der Zwischenzeit trotzdem: Sie liest
-aus der Datenbank, nicht aus dem Dateisystem.
+**Nothing is moved until the clip is no longer open.** The player holds the file
+during playback; pulling it out from under it would tear the video off. The
+gallery catches up as soon as the player closes — and whatever went wrong in the
+process (file locked, crash) is cleaned up by `filing::tidy` on the next start.
+The gallery is right in the meantime regardless: it reads from the database, not
+from the file system.
 
-**Angefasst wird nur, was im eingestellten Clip-Ordner liegt** — direkt darin
-oder eine Ebene tiefer. Wer den Speicherort umstellt, lässt seine bisherigen
-Clips bewusst liegen, wo sie sind; die zieht niemand hinterher. Leer gewordene
-Spielordner verschwinden von selbst, der Clip-Ordner selbst nie.
+**Only what lies in the configured clip folder is touched** — directly in it or
+one level down. Whoever changes the storage location deliberately leaves their
+existing clips where they are; nobody drags them along. Game folders that have
+become empty disappear by themselves, the clip folder itself never does.
 
-Ein **Favorit ist zugleich eine Kategorie**: Die Datei liegt in `Favoriten`, in
-der App bleibt der Clip unter seinem Spiel auffindbar — beides sind Filter über
-dieselbe Datenbank. Das Herz sitzt auf der Kachel (sichtbar, sobald es gesetzt
-ist) und im Player.
+A **favorite is a category at the same time**: the file lives in `Favorites`,
+while inside the app the clip stays findable under its game — both are filters
+over the same database. The heart sits on the tile (visible once set) and in the
+player.
 
-Spielnamen werden für den Ordner entschärft: verbotene Zeichen fliegen raus,
-Punkte und Leerzeichen am Ende auch, Gerätenamen wie `CON` bekommen einen
-Unterstrich davor, und nach 60 Zeichen ist Schluss — Spielnamen kommen teils
-aus Fenstertiteln, und die können ganze Sätze sein.
+Game names are made safe for a folder: forbidden characters are dropped, so are
+trailing dots and spaces, device names like `CON` get an underscore in front,
+and after 60 characters it stops — game names sometimes come from window titles,
+and those can be whole sentences.
 
-Die **Vorschaubilder** liegen nicht beim Clip, sondern unter
-`%APPDATA%\ClippiBoy\thumbs\<clip-id>.jpg`. Der Clip-Ordner gehört dem
-Nutzer und soll nur Videos enthalten — wer ihn öffnet, will Clips sehen und
-nicht zu jedem eine halbe Bilddatei. Bilder aus älteren Fassungen, die noch
-neben dem Video liegen, zieht ClippiBoy beim Start dorthin um. Nach einem
-Schnitt wird das Bild neu gerechnet, mit dem Clip wird es gelöscht.
+The **thumbnails** do not sit beside the clip but under
+`%APPDATA%\ClippiBoy\thumbs\<clip-id>.jpg`. The clip folder belongs to the user
+and should contain nothing but videos — whoever opens it wants to see clips, not
+half an image file for each one. Pictures from older versions that still sit
+next to the video are moved there by ClippiBoy at startup. After a trim the
+picture is recomputed; it is deleted along with the clip.
 
-Der Zuschnitt geht dabei nicht verloren. Beim ersten echten Schnitt wandert die
-unversehrte Aufnahme nach `%APPDATA%\ClippiBoy\originals\<clip-id>\`, und im
-Bearbeiten-Bereich steht dann **Zuschnitt aufheben** — ein Klick, und der ganze
-Clip ist zurück. Weiter *hinein*schneiden geht auch ohne Aufheben; die Griffe
-laufen dabei über die Zeitachse der geschnittenen Datei, gerechnet wird intern
-im Original.
+The trim does not lose anything in the process. On the first real cut the
+untouched recording moves to `%APPDATA%\ClippiBoy\originals\<clip-id>\`, and the
+editing pane then offers **Undo trim** — one click and the whole clip is back.
+Trimming further *inwards* works without undoing; the handles run over the
+trimmed file's timeline while the arithmetic happens internally in the original.
 
-Vier Dinge, die man dabei wissen sollte:
+Four things worth knowing about this:
 
-**Hinten kürzen ist verlustfrei, vorne nicht.** Fängt der Schnitt bei null an,
-wird das Bild nur kopiert (`-c:v copy`) und die Datei steht in ein bis zwei
-Sekunden. Ein Schnitt am Anfang muss dagegen bildgenau sitzen — beim Kopieren
-rutschte er auf das Keyframe davor, also bis zu zwei Sekunden zu früh. Dafür
-wird das Bild neu encodiert, mit dem Encoder aus den Einstellungen und x264 als
-Rückfall, falls die Hardware streikt (etwa weil nebenan der Puffer läuft). Ein
-Fortschrittsbalken zeigt, wie weit es ist. Gerechnet wird dabei **immer** aus
-dem Original, nie aus der schon geschnittenen Datei — der Verlust bleibt so bei
-einer Generation, auch wenn man dreimal nachschneidet.
+**Shortening at the back is lossless, at the front it is not.** If the cut
+starts at zero, the video is only copied (`-c:v copy`) and the file is ready in
+one to two seconds. A cut at the start, by contrast, has to be frame-accurate —
+when copying it slid to the keyframe before it, so up to two seconds too early.
+The video is re-encoded for that, with the encoder from the settings and x264 as
+a fallback if the hardware refuses (because the buffer is running next door, for
+instance). A progress bar shows how far along it is. The arithmetic **always**
+works from the original, never from the already-trimmed file — that keeps the
+loss at one generation even if you trim three times over.
 
-**Ein geschnittener Clip braucht doppelt Platz**, solange das Original daneben
-liegt. Es verschwindet, sobald der Zuschnitt aufgehoben oder der Clip gelöscht
-wird.
+**A trimmed clip needs twice the space** as long as the original sits beside it.
+It disappears as soon as the trim is undone or the clip is deleted.
 
-**Der Clip hat genau eine Tonspur.** Discord, der Browser und die meisten
-Player geben von einem MP4 stur die erste Tonspur wieder — lagen Mikrofon und
-Discord wie früher als eigene Spuren daneben, waren sie überall außerhalb des
-Editors stumm. Damit sich die Mischung trotzdem jederzeit ändern lässt, liegen
-die rohen Einzelspuren daneben, je Clip ein Ordner unter
-`%APPDATA%\ClippiBoy\tracks\<clip-id>\`. Sie gehören zum Clip und werden mit
-ihm gelöscht.
+**The clip has exactly one audio track.** Discord, the browser and most players
+stubbornly play back only the first audio track of an MP4 — with microphone and
+Discord sitting beside it as separate tracks, as they used to, they were silent
+everywhere outside the editor. So the mix can still be changed at any time, the
+raw individual tracks sit alongside, one folder per clip under
+`%APPDATA%\ClippiBoy\tracks\<clip-id>\`. They belong to the clip and are deleted
+with it.
 
-Die Spuren bleiben dabei **ungeschnitten** und stehen immer in Koordinaten der
-unversehrten Aufnahme. Das ist Absicht: Sie werden dadurch nie ersetzt, es gibt
-keinen zweiten Zeitstrahl, der davonlaufen kann, und Windows kann einem keine
-offene Datei sperren. Der Preis ist eine Zahl, die stimmen muss — der Versatz
-zwischen Spur und Bild, und das ist genau `original.startMs`.
+The tracks stay **untrimmed** in the process and are always in coordinates of
+the untouched recording. That is deliberate: it means they are never replaced,
+there is no second timeline that can run away, and Windows cannot lock an open
+file on you. The price is one number that has to be right — the offset between
+track and video, and that is exactly `original.startMs`.
 
-**Die Vorschau mischt über WebAudio.** WebView2 kommt an `audioTracks` nicht
-heran, deshalb lässt die UI die Einzelspuren als eigene Audioelemente synchron
-zum Video mitlaufen. Deren `volume` kann nur dämpfen, nie anheben — jeder
-Regler über 0 dB hätte die übrigen Spuren abgesenkt statt seine eigene
-anzuheben, und wer am Mikrofon drehte, hörte alles andere lauter oder leiser
-werden. Die Spuren laufen deshalb über einen kleinen WebAudio-Graphen: je Spur
-ein `GainNode`, dahinter ein Master und ein hartes Begrenzen auf ±1 — dasselbe,
-was beim Speichern passiert. Vorschau und fertiger Clip klingen damit gleich.
+**The preview mixes over WebAudio.** WebView2 cannot reach `audioTracks`, so the
+UI runs the individual tracks as audio elements of their own in sync with the
+video. Their `volume` can only attenuate, never boost — every slider above 0 dB
+would have lowered the other tracks instead of raising its own, and turning the
+microphone up would make everything else get louder or quieter. So the tracks run
+through a small WebAudio graph: one `GainNode` per track, then a master and hard
+clipping at ±1 — the same as what happens on save. Preview and finished clip
+therefore sound alike.
 
-Die Spuren liegen unter `asset.localhost` und damit auf einer anderen Herkunft
-als die Oberfläche; ohne `crossOrigin = "anonymous"` gäbe ein
-`MediaElementSource` **Stille** aus, ohne jede Fehlermeldung. Für den Fall, dass
-es trotzdem einmal so kommt, hört ein `AnalyserNode` mit und fällt nach zwei
-Sekunden ohne ein einziges Sample auf den alten Weg über `volume` zurück.
+The tracks live under `asset.localhost` and therefore on a different origin than
+the UI; without `crossOrigin = "anonymous"` a `MediaElementSource` would output
+**silence**, with no error message at all. In case it happens anyway, an
+`AnalyserNode` listens in and falls back to the old route over `volume` after two
+seconds without a single sample.

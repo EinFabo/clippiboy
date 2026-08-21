@@ -14,7 +14,7 @@ public class Ui {
 '@
 
 $proc = Get-Process -Name clippiboy -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-if (-not $proc) { Write-Output "ClippiBoy-Fenster nicht gefunden"; exit 1 }
+if (-not $proc) { Write-Output "ClippiBoy window not found"; exit 1 }
 $hwnd = $proc.MainWindowHandle
 
 [void][Ui]::ShowWindow($hwnd, 9)
@@ -28,4 +28,4 @@ Start-Sleep -Milliseconds 150
 [Ui]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
 Start-Sleep -Milliseconds 60
 [Ui]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-Write-Output "Klick bei $($r.Left + $X),$($r.Top + $Y)"
+Write-Output "clicked at $($r.Left + $X),$($r.Top + $Y)"

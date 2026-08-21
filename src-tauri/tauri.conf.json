@@ -50,15 +50,15 @@
     "createUpdaterArtifacts": true,
     "publisher": "EinFabo",
     "copyright": "© 2026 ClippiBoy",
-    "shortDescription": "Replay-Puffer mit getrennten Tonspuren",
-    "longDescription": "ClippiBoy hält die letzten Minuten deines Spiels im Hintergrund vor und schreibt sie auf Tastendruck als Clip — mit jeder Tonquelle als eigener Spur.",
+    "shortDescription": "Replay buffer with separate audio tracks",
+    "longDescription": "ClippiBoy keeps the last few minutes of your game in the background and writes them out as a clip at the press of a key — with every audio source on its own track.",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
     "resources": ["resources/ffmpeg.exe", "resources/ffprobe.exe"],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
-        "languages": ["German", "English"],
+        "languages": ["English", "German"],
         "displayLanguageSelector": false
       }
     }

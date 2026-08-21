@@ -1,25 +1,25 @@
-# Baut den Installer und veröffentlicht ihn als GitHub Release.
+# Builds the installer and publishes it as a GitHub release.
 #
-# Auslöser ist ein Tag wie `v0.2.0`. Der Tag muss zur `version` in
-# `src-tauri/tauri.conf.json` passen — daraus liest die App, ob ein Update
-# neuer ist als sie selbst.
+# Triggered by a tag like `v0.2.0`. The tag has to match the `version` in
+# `src-tauri/tauri.conf.json` — that is what the app reads to tell whether an
+# update is newer than itself.
 #
-# Einmalig einzurichten (Repository → Settings → Secrets → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY           Inhalt von ~/.clippiboy/updater.key
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  Inhalt von ~/.clippiboy/updater.password
+# One-time setup (repository → Settings → Secrets → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           contents of ~/.clippiboy/updater.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  contents of ~/.clippiboy/updater.password
 name: Release
 
 on:
   push:
     tags: ["v*"]
-  # Für einen Testlauf ohne Tag.
+  # For a trial run without a tag.
   workflow_dispatch:
 
 jobs:
   windows:
     runs-on: windows-latest
     permissions:
-      # Das Release anlegen und die Dateien anhängen.
+      # Create the release and attach the files.
       contents: write
 
     steps:
@@ -32,15 +32,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Der Rust-Build ist der lange Teil; ohne Cache dauert jeder Lauf ~15 min.
+      # The Rust build is the long part; without a cache every run takes ~15 min.
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
       - run: npm ci
 
-      # ffmpeg und ffprobe kommen mit ins Paket, damit die App auf einem
-      # fremden Rechner ohne Vorinstallation Clips schreiben kann.
+      # ffmpeg and ffprobe go into the package so the app can write clips on
+      # someone else's machine with nothing pre-installed.
       - run: npm run ffmpeg
 
       - uses: tauri-apps/tauri-action@v0
@@ -51,10 +51,10 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: ClippiBoy ${{ github.ref_name }}
-          releaseBody: "Installer unten unter *Assets*. Bestehende Installationen melden sich von selbst."
-          # Als Entwurf veröffentlichen wäre sicherer, aber der Updater sieht
-          # nur fertige Releases — sonst bekommt niemand das Update.
+          releaseBody: "Installer below under *Assets*. Existing installations announce it themselves."
+          # Publishing as a draft would be safer, but the updater only sees
+          # finished releases — otherwise nobody gets the update.
           releaseDraft: false
           prerelease: false
-          # Erzeugt zusätzlich `latest.json`, das der Updater abfragt.
+          # Additionally produces `latest.json`, which the updater queries.
           includeUpdaterJson: true
