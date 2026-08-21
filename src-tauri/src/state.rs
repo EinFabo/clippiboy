@@ -420,6 +420,7 @@ impl AppState {
             title: None,
             description: None,
             edit: None,
+            original: None,
         })
     }
 }

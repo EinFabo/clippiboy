@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use clippiboy_lib::audio::engine::AudioEngine;
 use clippiboy_lib::model::{
-    AudioSource, Clip, RecordingConfig, SourceKind, TargetKind, TrackMix,
+    AudioSource, Clip, EncoderId, RecordingConfig, SourceKind, TargetKind, TrackMix,
 };
-use clippiboy_lib::{encode, muxer, pipeline::Pipeline, stems};
+use clippiboy_lib::{edit, encode, muxer, pipeline::Pipeline, stems};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -174,9 +174,10 @@ fn check_save(path: &std::path::Path, duration_ms: u64) {
         title: None,
         description: None,
         edit: None,
+        original: None,
     };
 
-    let tracks = match stems::tracks(&clip) {
+    let tracks = match stems::tracks(&clip.id, &edit::source_path(&clip)) {
         Ok(tracks) => tracks,
         Err(err) => {
             eprintln!("Spuren nicht lesbar: {err}");
@@ -202,10 +203,15 @@ fn check_save(path: &std::path::Path, duration_ms: u64) {
         })
         .collect();
 
-    match stems::apply(&clip, &mix) {
-        Ok(size) => {
+    // Ohne Zuschnitt: Das Bild muss dabei Bild für Bild dasselbe bleiben.
+    let whole = edit::Trim::whole(clip.duration_ms);
+    match edit::apply(&clip, whole, &mix, EncoderId::X264, 40_000, |_| {}) {
+        Ok(applied) => {
             let after = video_frames(path);
-            println!("  neu geschrieben: {:.1} MB", size as f64 / 1_048_576.0);
+            println!(
+                "  neu geschrieben: {:.1} MB",
+                applied.size_bytes as f64 / 1_048_576.0
+            );
             println!("  Bilder vorher {before:?}, nachher {after:?}");
             assert_eq!(before, after, "Die Bildspur wurde angefasst!");
             probe(path);

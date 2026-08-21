@@ -7,6 +7,7 @@ import type {
   AudioSource,
   CaptureTarget,
   Clip,
+  ClipProgress,
   ClipTrack,
   EncoderInfo,
   EngineStatus,
@@ -69,9 +70,12 @@ export const api = {
   clipTracks: (id: string) => invoke<ClipTrack[]>("clip_tracks", { id }),
   clipWaveform: (id: string) => invoke<string>("clip_waveform", { id }),
   /**
-   * Die Mischung in die Clipdatei schreiben und den Zuschnitt als Markierung
-   * ablegen. Der Clip wird dabei ersetzt — der Player darf ihn währenddessen
-   * nicht offen halten, sonst scheitert das Ersetzen unter Windows.
+   * Den Clip so schreiben, wie er im Editor steht: Mischung eingerechnet,
+   * Zuschnitt ausgeführt. `startMs`/`endMs` beziehen sich auf die Zeitachse der
+   * **aktuellen** Datei.
+   *
+   * Der Clip wird dabei ersetzt — der Player darf ihn währenddessen nicht offen
+   * halten, sonst scheitert das Ersetzen unter Windows.
    */
   applyClipEdit: (
     id: string,
@@ -79,6 +83,9 @@ export const api = {
     endMs: number,
     tracks: TrackMix[],
   ) => invoke<Clip>("apply_clip_edit", { id, startMs, endMs, tracks }),
+  /** Den Zuschnitt aufheben: die ganze Aufnahme zurück, Mischung behalten. */
+  restoreClipOriginal: (id: string) =>
+    invoke<Clip>("restore_clip_original", { id }),
 };
 
 export const events = {
@@ -88,6 +95,8 @@ export const events = {
     listen<EngineStatus>("engine-status", (e) => cb(e.payload)),
   onClipSaved: (cb: (c: Clip) => void): Promise<UnlistenFn> =>
     listen<Clip>("clip-saved", (e) => cb(e.payload)),
+  onClipProgress: (cb: (p: ClipProgress) => void): Promise<UnlistenFn> =>
+    listen<ClipProgress>("clip-progress", (e) => cb(e.payload)),
   onUpdateAvailable: (cb: (info: UpdateInfo) => void): Promise<UnlistenFn> =>
     listen<UpdateInfo>("update-available", (e) => cb(e.payload)),
   onAudioErrors: (

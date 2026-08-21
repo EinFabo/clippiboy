@@ -44,10 +44,9 @@ interface EngineState {
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
   /** Ein Spiel bei allen Clips entfernen — die Clips selbst bleiben. */
   clearGame: (game: string) => Promise<void>;
-  /** Zuschnitt und Mischung merken; `null` setzt den Clip zurück. */
   /**
-   * Die Mischung in die Clipdatei schreiben und den Zuschnitt als Markierung
-   * ablegen. Fasst die Datei selbst an, nicht nur die Datenbank.
+   * Den Clip so schreiben, wie er im Editor steht: Mischung eingerechnet,
+   * Zuschnitt ausgeführt. Fasst die Datei selbst an, nicht nur die Datenbank.
    */
   applyClipEdit: (
     id: string,
@@ -55,6 +54,8 @@ interface EngineState {
     endMs: number,
     tracks: TrackMix[],
   ) => Promise<void>;
+  /** Den Zuschnitt aufheben und die ganze Aufnahme zurückholen. */
+  restoreClipOriginal: (id: string) => Promise<void>;
 }
 
 /** Die von Hand pflegbaren Felder eines Clips. */
@@ -311,6 +312,17 @@ export const useEngine = create<EngineState>((set, get) => ({
     // behaupten, es sei gespeichert.
     try {
       const clip = await api.applyClipEdit(id, startMs, endMs, tracks);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: String(err) });
+      throw err;
+    }
+  },
+
+  async restoreClipOriginal(id) {
+    if (!inTauri) return;
+    try {
+      const clip = await api.restoreClipOriginal(id);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       set({ lastError: String(err) });

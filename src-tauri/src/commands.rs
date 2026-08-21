@@ -5,6 +5,7 @@ use tauri::State;
 use crate::audio::devices;
 use crate::capture;
 use crate::clips::Library;
+use crate::edit;
 use crate::encode;
 use crate::preview;
 use crate::stems;
@@ -273,8 +274,10 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
 
 #[tauri::command]
 pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
-    // Die Einzelspuren gehören zum Clip und haben ohne ihn keinen Zweck mehr.
+    // Einzelspuren und Original gehören zum Clip und haben ohne ihn keinen
+    // Zweck mehr.
     stems::remove(&id);
+    edit::remove(&id);
     with_library(&state, |lib| lib.delete(&id).map_err(|e| e.to_string()))
 }
 
@@ -340,14 +343,20 @@ pub fn clip_waveform(state: State<'_, AppState>, id: String) -> Result<String> {
 pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTrack>> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "Clip nicht gefunden".to_string())?;
-    stems::tracks(&clip)
+    // Aus der unversehrten Aufnahme, falls der Clip geschnitten ist — die
+    // Einzelspuren stehen immer in Koordinaten des Originals.
+    stems::tracks(&clip.id, &edit::source_path(&clip))
 }
 
-/// Die eingestellte Mischung in den Clip schreiben und den Zuschnitt als
-/// Markierung ablegen.
+/// Den Clip so schreiben, wie er im Editor steht: Mischung eingerechnet,
+/// Zuschnitt ausgeführt.
 ///
-/// Nur der Ton wird eingerechnet — das Bild bleibt unangetastet, der Zuschnitt
-/// bleibt jederzeit wieder aufziehbar.
+/// Der Zuschnitt landet wirklich in der Datei — wer den Clip verschickt,
+/// verschickt den geschnittenen. Die unversehrte Aufnahme wandert dabei in die
+/// Original-Ablage und kommt über [`restore_clip_original`] jederzeit zurück.
+///
+/// `async`, weil ein Schnitt am Anfang das Bild neu encodiert und das je nach
+/// Länge dauert; solange dürfte der Hauptfaden das Fenster nicht zeichnen.
 #[tauri::command(async)]
 pub fn apply_clip_edit(
     state: State<'_, AppState>,
@@ -359,24 +368,86 @@ pub fn apply_clip_edit(
 ) -> Result<Clip> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+    let (encoder, bitrate) = encoder_for(&state);
+    let trim = edit::Trim { start_ms, end_ms };
 
-    let size_bytes = match stems::apply(&clip, &tracks) {
-        Ok(size) => size,
+    let applied = edit::apply(&clip, trim, &tracks, encoder, bitrate, progress(&app, &id));
+    store(&state, &app, &clip, applied, tracks)
+}
+
+/// Den Zuschnitt aufheben: die ganze Aufnahme zurückholen, Mischung behalten.
+///
+/// `async` aus demselben Grund wie [`apply_clip_edit`] — auch wenn hier nur
+/// kopiert wird, dauert das Ummuxen einer langen Aufnahme seine Sekunden.
+#[tauri::command(async)]
+pub fn restore_clip_original(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Clip> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "Clip nicht gefunden".to_string())?;
+    let (encoder, bitrate) = encoder_for(&state);
+    let tracks = clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default();
+
+    // Scheitert es, bleibt der Eintrag am Clip stehen: Er trägt den Versatz, in
+    // dem die Einzelspuren liegen. Ihn wegzuwerfen, weil die Aufnahme nicht
+    // auffindbar ist, ließe die Vorschau für immer versetzt laufen.
+    let applied = edit::restore(&clip, &tracks, encoder, bitrate, progress(&app, &id));
+    store(&state, &app, &clip, applied, tracks)
+}
+
+/// Encoder und Bitrate für einen Neuencodierlauf, aus den Einstellungen.
+fn encoder_for(state: &State<'_, AppState>) -> (crate::model::EncoderId, u32) {
+    let recording = state.config_snapshot().recording;
+    (encode::resolve(recording.encoder), recording.bitrate_kbps)
+}
+
+/// Fortschritt an die Oberfläche melden. ffmpeg meldet oft genug, dass ein
+/// Balken sich sichtbar bewegt.
+fn progress<'a>(app: &'a tauri::AppHandle, id: &'a str) -> impl Fn(f32) + 'a {
+    use tauri::Emitter;
+    move |value| {
+        let _ = app.emit(
+            "clip-progress",
+            crate::model::ClipProgress {
+                clip_id: id.to_string(),
+                progress: value,
+            },
+        );
+    }
+}
+
+/// Das Ergebnis eines Laufs in die Datenbank schreiben und den Clip neu lesen.
+fn store(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+    clip: &Clip,
+    applied: Result<edit::Applied>,
+    tracks: Vec<TrackMix>,
+) -> Result<Clip> {
+    let applied = match applied {
+        Ok(applied) => applied,
         Err(err) => {
-            crate::notify(&app, "error", err.clone());
+            crate::notify(app, "error", err.clone());
             return Err(err);
         }
     };
 
+    // Der Zuschnitt steckt jetzt in der Datei — was hier abgelegt wird, ist der
+    // volle Bereich der neuen Datei. Wo der im Original sitzt, steht daneben.
     let edit = ClipEdit {
-        start_ms,
-        end_ms,
+        start_ms: 0,
+        end_ms: applied.duration_ms,
         tracks,
     };
-    with_library(&state, |lib| {
-        lib.set_edit(&id, Some(&edit)).map_err(|e| e.to_string())?;
-        lib.set_size(&id, size_bytes).map_err(|e| e.to_string())?;
-        lib.get(&id)
+    with_library(state, |lib| {
+        lib.set_edit(&clip.id, Some(&edit)).map_err(|e| e.to_string())?;
+        lib.set_original(&clip.id, applied.original.as_ref())
+            .map_err(|e| e.to_string())?;
+        lib.set_file_state(&clip.id, applied.duration_ms, applied.size_bytes)
+            .map_err(|e| e.to_string())?;
+        lib.get(&clip.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Clip nicht gefunden".to_string())
     })

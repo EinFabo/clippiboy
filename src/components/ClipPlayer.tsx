@@ -4,7 +4,7 @@ import { Pill } from "@/components/ui/Card";
 import { ClipEditor, type Trim } from "@/components/ClipEditor";
 import { IconTrash } from "@/components/icons";
 import { useEngine } from "@/store";
-import { api, fileUrl, inTauri } from "@/lib/ipc";
+import { api, events, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
 import { useClipMix } from "@/lib/useClipMix";
 import { cn } from "@/lib/cn";
@@ -48,6 +48,7 @@ export function ClipPlayer({
   const video = useRef<HTMLVideoElement>(null);
   const frame = useRef<HTMLDivElement>(null);
   const applyClipEdit = useEngine((state) => state.applyClipEdit);
+  const restoreClipOriginal = useEngine((state) => state.restoreClipOriginal);
 
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
@@ -58,6 +59,8 @@ export function ClipPlayer({
   const [trim, setTrim] = useState<Trim>({ start: 0, end: 0 });
   const [waveform, setWaveform] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   // Zählt die Neuanläufe des Videoelements. Dient als `key`: Nach dem
   // Speichern bekommt der Player ein frisches Element statt eines, dem wir
@@ -102,6 +105,21 @@ export function ClipPlayer({
   // Das Bild der Tonspur für die Zeitleiste. Es kommt später als das Video und
   // erscheint dann einfach — fehlt es, bleibt die Leiste wie sie ist.
   const clipId = clip?.id;
+  // Der Kern meldet, wie weit er ist. Ohne das stünde der Knopf bei einem
+  // Schnitt am Anfang minutenlang ohne Lebenszeichen da.
+  useEffect(() => {
+    if (!clipId || !inTauri) return;
+    let unlisten: (() => void) | undefined;
+    void events
+      .onClipProgress((update) => {
+        if (update.clipId === clipId) setWriteProgress(update.progress);
+      })
+      .then((off) => {
+        unlisten = off;
+      });
+    return () => unlisten?.();
+  }, [clipId]);
+
   useEffect(() => {
     if (!clipId || !inTauri) return;
     let cancelled = false;
@@ -276,14 +294,18 @@ export function ClipPlayer({
    * Wiedergabe werden danach wiederhergestellt.
    */
   async function save() {
-    if (!clip || saving) return;
+    if (!clip || saving || restoring) return;
     const element = video.current;
+    // Nach einem echten Schnitt ist die Datei kürzer und fängt woanders an —
+    // dieselbe Sekundenzahl läge dann hinter dem neuen Ende. Der Versatz ist
+    // genau der abgeschnittene Anfang.
     resumeAt.current = {
-      time: element?.currentTime ?? 0,
+      time: Math.max(0, (element?.currentTime ?? 0) - trim.start),
       playing: element ? !element.paused : false,
     };
 
     setSaving(true);
+    setWriteProgress(0);
     setJustSaved(false);
     // Die Datei loslassen: Windows ersetzt keine Datei, die noch offen ist.
     element?.pause();
@@ -297,8 +319,41 @@ export function ClipPlayer({
       // dass der Player unten wieder ein spielbares Element bekommt.
     } finally {
       setSaving(false);
+      setWriteProgress(null);
       // Ein frisches Element statt des abgehängten. Das ist der einzige Weg,
       // der nicht davon abhängt, in welchem Zustand das alte gerade steckt.
+      setBroken(false);
+      setReload((n) => n + 1);
+    }
+  }
+
+  /**
+   * Den Zuschnitt aufheben. Wie [save]: erst die Datei freigeben, danach ein
+   * frisches Videoelement — die Datei darunter ist eine andere und länger.
+   */
+  async function restoreOriginal() {
+    if (!clip || saving || restoring) return;
+    const element = video.current;
+    // Die Stelle, an der man steht, liegt im Original um den weggeschnittenen
+    // Anfang später.
+    resumeAt.current = {
+      time: (element?.currentTime ?? 0) + (clip.original?.startMs ?? 0) / 1000,
+      playing: false,
+    };
+
+    setRestoring(true);
+    setWriteProgress(0);
+    setJustSaved(false);
+    element?.pause();
+    element?.removeAttribute("src");
+    element?.load();
+    try {
+      await restoreClipOriginal(clip.id);
+    } catch {
+      // Meldung steht schon im Store.
+    } finally {
+      setRestoring(false);
+      setWriteProgress(null);
       setBroken(false);
       setReload((n) => n + 1);
     }
@@ -441,6 +496,9 @@ export function ClipPlayer({
           onMark={mark}
           separateTracks={mix.separate}
           dirty={dirty}
+          progress={writeProgress}
+          onRestore={() => void restoreOriginal()}
+          restoring={restoring}
           saving={saving}
           justSaved={showSaved}
           onSave={save}

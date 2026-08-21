@@ -84,6 +84,12 @@ export function useClipMix(
   const saved = useRef(clip?.edit?.tracks);
   saved.current = clip?.edit?.tracks;
 
+  // Die Einzelspuren bleiben ungeschnitten und stehen immer in Koordinaten der
+  // unversehrten Aufnahme. Die Videodatei ist dagegen geschnitten und fängt bei
+  // null an. Ohne diesen Versatz käme der Ton bei jedem geschnittenen Clip aus
+  // einer anderen Stelle des Spiels als das Bild.
+  const offset = (clip?.original?.startMs ?? 0) / 1000;
+
   useEffect(() => {
     setTracks([]);
     setMix({});
@@ -155,7 +161,12 @@ export function useClipMix(
     // Audioelementen — die Tonspur des Videos enthält dasselbe noch einmal.
     if (video.current) video.current.volume = separate ? 0 : master;
     for (const [index, audio] of elements.current) audio.volume = volume(index);
-  }, [tracks, mix, master, video, separate]);
+    // `bindKey` gehört dazu, obwohl es hier nirgends steht: Nach dem Speichern
+    // hängt der Player ein **frisches** Videoelement ein, und das fängt bei
+    // voller Lautstärke an. `video` ist ein Ref und ändert seine Identität
+    // dabei nicht — ohne diesen Eintrag liefe der Effekt also nicht noch einmal
+    // und man hörte alles doppelt, bis jemand den Clip neu öffnet.
+  }, [tracks, mix, master, video, separate, bindKey]);
 
   // Die Spuren an das Video hängen: starten, anhalten, springen.
   useEffect(() => {
@@ -164,9 +175,10 @@ export function useClipMix(
     const all = () => [...elements.current.values()];
 
     const align = () => {
+      const at = element.currentTime + offset;
       for (const audio of all()) {
-        if (Math.abs(audio.currentTime - element.currentTime) > 0.12) {
-          audio.currentTime = element.currentTime;
+        if (Math.abs(audio.currentTime - at) > 0.12) {
+          audio.currentTime = at;
         }
       }
     };
@@ -205,7 +217,7 @@ export function useClipMix(
       element.removeEventListener("ratechange", rate);
       pause();
     };
-  }, [tracks, video, clipId, separate, bindKey]);
+  }, [tracks, video, clipId, separate, bindKey, offset]);
 
   const setTrack = useCallback((index: number, patch: Partial<TrackState>) => {
     setMix((current) => ({
