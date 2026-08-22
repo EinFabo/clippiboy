@@ -9,6 +9,7 @@
 // a build chain that is already large enough.
 
 import { createHash } from "node:crypto";
+import { get } from "node:https";
 import { inflateRawSync } from "node:zlib";
 import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -19,6 +20,7 @@ const OUT = join(ROOT, "src-tauri", "resources");
 const CACHE = join(ROOT, "node_modules", ".cache", "ffmpeg-release-essentials.zip");
 const URL_ZIP = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 const WANTED = ["ffmpeg.exe", "ffprobe.exe"];
+const TRIES = 4;
 
 /** Zentrale Verzeichnisliste eines ZIP-Archivs lesen. */
 function entries(buf) {
@@ -59,6 +61,78 @@ function extract(buf, entry) {
   throw new Error(`unknown compression (${entry.method}) at ${entry.name}`);
 }
 
+/**
+ * Fetch the archive.
+ *
+ * Deliberately `https.get` rather than `fetch`: the latter gives up on a body
+ * that takes longer than five minutes, and a hundred megabytes from a single
+ * slow mirror does exactly that on a build machine. There is no way to raise
+ * that limit without pulling in undici, which this file is not going to do.
+ */
+function download(url, depth = 0) {
+  return new Promise((resolve, reject) => {
+    if (depth > 5) {
+      reject(new Error("too many redirects"));
+      return;
+    }
+    const request = get(url, { headers: { "user-agent": "clippiboy-build" } }, (response) => {
+      const { statusCode, headers } = response;
+      if (statusCode >= 300 && statusCode < 400 && headers.location) {
+        response.resume();
+        resolve(download(new URL(headers.location, url).toString(), depth + 1));
+        return;
+      }
+      if (statusCode !== 200) {
+        response.resume();
+        reject(new Error(`HTTP ${statusCode}`));
+        return;
+      }
+      const expected = Number(headers["content-length"]) || 0;
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const body = Buffer.concat(chunks);
+        // A connection that dies mid-body does not always look like an error —
+        // and half an archive in the cache is worse than none at all, because
+        // the next run would take it for a good one and ship a broken ffmpeg.
+        if (expected && body.length !== expected) {
+          reject(new Error(`incomplete: ${body.length} of ${expected} bytes`));
+          return;
+        }
+        resolve(body);
+      });
+      response.on("error", reject);
+    });
+    request.on("error", reject);
+    // Only against a connection that stops sending altogether — a slow one is
+    // allowed to take its time.
+    request.setTimeout(120_000, () => request.destroy(new Error("no data for two minutes")));
+  });
+}
+
+/**
+ * The same, but it does not give up on the first bad day.
+ *
+ * The mirror is a single host with no CDN behind it, and it throttles and drops
+ * connections when several builds ask at once — which is exactly when a release
+ * is being cut.
+ */
+async function downloadWithRetries(url) {
+  let last;
+  for (let attempt = 1; attempt <= TRIES; attempt++) {
+    try {
+      return await download(url);
+    } catch (err) {
+      last = err;
+      console.warn(`attempt ${attempt}/${TRIES} failed: ${err.message}`);
+      if (attempt < TRIES) {
+        await new Promise((wait) => setTimeout(wait, attempt * 5000));
+      }
+    }
+  }
+  throw last;
+}
+
 async function exists(path) {
   try {
     await stat(path);
@@ -82,9 +156,7 @@ async function main() {
     zip = await readFile(CACHE);
   } else {
     console.log(`downloading ${URL_ZIP} …`);
-    const response = await fetch(URL_ZIP);
-    if (!response.ok) throw new Error(`download failed: HTTP ${response.status}`);
-    zip = Buffer.from(await response.arrayBuffer());
+    zip = await downloadWithRetries(URL_ZIP);
     await writeFile(CACHE, zip);
   }
   console.log(`archive: ${(zip.length / 1e6).toFixed(1)} MB, sha256 ${createHash("sha256").update(zip).digest("hex").slice(0, 16)}…`);
