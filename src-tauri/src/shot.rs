@@ -58,6 +58,100 @@ impl Shot {
         })
     }
 
+    /// Lay a transparent layer over the picture.
+    ///
+    /// The annotations are drawn in the WebView — arrows, boxes, and above all
+    /// text, which would mean a font renderer in here — and arrive as a PNG with
+    /// alpha. Only the layer travels, not the finished picture: it is empty
+    /// almost everywhere, so it deflates to a few kilobytes, while the picture
+    /// underneath is megabytes.
+    pub fn blend(&mut self, layer: &[u8]) -> Result<(), String> {
+        let top = read_rgba(layer)?;
+        if top.0 != self.width || top.1 != self.height {
+            return Err("The layer does not fit the picture.".into());
+        }
+        for (under, over) in self.rgb.chunks_exact_mut(3).zip(top.2.chunks_exact(4)) {
+            let alpha = over[3] as u32;
+            if alpha == 0 {
+                continue;
+            }
+            for channel in 0..3 {
+                under[channel] = ((over[channel] as u32 * alpha
+                    + under[channel] as u32 * (255 - alpha))
+                    / 255) as u8;
+            }
+        }
+        Ok(())
+    }
+
+    /// Blur an area until nothing can be read in it any more.
+    ///
+    /// Two passes of a box blur, first across then down. That is separable, so
+    /// the cost grows with the radius rather than with its square — and three
+    /// such passes would look like a Gaussian, which nobody is going to measure
+    /// on a redacted name.
+    ///
+    /// `ellipse` blurs the same rectangle but only writes back what lies inside
+    /// the oval — a face wants a round patch, and a rectangle around it points
+    /// at what it is hiding.
+    pub fn blur(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        ellipse: bool,
+    ) {
+        let left = x.min(self.width.saturating_sub(1)) as usize;
+        let top = y.min(self.height.saturating_sub(1)) as usize;
+        let w = (width as usize).min(self.width as usize - left);
+        let h = (height as usize).min(self.height as usize - top);
+        let radius = radius.max(1) as usize;
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let stride = self.width as usize * 3;
+        // A copy of the region, so a blurred pixel is never read as input for
+        // the next one — that would smear the picture in one direction.
+        let mut patch = vec![0u8; w * h * 3];
+        for row in 0..h {
+            let from = (top + row) * stride + left * 3;
+            patch[row * w * 3..(row + 1) * w * 3]
+                .copy_from_slice(&self.rgb[from..from + w * 3]);
+        }
+
+        let mut across = vec![0u8; patch.len()];
+        blur_rows(&patch, &mut across, w, h, radius);
+        // The same routine down the columns: transpose, run, transpose back.
+        let mut turned = vec![0u8; patch.len()];
+        transpose(&across, &mut turned, w, h);
+        let mut done = vec![0u8; patch.len()];
+        blur_rows(&turned, &mut done, h, w, radius);
+        transpose(&done, &mut across, h, w);
+
+        let (centre_x, centre_y) = (w as f32 / 2.0, h as f32 / 2.0);
+        for row in 0..h {
+            let line = (top + row) * stride + left * 3;
+            if !ellipse {
+                self.rgb[line..line + w * 3]
+                    .copy_from_slice(&across[row * w * 3..(row + 1) * w * 3]);
+                continue;
+            }
+            for column in 0..w {
+                let dx = (column as f32 + 0.5 - centre_x) / centre_x;
+                let dy = (row as f32 + 0.5 - centre_y) / centre_y;
+                if dx * dx + dy * dy > 1.0 {
+                    continue;
+                }
+                let to = line + column * 3;
+                let from = (row * w + column) * 3;
+                self.rgb[to..to + 3].copy_from_slice(&across[from..from + 3]);
+            }
+        }
+    }
+
     /// The picture as a device-independent bitmap, ready for the clipboard.
     ///
     /// Three shapes have to be turned around at once, and all three are
@@ -140,6 +234,70 @@ pub fn original_path(clip_id: &str) -> std::path::PathBuf {
 /// Is there still an untouched picture beside this one?
 pub fn has_original(clip_id: &str) -> bool {
     original_path(clip_id).is_file()
+}
+
+/// The picture as it is drawn **on**: the original with the crop applied, but
+/// without the marks.
+///
+/// Without it the marks would be seen twice once they are saved — once baked
+/// into the file and once as the layer over it — and there would be no way to
+/// pick one up again.
+pub fn base_path(clip_id: &str) -> std::path::PathBuf {
+    crate::edit::dir(clip_id).join("base.png")
+}
+
+/// What has been done to a screenshot so far.
+///
+/// The point of keeping it: crop and marks can then be taken back one without
+/// the other. A flattened picture cannot do that — once a mark is in the pixels
+/// there is no peeling it off again.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Edit {
+    #[serde(default)]
+    pub crop: Option<Rect>,
+    /// The marks exactly as the WebView keeps them. Opaque in here — it is
+    /// handed back unread, so they stay editable.
+    #[serde(default)]
+    pub marks: String,
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+fn edit_path(clip_id: &str) -> std::path::PathBuf {
+    crate::edit::dir(clip_id).join("shot.json")
+}
+
+pub fn read_edit(clip_id: &str) -> Edit {
+    std::fs::read_to_string(edit_path(clip_id))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_edit(clip_id: &str, edit: &Edit) -> Result<(), String> {
+    let path = edit_path(clip_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("could not create folder: {err}"))?;
+    }
+    let text = serde_json::to_string(edit).map_err(|err| err.to_string())?;
+    std::fs::write(&path, text).map_err(|err| format!("could not note the edit: {err}"))
+}
+
+/// Clear the whole store away — the picture is its untouched self again.
+pub fn forget(clip_id: &str) {
+    let _ = std::fs::remove_file(edit_path(clip_id));
+    let _ = std::fs::remove_file(base_path(clip_id));
+    let _ = std::fs::remove_file(original_path(clip_id));
+    let _ = std::fs::remove_dir(crate::edit::dir(clip_id));
 }
 
 /// Edges of a PNG, without decoding the pixels.
@@ -326,4 +484,69 @@ fn read_back(
             rgb,
         })
     }
+}
+
+/// One box blur pass along the rows.
+fn blur_rows(from: &[u8], to: &mut [u8], width: usize, height: usize, radius: usize) {
+    for row in 0..height {
+        let line = row * width * 3;
+        for column in 0..width {
+            let first = column.saturating_sub(radius);
+            let last = (column + radius).min(width - 1);
+            let count = (last - first + 1) as u32;
+            for channel in 0..3 {
+                let mut sum = 0u32;
+                for at in first..=last {
+                    sum += from[line + at * 3 + channel] as u32;
+                }
+                to[line + column * 3 + channel] = (sum / count) as u8;
+            }
+        }
+    }
+}
+
+/// Turn a picture on its side, so the same row routine blurs the columns.
+fn transpose(from: &[u8], to: &mut [u8], width: usize, height: usize) {
+    for row in 0..height {
+        for column in 0..width {
+            let source = (row * width + column) * 3;
+            let target = (column * height + row) * 3;
+            to[target..target + 3].copy_from_slice(&from[source..source + 3]);
+        }
+    }
+}
+
+/// Decode a PNG keeping its alpha — the counterpart to `read_png`, which throws
+/// it away because a screenshot has none to keep.
+fn read_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::STRIP_16,
+    );
+    let mut reader = decoder
+        .read_info()
+        .map_err(|err| format!("could not read the layer: {err}"))?;
+
+    let mut buffer = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|err| format!("could not read the layer: {err}"))?;
+    buffer.truncate(info.buffer_size());
+
+    let pixels = (info.width as usize) * (info.height as usize);
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buffer,
+        // A layer with no transparency at all covers everything — unusual, but
+        // not a reason to give up.
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(pixels * 4);
+            for pixel in buffer.chunks_exact(3) {
+                out.extend_from_slice(pixel);
+                out.push(255);
+            }
+            out
+        }
+        other => return Err(format!("unexpected layer format: {other:?}")),
+    };
+    Ok((info.width, info.height, rgba))
 }

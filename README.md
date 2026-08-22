@@ -28,7 +28,7 @@ mix or on a track of its own in the clip.
 | Buffer automation (at startup / in game) | ✅ done |
 | Clip editing: name, description, track mix, trim | ✅ done |
 | Screenshots: hotkey, own folder, gallery | ✅ done |
-| Screenshot editing: crop, annotate | ⏳ open |
+| Screenshot editing: crop, marks, blur (non-destructive) | ✅ done |
 | Upload | ⏳ open |
 
 ## Developing

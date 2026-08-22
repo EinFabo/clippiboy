@@ -512,8 +512,12 @@ pub fn run() {
             // folder — the gallery loads them from there.
             let _ = std::fs::create_dir_all(thumbs::dir());
             allow_clip_dir(handle, &thumbs::dir().to_string_lossy());
-            // The untouched recordings of trimmed clips stay too, but are never
-            // played back — so they are not granted either.
+            // The originals store. A trimmed clip's untouched recording is
+            // never played back from here — but a screenshot's is: while it is
+            // being annotated, that is the very picture on the stage, and
+            // without this the WebView refuses to load it.
+            let _ = std::fs::create_dir_all(edit::root());
+            allow_clip_dir(handle, &edit::root().to_string_lossy());
             if let Some(library) = app.state::<AppState>().library.lock().as_ref() {
                 edit::repair(library);
                 // Pictures from older versions still sit next to the videos.
@@ -582,9 +586,8 @@ pub fn run() {
             commands::save_clip,
             commands::take_screenshot,
             commands::copy_clip_image,
-            commands::crop_screenshot,
-            commands::restore_screenshot,
-            commands::screenshot_has_original,
+            commands::write_screenshot,
+            commands::screenshot_edit,
             commands::list_clips,
             commands::delete_clip,
             commands::reveal_clip,

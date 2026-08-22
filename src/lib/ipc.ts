@@ -14,6 +14,9 @@ import type {
   LevelMap,
   TrackMix,
   UpdateInfo,
+  ShotEdit,
+  ShotRect,
+  ShotStep,
 } from "./types";
 
 /** Is the app running inside the Tauri container? (Plain browser Vite has no IPC.) */
@@ -77,17 +80,24 @@ export const api = {
   /** Screenshots only: the picture itself, not the file. */
   copyClipImage: (id: string) => invoke<void>("copy_clip_image", { id }),
   /**
-   * Cut a rectangle out of a screenshot. In pixels of the picture, not of the
-   * preview — the core cuts, the WebView only says where.
+   * Write a screenshot from its original, its marks and its crop.
+   *
+   * Everything is rebuilt from the untouched picture every time — that is what
+   * lets the crop be taken back without losing the marks, and the other way
+   * round. Marks and crop are both in pixels of the **original**.
+   *
+   * A layer is a PNG with alpha at the original's size; only those travel,
+   * never the finished picture, so they weigh kilobytes. A blur is an area
+   * instead, because a layer can only cover while blurring has to read what is
+   * under it — and the order between the two decides what ends up on top.
    */
-  cropScreenshot: (
+  writeScreenshot: (
     id: string,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-  ) => invoke<Clip>("crop_screenshot", { id, x, y, width, height }),
-  restoreScreenshot: (id: string) => invoke<Clip>("restore_screenshot", { id }),
+    crop: ShotRect | null,
+    steps: ShotStep[],
+    marks: string,
+  ) => invoke<Clip>("write_screenshot", { id, crop, steps, marks }),
+  screenshotEdit: (id: string) => invoke<ShotEdit>("screenshot_edit", { id }),
   screenshotHasOriginal: (id: string) =>
     invoke<boolean>("screenshot_has_original", { id }),
   /** Open the clip in the Windows default player. */

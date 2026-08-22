@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "clippiboy"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "crossbeam-channel",
  "dirs 5.0.1",

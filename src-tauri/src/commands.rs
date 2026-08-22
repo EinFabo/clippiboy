@@ -293,67 +293,178 @@ pub fn take_screenshot(app: tauri::AppHandle) -> Result<Clip> {
     crate::take_screenshot_and_notify(&app)
 }
 
-/// Cut a rectangle out of a screenshot and write it back into the same file.
+/// One step of the annotation, in the order it was drawn.
 ///
-/// The cropping happens here rather than in the WebView on purpose: sending a
-/// finished 4K picture through the IPC would mean ten megabytes as a JSON array
-/// of numbers. A rectangle is four numbers.
+/// Two kinds, because they work in opposite directions: a layer covers what is
+/// underneath, while a blur reads it. They cannot be merged into one image, so
+/// the order between them has to survive the journey — otherwise everything
+/// blurred would end up under every mark, whichever was drawn first.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Step {
+    /// An area to make unreadable, in pixels of the **original** picture.
+    Blur {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        /// How far the blur reaches. The WebView sets it, so preview and file
+        /// agree.
+        radius: u32,
+        /// Blur an oval inside the rectangle rather than the rectangle itself.
+        #[serde(default)]
+        ellipse: bool,
+    },
+    /// A PNG with alpha, the size of the **original** picture, holding
+    /// everything drawn in one go — arrows, boxes, freehand, text.
+    Layer { png: Vec<u8> },
+}
+
+/// What a screenshot's editor has to know when it opens.
 ///
-/// The first crop puts the untouched picture aside, so it can be pulled back at
-/// any time via [`restore_screenshot`]. A second one does not: the original is
-/// the *original*, not the state before the last handle was moved.
+/// Two grounds, because the two halves of the editor stand on different ones:
+/// marks are drawn on the picture as cropped, while cropping itself has to show
+/// the whole original — otherwise a crop could only ever get smaller.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShotEdit {
+    pub crop: Option<crate::shot::Rect>,
+    pub marks: String,
+    /// The original with the crop but without the marks — what is drawn on.
+    /// `None` means nothing has been done yet and the clip's own file will do.
+    pub base_path: Option<String>,
+    /// The untouched picture — what is cropped from.
+    pub original_path: Option<String>,
+    /// Its edges. Every mark and every crop is reckoned in these coordinates.
+    pub original_width: u32,
+    pub original_height: u32,
+}
+
+#[tauri::command]
+pub fn screenshot_edit(state: State<'_, AppState>, id: String) -> Result<ShotEdit> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    let edit = crate::shot::read_edit(&id);
+
+    let base = crate::shot::base_path(&id);
+    let original = crate::shot::original_path(&id);
+    let text = |path: &std::path::Path| path.to_string_lossy().to_string();
+
+    // Untouched so far: the clip's own file is both grounds at once.
+    let (original_width, original_height) = if original.is_file() {
+        crate::shot::size_of_png(&original).unwrap_or((clip.width, clip.height))
+    } else {
+        (clip.width, clip.height)
+    };
+
+    Ok(ShotEdit {
+        crop: edit.crop,
+        marks: edit.marks,
+        // With a crop that is `base`; with marks alone the original already is
+        // the picture without them.
+        base_path: if base.is_file() {
+            Some(text(&base))
+        } else if original.is_file() {
+            Some(text(&original))
+        } else {
+            None
+        },
+        original_path: original.is_file().then(|| text(&original)),
+        original_width,
+        original_height,
+    })
+}
+
+/// Write a screenshot from its original, its marks and its crop.
 ///
-/// `async` because decoding, cutting and deflating take a moment on a big
+/// **Everything** is rebuilt from the untouched picture every time, and that is
+/// the whole point: crop and marks stay two things that can be taken back
+/// separately. Flattening them into the file would weld them together — a mark
+/// that is in the pixels cannot be peeled off again.
+///
+/// The order matters. The marks are reckoned in the original's coordinates, so
+/// they go on first and the crop cuts through them afterwards; a note at the
+/// edge is then clipped, which is what anyone would expect.
+///
+/// `async` because decoding, drawing and deflating take a moment on a big
 /// picture.
 #[tauri::command(async)]
-pub fn crop_screenshot(
+pub fn write_screenshot(
     state: State<'_, AppState>,
     id: String,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+    crop: Option<crate::shot::Rect>,
+    steps: Vec<Step>,
+    marks: String,
 ) -> Result<Clip> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     if !clip.screenshot {
-        return Err("Only a screenshot can be cropped.".into());
+        return Err("Only a screenshot can be edited this way.".into());
     }
-    let target = std::path::PathBuf::from(&clip.path);
-    let cut = crate::shot::read_png(&target)?.crop(x, y, width, height)?;
+    keep_original(&clip)?;
 
-    // Rescue first, write second: if the order were the other way round and the
-    // program died in between, the untouched picture would be gone.
-    if !crate::shot::has_original(&clip.id) {
-        let original = crate::shot::original_path(&clip.id);
-        if let Some(parent) = original.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("could not create folder: {err}"))?;
+    // Nothing left to do to it: the untouched picture goes back and the whole
+    // store goes away, so the clip stops calling itself edited.
+    if crop.is_none() && steps.is_empty() {
+        let whole = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
+        let clip = write_picture(&state, &clip, &whole)?;
+        crate::shot::forget(&id);
+        return Ok(clip);
+    }
+
+    let pristine = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
+
+    // The ground to draw on next time: the crop, but none of the marks.
+    if let Some(area) = crop {
+        pristine
+            .crop(area.x, area.y, area.width, area.height)?
+            .write_png(&crate::shot::base_path(&clip.id))?;
+    } else {
+        let _ = std::fs::remove_file(crate::shot::base_path(&clip.id));
+    }
+
+    let mut picture = pristine;
+    for step in &steps {
+        match step {
+            Step::Blur {
+                x,
+                y,
+                width,
+                height,
+                radius,
+                ellipse,
+            } => picture.blur(*x, *y, *width, *height, *radius, *ellipse),
+            Step::Layer { png } if !png.is_empty() => picture.blend(png)?,
+            Step::Layer { .. } => {}
         }
-        // Copied, not moved: the clip folder may sit on another drive than the
-        // store, and the file has to stay where it is anyway.
-        std::fs::copy(&target, &original)
-            .map_err(|err| format!("Could not save the original ({err})."))?;
+    }
+    if let Some(area) = crop {
+        picture = picture.crop(area.x, area.y, area.width, area.height)?;
     }
 
-    write_picture(&state, &clip, &cut)
+    crate::shot::write_edit(&id, &crate::shot::Edit { crop, marks })?;
+    write_picture(&state, &clip, &picture)
 }
 
-/// Undo the crop: the untouched picture comes back.
-#[tauri::command(async)]
-pub fn restore_screenshot(state: State<'_, AppState>, id: String) -> Result<Clip> {
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    let original = crate::shot::original_path(&clip.id);
-    if !original.is_file() {
-        return Err("The original can no longer be found.".into());
+/// Put the untouched picture aside, once.
+///
+/// Rescue first, write second: the other way round, a program that died in
+/// between would leave nothing to come back to. A second edit adds nothing —
+/// the original is the *original*, not the state before the last handle moved.
+fn keep_original(clip: &Clip) -> Result<()> {
+    if crate::shot::has_original(&clip.id) {
+        return Ok(());
     }
-    let whole = crate::shot::read_png(&original)?;
-    let clip = write_picture(&state, &clip, &whole)?;
-    // Only now: as long as it stands there, the crop can be undone. If removing
-    // it fails, that is a leftover file and not a failed restore.
-    let _ = std::fs::remove_file(&original);
-    Ok(clip)
+    let original = crate::shot::original_path(&clip.id);
+    if let Some(parent) = original.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("could not create folder: {err}"))?;
+    }
+    // Copied, not moved: the clip folder may sit on another drive than the
+    // store, and the file has to stay where it is anyway.
+    std::fs::copy(&clip.path, &original)
+        .map_err(|err| format!("Could not save the original ({err}).").into())
+        .map(|_| ())
 }
 
 /// Write a picture over a screenshot's file and record what changed.
@@ -386,12 +497,6 @@ fn write_picture(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
     })
-}
-
-/// Is there still an untouched picture beside this screenshot?
-#[tauri::command]
-pub fn screenshot_has_original(id: String) -> bool {
-    crate::shot::has_original(&id)
 }
 
 /// The picture itself on the clipboard, not its file.

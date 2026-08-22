@@ -210,6 +210,37 @@ export interface EngineStatus {
   game: string | null;
 }
 
+/** A rectangle in pixels of a screenshot's original. */
+export interface ShotRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One step of a screenshot's annotation, in the order it was drawn.
+ *
+ * A layer covers what is under it, a blur reads it — so the two cannot be
+ * merged into one picture, and their order is what decides what ends up on top.
+ */
+export type ShotStep =
+  | (ShotRect & { kind: "blur"; radius: number; ellipse: boolean })
+  | { kind: "layer"; png: number[] };
+
+/** What a screenshot's editor stands on when it opens. */
+export interface ShotEdit {
+  crop: ShotRect | null;
+  /** The marks as the editor keeps them — opaque to the core. */
+  marks: string;
+  /** The original with the crop but without the marks: what is drawn on. */
+  basePath: string | null;
+  /** The untouched picture: what is cropped from. */
+  originalPath: string | null;
+  originalWidth: number;
+  originalHeight: number;
+}
+
 /** Payload of the `overlay-banner` event (overlay window only). */
 export interface OverlayBanner {
   kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot";

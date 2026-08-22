@@ -10,6 +10,8 @@ import type {
   Clip,
   EncoderInfo,
   LevelMap,
+  ShotRect,
+  ShotStep,
   TrackMix,
 } from "./lib/types";
 
@@ -72,16 +74,16 @@ interface EngineState {
   ) => Promise<void>;
   /** Undo the trim and pull the whole recording back. */
   restoreClipOriginal: (id: string) => Promise<void>;
-  /** Cut a rectangle out of a screenshot — in pixels of the picture. */
-  cropScreenshot: (
+  /**
+   * Write a screenshot from its original, its marks and its crop — see
+   * `api.writeScreenshot`.
+   */
+  writeScreenshot: (
     id: string,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
+    crop: ShotRect | null,
+    steps: ShotStep[],
+    marks: string,
   ) => Promise<void>;
-  /** Undo the crop and pull the whole picture back. */
-  restoreScreenshot: (id: string) => Promise<void>;
 }
 
 /** A clip's hand-editable fields. */
@@ -392,23 +394,12 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
   },
 
-  async cropScreenshot(id, x, y, width, height) {
+  async writeScreenshot(id, crop, steps, marks) {
     if (!inTauri) return;
-    // Like `applyClipEdit`, deliberately not optimistic: a file is rewritten
+    // Deliberately not optimistic, like `applyClipEdit`: a file is rewritten
     // here, and if that fails the UI must not claim otherwise.
     try {
-      const clip = await api.cropScreenshot(id, x, y, width, height);
-      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
-    } catch (err) {
-      set({ lastError: String(err) });
-      throw err;
-    }
-  },
-
-  async restoreScreenshot(id) {
-    if (!inTauri) return;
-    try {
-      const clip = await api.restoreScreenshot(id);
+      const clip = await api.writeScreenshot(id, crop, steps, marks);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       set({ lastError: String(err) });
