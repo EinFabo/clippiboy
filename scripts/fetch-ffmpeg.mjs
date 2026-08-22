@@ -11,7 +11,7 @@
 import { createHash } from "node:crypto";
 import { get } from "node:https";
 import { inflateRawSync } from "node:zlib";
-import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -62,6 +62,26 @@ function extract(buf, entry) {
 }
 
 /**
+ * Locate the two programs in the archive.
+ *
+ * Doubles as the test of whether a buffer is an archive at all, and that is the
+ * point: a mirror can answer an error page with status 200, a transfer can
+ * break off without anything looking wrong, and a build can be interrupted
+ * mid-write. None of that may reach the cache — the next run would take it for
+ * a good archive and ship a broken ffmpeg. Truncation in particular cannot
+ * survive this: the central directory sits at the very end of a ZIP.
+ */
+function programs(buf) {
+  const list = entries(buf);
+  return WANTED.map((name) => {
+    // The path inside the archive carries the version number, hence going by the file name.
+    const entry = list.find((e) => e.name.endsWith(`/bin/${name}`));
+    if (!entry) throw new Error(`${name} is not in the archive`);
+    return { name, entry };
+  });
+}
+
+/**
  * Fetch the archive.
  *
  * Deliberately `https.get` rather than `fetch`: the latter gives up on a body
@@ -87,18 +107,21 @@ function download(url, depth = 0) {
         reject(new Error(`HTTP ${statusCode}`));
         return;
       }
-      const expected = Number(headers["content-length"]) || 0;
+      const expected = Number(headers["content-length"]);
       const chunks = [];
       response.on("data", (chunk) => chunks.push(chunk));
       response.on("end", () => {
         const body = Buffer.concat(chunks);
-        // A connection that dies mid-body does not always look like an error —
-        // and half an archive in the cache is worse than none at all, because
-        // the next run would take it for a good one and ship a broken ffmpeg.
-        if (expected && body.length !== expected) {
+        // A connection that dies mid-body does not always look like an error.
+        // Where the header is there, it names the damage plainly and early;
+        // where it is not, `programs()` is what stands between a half archive
+        // and the cache. Hence a note rather than a refusal — a chunked mirror
+        // is not a reason to fail a release build.
+        if (expected > 0 && body.length !== expected) {
           reject(new Error(`incomplete: ${body.length} of ${expected} bytes`));
           return;
         }
+        if (!(expected > 0)) console.warn("no content-length — completeness is decided when unpacking");
         resolve(body);
       });
       response.on("error", reject);
@@ -133,6 +156,37 @@ async function downloadWithRetries(url) {
   throw last;
 }
 
+/**
+ * The archive — from the cache when that still holds a whole one.
+ *
+ * Nothing is cached before it has proven readable, and nothing already cached
+ * is believed without asking again: otherwise one bad answer from the mirror
+ * would settle the matter for good, and no number of retries could ever get
+ * past it because the download would never run again.
+ */
+async function archive(force) {
+  if (!force && (await exists(CACHE))) {
+    const cached = await readFile(CACHE);
+    try {
+      programs(cached);
+      console.log(`archive from cache: ${CACHE}`);
+      return cached;
+    } catch (err) {
+      console.warn(`cached archive unusable (${err.message}) — fetching it again`);
+    }
+  }
+
+  console.log(`downloading ${URL_ZIP} …`);
+  const zip = await downloadWithRetries(URL_ZIP);
+  programs(zip);
+  // A whole file or none at all: a `.part` an interrupted build leaves behind
+  // is never read again, a half-written CACHE would be.
+  const part = `${CACHE}.part`;
+  await writeFile(part, zip);
+  await rename(part, CACHE);
+  return zip;
+}
+
 async function exists(path) {
   try {
     await stat(path);
@@ -150,23 +204,11 @@ async function main() {
   }
 
   await mkdir(dirname(CACHE), { recursive: true });
-  let zip;
-  if (await exists(CACHE)) {
-    console.log(`archive from cache: ${CACHE}`);
-    zip = await readFile(CACHE);
-  } else {
-    console.log(`downloading ${URL_ZIP} …`);
-    zip = await downloadWithRetries(URL_ZIP);
-    await writeFile(CACHE, zip);
-  }
+  const zip = await archive(force);
   console.log(`archive: ${(zip.length / 1e6).toFixed(1)} MB, sha256 ${createHash("sha256").update(zip).digest("hex").slice(0, 16)}…`);
 
   await mkdir(OUT, { recursive: true });
-  const list = entries(zip);
-  for (const name of WANTED) {
-    // The path inside the archive carries the version number, hence going by the file name.
-    const entry = list.find((e) => e.name.endsWith(`/bin/${name}`));
-    if (!entry) throw new Error(`${name} is not in the archive`);
+  for (const { name, entry } of programs(zip)) {
     const data = extract(zip, entry);
     const target = join(OUT, name);
     await writeFile(target, data);
