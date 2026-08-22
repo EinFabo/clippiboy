@@ -82,6 +82,16 @@ export function ColorPicker({
   onChange: (hex: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  /**
+   * What stands in the hex field while it is being typed in.
+   *
+   * A field controlled by `value` alone cannot be typed in at all: a keystroke
+   * that does not complete six digits changes nothing, and the next render puts
+   * the old colour straight back — so the caret never gets past the first one.
+   * Hence a text of its own, handed on only once it really is a colour. `null`
+   * means the field is showing `value` again.
+   */
+  const [typed, setTyped] = useState<string | null>(null);
   const custom = !swatches.includes(value.toLowerCase());
   const [r, g, b] = toRgb(value);
   const [hue, saturation, brightness] = toHsv(r, g, b);
@@ -192,13 +202,17 @@ export function ColorPicker({
           <div className="flex items-center gap-1.5">
             <input
               aria-label="Hex"
-              value={value.toUpperCase()}
+              value={typed ?? value.toUpperCase()}
               onChange={(event) => {
                 const text = event.target.value.trim();
+                setTyped(text);
                 if (/^#?[0-9a-fA-F]{6}$/.test(text)) {
                   onChange(text.startsWith("#") ? text.toLowerCase() : `#${text.toLowerCase()}`);
                 }
               }}
+              // Half a colour is not one: what was typed goes, and the field
+              // shows what is actually set.
+              onBlur={() => setTyped(null)}
               className="w-[92px] rounded-inner border border-line bg-elevated px-2 py-1
                 font-mono text-xs text-ink outline-none focus:border-line-strong"
             />

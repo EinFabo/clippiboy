@@ -89,8 +89,11 @@ function ratioOf(preset: string, width: number, height: number): number | null {
  * to meet its ratio would run over the edge on the very first click.
  */
 function fitRatio(rect: Rect, ratio: number, width: number, height: number): Rect {
-  let w = rect.width;
-  let h = rect.height;
+  // Nothing to reshape yet — a selection that was started but never dragged has
+  // no edges, and `w / h` would be a NaN that travels all the way into the
+  // crop. The whole picture is what a preset means at that point.
+  let w = rect.width > 0 ? rect.width : width;
+  let h = rect.height > 0 ? rect.height : height;
   if (w / h > ratio) w = h * ratio;
   else h = w / ratio;
   if (w > width) {
@@ -226,6 +229,11 @@ export function ShotViewer({
   const pictureWidth = clip?.width ?? 1920;
 
   // Everything about the previous picture says nothing about this one.
+  //
+  // Deliberately on the id alone. A crop changes `pictureWidth` too, and hanging
+  // this on it would empty the marks, close the editor and put every tool back
+  // to its default in the middle of working on one and the same picture — while
+  // `write` is already loading the very same thing.
   useEffect(() => {
     setBroken(false);
     setMode("view");
@@ -249,7 +257,10 @@ export function ShotViewer({
     return () => {
       current = false;
     };
-  }, [id, pictureWidth]);
+    // `pictureWidth` is only read to size the defaults, and on a new picture it
+    // is already the new one. See the note above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   // A picture that would not load says nothing about the next one — and the
   // stage shows a different file in each mode: the finished one while looking,
@@ -280,6 +291,9 @@ export function ShotViewer({
         // again draws it again — that is quicker than finding the button.
         event.preventDefault();
         setShapes((drawn) => drawn.slice(0, -1));
+        // Or the panel keeps offering the options of a mark that is gone, and
+        // its handles stay lying over the picture.
+        setSelected(null);
       } else if (mode === "view" && event.key === "ArrowLeft") {
         step(-1);
       } else if (mode === "view" && event.key === "ArrowRight") {

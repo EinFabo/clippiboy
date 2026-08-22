@@ -1,6 +1,8 @@
 import {
+  memo,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -343,7 +345,9 @@ function hit(
 ): Shape | null {
   for (let at = shapes.length - 1; at >= 0; at--) {
     const shape = shapes[at];
-    const margin = Math.max(slack, shape.size);
+    // A text's box is the text: its `size` is the height of a line, and taking
+    // that as a halo would let one caption swallow every click near it.
+    const margin = shape.tool === "text" ? slack : Math.max(slack, shape.size);
     if (shape.tool === "arrow") {
       if (nearLine(x, y, shape.x1, shape.y1, shape.x2, shape.y2) <= margin) return shape;
       continue;
@@ -382,8 +386,17 @@ function nearLine(
   return Math.hypot(x - (x1 + along * dx), y - (y1 + along * dy));
 }
 
-/** Which corners a shape can be pulled by. `move` alone means: none. */
-function handlesOf(shape: Shape): Array<[string, number, number]> {
+/**
+ * Which corners a shape can be pulled by. `move` alone means: none.
+ *
+ * Measured the same way the frame around it is — a text has no width until a
+ * font has been applied to it, and a handle reckoned without one sits somewhere
+ * else than the dashed line it belongs to.
+ */
+function handlesOf(
+  shape: Shape,
+  measure?: CanvasRenderingContext2D,
+): Array<[string, number, number]> {
   if (shape.tool === "arrow") {
     return [
       ["start", shape.x1, shape.y1],
@@ -391,7 +404,7 @@ function handlesOf(shape: Shape): Array<[string, number, number]> {
     ];
   }
   if (shape.tool === "pen") return [];
-  const box = bounds(shape);
+  const box = bounds(shape, measure);
   if (shape.tool === "text") {
     // One handle, and it scales rather than stretches — text has a size, not a
     // width and a height.
@@ -455,8 +468,14 @@ export function toSteps(shapes: Shape[]): Step[] {
   return steps;
 }
 
-/** A run of marks, painted onto a canvas of its own. */
-function ShapeLayer({
+/**
+ * A run of marks, painted onto a canvas of its own.
+ *
+ * Wrapped in `memo` on purpose: the canvas carries the picture's full
+ * resolution, and on a 4K still clearing and repainting one costs a good part
+ * of a frame. Only the layer whose marks really changed may do that.
+ */
+const ShapeLayer = memo(function ShapeLayer({
   shapes,
   width,
   height,
@@ -486,7 +505,7 @@ function ShapeLayer({
       style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
     />
   );
-}
+});
 
 interface Props {
   stage: React.RefObject<HTMLDivElement | null>;
@@ -559,6 +578,17 @@ export function AnnotateLayer({
     element.style.height = "0px";
     element.style.height = `${element.scrollHeight}px`;
   }, [typing?.value, typing?.id]);
+
+  // What was drawn last lies on top — including a blur, which then covers the
+  // arrow underneath it. In the DOM that is simply the order they are written
+  // in, and `backdrop-filter` picks up everything painted before it.
+  //
+  // The mark under the hand right now gets a layer of its own rather than
+  // joining the run before it. It changes with every movement, and sharing a
+  // canvas would repaint every finished mark along with it — at 4K a
+  // full-resolution canvas per frame, for every layer there is.
+  const layers = useMemo(() => toSteps(shapes), [shapes]);
+  const drawing = useMemo(() => (draft ? toSteps([draft]) : []), [draft]);
 
   if (!box) return null;
 
@@ -737,26 +767,17 @@ export function AnnotateLayer({
     top: box.top + y * box.scale,
   });
 
-  // What was drawn last lies on top — including a blur, which then covers the
-  // arrow underneath it. In the DOM that is simply the order they are written
-  // in, and `backdrop-filter` picks up everything painted before it.
-  const shown = draft ? [...shapes, draft] : shapes;
+  const asLayer = (step: Step, key: string) =>
+    step.kind === "blur" ? (
+      <BlurPatch key={key} step={step} box={box} />
+    ) : (
+      <ShapeLayer key={key} shapes={step.shapes} width={width} height={height} box={box} />
+    );
 
   return (
     <>
-      {toSteps(shown).map((step, at) =>
-        step.kind === "blur" ? (
-          <BlurPatch key={`blur-${at}`} step={step} box={box} />
-        ) : (
-          <ShapeLayer
-            key={`layer-${at}`}
-            shapes={step.shapes}
-            width={width}
-            height={height}
-            box={box}
-          />
-        ),
-      )}
+      {layers.map((step, at) => asLayer(step, `layer-${at}`))}
+      {drawing.map((step, at) => asLayer(step, `draft-${at}`))}
 
       <div
         className={cn(
@@ -795,7 +816,7 @@ export function AnnotateLayer({
               />
             );
           })()}
-          {handlesOf(chosen).map(([key, x, y]) => (
+          {handlesOf(chosen, measure).map(([key, x, y]) => (
             <div
               key={key}
               className="absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 cursor-pointer
@@ -888,10 +909,23 @@ function BlurPatch({
         // The rounding clips the backdrop with it, so an oval here is an oval
         // in the file — the core masks the same way.
         borderRadius: step.ellipse ? "50%" : undefined,
-        backdropFilter: `blur(${step.radius * box.scale}px)`,
+        backdropFilter: `blur(${sigmaOf(step.radius) * box.scale}px)`,
       }}
     />
   );
+}
+
+/**
+ * The radius CSS has to be given so the preview blurs as hard as the file.
+ *
+ * `blur()` is a Gaussian and takes a standard deviation; the core runs two box
+ * passes of half-width `radius`, and two of those have a variance of
+ * `2·r·(r+1)/3`. Handing CSS the radius itself makes the preview about a fifth
+ * softer than what is written — for a redacted name that is exactly the wrong
+ * direction to be wrong in.
+ */
+function sigmaOf(radius: number): number {
+  return Math.sqrt((2 * radius * (radius + 1)) / 3);
 }
 
 /**

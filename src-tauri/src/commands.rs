@@ -405,7 +405,12 @@ pub fn write_screenshot(
 
     // Nothing left to do to it: the untouched picture goes back and the whole
     // store goes away, so the clip stops calling itself edited.
-    if crop.is_none() && steps.is_empty() {
+    //
+    // The marks have their own say in that. A mark can be too small to paint
+    // anything — a blur dragged two pixels wide leaves no step — and without
+    // asking, that one slip would throw away the untouched picture and every
+    // mark noted beside it.
+    if crop.is_none() && steps.is_empty() && marks.is_empty() {
         let whole = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
         let clip = write_picture(&state, &clip, &whole)?;
         crate::shot::forget(&id);

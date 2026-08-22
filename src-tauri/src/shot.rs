@@ -131,7 +131,11 @@ impl Shot {
         blur_rows(&turned, &mut done, h, w, radius);
         transpose(&done, &mut across, h, w);
 
-        let (centre_x, centre_y) = (w as f32 / 2.0, h as f32 / 2.0);
+        // From the rectangle that was asked for, not from what is left of it
+        // after clamping. A blur pulled over the edge of the picture would
+        // otherwise become a squashed oval here while the preview, which knows
+        // nothing of the clamping, showed a round one.
+        let (centre_x, centre_y) = (width as f32 / 2.0, height as f32 / 2.0);
         for row in 0..h {
             let line = (top + row) * stride + left * 3;
             if !ellipse {
