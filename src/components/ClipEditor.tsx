@@ -237,7 +237,11 @@ export function ClipEditor({
           {saving ? "Saving…" : "Save"}
         </Button>
         {busy && progress !== null && <Progress value={progress} />}
-        <p className="text-xs leading-relaxed text-ink-faint">
+        <p className="flex items-start gap-1.5 text-xs leading-relaxed text-ink-faint">
+          {/* Mounts only while the message stands, so the stroke draws itself
+              anew on every save — an edit in between takes it away again. */}
+          {justSaved && !dirty && <DrawnCheck />}
+          <span>
           {restoring
             ? "The whole recording is being written back."
             : saving
@@ -251,9 +255,34 @@ export function ClipEditor({
                   : clip.original
                     ? "The trim sits in the file. The original is beside it, undoing works any time."
                     : "The file in the folder is exactly what stands here."}
+          </span>
         </p>
       </section>
     </aside>
+  );
+}
+
+/**
+ * The check that says it went through — drawn rather than switched on.
+ *
+ * Same trick the overlay uses for its outline: `pathLength="100"` makes the
+ * dash arithmetic independent of how long the stroke actually is, so the line
+ * runs itself from start to finish in a set time.
+ */
+function DrawnCheck() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden
+      className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ok"
+      fill="none"
+      strokeWidth="2.4"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path className="cb-draw" pathLength={100} d="m5 12.5 4.5 4.5L19 7" />
+    </svg>
   );
 }
 

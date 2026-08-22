@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Toggle } from "@/components/ui/Controls";
+import { Segmented, Toggle } from "@/components/ui/Controls";
 import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import type { OverlayCorner, UpdateInfo } from "@/lib/types";
@@ -22,6 +22,16 @@ export function Settings() {
 
   const patchOverlay = (patch: Partial<typeof config.overlay>) =>
     patchConfig({ overlay: { ...config.overlay, ...patch } });
+
+  // Prefixed, so a monitor whose id happened to read "follow" could not pass
+  // itself off as the setting that follows the game.
+  const screen = config.overlay.followActiveScreen
+    ? "follow"
+    : (monitors.find(
+        (m) =>
+          config.overlay.monitor === m.id ||
+          (config.overlay.monitor === null && m.isPrimary),
+      )?.id ?? null);
 
   return (
     <div className="space-y-8 pb-12">
@@ -104,62 +114,44 @@ export function Settings() {
             />
           </Row>
           <Row label="Screen">
-            <div className="flex flex-wrap justify-end gap-1.5">
-              {monitors.map((monitor) => (
-                <ChoiceButton
-                  key={monitor.id}
-                  active={
-                    !config.overlay.followActiveScreen &&
-                    (config.overlay.monitor === monitor.id ||
-                      (config.overlay.monitor === null && monitor.isPrimary))
-                  }
-                  disabled={!config.overlay.enabled}
-                  onClick={() =>
-                    patchOverlay({
-                      monitor: monitor.id,
-                      followActiveScreen: false,
-                    })
-                  }
-                >
-                  {monitor.title.split("—")[0].trim()}
-                </ChoiceButton>
-              ))}
-              <ChoiceButton
-                active={config.overlay.followActiveScreen}
-                disabled={!config.overlay.enabled}
-                onClick={() => patchOverlay({ followActiveScreen: true })}
-              >
-                follows the game
-              </ChoiceButton>
-            </div>
+            <Segmented
+              className="flex-wrap justify-end"
+              disabled={!config.overlay.enabled}
+              value={screen}
+              options={[
+                ...monitors.map((monitor) => ({
+                  key: monitor.id,
+                  label: monitor.title.split("—")[0].trim(),
+                })),
+                { key: "follow", label: "follows the game" },
+              ]}
+              onChange={(key) =>
+                patchOverlay(
+                  key === "follow"
+                    ? { followActiveScreen: true }
+                    : { monitor: key, followActiveScreen: false },
+                )
+              }
+            />
           </Row>
           <Row label="Corner">
-            <div className="flex gap-1.5">
-              {corners.map(([corner, label]) => (
-                <ChoiceButton
-                  key={corner}
-                  active={config.overlay.corner === corner}
-                  disabled={!config.overlay.enabled}
-                  onClick={() => patchOverlay({ corner })}
-                >
-                  {label}
-                </ChoiceButton>
-              ))}
-            </div>
+            <Segmented
+              disabled={!config.overlay.enabled}
+              value={config.overlay.corner}
+              options={corners.map(([corner, label]) => ({ key: corner, label }))}
+              onChange={(corner) => patchOverlay({ corner })}
+            />
           </Row>
           <Row label="Duration" hint="Errors always stay at least 6 s">
-            <div className="flex gap-1.5">
-              {[2000, 3500, 5000, 8000].map((durationMs) => (
-                <ChoiceButton
-                  key={durationMs}
-                  active={config.overlay.durationMs === durationMs}
-                  disabled={!config.overlay.enabled}
-                  onClick={() => patchOverlay({ durationMs })}
-                >
-                  {durationMs / 1000} s
-                </ChoiceButton>
-              ))}
-            </div>
+            <Segmented
+              disabled={!config.overlay.enabled}
+              value={String(config.overlay.durationMs)}
+              options={[2000, 3500, 5000, 8000].map((ms) => ({
+                key: String(ms),
+                label: `${ms / 1000} s`,
+              }))}
+              onChange={(key) => patchOverlay({ durationMs: Number(key) })}
+            />
           </Row>
         </Card>
         <p className="mt-3 text-xs text-ink-faint">
@@ -206,34 +198,6 @@ function Row({
       </div>
       <div className="shrink-0">{children}</div>
     </div>
-  );
-}
-
-function ChoiceButton({
-  active,
-  disabled,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={cn(
-        "h-8 rounded-pill px-3.5 text-[13px] font-medium tabular-nums transition-colors duration-150",
-        "disabled:pointer-events-none disabled:opacity-40",
-        active
-          ? "bg-white text-black"
-          : "border border-line bg-elevated text-ink-muted hover:text-ink",
-      )}
-    >
-      {children}
-    </button>
   );
 }
 

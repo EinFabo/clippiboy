@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { SLIDE, SlidingIndicator } from "./SlidingIndicator";
 
 export function Toggle({
   checked,
@@ -33,6 +34,57 @@ export function Toggle({
         )}
       />
     </button>
+  );
+}
+
+/**
+ * A row of options where one is picked, with a marker that travels to it.
+ *
+ * The whole row is one track with one frame around it, rather than a frame per
+ * button: that is what lets the white pill slide from one option to the next
+ * instead of switching off here and on over there.
+ */
+export function Segmented<K extends string>({
+  value,
+  options,
+  onChange,
+  disabled,
+  className,
+}: {
+  /** `null` when nothing matches — the marker then stays away entirely. */
+  value: K | null;
+  options: Array<{ key: K; label: ReactNode }>;
+  onChange: (key: K) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "relative flex items-center gap-0.5 rounded-pill border border-line bg-elevated p-0.5",
+        disabled && "pointer-events-none opacity-40",
+        className,
+      )}
+    >
+      {value !== null && (
+        <SlidingIndicator activeKey={value} className="rounded-pill bg-white" />
+      )}
+      {options.map(({ key, label }) => (
+        <button
+          key={key}
+          {...{ [SLIDE]: key }}
+          onClick={() => onChange(key)}
+          className={cn(
+            // Positioned, so it stands above the marker instead of under it.
+            "relative h-7 rounded-pill px-3 text-[13px] font-medium tabular-nums",
+            "transition-colors duration-150 ease-[var(--ease-out-soft)]",
+            value === key ? "text-black" : "text-ink-muted hover:text-ink",
+          )}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   );
 }
 

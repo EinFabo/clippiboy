@@ -345,7 +345,7 @@ Two menus of our own in the UI's style take its place:
 
 **On a clip** (tile in the gallery, picture in the player): Open · Open in
 default player · Rename · Favorite · **Copy clip** · Copy path · Show in
-folder · Delete. "Copy clip" puts the **file** on the clipboard, not its path —
+folder · Delete… "Copy clip" puts the **file** on the clipboard, not its path —
 in Discord or WhatsApp, Ctrl+V then attaches the clip; in Explorer it drops a
 copy. The format for that is `CF_HDROP`, and no WebView can do it: it comes from
 `src-tauri/src/clipboard.rs`.
@@ -362,6 +362,37 @@ underneath would otherwise lose its selection, and the editor would save on blur
 mid-operation. So the keyboard (↑/↓/Enter/Escape) runs through the document.
 Rendering happens into `document.fullscreenElement ?? document.body` — in the
 player's fullscreen everything else is invisible.
+
+## Deleting
+
+Deleting takes the file off the disk — not into the recycle bin, and there is no
+undo. So nothing deletes on the first click: the bin on the tile and the Delete
+button in the player turn into a question in their own place, with a tick and a
+cross beside it. Escape or the cross keeps the clip. The confirm button is
+deliberately **not** focused, so a stray Enter cannot finish what a stray click
+started.
+
+Gone with the clip are its thumbnail, its separated audio tracks and, if there
+is one, the untrimmed original — none of them are of any use on their own.
+
+## Motion
+
+The interface moves in one vocabulary, defined as four curves in
+`src/styles/tokens.css` and one set of keyframes in `src/styles/motion.css`.
+Everything runs on `opacity` and `transform` alone, so nothing costs a layout
+pass while a game is running next door — the same rule the banner follows.
+
+The marker in the nav bar travels to the tab you picked instead of switching off
+here and on over there; the gallery introduces itself once per session and then
+just shows the clips; a deleted tile fades where it stood and the rest slides
+into the gap; the heart lets a single ring go and is done. Whatever is asked for
+by `prefers-reduced-motion` is honoured throughout: every animation still ends
+in its final state, only the journey is skipped.
+
+No animation library — the same reason there is no icon library and no `clsx`.
+The whole vocabulary is about two hundred lines in `src/lib/` (`useFlip`,
+`usePresence`, `useCountUp`) and three small components in
+`src/components/ui/`.
 
 ## Order in the clip folder
 

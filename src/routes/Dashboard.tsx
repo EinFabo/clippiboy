@@ -9,6 +9,8 @@ import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
 import { SourceTrouble } from "@/components/SourceTrouble";
 import { cn } from "@/lib/cn";
+import { LiveDot } from "@/components/ui/LiveDot";
+import { useCountUp } from "@/lib/useCountUp";
 
 export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const {
@@ -53,11 +55,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
       <section className="grid grid-cols-4 gap-4">
         <Stat
           label="Replay buffer"
-          value={
-            bufferActive
-              ? formatBufferSeconds(Math.round(bufferedSeconds))
-              : "off"
-          }
+          count={bufferActive ? bufferedSeconds : 0}
+          format={(s) => (bufferActive ? formatBufferSeconds(Math.round(s)) : "off")}
           hint={`of ${formatBufferSeconds(config.buffer.seconds)}`}
           live={bufferActive}
         />
@@ -78,7 +77,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         />
         <Stat
           label="Audio sources"
-          value={String(config.sources.filter((s) => s.enabled).length)}
+          count={config.sources.filter((s) => s.enabled).length}
+          format={(n) => String(Math.round(n))}
           hint={`${config.sources.filter((s) => s.separateTrack).length} on their own track`}
           onClick={() => onNavigate("audio")}
         />
@@ -161,19 +161,20 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   );
 }
 
-function Stat({
-  label,
-  value,
-  hint,
-  live,
-  onClick,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-  live?: boolean;
-  onClick?: () => void;
-}) {
+/**
+ * A number with its name. Either a finished string, or — where the value is
+ * worth watching move — a raw number plus how to write it, so it can run up to
+ * a new reading instead of jumping to it.
+ */
+function Stat(
+  props: {
+    label: string;
+    hint: string;
+    live?: boolean;
+    onClick?: () => void;
+  } & ({ value: string } | { count: number; format: (n: number) => string }),
+) {
+  const { label, hint, live, onClick } = props;
   return (
     <Card
       interactive={!!onClick}
@@ -181,11 +182,22 @@ function Stat({
       className={cn("p-5", onClick && "cursor-pointer")}
     >
       <div className="flex items-center gap-2 text-xs font-medium text-ink-muted">
-        {live && <span className="h-2 w-2 animate-pulse rounded-pill bg-live" />}
+        {live && <LiveDot />}
         {label}
       </div>
-      <p className="display mt-3 truncate text-3xl">{value}</p>
+      <p className="display mt-3 truncate text-3xl">
+        {"count" in props ? (
+          <Counted value={props.count} format={props.format} />
+        ) : (
+          props.value
+        )}
+      </p>
       <p className="mt-1 text-xs text-ink-faint">{hint}</p>
     </Card>
   );
+}
+
+/** Its own component so only the number re-renders while it is running. */
+function Counted({ value, format }: { value: number; format: (n: number) => string }) {
+  return <>{format(useCountUp(value))}</>;
 }

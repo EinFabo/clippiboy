@@ -31,7 +31,10 @@ export default function App() {
         <NavBar route={route} onNavigate={setRoute} />
 
         <main className="relative h-full overflow-y-auto pt-24 pb-16">
-          <div className="mx-auto w-full max-w-[1180px] px-8">
+          {/* Keyed on the route so the rise plays again on every change — the
+              same trick the overlay uses to replay its card animation. The
+              routes already unmount on a switch, so nothing is lost by it. */}
+          <div key={route} className="cb-rise mx-auto w-full max-w-[1180px] px-8">
             {route === "dashboard" && <Dashboard onNavigate={setRoute} />}
             {route === "clips" && <Clips onNavigate={setRoute} />}
             {route === "audio" && <AudioMixer />}

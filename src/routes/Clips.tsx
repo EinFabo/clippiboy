@@ -18,6 +18,12 @@ import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, fileName, formatAgo, formatDuration, formatSize } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { isTextField } from "@/lib/dom";
+import { useFlip } from "@/lib/useFlip";
+import { usePresence } from "@/lib/usePresence";
+import { useCountUp } from "@/lib/useCountUp";
+import { HeartBurst } from "@/components/ui/HeartBurst";
+import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
+import { animate, EASE_SPRING } from "@/lib/motion";
 import type { Clip } from "@/lib/types";
 
 /**
@@ -34,6 +40,17 @@ type Filter =
   | { kind: "game"; name: string };
 
 const ALL: Filter = { kind: "all" };
+
+/** Has to match the length of `cb-tile-out` in styles/motion.css. */
+const LEAVE_MS = 200;
+
+/**
+ * Whether the gallery has already introduced itself in this session.
+ *
+ * The staggered arrival is a greeting, not a habit: coming back from another
+ * tab for the fourth time should simply show the clips.
+ */
+let greeted = false;
 
 export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const { clips, deleteClip, clearGame, setFavorite, fileClip } = useEngine();
@@ -59,7 +76,23 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
   /** Which clip is being renamed — both the click on the name and "Rename" in
       the right-click menu land here. */
   const [renaming, setRenaming] = useState<string | null>(null);
+  /**
+   * Which clip has been asked about. Deleting takes the file off the disk and
+   * there is no way back, so the bin does not delete — it asks, in its own
+   * place on the tile.
+   */
+  const [confirming, setConfirming] = useState<string | null>(null);
   const clipMenu = useClipMenu();
+  const grid = useRef<HTMLDivElement>(null);
+  /**
+   * The thumbnails by clip id. The player asks for one when it opens and again
+   * when it closes, so the picture has somewhere to grow out of and back into.
+   */
+  const thumbs = useRef(new Map<string, HTMLElement>());
+  const originOf = useCallback(
+    (id: string) => thumbs.current.get(id)?.getBoundingClientRect() ?? null,
+    [],
+  );
 
   /** Games with a count, most frequent first — the bar should lead with what
       people actually filter by. */
@@ -114,6 +147,45 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
   const filtered = query !== "" || filter.kind !== "all";
 
+  const clipIds = useMemo(() => new Set(clips.map((c) => c.id)), [clips]);
+
+  /**
+   * The tiles, including the ones on their way out. Only a clip that was really
+   * deleted is held back for its exit — one that merely fell out of the filter
+   * goes at once, or every keystroke in the search field would drag a trail of
+   * ghosts behind it.
+   */
+  const tiles = usePresence(visible, (clip) => clip.id, LEAVE_MS, (id) => !clipIds.has(id));
+
+  /** Where a tile stands in the live list — the player counts in those. */
+  const positions = new Map(visible.map((clip, index) => [clip.id, index]));
+
+  // Deleting one tile and filtering the rest are the same thing to the grid:
+  // whatever stays has to travel to its new place instead of appearing there.
+  useFlip(grid, tiles.map((tile) => (tile.leaving ? `${tile.key}!` : tile.key)).join());
+
+  // Which tiles arrive with an animation, decided once and then left alone —
+  // recomputing it every render would cut the animation off halfway.
+  const greeting = useRef<Set<string> | null>(null);
+  const known = useRef<Set<string> | null>(null);
+  const arrived = useRef(new Set<string>());
+
+  if (greeting.current === null && tiles.length > 0) {
+    greeting.current = greeted ? new Set() : new Set(tiles.map((tile) => tile.key));
+    greeted = true;
+  }
+  if (known.current === null) {
+    known.current = new Set(clips.map((clip) => clip.id));
+  } else {
+    // A clip saved while the gallery is open comes in at the front
+    // (store.ts:163) and should be seen doing it.
+    for (const clip of clips) {
+      if (known.current.has(clip.id)) continue;
+      known.current.add(clip.id);
+      arrived.current.add(clip.id);
+    }
+  }
+
   // Deleted clips fall out of the playlist, changed ones stay in it — with
   // whatever state the store currently holds.
   const playing = useMemo(() => {
@@ -154,10 +226,16 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
       <div className="space-y-3">
         <div className="flex items-center gap-3">
           <SearchField value={query} onChange={setQuery} />
-          <span className="ml-auto shrink-0 text-xs text-ink-faint">
-            {filtered
-              ? `${visible.length} of ${clips.length} clips`
-              : `${clips.length} clips`}
+          <span className="ml-auto shrink-0 text-xs text-ink-faint tabular-nums">
+            {filtered ? (
+              <>
+                <Counted value={visible.length} /> of {clips.length} clips
+              </>
+            ) : (
+              <>
+                <Counted value={clips.length} /> clips
+              </>
+            )}
           </span>
         </div>
 
@@ -172,17 +250,28 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
         />
       </div>
 
-      {visible.length === 0 ? (
+      {tiles.length === 0 ? (
         <Card className="grid h-56 place-items-center text-sm text-ink-muted">
           No clips found.
         </Card>
       ) : (
-        <div className="grid grid-cols-3 gap-4 pb-10">
-          {visible.map((clip, index) => (
+        <div ref={grid} className="grid grid-cols-3 gap-4 pb-10">
+          {tiles.map(({ item: clip, key, leaving }, slot) => {
+            const index = positions.get(clip.id) ?? 0;
+            // Capped, so a gallery of eighty clips does not crawl in.
+            const wait = greeting.current?.has(key) ? Math.min(slot, 11) * 30 : null;
+            return (
             <Card
-              key={clip.id}
-              interactive
-              className="group overflow-hidden"
+              key={key}
+              data-flip={key}
+              interactive={!leaving}
+              className={cn(
+                "group overflow-hidden",
+                leaving
+                  ? "cb-tile-out"
+                  : (wait !== null || arrived.current.has(key)) && "cb-tile-in",
+              )}
+              style={wait !== null ? { animationDelay: `${wait}ms` } : undefined}
               onContextMenu={(event) => {
                 // If the cursor is in the name field the menu belongs to the
                 // text — `TextMenu` takes care of that on its own.
@@ -190,12 +279,16 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 clipMenu(event, clip, {
                   onOpen: () => openAt(index),
                   onRename: () => setRenaming(clip.id),
-                  onDelete: () => deleteClip(clip.id),
+                  onDelete: () => setConfirming(clip.id),
                 });
               }}
             >
               <div className="relative">
                 <button
+                  ref={(node) => {
+                    if (node) thumbs.current.set(clip.id, node);
+                    else thumbs.current.delete(clip.id);
+                  }}
                   onClick={() => openAt(index)}
                   aria-label={`Play ${clip.game ?? "clip"}`}
                   className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
@@ -262,25 +355,44 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       : "text-white/70 opacity-0 group-hover:opacity-100 hover:text-white",
                   )}
                 >
-                  <IconHeart filled={clip.favorite} className="h-4 w-4" />
+                  <HeartBurst favorite={clip.favorite} />
                 </button>
                 <div
-                  className="absolute top-3 right-3 flex gap-1.5 opacity-0 transition-opacity
-                    group-hover:opacity-100"
+                  className={cn(
+                    "absolute top-3 right-3 flex gap-1.5 transition-opacity",
+                    // While the question stands it has to stay up, even once
+                    // the cursor has wandered off the tile.
+                    confirming === clip.id
+                      ? "opacity-100"
+                      : "opacity-0 group-hover:opacity-100",
+                  )}
                 >
-                  <IconAction
-                    label="Show in folder"
-                    onClick={() => inTauri && api.revealClip(clip.id)}
-                  >
-                    <IconFolder className="h-4 w-4" />
-                  </IconAction>
-                  <IconAction
-                    label="Delete clip"
-                    danger
-                    onClick={() => deleteClip(clip.id)}
-                  >
-                    <IconTrash className="h-4 w-4" />
-                  </IconAction>
+                  {confirming === clip.id ? (
+                    <ConfirmDelete
+                      origin="right"
+                      onConfirm={() => {
+                        setConfirming(null);
+                        void deleteClip(clip.id);
+                      }}
+                      onCancel={() => setConfirming(null)}
+                    />
+                  ) : (
+                    <>
+                      <IconAction
+                        label="Show in folder"
+                        onClick={() => inTauri && api.revealClip(clip.id)}
+                      >
+                        <IconFolder className="h-4 w-4" />
+                      </IconAction>
+                      <IconAction
+                        label="Delete clip"
+                        danger
+                        onClick={() => setConfirming(clip.id)}
+                      >
+                        <IconTrash className="h-4 w-4" />
+                      </IconAction>
+                    </>
+                  )}
                 </div>
               </div>
               <div className="p-4">
@@ -308,7 +420,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 </div>
               </div>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -324,10 +437,16 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
           onClose={closePlayer}
           onDelete={deleteClip}
           onOpenMixer={() => onNavigate("audio")}
+          originOf={originOf}
         />
       )}
     </div>
   );
+}
+
+/** A count that runs to its new reading instead of flicking to it. */
+function Counted({ value }: { value: number }) {
+  return <>{Math.round(useCountUp(value))}</>;
 }
 
 /**
@@ -512,6 +631,21 @@ function GameFilters({
     return () => window.removeEventListener("keydown", onKey);
   }, [confirming]);
 
+  // Chips are sorted by how often a game turns up, and the confirmation takes
+  // the place of the chip it belongs to. Both shift everything to the right of
+  // them, and that should be a slide rather than a jump.
+  useFlip(
+    strip,
+    [
+      "all",
+      favorites > 0 && "favorites",
+      ...games.map(({ name }) => (confirming === name ? `${name}?` : name)),
+      untagged > 0 && "untagged",
+    ]
+      .filter(Boolean)
+      .join(),
+  );
+
   const edge = (on: boolean) => (on ? "36px" : "0px");
   const mask = `linear-gradient(to right, transparent, #000 ${edge(fade.left)},
     #000 calc(100% - ${edge(fade.right)}), transparent)`;
@@ -524,6 +658,7 @@ function GameFilters({
       style={{ maskImage: mask, WebkitMaskImage: mask }}
     >
       <Chip
+        id="all"
         active={active.kind === "all"}
         onClick={() => onSelect({ kind: "all" })}
         count={total}
@@ -533,6 +668,7 @@ function GameFilters({
 
       {favorites > 0 && (
         <Chip
+          id="favorites"
           active={active.kind === "favorites"}
           count={favorites}
           onClick={() => onSelect({ kind: "favorites" })}
@@ -554,6 +690,7 @@ function GameFilters({
         confirming === name ? (
           <ConfirmChip
             key={name}
+            id={name}
             name={name}
             onConfirm={() => {
               onRemove(name);
@@ -564,6 +701,7 @@ function GameFilters({
         ) : (
           <Chip
             key={name}
+            id={name}
             active={active.kind === "game" && active.name === name}
             count={count}
             onClick={() => onSelect({ kind: "game", name })}
@@ -576,6 +714,7 @@ function GameFilters({
 
       {untagged > 0 && (
         <Chip
+          id="untagged"
           active={active.kind === "untagged"}
           count={untagged}
           onClick={() => onSelect({ kind: "untagged" })}
@@ -593,6 +732,7 @@ function GameFilters({
  * you moved across.
  */
 function Chip({
+  id,
   active,
   count,
   icon,
@@ -600,6 +740,7 @@ function Chip({
   onRemove,
   children,
 }: {
+  id: string;
   active: boolean;
   count: number;
   icon?: React.ReactNode;
@@ -607,8 +748,30 @@ function Chip({
   onRemove?: () => void;
   children: string;
 }) {
+  const box = useRef<HTMLDivElement>(null);
+  const was = useRef(active);
+
+  // A single small nod when the chip takes over — not on mount, or the whole
+  // bar would twitch every time the gallery opens.
+  useEffect(() => {
+    if (was.current === active) return;
+    was.current = active;
+    if (!active) return;
+    animate(
+      box.current,
+      [
+        { transform: "scale(1)" },
+        { transform: "scale(1.04)", offset: 0.45 },
+        { transform: "scale(1)" },
+      ],
+      { duration: 300, easing: EASE_SPRING },
+    );
+  }, [active]);
+
   return (
     <div
+      ref={box}
+      data-flip={id}
       className={cn(
         "group/chip flex h-8 shrink-0 items-center rounded-pill border",
         "transition-colors duration-150",
@@ -651,18 +814,21 @@ function Chip({
 
 /** The confirmation sits in the pill's place — no dialog over the page. */
 function ConfirmChip({
+  id,
   name,
   onConfirm,
   onCancel,
 }: {
+  id: string;
   name: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   return (
     <div
-      className="flex h-8 shrink-0 items-center gap-1 rounded-pill border border-live/40
-        bg-live/15 pl-4 text-[13px] font-medium text-live"
+      data-flip={id}
+      className="cb-chip-expand flex h-8 shrink-0 items-center gap-1 rounded-pill border
+        border-live/40 bg-live/15 pl-4 text-[13px] font-medium text-live"
     >
       <span className="max-w-[160px] truncate" title={name}>
         {name}

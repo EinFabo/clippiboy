@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
 import { ClipEditor, type Trim } from "@/components/ClipEditor";
 import { useClipMenu } from "@/components/clipMenu";
-import { IconHeart, IconTrash } from "@/components/icons";
+import { IconTrash } from "@/components/icons";
+import { HeartBurst } from "@/components/ui/HeartBurst";
+import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
+import { EASE_ENTRANCE, EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { useEngine } from "@/store";
 import { api, events, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
@@ -19,10 +23,26 @@ interface Props {
   onDelete: (id: string) => void;
   /** Switch to the audio mixer — that is where the separated tracks come from. */
   onOpenMixer: () => void;
+  /**
+   * Where the clip's tile sits on screen, if the caller shows tiles at all.
+   * That is what lets the picture grow out of the gallery instead of the player
+   * simply being there. The dashboard passes nothing and gets a plain fade.
+   */
+  originOf?: (clipId: string) => DOMRect | null;
+}
+
+/** The picture on its way between the tile and the stage. */
+interface Flight {
+  src: string;
+  from: DOMRect;
+  to: DOMRect;
 }
 
 /** One frame at 30 fps. Enough to set a mark cleanly. */
 const FRAME = 1 / 30;
+
+/** Has to match the length of `cb-player-out` in styles/motion.css. */
+const LEAVE_MS = 200;
 
 /**
  * Full-bleed player over the gallery, with the editing pane beside it.
@@ -43,9 +63,21 @@ export function ClipPlayer({
   onClose,
   onDelete,
   onOpenMixer,
+  originOf,
 }: Props) {
   const clip = clips[index];
   const video = useRef<HTMLVideoElement>(null);
+  /**
+   * Closing is held for as long as the exit runs. The gallery moves files
+   * around the moment the player is gone (Clips.tsx), so the wait has to happen
+   * here rather than there — every caller gets it that way.
+   */
+  const [leaving, setLeaving] = useState(false);
+  /** Set while the stage is travelling back onto its tile. */
+  const [shrinking, setShrinking] = useState(false);
+  const goodbye = useRef(0);
+  const [flight, setFlight] = useState<Flight | null>(null);
+  const ghost = useRef<HTMLImageElement>(null);
   const frame = useRef<HTMLDivElement>(null);
   const applyClipEdit = useEngine((state) => state.applyClipEdit);
   const setFavorite = useEngine((state) => state.setFavorite);
@@ -64,6 +96,12 @@ export function ClipPlayer({
   const [restoring, setRestoring] = useState(false);
   const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
+  /**
+   * Whether the question about deleting stands. The file goes off the disk and
+   * does not come back, so the button asks first — in its own place, like
+   * everything else that asks in this app.
+   */
+  const [askingDelete, setAskingDelete] = useState(false);
   // Counts the video element's restarts. Serves as a `key`: after saving, the
   // player gets a fresh element rather than one whose source we pulled out from
   // under it. The audio tracks re-attach to it as well.
@@ -73,24 +111,112 @@ export function ClipPlayer({
   /** Failed attempts at loading the current file. */
   const loadFailures = useRef(0);
 
+  /** Play the exit, then really go. Everything that closes goes through here. */
+  const close = useCallback(() => {
+    if (prefersReducedMotion()) {
+      onClose();
+      return;
+    }
+
+    // The stage travels back onto the tile it came from. Not the thumbnail this
+    // time but the stage itself, so what shrinks is the frame you were actually
+    // watching — a thumbnail here would jump the clip back to its first second
+    // at the very moment you close it.
+    const stage = frame.current;
+    const target = clip ? originOf?.(clip.id) : null;
+    if (stage && target && target.width > 0) {
+      const box = stage.getBoundingClientRect();
+      stage.style.transformOrigin = "top left";
+      stage.animate(
+        [
+          { transform: "none" },
+          {
+            transform:
+              `translate(${target.left - box.left}px, ${target.top - box.top}px) ` +
+              `scale(${target.width / box.width}, ${target.height / box.height})`,
+          },
+        ],
+        { duration: LEAVE_MS, easing: EASE_EXIT, fill: "forwards" },
+      );
+      setShrinking(true);
+    }
+
+    setLeaving((already) => {
+      if (already) return already;
+      goodbye.current = window.setTimeout(onClose, LEAVE_MS);
+      return true;
+    });
+  }, [clip, onClose, originOf]);
+
+  useEffect(() => () => clearTimeout(goodbye.current), []);
+
+  // Measured once, at the first layout: the tile is still where it was, and the
+  // stage already knows how big it will be.
+  useLayoutEffect(() => {
+    const from = clip ? originOf?.(clip.id) : null;
+    const to = frame.current?.getBoundingClientRect();
+    if (!clip?.thumbPath || !from || !to || from.width === 0) return;
+    if (prefersReducedMotion()) return;
+    setFlight({ src: `${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`, from, to });
+    // Only for the clip the player opened with — paging on happens inside the
+    // gallery's own list and has nothing to fly from.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const node = ghost.current;
+    if (!flight || !node) return;
+
+    const box = (rect: DOMRect) => ({
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+    });
+    const fly = node.animate([box(flight.from), box(flight.to)], {
+      duration: 350,
+      easing: EASE_ENTRANCE,
+      fill: "forwards",
+    });
+    // Hands over shortly before it lands, so the video is already underneath
+    // rather than appearing after a gap.
+    const hand = node.animate([{ opacity: 1 }, { opacity: 0 }], {
+      delay: 250,
+      duration: 150,
+      fill: "forwards",
+    });
+
+    void Promise.all([fly.finished, hand.finished])
+      .then(() => setFlight(null))
+      .catch(() => {});
+
+    return () => {
+      fly.cancel();
+      hand.cancel();
+    };
+  }, [flight]);
+
   // The video element's volume belongs to the mixer: track 0 is the main mix,
   // and that has to match the other tracks.
   const mix = useClipMix(clip, video, muted ? 0 : volume, reload);
 
   // The success message belongs to exactly one clip — when paging through, it
-  // would otherwise be a claim about a clip nobody saved.
+  // would otherwise be a claim about a clip nobody saved. The same goes for the
+  // question about deleting: it was asked about the clip that was on screen.
   useEffect(() => {
     setJustSaved(false);
+    setAskingDelete(false);
   }, [clip?.id]);
 
   /** Delete and move on within the player — if the last clip is gone, there is
       nothing left to show. */
   const removeClip = useCallback(() => {
     if (!clip) return;
+    setAskingDelete(false);
     onDelete(clip.id);
-    if (clips.length <= 1) onClose();
+    if (clips.length <= 1) close();
     else onIndexChange(Math.min(index, clips.length - 2));
-  }, [clip, clips.length, index, onClose, onDelete, onIndexChange]);
+  }, [clip, clips.length, index, close, onDelete, onIndexChange]);
 
   const step = useCallback(
     (delta: number) => {
@@ -267,7 +393,13 @@ export function ClipPlayer({
         o: () => mark("end"),
         n: () => step(1),
         p: () => step(-1),
-        Escape: () => (document.fullscreenElement ? undefined : onClose()),
+        // Escape works its way outwards: first the fullscreen, then the
+        // question about deleting, and only then the player itself.
+        Escape: () => {
+          if (document.fullscreenElement) return;
+          if (askingDelete) return; // the question takes it — see ConfirmDelete
+          close();
+        },
       };
       const handler = handlers[event.key] ?? handlers[event.key.toLowerCase()];
       if (!handler) return;
@@ -276,7 +408,7 @@ export function ClipPlayer({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggle, seek, seekTo, fullscreen, mark, step, onClose, trim.start, trim.end]);
+  }, [toggle, seek, seekTo, fullscreen, mark, step, close, askingDelete, trim.start, trim.end]);
 
   const base = clip ? fileUrl(clip.path) : undefined;
   // After saving the file is a different one — usually shorter, because the
@@ -376,11 +508,26 @@ export function ClipPlayer({
 
   const progress = duration > 0 ? (time / duration) * 100 : 0;
 
-  return (
+  // Hung under <body> rather than where it is written. The route wrapper it
+  // would otherwise sit in animates a transform, and in Chromium that makes it
+  // the frame of reference for every `fixed` descendant — the player would then
+  // start below the nav bar instead of covering the window.
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-black/80 backdrop-blur-xl"
-      onClick={onClose}
+      className={cn(
+        "fixed inset-0 z-50 bg-black/80 backdrop-blur-xl",
+        leaving ? "cb-backdrop-out" : "cb-backdrop-in",
+      )}
+      onClick={close}
     >
+      {/* The scale sits on this wrapper, not on the backdrop: a backdrop that
+          scales drags the whole screen with it. */}
+      <div
+        className={cn(
+          "flex h-full flex-col",
+          leaving ? (shrinking ? "cb-chrome-out" : "cb-player-out") : "cb-player-in",
+        )}
+      >
       {/* The clip's name lives in the editing pane and is editable there — up
           here it would stand a second time, but untouchable. */}
       <header className="flex shrink-0 items-center justify-between gap-6 px-8 pt-6 pb-4">
@@ -393,7 +540,7 @@ export function ClipPlayer({
         </div>
         <button
           aria-label="Close player"
-          onClick={onClose}
+          onClick={close}
           className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
             text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
         >
@@ -410,7 +557,7 @@ export function ClipPlayer({
         <div
           ref={frame}
           onContextMenu={(event) =>
-            clip && clipMenu(event, clip, { onDelete: removeClip })
+            clip && clipMenu(event, clip, { onDelete: () => setAskingDelete(true) })
           }
           className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-card bg-black"
         >
@@ -527,19 +674,23 @@ export function ClipPlayer({
             aria-label={playing ? "Pause" : "Play"}
             onClick={toggle}
             disabled={broken}
-            className="grid h-11 w-11 shrink-0 place-items-center rounded-pill bg-white text-black
-              transition-transform active:scale-95 disabled:opacity-40"
+            className="relative grid h-11 w-11 shrink-0 place-items-center rounded-pill bg-white
+              text-black transition-transform active:scale-95 disabled:opacity-40"
           >
-            {playing ? (
+            {/* Both symbols stay in place and hand over to each other. Swapping
+                the elements would make the button blink at the very moment the
+                eye is on it. */}
+            <PlayGlyph shown={playing}>
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
                 <rect x="6.5" y="5" width="3.6" height="14" rx="1.2" />
                 <rect x="13.9" y="5" width="3.6" height="14" rx="1.2" />
               </svg>
-            ) : (
+            </PlayGlyph>
+            <PlayGlyph shown={!playing} turn={-1}>
               <svg viewBox="0 0 24 24" className="h-4 w-4 translate-x-[1px]" fill="currentColor">
                 <path d="M7.5 5.2 19 12 7.5 18.8V5.2Z" />
               </svg>
-            )}
+            </PlayGlyph>
           </button>
 
           <Scrubber
@@ -587,9 +738,9 @@ export function ClipPlayer({
             variant={clip.favorite ? "primary" : "secondary"}
             aria-pressed={clip.favorite}
             icon={
-              <IconHeart
-                filled={clip.favorite}
-                className={cn("h-4 w-4", !clip.favorite && "text-live")}
+              <HeartBurst
+                favorite={clip.favorite}
+                className={cn(!clip.favorite && "text-live")}
               />
             }
             onClick={() => void setFavorite(clip.id, !clip.favorite)}
@@ -603,14 +754,22 @@ export function ClipPlayer({
           >
             Show in folder
           </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            icon={<IconTrash className="h-4 w-4" />}
-            onClick={removeClip}
-          >
-            Delete
-          </Button>
+          {askingDelete ? (
+            <ConfirmDelete
+              question="Delete clip?"
+              onConfirm={removeClip}
+              onCancel={() => setAskingDelete(false)}
+            />
+          ) : (
+            <Button
+              size="sm"
+              variant="danger"
+              icon={<IconTrash className="h-4 w-4" />}
+              onClick={() => setAskingDelete(true)}
+            >
+              Delete
+            </Button>
+          )}
 
           <span className="ml-auto text-xs text-ink-faint">
             Space · ←/→ 5 s, 1 s with shift · ,/. single frame · I/O start
@@ -634,7 +793,56 @@ export function ClipPlayer({
           </div>
         </div>
       </footer>
-    </div>
+      </div>
+
+      {flight && (
+        <img
+          ref={ghost}
+          src={flight.src}
+          alt=""
+          aria-hidden
+          className="pointer-events-none fixed z-[60] rounded-card bg-black object-contain"
+          style={{
+            left: flight.from.left,
+            top: flight.from.top,
+            width: flight.from.width,
+            height: flight.from.height,
+          }}
+        />
+      )}
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * One of the two symbols on the play button. The one going out shrinks and
+ * turns away, the one coming in turns in from the other side — 160 ms, so they
+ * overlap and it reads as one symbol changing its mind.
+ */
+function PlayGlyph({
+  shown,
+  turn = 1,
+  children,
+}: {
+  shown: boolean;
+  turn?: 1 | -1;
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      aria-hidden={!shown}
+      className={cn(
+        "absolute grid place-items-center",
+        "transition-[opacity,transform,rotate] duration-[160ms] ease-[var(--ease-out-soft)]",
+        shown
+          ? "scale-100 opacity-100"
+          : "pointer-events-none scale-[0.7] opacity-0",
+      )}
+      style={{ rotate: shown ? "0deg" : `${20 * turn}deg` }}
+    >
+      {children}
+    </span>
   );
 }
 

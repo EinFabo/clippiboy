@@ -30,7 +30,14 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 
   /* Bewegung */
+  /* UI states: hover, colour, the sliding pill. */
   --ease-out-soft: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* Things arriving. Expo-out — fast at first, then it settles. */
+  --ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);
+  /* Things leaving. Slow at first, then gone — the mirror of the entrance. */
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  /* A single small overshoot. Only where a click is confirmed: heart, chip. */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 :root {

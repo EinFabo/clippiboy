@@ -101,7 +101,9 @@ export function useClipMenu() {
     entries.push({ kind: "separator" });
     entries.push({
       kind: "item",
-      label: "Delete",
+      // With the ellipsis, because it asks first — the deleting happens where
+      // the menu was opened from.
+      label: "Delete…",
       icon: <IconTrash className={icon} />,
       danger: true,
       onSelect: options.onDelete,
