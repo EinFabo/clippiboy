@@ -3,8 +3,10 @@ import { useEngine } from "@/store";
 import { Card, Pill } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
+import { ShotViewer } from "@/components/ShotViewer";
 import { useClipMenu } from "@/components/clipMenu";
 import {
+  IconCamera,
   IconCheck,
   IconClose,
   IconFolder,
@@ -34,8 +36,10 @@ import type { Clip } from "@/lib/types";
  * throw the filter off.
  */
 type Filter =
+  /** Recordings. Stills have a chip of their own — see `screenshots`. */
   | { kind: "all" }
   | { kind: "favorites" }
+  | { kind: "screenshots" }
   | { kind: "untagged" }
   | { kind: "game"; name: string };
 
@@ -108,6 +112,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
   const untagged = useMemo(() => clips.filter((c) => !c.game).length, [clips]);
   const favorites = useMemo(() => clips.filter((c) => c.favorite).length, [clips]);
+  const shots = useMemo(() => clips.filter((c) => c.screenshot).length, [clips]);
+  const recordings = clips.length - shots;
 
   // If a clip's game is renamed or removed, its filter disappears — without
   // this the gallery would stay empty and nobody would know why. Not while the
@@ -120,9 +126,11 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
         ? untagged === 0
         : filter.kind === "favorites"
           ? favorites === 0
-          : !games.some((g) => g.name === filter.name);
+          : filter.kind === "screenshots"
+            ? shots === 0
+            : !games.some((g) => g.name === filter.name);
     if (gone) setFilter(ALL);
-  }, [filter, games, untagged, favorites, open]);
+  }, [filter, games, untagged, favorites, shots, open]);
 
   const visible = clips.filter((c) => {
     const haystack = [
@@ -136,12 +144,14 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
     const matchesQuery = !query || haystack.includes(query.toLowerCase());
     const matchesFilter =
       filter.kind === "all"
-        ? true
+        ? !c.screenshot
         : filter.kind === "favorites"
           ? c.favorite
-          : filter.kind === "untagged"
-            ? !c.game
-            : c.game === filter.name;
+          : filter.kind === "screenshots"
+            ? c.screenshot
+            : filter.kind === "untagged"
+              ? !c.game
+              : c.game === filter.name;
     return matchesQuery && matchesFilter;
   });
 
@@ -202,6 +212,13 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
     setOpen(index);
   };
 
+  /** Page on inside the open viewer. Both of them do it the same way. */
+  const openIndex = (next: number) => {
+    const clip = playing[next];
+    if (clip) touched.current.add(clip.id);
+    setOpen(next);
+  };
+
   /** On close, catch up on what was not possible during playback: move the
       files of the clips that were viewed into their folder. */
   const closePlayer = () => {
@@ -243,7 +260,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
           games={games}
           untagged={untagged}
           favorites={favorites}
-          total={clips.length}
+          shots={shots}
+          total={recordings}
           active={filter}
           onSelect={setFilter}
           onRemove={clearGame}
@@ -290,7 +308,9 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                     else thumbs.current.delete(clip.id);
                   }}
                   onClick={() => openAt(index)}
-                  aria-label={`Play ${clip.game ?? "clip"}`}
+                  aria-label={`${clip.screenshot ? "Open" : "Play"} ${
+                    clip.game ?? (clip.screenshot ? "screenshot" : "clip")
+                  }`}
                   className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
                 >
                   {clip.thumbPath && (
@@ -304,15 +324,20 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       className="h-full w-full object-cover"
                     />
                   )}
-                  {/* Play symbol on hover only — it covers the picture otherwise. */}
+                  {/* Sign on hover only — it covers the picture otherwise. And
+                      no play symbol over a still: there is nothing to play. */}
                   <span
                     className="absolute inset-0 grid place-items-center bg-black/30 opacity-0
                       transition-opacity duration-200 group-hover:opacity-100"
                   >
                     <span className="grid h-12 w-12 place-items-center rounded-pill bg-white/90 text-black">
-                      <svg viewBox="0 0 24 24" className="h-5 w-5 translate-x-[1px]" fill="currentColor">
-                        <path d="M7.5 5.2 19 12 7.5 18.8V5.2Z" />
-                      </svg>
+                      {clip.screenshot ? (
+                        <IconCamera className="h-5 w-5" />
+                      ) : (
+                        <svg viewBox="0 0 24 24" className="h-5 w-5 translate-x-[1px]" fill="currentColor">
+                          <path d="M7.5 5.2 19 12 7.5 18.8V5.2Z" />
+                        </svg>
+                      )}
                     </span>
                   </span>
                   {/* Both pills on one row: a long game name would otherwise
@@ -330,7 +355,15 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                           <IconScissors className="h-3 w-3" />
                         </Pill>
                       )}
-                      <Pill>{formatDuration(clip.durationMs)}</Pill>
+                      {/* A still has no length. The camera says what the
+                          duration would have said on a clip. */}
+                      {clip.screenshot ? (
+                        <Pill title="Screenshot">
+                          <IconCamera className="h-3 w-3" />
+                        </Pill>
+                      ) : (
+                        <Pill>{formatDuration(clip.durationMs)}</Pill>
+                      )}
                     </span>
                   </span>
                 </button>
@@ -403,8 +436,13 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 />
                 <p className="mt-1 truncate text-xs text-ink-muted">
                   {clip.game ? `${clip.game} · ` : ""}
-                  {formatAgo(clip.createdAt)} · {clip.height}p ·{" "}
-                  {formatSize(clip.sizeBytes)}
+                  {formatAgo(clip.createdAt)} ·{" "}
+                  {/* A still is measured by its edges, not by "1080p" — that is
+                      a word about video. */}
+                  {clip.screenshot
+                    ? `${clip.width} × ${clip.height}`
+                    : `${clip.height}p`}{" "}
+                  · {formatSize(clip.sizeBytes)}
                 </p>
                 {clip.description && (
                   <p className="mt-1 truncate text-xs text-ink-faint">
@@ -425,20 +463,29 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
         </div>
       )}
 
+      {/* Which of the two opens is decided per entry, not per playlist: paging
+          through a gallery of both leads from a clip into a picture and back. */}
       {open !== null && playing.length > 0 && (
-        <ClipPlayer
-          clips={playing}
-          index={Math.min(open, playing.length - 1)}
-          onIndexChange={(next) => {
-            const clip = playing[next];
-            if (clip) touched.current.add(clip.id);
-            setOpen(next);
-          }}
-          onClose={closePlayer}
-          onDelete={deleteClip}
-          onOpenMixer={() => onNavigate("audio")}
-          originOf={originOf}
-        />
+        playing[Math.min(open, playing.length - 1)]?.screenshot ? (
+          <ShotViewer
+            clips={playing}
+            index={Math.min(open, playing.length - 1)}
+            onIndexChange={openIndex}
+            onClose={closePlayer}
+            onDelete={deleteClip}
+            originOf={originOf}
+          />
+        ) : (
+          <ClipPlayer
+            clips={playing}
+            index={Math.min(open, playing.length - 1)}
+            onIndexChange={openIndex}
+            onClose={closePlayer}
+            onDelete={deleteClip}
+            onOpenMixer={() => onNavigate("audio")}
+            originOf={originOf}
+          />
+        )
       )}
     </div>
   );
@@ -576,6 +623,7 @@ function GameFilters({
   games,
   untagged,
   favorites,
+  shots,
   total,
   active,
   onSelect,
@@ -584,6 +632,7 @@ function GameFilters({
   games: Array<{ name: string; count: number }>;
   untagged: number;
   favorites: number;
+  shots: number;
   total: number;
   active: Filter;
   onSelect: (filter: Filter) => void;
@@ -600,7 +649,7 @@ function GameFilters({
     setFade({ left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 });
   }, []);
 
-  useLayoutEffect(measure, [measure, games, untagged, favorites]);
+  useLayoutEffect(measure, [measure, games, untagged, favorites, shots]);
 
   // Tip the mouse wheel over: there is nothing in the bar that could scroll
   // vertically, so the wheel should move it horizontally. Only when it really
@@ -639,6 +688,7 @@ function GameFilters({
     [
       "all",
       favorites > 0 && "favorites",
+      shots > 0 && "screenshots",
       ...games.map(({ name }) => (confirming === name ? `${name}?` : name)),
       untagged > 0 && "untagged",
     ]
@@ -657,13 +707,15 @@ function GameFilters({
       className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5"
       style={{ maskImage: mask, WebkitMaskImage: mask }}
     >
+      {/* Was called "All" while there was only one kind of thing in here.
+          Now it names what it shows, and the stills sit beside it. */}
       <Chip
         id="all"
         active={active.kind === "all"}
         onClick={() => onSelect({ kind: "all" })}
         count={total}
       >
-        All
+        Clips
       </Chip>
 
       {favorites > 0 && (
@@ -683,6 +735,25 @@ function GameFilters({
           }
         >
           Favorites
+        </Chip>
+      )}
+
+      {shots > 0 && (
+        <Chip
+          id="screenshots"
+          active={active.kind === "screenshots"}
+          count={shots}
+          onClick={() => onSelect({ kind: "screenshots" })}
+          icon={
+            <IconCamera
+              className={cn(
+                "h-3.5 w-3.5",
+                active.kind === "screenshots" ? "text-black/70" : "text-ink-muted",
+              )}
+            />
+          }
+        >
+          Screenshots
         </Chip>
       )}
 

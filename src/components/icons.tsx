@@ -100,6 +100,14 @@ export const IconHeart = ({
   </svg>
 );
 
+/** A screenshot: the camera, not the film. */
+export const IconCamera = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" className={className} fill="none" strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
+    <path d="M3 8.5A1.5 1.5 0 0 1 4.5 7h2.2l1.3-2h7.9l1.3 2h2.3A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5v-9Z" />
+    <circle cx="12" cy="13" r="3.4" />
+  </svg>
+);
+
 export const IconPlay = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" className={className} fill="currentColor">
     <path d="M8 5.4 18.5 12 8 18.6V5.4Z" />

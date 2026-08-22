@@ -87,6 +87,7 @@ export interface OverlayConfig {
   onClipSaved: boolean;
   onBufferToggle: boolean;
   onError: boolean;
+  onScreenshot: boolean;
   corner: OverlayCorner;
   durationMs: number;
   /** Device name of the screen (`\\.\DISPLAY1`); null = primary. */
@@ -102,6 +103,7 @@ export interface AppConfig {
   clipDir: string;
   saveClipHotkey: string;
   toggleBufferHotkey: string;
+  screenshotHotkey: string;
   autoStartWithWindows: boolean;
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;
@@ -133,6 +135,12 @@ export interface Clip {
    * can be pulled open again with `restoreClipOriginal`.
    */
   original: ClipOriginal | null;
+  /**
+   * A still instead of a recording. Everything to do with time — the duration,
+   * the trim, the individual tracks, the waveform — does not apply to it, and
+   * the core turns those requests away.
+   */
+  screenshot: boolean;
 }
 
 /**
@@ -204,7 +212,7 @@ export interface EngineStatus {
 
 /** Payload of the `overlay-banner` event (overlay window only). */
 export interface OverlayBanner {
-  kind: "clip" | "buffer" | "bufferOff" | "error" | "info";
+  kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot";
   title: string;
   detail: string | null;
   thumbPath: string | null;

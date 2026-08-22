@@ -60,6 +60,9 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let save = MenuItem::with_id(app, "save", "Save clip", false, None::<&str>)?;
+    // Always available, unlike "Save clip": a screenshot brings its own capture
+    // session and does not care whether the buffer is running.
+    let shot = MenuItem::with_id(app, "shot", "Take screenshot", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -68,6 +71,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &toggle,
             &save,
+            &shot,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -97,6 +101,14 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
                 let app = app.clone();
                 // Muxing takes a moment — do not do it on the menu thread.
                 std::thread::spawn(move || crate::save_clip_and_notify(&app));
+            }
+            "shot" => {
+                let app = app.clone();
+                // Reading the picture back takes a moment — not on the menu
+                // thread, the menu would stay open until it is done.
+                std::thread::spawn(move || {
+                    let _ = crate::take_screenshot_and_notify(&app);
+                });
             }
             "quit" => {
                 let state = app.state::<AppState>();

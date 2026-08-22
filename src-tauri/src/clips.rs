@@ -63,6 +63,9 @@ impl Library {
         self.add_column("original", "TEXT")?;
         // The heart in the gallery.
         self.add_column("favorite", "INTEGER NOT NULL DEFAULT 0")?;
+        // A still instead of a recording. Everything already in the database is
+        // a clip, so the default answers the question for them.
+        self.add_column("screenshot", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(())
     }
 
@@ -84,8 +87,8 @@ impl Library {
         self.conn.execute(
             "INSERT OR REPLACE INTO clips
              (id, path, created_at, duration_ms, game, width, height, size_bytes,
-              thumb_path, title, description, edit, original, favorite)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              thumb_path, title, description, edit, original, favorite, screenshot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 clip.id,
                 clip.path,
@@ -101,6 +104,7 @@ impl Library {
                 encode_edit(clip.edit.as_ref()),
                 encode_original(clip.original.as_ref()),
                 clip.favorite,
+                clip.screenshot,
             ],
         )?;
         Ok(())
@@ -109,7 +113,7 @@ impl Library {
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,
-                    thumb_path, title, description, edit, original, favorite
+                    thumb_path, title, description, edit, original, favorite, screenshot
              FROM clips ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -128,6 +132,7 @@ impl Library {
                 edit: decode_edit(row.get::<_, Option<String>>(11)?),
                 original: decode_original(row.get::<_, Option<String>>(12)?),
                 favorite: row.get(13)?,
+                screenshot: row.get(14)?,
             })
         })?;
         rows.collect()
@@ -203,6 +208,23 @@ impl Library {
         self.conn.execute(
             "UPDATE clips SET duration_ms = ?2, size_bytes = ?3 WHERE id = ?1",
             params![id, duration_ms as i64, size_bytes as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Record edges and size. The counterpart to `set_file_state` for a still:
+    /// it has no length, but cropping changes exactly what a recording never
+    /// does — how big the picture is.
+    pub fn set_picture(
+        &self,
+        id: &str,
+        width: u32,
+        height: u32,
+        size_bytes: u64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET width = ?2, height = ?3, size_bytes = ?4 WHERE id = ?1",
+            params![id, width, height, size_bytes as i64],
         )?;
         Ok(())
     }
@@ -288,6 +310,7 @@ mod tests {
             edit: None,
             original: None,
             favorite: false,
+            screenshot: false,
         }
     }
 

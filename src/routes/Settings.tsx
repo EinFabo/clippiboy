@@ -4,17 +4,28 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Segmented, Toggle } from "@/components/ui/Controls";
+import { Segmented, Select, Toggle } from "@/components/ui/Controls";
 import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import type { OverlayCorner, UpdateInfo } from "@/lib/types";
 
-const corners: [OverlayCorner, string][] = [
-  ["topLeft", "top left"],
-  ["topRight", "top right"],
-  ["bottomLeft", "bottom left"],
-  ["bottomRight", "bottom right"],
+/**
+ * The four corners in reading order: value, what it is called, and where the
+ * mark sits inside its cell of the pad below. One table drives all three.
+ */
+const corners: [OverlayCorner, string, string][] = [
+  ["topLeft", "top left", "top-1.5 left-1.5"],
+  ["topRight", "top right", "top-1.5 right-1.5"],
+  ["bottomLeft", "bottom left", "bottom-1.5 left-1.5"],
+  ["bottomRight", "bottom right", "bottom-1.5 right-1.5"],
 ];
+
+/**
+ * The two entries in the screen dropdown that are not a device name. A monitor
+ * id always reads `\\.\DISPLAYn`, so neither of them can be mistaken for one.
+ */
+const FOLLOW = "follow";
+const UNKNOWN = "unknown";
 
 export function Settings() {
   const { config, targets, patchConfig, lastError } = useEngine();
@@ -23,15 +34,18 @@ export function Settings() {
   const patchOverlay = (patch: Partial<typeof config.overlay>) =>
     patchConfig({ overlay: { ...config.overlay, ...patch } });
 
-  // Prefixed, so a monitor whose id happened to read "follow" could not pass
-  // itself off as the setting that follows the game.
   const screen = config.overlay.followActiveScreen
-    ? "follow"
+    ? FOLLOW
     : (monitors.find(
         (m) =>
           config.overlay.monitor === m.id ||
           (config.overlay.monitor === null && m.isPrimary),
       )?.id ?? null);
+
+  // The configured screen is not among the ones plugged in. Worth saying out
+  // loud: a dropdown would otherwise quietly show its first entry, and the core
+  // falls back to the primary screen without anyone noticing.
+  const unplugged = screen === null && monitors.length > 0;
 
   return (
     <div className="space-y-8 pb-12">
@@ -106,6 +120,13 @@ export function Settings() {
               onChange={(onBufferToggle) => patchOverlay({ onBufferToggle })}
             />
           </Row>
+          <Row label="Screenshot taken">
+            <Toggle
+              checked={config.overlay.onScreenshot}
+              disabled={!config.overlay.enabled}
+              onChange={(onScreenshot) => patchOverlay({ onScreenshot })}
+            />
+          </Row>
           <Row label="Errors">
             <Toggle
               checked={config.overlay.onError}
@@ -113,36 +134,60 @@ export function Settings() {
               onChange={(onError) => patchOverlay({ onError })}
             />
           </Row>
-          <Row label="Screen">
-            <Segmented
-              className="flex-wrap justify-end"
+          <Row
+            label="Screen"
+            hint={
+              unplugged
+                ? "That screen is not connected — the banner goes to the primary one"
+                : undefined
+            }
+          >
+            <Select
+              label="Screen"
               disabled={!config.overlay.enabled}
-              value={screen}
+              value={screen ?? UNKNOWN}
               options={[
+                // Only there while nothing matches, so the dropdown never shows
+                // a screen that is not the one actually in use.
+                ...(screen === null
+                  ? [
+                      {
+                        value: UNKNOWN,
+                        label: unplugged
+                          ? `${config.overlay.monitor} · not connected`
+                          : "Primary screen",
+                      },
+                    ]
+                  : []),
                 ...monitors.map((monitor) => ({
-                  key: monitor.id,
-                  label: monitor.title.split("—")[0].trim(),
+                  value: monitor.id,
+                  label: monitor.isPrimary
+                    ? `${monitor.title} · primary`
+                    : monitor.title,
                 })),
-                { key: "follow", label: "follows the game" },
+                { value: FOLLOW, label: "Follows the game" },
               ]}
-              onChange={(key) =>
+              onChange={(value) => {
+                if (value === UNKNOWN) return;
                 patchOverlay(
-                  key === "follow"
+                  value === FOLLOW
                     ? { followActiveScreen: true }
-                    : { monitor: key, followActiveScreen: false },
-                )
-              }
+                    : { monitor: value, followActiveScreen: false },
+                );
+              }}
             />
           </Row>
-          <Row label="Corner">
-            <Segmented
-              disabled={!config.overlay.enabled}
+          <Row
+            label="Corner"
+            hint={corners.find(([corner]) => corner === config.overlay.corner)?.[1]}
+          >
+            <CornerPad
               value={config.overlay.corner}
-              options={corners.map(([corner, label]) => ({ key: corner, label }))}
+              disabled={!config.overlay.enabled}
               onChange={(corner) => patchOverlay({ corner })}
             />
           </Row>
-          <Row label="Duration" hint="Errors always stay at least 6 s">
+          <Row label="Duration" hint="Info: Errors always stay at least 6 s">
             <Segmented
               disabled={!config.overlay.enabled}
               value={String(config.overlay.durationMs)}
@@ -197,6 +242,55 @@ function Row({
         {hint && <p className="mt-1 text-xs text-ink-muted">{hint}</p>}
       </div>
       <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * The four corners as a 2 × 2 pad: every cell is a screen, and the little bar in
+ * it sits where the banner would. Four words in a row said where it goes — this
+ * shows it, in less room than the words took.
+ */
+function CornerPad({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: OverlayCorner;
+  onChange: (corner: OverlayCorner) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "grid grid-cols-2 gap-[3px] rounded-inner border border-line bg-elevated p-[3px]",
+        disabled && "pointer-events-none opacity-40",
+      )}
+    >
+      {corners.map(([corner, label, mark]) => (
+        <button
+          key={corner}
+          type="button"
+          aria-label={label}
+          aria-pressed={value === corner}
+          onClick={() => onChange(corner)}
+          className={cn(
+            "relative h-7 w-10 rounded-[9px]",
+            "transition-colors duration-150 ease-[var(--ease-out-soft)]",
+            value === corner ? "bg-accent/25" : "bg-base hover:bg-hover",
+          )}
+        >
+          {/* Roughly the banner's proportions — 416 × 128 in `overlay.rs`. */}
+          <span
+            className={cn(
+              "absolute h-1 w-3.5 rounded-[2px]",
+              "transition-colors duration-150 ease-[var(--ease-out-soft)]",
+              mark,
+              value === corner ? "bg-accent-bright" : "bg-ink-faint",
+            )}
+          />
+        </button>
+      ))}
     </div>
   );
 }
@@ -316,13 +410,19 @@ function Hotkeys() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const warn =
-    risky(config.saveClipHotkey) || risky(config.toggleBufferHotkey);
+    risky(config.saveClipHotkey) ||
+    risky(config.toggleBufferHotkey) ||
+    risky(config.screenshotHotkey);
 
-  const apply = async (saveClip: string, toggleBuffer: string) => {
+  const apply = async (
+    saveClip: string,
+    toggleBuffer: string,
+    screenshot: string,
+  ) => {
     setSaving(true);
     setError(null);
     try {
-      await setHotkeys(saveClip, toggleBuffer);
+      await setHotkeys(saveClip, toggleBuffer, screenshot);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -337,14 +437,27 @@ function Hotkeys() {
           <HotkeyInput
             value={config.saveClipHotkey}
             busy={saving}
-            onChange={(value) => apply(value, config.toggleBufferHotkey)}
+            onChange={(value) =>
+              apply(value, config.toggleBufferHotkey, config.screenshotHotkey)
+            }
           />
         </Row>
         <Row label="Buffer on/off">
           <HotkeyInput
             value={config.toggleBufferHotkey}
             busy={saving}
-            onChange={(value) => apply(config.saveClipHotkey, value)}
+            onChange={(value) =>
+              apply(config.saveClipHotkey, value, config.screenshotHotkey)
+            }
+          />
+        </Row>
+        <Row label="Screenshot" hint="Info: Works without a running buffer">
+          <HotkeyInput
+            value={config.screenshotHotkey}
+            busy={saving}
+            onChange={(value) =>
+              apply(config.saveClipHotkey, config.toggleBufferHotkey, value)
+            }
           />
         </Row>
       </Card>

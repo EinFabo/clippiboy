@@ -1,5 +1,6 @@
 import {
   IconArrowUpRight,
+  IconCamera,
   IconCopy,
   IconFolder,
   IconHeart,
@@ -27,6 +28,9 @@ const icon = "h-4 w-4";
 /**
  * A clip's right-click menu — the same entries in the gallery as in the player,
  * except that "Open" and "Rename" are missing there.
+ *
+ * A screenshot gets the same menu, worded for a picture, plus the one entry a
+ * still has and a recording does not: the picture itself on the clipboard.
  */
 export function useClipMenu() {
   const menu = useMenu();
@@ -40,13 +44,17 @@ export function useClipMenu() {
       entries.push({
         kind: "item",
         label: "Open",
-        icon: <IconPlay className={icon} />,
+        icon: clip.screenshot ? (
+          <IconCamera className={icon} />
+        ) : (
+          <IconPlay className={icon} />
+        ),
         onSelect: options.onOpen,
       });
     }
     entries.push({
       kind: "item",
-      label: "Open in default player",
+      label: clip.screenshot ? "Open in default viewer" : "Open in default player",
       icon: <IconArrowUpRight className={icon} />,
       disabled: !inTauri,
       onSelect: () => void api.openClip(clip.id),
@@ -74,9 +82,21 @@ export function useClipMenu() {
     });
 
     entries.push({ kind: "separator" });
+    // The picture first: on a screenshot that is the one you actually want —
+    // in a chat window a pasted file is an attachment, a pasted picture is a
+    // picture.
+    if (clip.screenshot) {
+      entries.push({
+        kind: "item",
+        label: "Copy picture",
+        icon: <IconCamera className={icon} />,
+        disabled: !inTauri,
+        onSelect: () => void api.copyClipImage(clip.id),
+      });
+    }
     entries.push({
       kind: "item",
-      label: "Copy clip",
+      label: clip.screenshot ? "Copy file" : "Copy clip",
       // The one entry you find nowhere else: the file itself on the clipboard,
       // ready for Ctrl+V in Discord.
       icon: <IconCopy className={icon} />,

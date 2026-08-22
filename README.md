@@ -27,6 +27,8 @@ mix or on a track of its own in the clip.
 | Icon, installer (NSIS), auto-update | ✅ done |
 | Buffer automation (at startup / in game) | ✅ done |
 | Clip editing: name, description, track mix, trim | ✅ done |
+| Screenshots: hotkey, own folder, gallery | ✅ done |
+| Screenshot editing: crop, annotate | ⏳ open |
 | Upload | ⏳ open |
 
 ## Developing
@@ -48,7 +50,8 @@ with the C++ workload, and WebView2 (pre-installed from Windows 11 on).
 ffmpeg does **not** have to be installed: `npm run ffmpeg` puts a tested build
 next to the app, and that one takes precedence over any on the PATH.
 
-Hotkeys: `Ctrl+Shift+B` buffer on/off, `Ctrl+Shift+S` save clip. Both can be
+Hotkeys: `Ctrl+Shift+B` buffer on/off, `Ctrl+Shift+S` save clip,
+`Ctrl+Shift+P` screenshot. All three can be
 bound to any key in the settings — including one with no modifier, `F9` for
 instance. A single letter key then applies everywhere, chat included.
 
@@ -186,7 +189,8 @@ src-tauri/src/
   encode.rs              encoder detection
   clipboard.rs           Windows clipboard: file (CF_HDROP) and text
   clips.rs               SQLite clip index
-  filing.rs              order in the clip folder: one folder per game (+ tests)
+  filing.rs              order in the clip folder: game, then kind (+ tests)
+  shot.rs                one frame from the GPU into a PNG
   thumbs.rs              thumbnails (in the data directory, not beside the clip)
   config.rs              configuration as JSON
   commands.rs            Tauri commands
@@ -397,14 +401,19 @@ The whole vocabulary is about two hundred lines in `src/lib/` (`useFlip`,
 ## Order in the clip folder
 
 Every game gets a folder of its own, favorites go into `Favorites`, and whatever
-has no game stays directly in the clip folder:
+has no game stays directly in the clip folder. One level further down the kind
+splits the two apart, so recordings and stills never lie mixed together:
 
 ```
 Videos\ClippiBoy\
-  clip_2026-08-18_11-37.mp4      ← no game
-  Bodycam\
+  Videos\                        ← no game
+  Screenshots\
   Counter-Strike 2\
+    Videos\
+    Screenshots\
   Favorites\                     ← everything with a heart, across all games
+    Videos\
+    Screenshots\
 ```
 
 If a clip's game or its heart changes, the file moves along. Two rules for that:
@@ -417,9 +426,10 @@ The gallery is right in the meantime regardless: it reads from the database, not
 from the file system.
 
 **Only what lies in the configured clip folder is touched** — directly in it or
-one level down. Whoever changes the storage location deliberately leaves their
-existing clips where they are; nobody drags them along. Game folders that have
-become empty disappear by themselves, the clip folder itself never does.
+up to two levels down, which is as deep as `<game>\Videos` goes. Whoever changes the storage location deliberately leaves their
+existing clips where they are; nobody drags them along. Folders that have become
+empty disappear by themselves — an emptied `Videos` takes its game folder with it
+if nothing else is left in there — the clip folder itself never does.
 
 A **favorite is a category at the same time**: the file lives in `Favorites`,
 while inside the app the clip stays findable under its game — both are filters

@@ -139,6 +139,8 @@ pub struct OverlayConfig {
     pub on_clip_saved: bool,
     pub on_buffer_toggle: bool,
     pub on_error: bool,
+    #[serde(default = "yes")]
+    pub on_screenshot: bool,
     pub corner: OverlayCorner,
     pub duration_ms: u32,
     /// The screen the banner sticks to (device name like `\\.\DISPLAY1`).
@@ -158,12 +160,23 @@ impl Default for OverlayConfig {
             on_clip_saved: true,
             on_buffer_toggle: true,
             on_error: true,
+            on_screenshot: true,
             corner: OverlayCorner::BottomRight,
             duration_ms: 3500,
             monitor: None,
             follow_active_screen: false,
         }
     }
+}
+
+/// S saves, B is the buffer, P is the picture.
+pub fn default_screenshot_hotkey() -> String {
+    "Ctrl+Shift+P".into()
+}
+
+/// Serde needs a function even for a plain `true`.
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +188,10 @@ pub struct AppConfig {
     pub clip_dir: String,
     pub save_clip_hotkey: String,
     pub toggle_buffer_hotkey: String,
+    /// Came later than the other two, so it needs its own default — see the
+    /// note below on why a missing default costs the whole config.
+    #[serde(default = "default_screenshot_hotkey")]
+    pub screenshot_hotkey: String,
     pub auto_start_with_windows: bool,
     pub only_buffer_in_game: bool,
     // Newly added fields need `default` — otherwise `config::load()` throws away
@@ -217,6 +234,10 @@ pub struct Clip {
     /// has been trimmed and can be pulled open again at any time.
     #[serde(default)]
     pub original: Option<ClipOriginal>,
+    /// A still instead of a recording. Everything to do with time — trimming,
+    /// the tracks, the waveform — does not apply to it.
+    #[serde(default)]
+    pub screenshot: bool,
 }
 
 /// What was set in the editor.

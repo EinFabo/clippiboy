@@ -75,6 +75,7 @@ pub fn set_config(
     // once, they must not just sit in the JSON and apply nowhere.
     if previous.save_clip_hotkey != next.save_clip_hotkey
         || previous.toggle_buffer_hotkey != next.toggle_buffer_hotkey
+        || previous.screenshot_hotkey != next.screenshot_hotkey
     {
         if let Err(err) = crate::register_hotkeys(&app) {
             crate::notify(&app, "error", err);
@@ -95,8 +96,9 @@ pub fn set_hotkeys(
     app: tauri::AppHandle,
     save_clip: String,
     toggle_buffer: String,
+    screenshot: String,
 ) -> Result<AppConfig> {
-    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer);
+    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer, screenshot);
     if result.is_err() {
         // Even after rejected input the previous hotkeys have to take hold
         // again — the settings suspend them while recording a new one.
@@ -110,19 +112,31 @@ fn apply_hotkeys(
     app: &tauri::AppHandle,
     save_clip: String,
     toggle_buffer: String,
+    screenshot: String,
 ) -> Result<AppConfig> {
     let save_clip = save_clip.trim().to_string();
     let toggle_buffer = toggle_buffer.trim().to_string();
+    let screenshot = screenshot.trim().to_string();
     crate::parse_hotkey(&save_clip)?;
     crate::parse_hotkey(&toggle_buffer)?;
-    if save_clip.eq_ignore_ascii_case(&toggle_buffer) {
-        return Err("Both hotkeys are on the same key combination.".into());
+    crate::parse_hotkey(&screenshot)?;
+    // Every pair, not just the first two — with three assignments the clash can
+    // sit anywhere among them.
+    let taken = [&save_clip, &toggle_buffer, &screenshot];
+    for (at, one) in taken.iter().enumerate() {
+        if taken[at + 1..]
+            .iter()
+            .any(|other| one.eq_ignore_ascii_case(other))
+        {
+            return Err("Two hotkeys are on the same key combination.".into());
+        }
     }
 
     let previous = state.config_snapshot();
     let mut config = previous.clone();
     config.save_clip_hotkey = save_clip;
     config.toggle_buffer_hotkey = toggle_buffer;
+    config.screenshot_hotkey = screenshot;
     let next = state.replace_config(config);
 
     match crate::register_hotkeys(app) {
@@ -131,6 +145,7 @@ fn apply_hotkeys(
             let mut rollback = state.config_snapshot();
             rollback.save_clip_hotkey = previous.save_clip_hotkey;
             rollback.toggle_buffer_hotkey = previous.toggle_buffer_hotkey;
+            rollback.screenshot_hotkey = previous.screenshot_hotkey;
             state.replace_config(rollback);
             let _ = crate::register_hotkeys(app);
             Err(err)
@@ -267,6 +282,132 @@ pub fn save_clip(
             Ok(clip)
         }
     }
+}
+
+/// One picture from the recording source, like the hotkey and the tray entry.
+///
+/// `async` because reading the picture back off the GPU and deflating the PNG
+/// take a few hundred milliseconds, and the window should keep painting.
+#[tauri::command(async)]
+pub fn take_screenshot(app: tauri::AppHandle) -> Result<Clip> {
+    crate::take_screenshot_and_notify(&app)
+}
+
+/// Cut a rectangle out of a screenshot and write it back into the same file.
+///
+/// The cropping happens here rather than in the WebView on purpose: sending a
+/// finished 4K picture through the IPC would mean ten megabytes as a JSON array
+/// of numbers. A rectangle is four numbers.
+///
+/// The first crop puts the untouched picture aside, so it can be pulled back at
+/// any time via [`restore_screenshot`]. A second one does not: the original is
+/// the *original*, not the state before the last handle was moved.
+///
+/// `async` because decoding, cutting and deflating take a moment on a big
+/// picture.
+#[tauri::command(async)]
+pub fn crop_screenshot(
+    state: State<'_, AppState>,
+    id: String,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<Clip> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    if !clip.screenshot {
+        return Err("Only a screenshot can be cropped.".into());
+    }
+    let target = std::path::PathBuf::from(&clip.path);
+    let cut = crate::shot::read_png(&target)?.crop(x, y, width, height)?;
+
+    // Rescue first, write second: if the order were the other way round and the
+    // program died in between, the untouched picture would be gone.
+    if !crate::shot::has_original(&clip.id) {
+        let original = crate::shot::original_path(&clip.id);
+        if let Some(parent) = original.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("could not create folder: {err}"))?;
+        }
+        // Copied, not moved: the clip folder may sit on another drive than the
+        // store, and the file has to stay where it is anyway.
+        std::fs::copy(&target, &original)
+            .map_err(|err| format!("Could not save the original ({err})."))?;
+    }
+
+    write_picture(&state, &clip, &cut)
+}
+
+/// Undo the crop: the untouched picture comes back.
+#[tauri::command(async)]
+pub fn restore_screenshot(state: State<'_, AppState>, id: String) -> Result<Clip> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    let original = crate::shot::original_path(&clip.id);
+    if !original.is_file() {
+        return Err("The original can no longer be found.".into());
+    }
+    let whole = crate::shot::read_png(&original)?;
+    let clip = write_picture(&state, &clip, &whole)?;
+    // Only now: as long as it stands there, the crop can be undone. If removing
+    // it fails, that is a leftover file and not a failed restore.
+    let _ = std::fs::remove_file(&original);
+    Ok(clip)
+}
+
+/// Write a picture over a screenshot's file and record what changed.
+///
+/// Windows will not let an open file be replaced, so the new picture goes to a
+/// temporary file beside it first and takes its place from there — the same
+/// route `muxer::build` takes for a clip.
+fn write_picture(
+    state: &State<'_, AppState>,
+    clip: &Clip,
+    picture: &crate::shot::Shot,
+) -> Result<Clip> {
+    let target = std::path::PathBuf::from(&clip.path);
+    let temp = target.with_extension(format!("{}.new.png", std::process::id()));
+    picture.write_png(&temp)?;
+    if let Err(err) = crate::muxer::replace_file(&temp, &target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err);
+    }
+
+    let size_bytes = std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
+    if let Err(err) = crate::thumbs::make_still(&target, &clip.id) {
+        log::warn!("thumbnail not refreshed: {err}");
+    }
+
+    with_library(state, |lib| {
+        lib.set_picture(&clip.id, picture.width, picture.height, size_bytes)
+            .map_err(|e| e.to_string())?;
+        lib.get(&clip.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "clip not found".to_string())
+    })
+}
+
+/// Is there still an untouched picture beside this screenshot?
+#[tauri::command]
+pub fn screenshot_has_original(id: String) -> bool {
+    crate::shot::has_original(&id)
+}
+
+/// The picture itself on the clipboard, not its file.
+///
+/// The file (`copy_clip_file`) only helps where files can be dropped; a chat
+/// window wants the picture. Reading it back and turning it into a bitmap takes
+/// a moment on a 4K screenshot, hence `async`.
+#[tauri::command(async)]
+pub fn copy_clip_image(state: State<'_, AppState>, id: String) -> Result<()> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    if !clip.screenshot {
+        return Err("Only a screenshot can go on the clipboard as a picture.".into());
+    }
+    let shot = crate::shot::read_png(std::path::Path::new(&clip.path))?;
+    crate::clipboard::copy_image(&shot.dib())
 }
 
 #[tauri::command]
@@ -435,6 +576,7 @@ pub fn update_clip(
 pub fn clip_waveform(state: State<'_, AppState>, id: String) -> Result<String> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
+    refuse_still(&clip)?;
     preview::waveform(&clip).map(|path| path.to_string_lossy().to_string())
 }
 
@@ -448,6 +590,7 @@ pub fn clip_waveform(state: State<'_, AppState>, id: String) -> Result<String> {
 pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTrack>> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
+    refuse_still(&clip)?;
     // From the untouched recording if the clip is trimmed — the individual
     // tracks are always in coordinates of the original.
     stems::tracks(&clip.id, &edit::source_path(&clip))
@@ -474,6 +617,7 @@ pub fn apply_clip_edit(
 ) -> Result<Clip> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
+    refuse_still(&clip)?;
     let (encoder, bitrate) = encoder_for(&state);
     let trim = edit::Trim { start_ms, end_ms };
 
@@ -493,6 +637,7 @@ pub fn restore_clip_original(
 ) -> Result<Clip> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
+    refuse_still(&clip)?;
     let (encoder, bitrate) = encoder_for(&state);
     let tracks = clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default();
 
@@ -567,6 +712,18 @@ pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<()> {
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| e.to_string())
+}
+
+/// Turn away everything that only a recording has.
+///
+/// Trimming, the individual tracks and the waveform all run through ffmpeg and
+/// expect a stream with a duration. Without this the caller would get an ffmpeg
+/// error nobody can do anything with, instead of the plain reason.
+fn refuse_still(clip: &Clip) -> Result<()> {
+    if clip.screenshot {
+        return Err("A screenshot has no sound and no length.".into());
+    }
+    Ok(())
 }
 
 fn with_library<T>(

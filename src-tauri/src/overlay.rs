@@ -38,6 +38,9 @@ pub enum BannerKind {
     BufferOff,
     Error,
     Info,
+    /// A picture, not a recording — its own kind so the banner can say so
+    /// without reading the text.
+    Screenshot,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -123,6 +126,7 @@ pub fn show_with_thumb(
         BannerKind::Clip => config.on_clip_saved,
         BannerKind::Buffer | BannerKind::BufferOff => config.on_buffer_toggle,
         BannerKind::Error => config.on_error,
+        BannerKind::Screenshot => config.on_screenshot,
         BannerKind::Info => true,
     };
     if !wanted {

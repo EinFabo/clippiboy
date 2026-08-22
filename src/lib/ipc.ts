@@ -34,8 +34,9 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   setConfig: (config: AppConfig) => invoke<void>("set_config", { config }),
   /** Throws when a combination is invalid or already taken. */
-  setHotkeys: (saveClip: string, toggleBuffer: string) =>
-    invoke<AppConfig>("set_hotkeys", { saveClip, toggleBuffer }),
+  /** All three at once — the core only accepts them together. */
+  setHotkeys: (saveClip: string, toggleBuffer: string, screenshot: string) =>
+    invoke<AppConfig>("set_hotkeys", { saveClip, toggleBuffer, screenshot }),
   /** Throws when the folder cannot be created or written to. */
   setClipDir: (dir: string) => invoke<AppConfig>("set_clip_dir", { dir }),
   defaultClipDir: () => invoke<string>("default_clip_dir"),
@@ -53,6 +54,7 @@ export const api = {
   startBuffer: () => invoke<void>("start_buffer"),
   stopBuffer: () => invoke<void>("stop_buffer"),
   saveClip: (seconds?: number) => invoke<Clip>("save_clip", { seconds }),
+  takeScreenshot: () => invoke<Clip>("take_screenshot"),
   status: () => invoke<EngineStatus>("engine_status"),
 
   appVersion: () => invoke<string>("app_version"),
@@ -72,6 +74,22 @@ export const api = {
    * Ctrl+V then attaches the clip.
    */
   copyClipFile: (id: string) => invoke<void>("copy_clip_file", { id }),
+  /** Screenshots only: the picture itself, not the file. */
+  copyClipImage: (id: string) => invoke<void>("copy_clip_image", { id }),
+  /**
+   * Cut a rectangle out of a screenshot. In pixels of the picture, not of the
+   * preview — the core cuts, the WebView only says where.
+   */
+  cropScreenshot: (
+    id: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ) => invoke<Clip>("crop_screenshot", { id, x, y, width, height }),
+  restoreScreenshot: (id: string) => invoke<Clip>("restore_screenshot", { id }),
+  screenshotHasOriginal: (id: string) =>
+    invoke<boolean>("screenshot_has_original", { id }),
   /** Open the clip in the Windows default player. */
   openClip: (id: string) => invoke<void>("open_clip", { id }),
   clipboardWriteText: (text: string) =>

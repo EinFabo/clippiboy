@@ -1,9 +1,10 @@
 //! Where a clip file sits inside the clip folder.
 //!
 //! One folder per game, favorites in their own, anything without a game stays
-//! directly in the clip folder. The database remains the truth about a clip:
-//! the folder is only the order you see in Explorer — inside the app a favorite
-//! is still found under its game.
+//! directly in the clip folder — and in each of those, the kind splits the
+//! files once more: `Videos` and `Screenshots`. The database remains the truth
+//! about a clip: the folder is only the order you see in Explorer — inside the
+//! app a favorite is still found under its game.
 //!
 //! Only what lies **in the configured clip folder** is moved. Whoever changes
 //! the storage location deliberately leaves their existing clips where they
@@ -16,6 +17,11 @@ use crate::model::Clip;
 
 /// Folder for the clips marked with a heart.
 pub const FAVORITES: &str = "Favorites";
+
+/// The bottom level is always the kind, so that a game folder does not mix
+/// recordings and stills.
+pub const VIDEOS: &str = "Videos";
+pub const SCREENSHOTS: &str = "Screenshots";
 
 /// Characters Windows does not allow in a folder name.
 const FORBIDDEN: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
@@ -59,23 +65,40 @@ pub fn folder_name(game: &str) -> Option<String> {
     Some(if reserved { format!("_{name}") } else { name })
 }
 
-/// The folder a clip with this game and this heart belongs in.
-pub fn dir_for(clip_dir: &Path, game: Option<&str>, favorite: bool) -> PathBuf {
-    if favorite {
-        return clip_dir.join(FAVORITES);
-    }
-    match game.and_then(folder_name) {
-        Some(name) => clip_dir.join(name),
-        None => clip_dir.to_path_buf(),
-    }
+/// The folder a clip with this game, this heart and this kind belongs in.
+pub fn dir_for(
+    clip_dir: &Path,
+    game: Option<&str>,
+    favorite: bool,
+    screenshot: bool,
+) -> PathBuf {
+    let base = if favorite {
+        clip_dir.join(FAVORITES)
+    } else {
+        match game.and_then(folder_name) {
+            Some(name) => clip_dir.join(name),
+            None => clip_dir.to_path_buf(),
+        }
+    };
+    base.join(if screenshot { SCREENSHOTS } else { VIDEOS })
 }
 
-/// Is the file in the clip folder — directly in it or one level down?
+/// Is the file in the clip folder — in it, or up to two levels down?
+///
+/// Two, because the deepest a file of ours ever goes is
+/// `<clip folder>/<game>/Videos`. Anything below that belongs to somebody else
+/// and stays where it is; the same goes for clips from before the storage
+/// location was moved.
 fn inside(clip_dir: &Path, file: &Path) -> bool {
-    match file.parent() {
-        Some(parent) => parent == clip_dir || parent.parent() == Some(clip_dir),
-        None => false,
+    let mut dir = file.parent();
+    for _ in 0..3 {
+        match dir {
+            Some(path) if path == clip_dir => return true,
+            Some(path) => dir = path.parent(),
+            None => return false,
+        }
     }
+    false
 }
 
 /// Move a clip's file to where it belongs.
@@ -89,7 +112,7 @@ pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
     if !file.is_file() || !inside(clip_dir, &file) {
         return Ok(None);
     }
-    let dir = dir_for(clip_dir, clip.game.as_deref(), clip.favorite);
+    let dir = dir_for(clip_dir, clip.game.as_deref(), clip.favorite, clip.screenshot);
     if file.parent() == Some(dir.as_path()) {
         return Ok(None);
     }
@@ -143,14 +166,22 @@ pub fn tidy(library: &Library, clip_dir: &str) {
     }
 }
 
-/// Clear away a subfolder that has become empty. The clip folder itself always
-/// stays, and so does a folder with content: `remove_dir` fails of its own
-/// accord then.
+/// Clear away a subfolder that has become empty, and the one above it if that
+/// leaves it empty too — an emptied `Counter-Strike 2/Videos` would otherwise
+/// leave `Counter-Strike 2` standing around forever.
+///
+/// The clip folder itself always stays, and so does a folder with content:
+/// `remove_dir` fails of its own accord then, and that ends the walk upwards.
 pub fn prune(dir: &Path, clip_dir: &Path) {
     if dir == clip_dir || !dir.starts_with(clip_dir) {
         return;
     }
-    let _ = std::fs::remove_dir(dir);
+    if std::fs::remove_dir(dir).is_err() {
+        return;
+    }
+    if let Some(parent) = dir.parent() {
+        prune(parent, clip_dir);
+    }
 }
 
 /// A free file name in the target folder. The names carry milliseconds, so a
@@ -221,10 +252,30 @@ mod tests {
     #[test]
     fn the_favourite_folder_wins_over_the_game() {
         let root = Path::new("C:/clips");
-        assert_eq!(dir_for(root, Some("Bodycam"), false), root.join("Bodycam"));
-        assert_eq!(dir_for(root, Some("Bodycam"), true), root.join(FAVORITES));
-        // With no game the clip stays where it is.
-        assert_eq!(dir_for(root, None, false), root);
+        assert_eq!(
+            dir_for(root, Some("Bodycam"), false, false),
+            root.join("Bodycam").join(VIDEOS),
+        );
+        assert_eq!(
+            dir_for(root, Some("Bodycam"), true, false),
+            root.join(FAVORITES).join(VIDEOS),
+        );
+        // With no game only the kind is left.
+        assert_eq!(dir_for(root, None, false, false), root.join(VIDEOS));
+    }
+
+    /// A still and a recording of the same game are never in the same folder.
+    #[test]
+    fn the_kind_splits_the_game_folder() {
+        let root = Path::new("C:/clips");
+        assert_eq!(
+            dir_for(root, Some("Bodycam"), false, true),
+            root.join("Bodycam").join(SCREENSHOTS),
+        );
+        assert_eq!(
+            dir_for(root, None, true, true),
+            root.join(FAVORITES).join(SCREENSHOTS),
+        );
     }
 
     /// Only our own folder and one level below get rearranged — otherwise
@@ -233,8 +284,9 @@ mod tests {
     fn only_files_in_the_clip_folder_are_moved() {
         let root = Path::new("C:/clips");
         assert!(inside(root, Path::new("C:/clips/a.mp4")));
-        assert!(inside(root, Path::new("C:/clips/Bodycam/a.mp4")));
-        assert!(!inside(root, Path::new("C:/clips/Bodycam/alt/a.mp4")));
+        assert!(inside(root, Path::new("C:/clips/Videos/a.mp4")));
+        assert!(inside(root, Path::new("C:/clips/Bodycam/Videos/a.mp4")));
+        assert!(!inside(root, Path::new("C:/clips/Bodycam/Videos/old/a.mp4")));
         assert!(!inside(root, Path::new("D:/elsewhere/a.mp4")));
     }
 

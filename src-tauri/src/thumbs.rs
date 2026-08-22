@@ -40,6 +40,29 @@ pub fn make(video: &Path, clip_id: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Compute a thumbnail from a still and store it.
+///
+/// The same thing, minus the `-ss 0.5`: a single image has no half second to
+/// seek to, and ffmpeg gives up rather than delivering the one frame it has.
+///
+/// A screenshot must not be its own thumbnail, however tempting that is —
+/// `migrate` below moves every picture that lies outside this folder into it,
+/// and would carry the original out of the user's clip folder.
+pub fn make_still(image: &Path, clip_id: &str) -> Result<PathBuf, String> {
+    let out = path(clip_id);
+    std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
+    run(
+        ffmpeg()
+            .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .arg("-i")
+            .arg(image)
+            .args(["-frames:v", "1", "-vf", "scale=480:-1", "-q:v", "4"])
+            .arg(&out),
+        "thumbnail",
+    )?;
+    Ok(out)
+}
+
 /// Clear away the picture of a deleted clip.
 pub fn remove(clip_id: &str) {
     let _ = std::fs::remove_file(path(clip_id));

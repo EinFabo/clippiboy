@@ -36,13 +36,18 @@ interface EngineState {
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  /** Both hotkeys at once — the core only accepts them together. */
-  setHotkeys: (saveClip: string, toggleBuffer: string) => Promise<void>;
+  /** All three hotkeys at once — the core only accepts them together. */
+  setHotkeys: (
+    saveClip: string,
+    toggleBuffer: string,
+    screenshot: string,
+  ) => Promise<void>;
   setClipDir: (dir: string) => Promise<void>;
   upsertSource: (source: AudioSource) => Promise<void>;
   removeSource: (id: string) => Promise<void>;
   toggleBuffer: () => Promise<void>;
   saveClip: () => Promise<void>;
+  takeScreenshot: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
   /** Set or take away the heart. */
@@ -67,6 +72,16 @@ interface EngineState {
   ) => Promise<void>;
   /** Undo the trim and pull the whole recording back. */
   restoreClipOriginal: (id: string) => Promise<void>;
+  /** Cut a rectangle out of a screenshot — in pixels of the picture. */
+  cropScreenshot: (
+    id: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ) => Promise<void>;
+  /** Undo the crop and pull the whole picture back. */
+  restoreScreenshot: (id: string) => Promise<void>;
 }
 
 /** A clip's hand-editable fields. */
@@ -203,20 +218,21 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
   },
 
-  async setHotkeys(saveClip, toggleBuffer) {
+  async setHotkeys(saveClip, toggleBuffer, screenshot) {
     if (!inTauri) {
       set((st) => ({
         config: {
           ...st.config,
           saveClipHotkey: saveClip,
           toggleBufferHotkey: toggleBuffer,
+          screenshotHotkey: screenshot,
         },
       }));
       return;
     }
     // Deliberately without an optimistic update: if registering fails, the old
     // assignment should stand, and the error belongs on that row.
-    set({ config: await api.setHotkeys(saveClip, toggleBuffer) });
+    set({ config: await api.setHotkeys(saveClip, toggleBuffer, screenshot) });
   },
 
   async setClipDir(dir) {
@@ -265,6 +281,17 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       // The core reports the finished clip back via `clip-saved`.
       await api.saveClip();
+    } catch (err) {
+      set({ lastError: String(err) });
+    }
+  },
+
+  async takeScreenshot() {
+    if (!inTauri) return;
+    try {
+      // Comes back through `clip-saved`, like a clip — for the gallery the two
+      // are the same thing.
+      await api.takeScreenshot();
     } catch (err) {
       set({ lastError: String(err) });
     }
@@ -358,6 +385,30 @@ export const useEngine = create<EngineState>((set, get) => ({
     // saved.
     try {
       const clip = await api.applyClipEdit(id, startMs, endMs, tracks);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: String(err) });
+      throw err;
+    }
+  },
+
+  async cropScreenshot(id, x, y, width, height) {
+    if (!inTauri) return;
+    // Like `applyClipEdit`, deliberately not optimistic: a file is rewritten
+    // here, and if that fails the UI must not claim otherwise.
+    try {
+      const clip = await api.cropScreenshot(id, x, y, width, height);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: String(err) });
+      throw err;
+    }
+  },
+
+  async restoreScreenshot(id) {
+    if (!inTauri) return;
+    try {
+      const clip = await api.restoreScreenshot(id);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       set({ lastError: String(err) });

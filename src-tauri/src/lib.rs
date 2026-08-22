@@ -17,6 +17,7 @@ pub mod muxer;
 pub mod overlay;
 pub mod pipeline;
 pub mod preview;
+pub mod shot;
 pub mod state;
 pub mod stems;
 pub mod thumbs;
@@ -87,6 +88,50 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, Strin
         Err(err) => {
             notify(app, "error", err.clone());
             overlay::show(app, BannerKind::Error, "Clip failed", Some(err.clone()));
+            Err(err)
+        }
+    }
+}
+
+/// Take a screenshot and report the result.
+///
+/// The same shape as `save_clip_and_notify`, and deliberately over the same
+/// `clip-saved` event: for the gallery a screenshot is a clip like any other,
+/// only one without a duration. A second channel would buy nothing.
+///
+pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
+    let state = app.state::<AppState>();
+
+    // Say so right away. Usually the picture is there before you have read this
+    // — but Windows.Graphics.Capture only delivers when something is redrawn,
+    // and in front of a still screen the wait runs into seconds. Then this is
+    // the difference between "it is working" and "nothing happened".
+    //
+    // It does not end up in the picture: the overlay window is content
+    // protected, so the capture never sees it (see `overlay::create`).
+    overlay::show(app, BannerKind::Screenshot, "Taking screenshot…", None);
+
+    match state.take_screenshot() {
+        Ok(clip) => {
+            if let Some(library) = state.library.lock().as_ref() {
+                if let Err(err) = library.insert(&clip) {
+                    log::error!("could not index the screenshot: {err}");
+                }
+            }
+            let _ = app.emit("clip-saved", clip.clone());
+            notify(app, "ok", "Screenshot saved".to_string());
+            overlay::show_with_thumb(
+                app,
+                BannerKind::Screenshot,
+                clip.game.clone().unwrap_or_else(|| "Screenshot".into()),
+                Some(format!("Screenshot · {}×{}", clip.width, clip.height)),
+                clip.thumb_path.clone(),
+            );
+            Ok(clip)
+        }
+        Err(err) => {
+            notify(app, "error", err.clone());
+            overlay::show(app, BannerKind::Error, "Screenshot failed", Some(err.clone()));
             Err(err)
         }
     }
@@ -251,7 +296,7 @@ pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut
     Shortcut::from_str(text).map_err(|_| format!("\"{text}\" is not a valid key combination."))
 }
 
-/// Register the global hotkeys (save, and buffer on/off).
+/// Register the global hotkeys (save, screenshot, and buffer on/off).
 ///
 /// Called at startup and after every change. Hence unregistering everything
 /// first: otherwise the old assignment would stay active as well.
@@ -278,6 +323,21 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     }) {
         log::warn!("could not register hotkey '{save}': {err}");
         failed.push(save);
+    }
+
+    let shot = config.screenshot_hotkey.clone();
+    if let Err(err) = shortcuts.on_shortcut(shot.as_str(), move |app, _shortcut, event| {
+        if event.state() == ShortcutState::Pressed {
+            let app = app.clone();
+            // Reading the picture back off the GPU and writing the PNG takes a
+            // few hundred milliseconds — not on the hotkey thread.
+            std::thread::spawn(move || {
+                let _ = take_screenshot_and_notify(&app);
+            });
+        }
+    }) {
+        log::warn!("could not register hotkey '{shot}': {err}");
+        failed.push(shot);
     }
 
     let toggle = config.toggle_buffer_hotkey.clone();
@@ -520,6 +580,11 @@ pub fn run() {
             commands::start_buffer,
             commands::stop_buffer,
             commands::save_clip,
+            commands::take_screenshot,
+            commands::copy_clip_image,
+            commands::crop_screenshot,
+            commands::restore_screenshot,
+            commands::screenshot_has_original,
             commands::list_clips,
             commands::delete_clip,
             commands::reveal_clip,

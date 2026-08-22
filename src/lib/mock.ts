@@ -84,6 +84,7 @@ export const mockConfig: AppConfig = {
   clipDir: "C:\\Users\\fabia\\Videos\\ClippiBoy",
   saveClipHotkey: "Ctrl+Shift+S",
   toggleBufferHotkey: "Ctrl+Shift+B",
+  screenshotHotkey: "Ctrl+Shift+P",
   autoStartWithWindows: false,
   onlyBufferInGame: true,
   overlay: {
@@ -91,6 +92,7 @@ export const mockConfig: AppConfig = {
     onClipSaved: true,
     onBufferToggle: true,
     onError: true,
+    onScreenshot: true,
     corner: "bottomRight",
     durationMs: 3500,
     monitor: null,
@@ -115,6 +117,7 @@ export const mockClips: Clip[] = [
     favorite: true,
     edit: null,
     original: null,
+    screenshot: false,
   },
   {
     id: "c2",
@@ -131,6 +134,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    screenshot: false,
   },
   {
     id: "c3",
@@ -147,6 +151,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    screenshot: false,
   },
   // The gallery has to survive the bad case too: one clip with no game and three
   // misdetections from before the stricter title check — that is what shows
@@ -167,6 +172,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    screenshot: false,
   },
   ...[
     "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
@@ -187,6 +193,25 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    screenshot: false,
+  })),
+  ...["Counter-Strike 2", null].map((game, i) => ({
+    id: `s${1 + i}`,
+    path: `C:\\Users\\fabia\\Videos\\ClippiBoy\\shot_2026-08-2${i}_19-04-1${i}.png`,
+    createdAt: Date.now() - 1000 * 60 * (30 + i * 90),
+    // A still has no length, and the gallery shows the camera instead.
+    durationMs: 0,
+    game,
+    width: 3840,
+    height: 2160,
+    sizeBytes: 9_400_000 - i * 1_200_000,
+    thumbPath: null,
+    title: i === 0 ? "Scoreboard" : null,
+    description: null,
+    favorite: false,
+    edit: null,
+    original: null,
+    screenshot: true,
   })),
 ];
 

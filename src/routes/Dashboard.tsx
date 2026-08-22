@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useEngine } from "@/store";
 import { Card, Pill, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
-import { IconArrowUpRight, IconScissors } from "@/components/icons";
+import { IconArrowUpRight, IconCamera, IconScissors } from "@/components/icons";
 import { clipName, formatAgo, formatBufferSeconds, formatDuration } from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
@@ -21,10 +21,16 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     detectedGame,
     toggleBuffer,
     saveClip,
+    takeScreenshot,
     deleteClip,
   } = useEngine();
   const [playing, setPlaying] = useState<number | null>(null);
-  const recent = clips.slice(0, 3);
+  // Recordings only. The player below is the video one, and "Latest clips" says
+  // what it shows — screenshots have their own place in the gallery.
+  const recent = useMemo(
+    () => clips.filter((clip) => !clip.screenshot).slice(0, 3),
+    [clips],
+  );
 
   return (
     <div className="space-y-12">
@@ -48,6 +54,15 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
             disabled={!bufferActive}
           >
             Save clip
+          </Button>
+          {/* No `disabled` on this one: a screenshot brings its own capture
+              session and does not care whether the buffer is running. */}
+          <Button
+            variant="secondary"
+            icon={<IconCamera className="h-4 w-4" />}
+            onClick={takeScreenshot}
+          >
+            Screenshot
           </Button>
         </div>
       </header>

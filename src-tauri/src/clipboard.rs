@@ -1,8 +1,9 @@
 //! The Windows clipboard.
 //!
-//! Two things live here: putting a **file** on the clipboard so a clip lands in
-//! Discord or Explorer with Ctrl+V, and reading and writing **text** for the
-//! context menu in text fields.
+//! Three things live here: putting a **file** on the clipboard so a clip lands
+//! in Discord or Explorer with Ctrl+V, putting a **picture** there so a
+//! screenshot can be pasted straight into a chat, and reading and writing
+//! **text** for the context menu in text fields.
 //!
 //! Why not from inside the WebView? Reading the clipboard asks for permission
 //! there, and that dialog does not belong in an app that is native anyway. And
@@ -26,6 +27,8 @@ mod win {
     const CF_HDROP: u32 = 15;
     /// Text in UTF-16.
     const CF_UNICODETEXT: u32 = 13;
+    /// A bitmap without its file header — that is what the clipboard wants.
+    const CF_DIB: u32 = 8;
 
     /// Open the clipboard — with a few attempts.
     ///
@@ -120,6 +123,17 @@ mod win {
         put(CF_HDROP, &bytes)
     }
 
+    /// Put a picture on the clipboard as a device-independent bitmap.
+    ///
+    /// `CF_DIB` is what every program understands — the file on the clipboard
+    /// (`copy_files`) only helps where files can be dropped, and a chat window
+    /// wants the picture itself.
+    pub fn copy_image(dib: &[u8]) -> Result<(), String> {
+        let _clipboard = Clipboard::open()?;
+        unsafe { EmptyClipboard() }.map_err(|err| format!("empty clipboard: {err}"))?;
+        put(CF_DIB, dib)
+    }
+
     pub fn copy_text(text: &str) -> Result<(), String> {
         let units = wide(text);
         let mut bytes = Vec::with_capacity(units.len() * 2);
@@ -164,7 +178,12 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{copy_text, read_text};
+pub use win::{copy_image, copy_text, read_text};
+
+#[cfg(not(windows))]
+pub fn copy_image(_dib: &[u8]) -> Result<(), String> {
+    Err("The clipboard is only available on Windows.".into())
+}
 
 #[cfg(windows)]
 pub fn copy_files(paths: &[std::path::PathBuf]) -> Result<(), String> {

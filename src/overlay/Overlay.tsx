@@ -82,6 +82,9 @@ export function Overlay() {
     bufferOff: "text-ok",
     error: "text-live",
     info: "text-ink-muted",
+    // The same colour as a clip: both say "kept". What tells them apart is the
+    // sign in the picture frame, and that is enough at a glance.
+    screenshot: "text-accent-bright",
   }[banner.kind];
 
   const stroke = {
@@ -90,6 +93,7 @@ export function Overlay() {
     bufferOff: "var(--color-ok)",
     error: "var(--color-live)",
     info: "var(--color-line-strong)",
+    screenshot: "var(--color-accent-bright)",
   }[banner.kind];
 
   // "Buffer off" plays the line backwards and greys it out along the way — the
@@ -158,6 +162,14 @@ function Mark({ kind }: { kind: OverlayBanner["kind"] }) {
       <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <circle cx="12" cy="12" r="9" />
         <path d="M12 7.5v5.5M12 16.3v.2" />
+      </svg>
+    );
+  }
+  if (kind === "screenshot") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
+        <path d="M3 8.5A1.5 1.5 0 0 1 4.5 7h2.2l1.3-2h7.9l1.3 2h2.3A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5v-9Z" />
+        <circle cx="12" cy="13" r="3.4" />
       </svg>
     );
   }

@@ -378,30 +378,7 @@ impl AppState {
         // via the button, ClippiBoy is in the foreground.
         let buffering_game = self.buffering_game.lock().clone();
         let game = buffering_game.or_else(|| self.current_game.lock().clone());
-        // Milliseconds are part of it: two clips in the same second would
-        // otherwise get the same path. Both ffmpeg runs would then write the
-        // same file, share the segment list in the temp folder, and in the
-        // database (`path` is UNIQUE) only one of the two would remain.
-        let now = jiff::Zoned::now();
-        let stamp = format!(
-            "{}-{:03}",
-            now.strftime("%Y-%m-%d_%H-%M-%S"),
-            now.subsec_nanosecond() / 1_000_000
-        );
-        let name = match &game {
-            Some(app) => format!("{}_{stamp}.mp4", sanitize_name(app)),
-            None => format!("clip_{stamp}.mp4"),
-        };
-
-        // One folder per game. A new clip is not a favorite yet, so the game
-        // alone decides — with none it stays in the clip folder.
-        let dir = crate::filing::dir_for(
-            std::path::Path::new(&config.clip_dir),
-            game.as_deref(),
-            false,
-        );
-        std::fs::create_dir_all(&dir)
-            .map_err(|err| format!("could not create folder '{}': {err}", dir.display()))?;
+        let output = destination(&config.clip_dir, game.as_deref(), false)?;
 
         // The id already here: the muxer files the individual tracks under it,
         // and those come out of the same ffmpeg run as the clip.
@@ -409,7 +386,7 @@ impl AppState {
         let result = crate::muxer::build(crate::muxer::ClipRequest {
             snapshot,
             clip_id: id.clone(),
-            output: dir.join(name),
+            output,
             temp_dir: config::data_dir().join("temp"),
         })?;
 
@@ -431,8 +408,106 @@ impl AppState {
             favorite: false,
             edit: None,
             original: None,
+            screenshot: false,
         })
     }
+
+    /// One picture from the recording source.
+    ///
+    /// Unlike `save_clip` this needs no running buffer — it opens a capture
+    /// session of its own and closes it again as soon as a frame has arrived.
+    /// It deliberately skips `begin_save` too: a screenshot is done in a blink,
+    /// and whoever presses twice wants two pictures.
+    pub fn take_screenshot(&self) -> Result<Clip, String> {
+        let config = self.config_snapshot();
+        // Whatever the buffer is really capturing, otherwise what is configured
+        // — the source, not the size: a picture comes at the source's native
+        // resolution. The scaling in the recording settings is there to save
+        // bitrate, and a screenshot has none to save.
+        let recording = self
+            .active_recording
+            .lock()
+            .clone()
+            .unwrap_or_else(|| config.recording.clone());
+
+        let shot = crate::shot::grab(recording.target_kind, recording.target_id.as_deref())?;
+
+        let buffering_game = self.buffering_game.lock().clone();
+        let game = buffering_game.or_else(|| self.current_game.lock().clone());
+        let path = destination(&config.clip_dir, game.as_deref(), true)?;
+        shot.write_png(&path)?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        // A picture of its own, not the screenshot itself: `thumbs::migrate`
+        // carries every thumbnail lying outside its folder into it, and would
+        // take the original out of the user's clip folder along the way.
+        let thumb_path = match crate::thumbs::make_still(&path, &id) {
+            Ok(thumb) => Some(thumb.to_string_lossy().to_string()),
+            Err(err) => {
+                log::warn!("no thumbnail for the screenshot: {err}");
+                None
+            }
+        };
+
+        Ok(Clip {
+            id,
+            path: path.to_string_lossy().to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            duration_ms: 0,
+            game,
+            width: shot.width,
+            height: shot.height,
+            size_bytes: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+            thumb_path,
+            title: None,
+            description: None,
+            favorite: false,
+            edit: None,
+            original: None,
+            screenshot: true,
+        })
+    }
+}
+
+/// Where a new file goes and what it is called.
+///
+/// Milliseconds are part of the name: two clips in the same second would
+/// otherwise get the same path. Both ffmpeg runs would then write the same file,
+/// share the segment list in the temp folder, and in the database (`path` is
+/// UNIQUE) only one of the two would remain.
+///
+/// The folder follows from game and kind. Nothing new is a favorite yet, so that
+/// question does not arise here.
+fn destination(
+    clip_dir: &str,
+    game: Option<&str>,
+    screenshot: bool,
+) -> Result<std::path::PathBuf, String> {
+    let now = jiff::Zoned::now();
+    let stamp = format!(
+        "{}-{:03}",
+        now.strftime("%Y-%m-%d_%H-%M-%S"),
+        now.subsec_nanosecond() / 1_000_000
+    );
+    let extension = if screenshot { "png" } else { "mp4" };
+    let name = match game {
+        Some(app) => format!("{}_{stamp}.{extension}", sanitize_name(app)),
+        None if screenshot => format!("shot_{stamp}.{extension}"),
+        None => format!("clip_{stamp}.{extension}"),
+    };
+
+    let dir = crate::filing::dir_for(
+        std::path::Path::new(clip_dir),
+        game,
+        false,
+        screenshot,
+    );
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("could not create folder '{}': {err}", dir.display()))?;
+    Ok(dir.join(name))
 }
 
 fn sanitize_name(text: &str) -> String {

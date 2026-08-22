@@ -129,19 +129,25 @@ export function Select<T extends string>({
   options,
   onChange,
   label,
+  disabled,
 }: {
   value: T;
   options: Array<{ value: T; label: string }>;
   onChange: (v: T) => void;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <select
       aria-label={label}
       value={value}
+      disabled={disabled}
       onChange={(e) => onChange(e.target.value as T)}
-      className="h-9 rounded-pill border border-line bg-elevated px-4 text-sm text-ink
-        outline-none transition-colors hover:border-line-strong"
+      className={cn(
+        `h-9 rounded-pill border border-line bg-elevated px-4 text-sm text-ink
+        outline-none transition-colors hover:border-line-strong`,
+        disabled && "pointer-events-none opacity-40",
+      )}
     >
       {options.map((o) => (
         <option key={o.value} value={o.value} className="bg-elevated">
