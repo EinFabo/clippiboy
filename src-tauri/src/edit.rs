@@ -377,6 +377,31 @@ fn run(
     })
 }
 
+/// Move a file, even onto another drive.
+///
+/// The originals store sits next to the config in `AppData`, the clips lie
+/// wherever the folder in the settings points — a second disk, say. `rename`
+/// refuses that outright ("Das System kann die Datei nicht auf ein anderes
+/// Laufwerk verschieben", os error 17), and no amount of retrying changes it.
+/// Only then is the file copied and the source removed afterwards; that costs
+/// the time a copy of a few hundred megabytes takes, but it is the only way
+/// across.
+fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {
+            std::fs::copy(from, to)?;
+            // From here on the copy is the one that counts. If the source will
+            // not go, it stays behind as a leftover — annoying, not fatal, and
+            // above all not a reason to fail the move.
+            if let Err(err) = std::fs::remove_file(from) {
+                log::warn!("'{}' stayed behind after the move: {err}", from.display());
+            }
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 /// Move the finished file into its place — and, if this is the first real cut,
 /// rescue the untouched recording along the way.
 ///
@@ -392,7 +417,7 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
         // again by it. The other way round a video would lie there with nothing
         // to tie it to.
         write_note(&clip.id, plan.original.as_ref().expect("checked"))?;
-        if let Err(err) = std::fs::rename(target, &archive) {
+        if let Err(err) = move_across(target, &archive) {
             let _ = std::fs::remove_file(temp);
             let _ = std::fs::remove_file(note_path(&clip.id));
             return Err(format!(
@@ -404,7 +429,7 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
     if let Err(err) = replace_file(temp, target) {
         if first_cut {
             // Back to the start: better an untrimmed clip than none at all.
-            let _ = std::fs::rename(&archive, target);
+            let _ = move_across(&archive, target);
             let _ = std::fs::remove_file(note_path(&clip.id));
             let _ = std::fs::remove_dir_all(dir(&clip.id));
         }
@@ -649,7 +674,7 @@ pub fn repair(library: &crate::clips::Library) {
             // untouched recording lies in the store. Push it back — an untrimmed
             // clip is infinitely better than none at all.
             (false, Some(_), true) => {
-                if std::fs::rename(&video, target).is_ok() {
+                if move_across(&video, target).is_ok() {
                     log::info!("clip '{}' recovered from the originals store", clip.id);
                     remove(&clip.id);
                     let _ = library.set_original(&clip.id, None);
