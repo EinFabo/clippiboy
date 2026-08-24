@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-label="ClippiBoy — a replay buffer for Windows">
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2=".7" y2="1">
+      <stop offset="0" stop-color="#14101f"/>
+      <stop offset=".55" stop-color="#0c0b12"/>
+      <stop offset="1" stop-color="#08080a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="18%" cy="8%" r="70%">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity=".38"/>
+      <stop offset=".6" stop-color="#4c1d95" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#4c1d95" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c4fd8" stop-opacity=".85"/>
+      <stop offset=".5" stop-color="#34343d"/>
+      <stop offset="1" stop-color="#26262c"/>
+    </linearGradient>
+
+    <radialGradient id="cbDisc" cx="34%" cy="24%" r="92%">
+      <stop offset="0" stop-color="#1d1533"/>
+      <stop offset=".55" stop-color="#110c1f"/>
+      <stop offset="1" stop-color="#08060f"/>
+    </radialGradient>
+    <linearGradient id="cbRim" x1="0" y1="0" x2=".45" y2="1">
+      <stop offset="0" stop-color="#7c4fd8"/>
+      <stop offset=".5" stop-color="#452a7f"/>
+      <stop offset="1" stop-color="#2a1a4d"/>
+    </linearGradient>
+    <linearGradient id="cbMark" x1=".08" y1=".05" x2=".92" y2=".95">
+      <stop offset="0" stop-color="#b492ff"/>
+      <stop offset=".45" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="cbPlay" x1=".1" y1="0" x2=".9" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="318" rx="28" fill="url(#panel)"/>
+  <rect x="1" y="1" width="1198" height="318" rx="28" fill="url(#glow)"/>
+  <rect x="1.5" y="1.5" width="1197" height="317" rx="27" fill="none" stroke="url(#edge)" stroke-width="1.5"/>
+
+  <g transform="translate(76,76) scale(0.65625)">
+    <circle cx="128" cy="128" r="125" fill="url(#cbDisc)"/>
+    <circle cx="128" cy="128" r="123.5" fill="none" stroke="url(#cbRim)" stroke-width="3"/>
+    <path d="M177.03 86.86 A64 64 0 1 0 177.03 169.14" fill="none" stroke="url(#cbMark)" stroke-width="28" stroke-linecap="round"/>
+    <path d="M111.6 102.1 L143.2 128 L111.6 153.9 Z" fill="url(#cbPlay)" stroke="url(#cbPlay)" stroke-width="9" stroke-linejoin="round"/>
+  </g>
+
+  <g font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+    <text x="272" y="136" font-size="62" font-weight="700" fill="#ffffff" letter-spacing="-1.5">ClippiBoy</text>
+    <text x="274" y="180" font-size="23" fill="#8a8a96">A replay buffer for Windows — every audio source kept apart.</text>
+
+    <g font-size="15" font-weight="600">
+      <rect x="274" y="212" width="152" height="38" rx="19" fill="#1a1a1f" stroke="#34343d"/>
+      <text x="350" y="236" fill="#c9c9d3" text-anchor="middle">Rust · Tauri · React</text>
+
+      <rect x="440" y="212" width="204" height="38" rx="19" fill="#1a1a1f" stroke="#34343d"/>
+      <text x="542" y="236" fill="#c9c9d3" text-anchor="middle">Zero-copy GPU capture</text>
+
+      <rect x="658" y="212" width="192" height="38" rx="19" fill="#1a1a1f" stroke="#34343d"/>
+      <text x="754" y="236" fill="#c9c9d3" text-anchor="middle">Separate audio tracks</text>
+    </g>
+  </g>
+
+  <g opacity=".5">
+    <circle cx="1064" cy="96" r="3" fill="#8b5cf6"/>
+    <circle cx="1104" cy="150" r="2" fill="#a78bfa"/>
+    <circle cx="1032" cy="206" r="2" fill="#7c3aed"/>
+  </g>
+</svg>

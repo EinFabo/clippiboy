@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" width="1200" height="430" role="img" aria-label="Capture pipeline: screen capture, GPU colour conversion, hardware encoder, packet ring, MP4">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2=".6" y2="1">
+      <stop offset="0" stop-color="#101018"/>
+      <stop offset="1" stop-color="#08080a"/>
+    </linearGradient>
+    <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="tipDim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5c5c68"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="428" rx="24" fill="url(#bg)" stroke="#26262c" stroke-width="1.5"/>
+
+  <g font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+    <text x="40" y="52" font-size="17" font-weight="700" fill="#ffffff" letter-spacing="1.4">VIDEO PATH</text>
+
+    <!-- boxes -->
+    <g>
+      <rect x="40" y="76" width="192" height="96" rx="18" fill="#17171d" stroke="#34343d"/>
+      <text x="136" y="118" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">Screen capture</text>
+      <text x="136" y="142" font-size="12.5" fill="#8a8a96" text-anchor="middle">Windows.Graphics.Capture</text>
+
+      <rect x="272" y="76" width="192" height="96" rx="18" fill="#17171d" stroke="#34343d"/>
+      <text x="368" y="118" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">GPU convert</text>
+      <text x="368" y="142" font-size="12.5" fill="#8a8a96" text-anchor="middle">BGRA → NV12</text>
+
+      <rect x="504" y="76" width="192" height="96" rx="18" fill="#1c1730" stroke="#7c4fd8"/>
+      <text x="600" y="118" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">Encoder</text>
+      <text x="600" y="142" font-size="12.5" fill="#a78bfa" text-anchor="middle">H.264 · Media Foundation</text>
+
+      <rect x="736" y="76" width="192" height="96" rx="18" fill="#17171d" stroke="#34343d"/>
+      <text x="832" y="118" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">Packet ring</text>
+      <text x="832" y="142" font-size="12.5" fill="#8a8a96" text-anchor="middle">in memory, keyframe-safe</text>
+
+      <rect x="968" y="76" width="192" height="96" rx="18" fill="#17171d" stroke="#34343d"/>
+      <text x="1064" y="118" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">MP4</text>
+      <text x="1064" y="142" font-size="12.5" fill="#8a8a96" text-anchor="middle">muxed, never re-encoded</text>
+    </g>
+
+    <!-- arrows -->
+    <g stroke="#8b5cf6" stroke-width="2" marker-end="url(#tip)">
+      <line x1="234" y1="124" x2="268" y2="124"/>
+      <line x1="466" y1="124" x2="500" y2="124"/>
+      <line x1="698" y1="124" x2="732" y2="124"/>
+      <line x1="930" y1="124" x2="964" y2="124"/>
+    </g>
+    <g font-size="11.5" fill="#5c5c68" text-anchor="middle">
+      <text x="251" y="106">texture</text>
+      <text x="483" y="106">NV12</text>
+      <text x="715" y="106">packets</text>
+      <text x="947" y="106">on save</text>
+    </g>
+
+    <!-- gpu bracket -->
+    <path d="M60 192 L60 204 L444 204 L444 192" fill="none" stroke="#4c1d95" stroke-width="1.5"/>
+    <text x="252" y="226" font-size="12.5" fill="#8a8a96" text-anchor="middle">one shared D3D11 device — the picture never travels through the CPU</text>
+
+    <!-- audio -->
+    <text x="40" y="286" font-size="17" font-weight="700" fill="#ffffff" letter-spacing="1.4">AUDIO PATH</text>
+
+    <rect x="40" y="304" width="192" height="86" rx="18" fill="#17171d" stroke="#34343d"/>
+    <text x="136" y="340" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">WASAPI sources</text>
+    <text x="136" y="363" font-size="12.5" fill="#8a8a96" text-anchor="middle">device · app · microphone</text>
+
+    <rect x="272" y="304" width="192" height="86" rx="18" fill="#17171d" stroke="#34343d"/>
+    <text x="368" y="340" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">Mixer</text>
+    <text x="368" y="363" font-size="12.5" fill="#8a8a96" text-anchor="middle">own thread, every 10 ms</text>
+
+    <rect x="504" y="304" width="192" height="86" rx="18" fill="#17171d" stroke="#34343d"/>
+    <text x="600" y="340" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">Ring per source</text>
+    <text x="600" y="363" font-size="12.5" fill="#8a8a96" text-anchor="middle">40 ms of lag at most</text>
+
+    <g stroke="#8b5cf6" stroke-width="2" marker-end="url(#tip)">
+      <line x1="234" y1="347" x2="268" y2="347"/>
+      <line x1="466" y1="347" x2="500" y2="347"/>
+    </g>
+
+    <path d="M700 347 L1064 347 L1064 178" fill="none" stroke="#5c5c68" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#tipDim)"/>
+    <text x="884" y="335" font-size="12.5" fill="#8a8a96" text-anchor="middle">main mix + one track per source that asks for its own</text>
+  </g>
+</svg>

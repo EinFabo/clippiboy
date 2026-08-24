@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="1200" height="440" role="img" aria-label="Audio routing: output devices, applications and microphones through the mixer into the main mix and separate tracks">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2=".6" y2="1">
+      <stop offset="0" stop-color="#101018"/>
+      <stop offset="1" stop-color="#08080a"/>
+    </linearGradient>
+    <linearGradient id="mix" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a1b52"/>
+      <stop offset="1" stop-color="#17122b"/>
+    </linearGradient>
+    <marker id="tip2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8b5cf6"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="438" rx="24" fill="url(#bg2)" stroke="#26262c" stroke-width="1.5"/>
+
+  <g font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+    <text x="40" y="50" font-size="14" font-weight="700" fill="#5c5c68" letter-spacing="1.6">SOURCES</text>
+    <text x="470" y="50" font-size="14" font-weight="700" fill="#5c5c68" letter-spacing="1.6">MIXER</text>
+    <text x="716" y="50" font-size="14" font-weight="700" fill="#5c5c68" letter-spacing="1.6">IN THE CLIP</text>
+
+    <!-- sources -->
+    <g>
+      <rect x="40" y="72" width="336" height="92" rx="18" fill="#17171d" stroke="#34343d"/>
+      <circle cx="76" cy="118" r="14" fill="#4c1d95"/><circle cx="76" cy="118" r="5" fill="#a78bfa"/>
+      <text x="108" y="112" font-size="18" font-weight="600" fill="#ffffff">Output device</text>
+      <text x="108" y="136" font-size="12.5" fill="#8a8a96">loopback of a whole endpoint</text>
+
+      <rect x="40" y="180" width="336" height="92" rx="18" fill="#17171d" stroke="#34343d"/>
+      <circle cx="76" cy="226" r="14" fill="#4c1d95"/><rect x="71" y="221" width="10" height="10" rx="2" fill="#a78bfa"/>
+      <text x="108" y="220" font-size="18" font-weight="600" fill="#ffffff">Application</text>
+      <text x="108" y="244" font-size="12.5" fill="#8a8a96">process loopback (Windows 10 20348+)</text>
+
+      <rect x="40" y="288" width="336" height="92" rx="18" fill="#17171d" stroke="#34343d"/>
+      <circle cx="76" cy="334" r="14" fill="#4c1d95"/><path d="M76 327 v14" stroke="#a78bfa" stroke-width="6" stroke-linecap="round"/>
+      <text x="108" y="328" font-size="18" font-weight="600" fill="#ffffff">Microphone</text>
+      <text x="108" y="352" font-size="12.5" fill="#8a8a96">any input device</text>
+    </g>
+
+    <!-- arrows into mixer -->
+    <g stroke="#8b5cf6" stroke-width="2" fill="none" marker-end="url(#tip2)">
+      <path d="M380 118 C 420 118, 420 200, 456 200"/>
+      <path d="M380 226 L456 226"/>
+      <path d="M380 334 C 420 334, 420 252, 456 252"/>
+    </g>
+
+    <!-- mixer -->
+    <rect x="460" y="140" width="182" height="172" rx="20" fill="url(#mix)" stroke="#7c4fd8"/>
+    <text x="551" y="184" font-size="20" font-weight="600" fill="#ffffff" text-anchor="middle">Mixer</text>
+    <g text-anchor="middle" font-size="13" fill="#c9c9d3">
+      <text x="551" y="216">gain · mute · solo</text>
+      <text x="551" y="240">live level per source</text>
+    </g>
+    <g>
+      <rect x="500" y="258" width="10" height="30" rx="5" fill="#8b5cf6"/>
+      <rect x="520" y="266" width="10" height="22" rx="5" fill="#a78bfa"/>
+      <rect x="540" y="252" width="10" height="36" rx="5" fill="#8b5cf6"/>
+      <rect x="560" y="270" width="10" height="18" rx="5" fill="#6d28d9"/>
+      <rect x="580" y="262" width="10" height="26" rx="5" fill="#a78bfa"/>
+    </g>
+
+    <!-- outputs -->
+    <g stroke="#8b5cf6" stroke-width="2" fill="none" marker-end="url(#tip2)">
+      <path d="M646 200 C 680 200, 680 148, 712 148"/>
+      <path d="M646 252 C 680 252, 680 304, 712 304"/>
+    </g>
+
+    <rect x="716" y="96" width="444" height="104" rx="18" fill="#17171d" stroke="#34343d"/>
+    <text x="748" y="136" font-size="18" font-weight="600" fill="#ffffff">Main mix — track 1</text>
+    <text x="748" y="162" font-size="12.5" fill="#8a8a96">the one track Discord, browsers and players actually play</text>
+    <text x="748" y="182" font-size="12.5" fill="#8a8a96">everything without &quot;own track&quot; lands here</text>
+
+    <rect x="716" y="252" width="444" height="104" rx="18" fill="#17171d" stroke="#34343d"/>
+    <text x="748" y="292" font-size="18" font-weight="600" fill="#ffffff">Own track — written alongside</text>
+    <text x="748" y="318" font-size="12.5" fill="#8a8a96">raw PCM per source, muxed in as an extra MP4 track</text>
+    <text x="748" y="338" font-size="12.5" fill="#8a8a96">the mix stays changeable long after the recording</text>
+
+    <text x="40" y="412" font-size="12.5" fill="#8a8a96">A source with its own track keeps it while it is enabled — muted or not. The mixer pushes silence into it instead of dropping the track.</text>
+  </g>
+</svg>
