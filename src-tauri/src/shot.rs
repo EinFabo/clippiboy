@@ -36,6 +36,26 @@ impl Shot {
     /// The rectangle is clamped to what is really there rather than rejected: it
     /// comes from a mouse dragged across a scaled preview, and a rounding error
     /// at the edge is not a reason to refuse the crop.
+    /// The rectangle as it will really be cut.
+    ///
+    /// [`Shot::crop`] takes less than it was asked for when the selection
+    /// reaches past the edge, and says nothing about it. The selection comes
+    /// from a mouse on a scaled preview and is rounded component by component,
+    /// so `x + width` can land a pixel past the edge without anyone having done
+    /// anything wrong. Whoever writes the rectangle down has to write down this
+    /// one: a note claiming a width that `base.png` does not have makes the next
+    /// open scale every mark against the wrong picture.
+    pub fn clamped(&self, area: Rect) -> Result<Rect, String> {
+        let x = area.x.min(self.width.saturating_sub(1));
+        let y = area.y.min(self.height.saturating_sub(1));
+        let width = area.width.min(self.width - x);
+        let height = area.height.min(self.height - y);
+        if width == 0 || height == 0 {
+            return Err("The selection is empty.".into());
+        }
+        Ok(Rect { x, y, width, height })
+    }
+
     pub fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Result<Shot, String> {
         let left = x.min(self.width.saturating_sub(1)) as usize;
         let top = y.min(self.height.saturating_sub(1)) as usize;
@@ -310,7 +330,13 @@ pub fn write_edit(clip_id: &str, edit: &Edit) -> Result<(), String> {
             .map_err(|err| format!("could not create folder: {err}"))?;
     }
     let text = serde_json::to_string(edit).map_err(|err| err.to_string())?;
-    std::fs::write(&path, text).map_err(|err| format!("could not note the edit: {err}"))
+    // Beside it first, then renamed over. `fs::write` truncates before it
+    // writes: a program that dies in the middle leaves an empty or half a note,
+    // and half a note reads as "no crop" while a cropped base.png lies next to
+    // it. A rename has no middle.
+    let part = path.with_extension("json.part");
+    std::fs::write(&part, text).map_err(|err| format!("could not note the edit: {err}"))?;
+    std::fs::rename(&part, &path).map_err(|err| format!("could not note the edit: {err}"))
 }
 
 /// Clear the whole store away — the picture is its untouched self again.
@@ -677,6 +703,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_clamped_rectangle_is_the_one_that_is_really_cut() {
+        let shot = split_picture(); // 100 x 20
+        // Rounded component by component, x + width lands one past the edge.
+        let asked = Rect { x: 1, y: 0, width: 100, height: 20 };
+        let real = shot.clamped(asked).expect("still has room");
+        assert_eq!((real.x, real.width), (1, 99), "the note has to hold what was cut");
+
+        let cut = shot.crop(real.x, real.y, real.width, real.height).expect("cuts");
+        assert_eq!((cut.width, cut.height), (real.width, real.height));
+    }
+
+    #[test]
+    fn a_rectangle_beside_the_picture_is_no_rectangle() {
+        let shot = split_picture();
+        assert!(shot.clamped(Rect { x: 5, y: 5, width: 0, height: 10 }).is_err());
     }
 
     #[test]

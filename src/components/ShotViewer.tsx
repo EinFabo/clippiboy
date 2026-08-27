@@ -259,7 +259,8 @@ export function ShotViewer({
     setSelected(null);
     setEdit(null);
     // The defaults are reckoned from the picture: a stroke that reads well on
-    // 4K is a bar on 1080p.
+    // 4K is a bar on 1080p. Provisional — the edges that count are the
+    // original's, and those only arrive with the store below.
     setStyles(defaultStyles(pictureWidth));
     if (!id || !inTauri) return;
     let current = true;
@@ -270,6 +271,13 @@ export function ShotViewer({
         setEdit(loaded);
         setShapes(readMarks(loaded));
         setUnsaved(false);
+        // Now from the original's width rather than the cropped picture's.
+        // Marks are drawn, stored and painted in the original's coordinates,
+        // and the thickness slider is ranged from them too. On a 3840 picture
+        // cropped to 800, the defaults came out at 2 while the slider began at
+        // 3.2 — every tool started as a hairline on a 4K canvas, with the knob
+        // pinned to the left and the reading beside it disagreeing with it.
+        setStyles(defaultStyles(loaded.originalWidth ?? pictureWidth));
       })
       .catch(() => {});
     return () => {

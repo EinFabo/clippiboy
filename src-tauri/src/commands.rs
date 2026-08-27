@@ -419,14 +419,25 @@ pub fn write_screenshot(
 
     let pristine = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
 
-    // The ground to draw on next time: the crop, but none of the marks.
-    if let Some(area) = crop {
-        pristine
-            .crop(area.x, area.y, area.width, area.height)?
-            .write_png(&crate::shot::base_path(&clip.id))?;
-    } else {
-        let _ = std::fs::remove_file(crate::shot::base_path(&clip.id));
-    }
+    // Clamped once, here, and from here on nobody asks for anything else. What
+    // gets noted down has to be what was really cut — otherwise the note and
+    // base.png describe two different pictures.
+    let crop = match crop {
+        Some(area) => Some(pristine.clamped(area)?),
+        None => None,
+    };
+
+    // Everything that can fail happens before the first byte is written.
+    //
+    // The order used to be the other way round: base.png went to disk with the
+    // new crop, and only then were the layers blended. A layer that would not
+    // decode returned here — with the new base.png already lying there and the
+    // note still holding the old crop. The next open then sized the overlay
+    // from one and scaled it against the other, and every mark sat askew.
+    let ground = match crop {
+        Some(area) => Some(pristine.crop(area.x, area.y, area.width, area.height)?),
+        None => None,
+    };
 
     let mut picture = pristine;
     for step in &steps {
@@ -445,6 +456,14 @@ pub fn write_screenshot(
     }
     if let Some(area) = crop {
         picture = picture.crop(area.x, area.y, area.width, area.height)?;
+    }
+
+    // The ground to draw on next time: the crop, but none of the marks.
+    match &ground {
+        Some(shot) => shot.write_png(&crate::shot::base_path(&clip.id))?,
+        None => {
+            let _ = std::fs::remove_file(crate::shot::base_path(&clip.id));
+        }
     }
 
     crate::shot::write_edit(&id, &crate::shot::Edit { crop, marks })?;
