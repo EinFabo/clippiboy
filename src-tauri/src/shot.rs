@@ -86,10 +86,16 @@ impl Shot {
 
     /// Blur an area until nothing can be read in it any more.
     ///
-    /// Two passes of a box blur, first across then down. That is separable, so
-    /// the cost grows with the radius rather than with its square — and three
-    /// such passes would look like a Gaussian, which nobody is going to measure
-    /// on a redacted name.
+    /// One pass of a box blur across, one down. That is separable, so the cost
+    /// does not grow with the square of the radius — and with the sliding sum in
+    /// [`blur_rows`] it does not grow with the radius at all.
+    ///
+    /// The copy reaches `radius` beyond the rectangle on every side. Without
+    /// that margin only pixels from inside the rectangle are averaged, and a
+    /// redaction barely wider than the word it covers keeps the shape of that
+    /// word — while the preview, which blurs the whole picture and clips
+    /// afterwards, shows it mixed into its surroundings. The margin is what
+    /// makes the two agree.
     ///
     /// `ellipse` blurs the same rectangle but only writes back what lies inside
     /// the oval — a face wants a round patch, and a rectangle around it points
@@ -113,23 +119,34 @@ impl Shot {
         }
 
         let stride = self.width as usize * 3;
+
+        // The area actually read: the rectangle plus a margin of `radius`,
+        // as far as the picture reaches.
+        let from_x = left.saturating_sub(radius);
+        let from_y = top.saturating_sub(radius);
+        let to_x = (left + w + radius).min(self.width as usize);
+        let to_y = (top + h + radius).min(self.height as usize);
+        let (pw, ph) = (to_x - from_x, to_y - from_y);
+        // Where the rectangle sits inside that copy.
+        let (inset_x, inset_y) = (left - from_x, top - from_y);
+
         // A copy of the region, so a blurred pixel is never read as input for
         // the next one — that would smear the picture in one direction.
-        let mut patch = vec![0u8; w * h * 3];
-        for row in 0..h {
-            let from = (top + row) * stride + left * 3;
-            patch[row * w * 3..(row + 1) * w * 3]
-                .copy_from_slice(&self.rgb[from..from + w * 3]);
+        let mut patch = vec![0u8; pw * ph * 3];
+        for row in 0..ph {
+            let from = (from_y + row) * stride + from_x * 3;
+            patch[row * pw * 3..(row + 1) * pw * 3]
+                .copy_from_slice(&self.rgb[from..from + pw * 3]);
         }
 
         let mut across = vec![0u8; patch.len()];
-        blur_rows(&patch, &mut across, w, h, radius);
+        blur_rows(&patch, &mut across, pw, ph, radius);
         // The same routine down the columns: transpose, run, transpose back.
         let mut turned = vec![0u8; patch.len()];
-        transpose(&across, &mut turned, w, h);
+        transpose(&across, &mut turned, pw, ph);
         let mut done = vec![0u8; patch.len()];
-        blur_rows(&turned, &mut done, h, w, radius);
-        transpose(&done, &mut across, h, w);
+        blur_rows(&turned, &mut done, ph, pw, radius);
+        transpose(&done, &mut across, ph, pw);
 
         // From the rectangle that was asked for, not from what is left of it
         // after clamping. A blur pulled over the edge of the picture would
@@ -138,9 +155,9 @@ impl Shot {
         let (centre_x, centre_y) = (width as f32 / 2.0, height as f32 / 2.0);
         for row in 0..h {
             let line = (top + row) * stride + left * 3;
+            let read = ((inset_y + row) * pw + inset_x) * 3;
             if !ellipse {
-                self.rgb[line..line + w * 3]
-                    .copy_from_slice(&across[row * w * 3..(row + 1) * w * 3]);
+                self.rgb[line..line + w * 3].copy_from_slice(&across[read..read + w * 3]);
                 continue;
             }
             for column in 0..w {
@@ -150,7 +167,7 @@ impl Shot {
                     continue;
                 }
                 let to = line + column * 3;
-                let from = (row * w + column) * 3;
+                let from = read + column * 3;
                 self.rgb[to..to + 3].copy_from_slice(&across[from..from + 3]);
             }
         }
@@ -491,19 +508,36 @@ fn read_back(
 }
 
 /// One box blur pass along the rows.
+///
+/// The window is carried from one pixel to the next — what enters on the right
+/// is added, what leaves on the left is subtracted — so a pass costs the same
+/// whatever the radius. Summing the window afresh per pixel made a wide blur on
+/// a 4K still take seconds, and the radius may go up to 96.
 fn blur_rows(from: &[u8], to: &mut [u8], width: usize, height: usize, radius: usize) {
+    if width == 0 {
+        return;
+    }
     for row in 0..height {
         let line = row * width * 3;
-        for column in 0..width {
-            let first = column.saturating_sub(radius);
-            let last = (column + radius).min(width - 1);
-            let count = (last - first + 1) as u32;
-            for channel in 0..3 {
-                let mut sum = 0u32;
-                for at in first..=last {
-                    sum += from[line + at * 3 + channel] as u32;
+        for channel in 0..3 {
+            let (mut first, mut last) = (0usize, radius.min(width - 1));
+            let mut sum: u32 = (first..=last)
+                .map(|at| from[line + at * 3 + channel] as u32)
+                .sum();
+            for column in 0..width {
+                to[line + column * 3 + channel] = (sum / (last - first + 1) as u32) as u8;
+                let next = column + 1;
+                if next == width {
+                    break;
                 }
-                to[line + column * 3 + channel] = (sum / count) as u8;
+                if next > radius {
+                    sum -= from[line + first * 3 + channel] as u32;
+                    first += 1;
+                }
+                if last + 1 < width && next + radius > last {
+                    last += 1;
+                    sum += from[line + last * 3 + channel] as u32;
+                }
             }
         }
     }
@@ -553,4 +587,103 @@ fn read_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         other => return Err(format!("unexpected layer format: {other:?}")),
     };
     Ok((info.width, info.height, rgba))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How `blur_rows` worked before the window was carried along: every pixel
+    /// summed its whole window afresh. Correct, just slow — so it is the yardstick.
+    fn naive_rows(from: &[u8], to: &mut [u8], width: usize, height: usize, radius: usize) {
+        for row in 0..height {
+            let line = row * width * 3;
+            for column in 0..width {
+                let first = column.saturating_sub(radius);
+                let last = (column + radius).min(width - 1);
+                let count = (last - first + 1) as u32;
+                for channel in 0..3 {
+                    let mut sum = 0u32;
+                    for at in first..=last {
+                        sum += from[line + at * 3 + channel] as u32;
+                    }
+                    to[line + column * 3 + channel] = (sum / count) as u8;
+                }
+            }
+        }
+    }
+
+    fn noise(len: usize) -> Vec<u8> {
+        // A fixed pattern beats a random one: a failure is reproducible.
+        (0..len).map(|i| ((i * 37 + i / 5 * 11) % 251) as u8).collect()
+    }
+
+    #[test]
+    fn the_carried_window_sums_what_the_slow_loop_summed() {
+        for &(width, height) in &[(1, 1), (2, 3), (7, 4), (33, 5), (64, 2)] {
+            for radius in [1, 2, 3, 8, 40] {
+                let from = noise(width * height * 3);
+                let mut fast = vec![0u8; from.len()];
+                let mut slow = vec![0u8; from.len()];
+                blur_rows(&from, &mut fast, width, height, radius);
+                naive_rows(&from, &mut slow, width, height, radius);
+                assert_eq!(fast, slow, "{width}x{height}, radius {radius}");
+            }
+        }
+    }
+
+    fn split_picture() -> Shot {
+        // 100 x 20, black on the left half, white on the right.
+        let (width, height) = (100usize, 20usize);
+        let mut rgb = vec![0u8; width * height * 3];
+        for row in 0..height {
+            for column in 50..width {
+                let at = (row * width + column) * 3;
+                rgb[at..at + 3].copy_from_slice(&[255, 255, 255]);
+            }
+        }
+        Shot { width: width as u32, height: height as u32, rgb }
+    }
+
+    #[test]
+    fn the_blur_reaches_past_its_own_edge_for_input() {
+        let mut shot = split_picture();
+        // A white rectangle whose left edge sits on the border to the black half.
+        shot.blur(50, 0, 20, 20, 10, false);
+        let at = (10 * 100 + 50) * 3;
+        assert!(
+            shot.rgb[at] < 200,
+            "the first white column stayed at {} — nothing from the black half \
+             was averaged in",
+            shot.rgb[at],
+        );
+    }
+
+    #[test]
+    fn nothing_outside_the_rectangle_is_written() {
+        let before = split_picture();
+        let mut after = split_picture();
+        after.blur(50, 0, 20, 20, 10, false);
+        for row in 0..20usize {
+            for column in 0..100usize {
+                if (50..70).contains(&column) {
+                    continue;
+                }
+                let at = (row * 100 + column) * 3;
+                assert_eq!(
+                    before.rgb[at..at + 3],
+                    after.rgb[at..at + 3],
+                    "pixel {column},{row} was touched although it lies outside the rectangle",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rectangle_over_the_edge_stays_inside_the_picture() {
+        let mut shot = split_picture();
+        // Wider and taller than what is left of the picture from that corner.
+        shot.blur(90, 15, 40, 40, 6, false);
+        assert_eq!(shot.rgb.len(), 100 * 20 * 3);
+    }
 }

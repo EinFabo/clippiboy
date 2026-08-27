@@ -670,9 +670,19 @@ export function AnnotateLayer({
     const point = at(event);
 
     if (state?.kind === "move") {
-      const dx = point.x - state.grabX;
-      const dy = point.y - state.grabY;
       const from = state.from;
+      // The mark has to stay in the picture. `at()` clamps the pointer, but the
+      // distance it has travelled does not: grab a mark at x=500, pull to the
+      // left edge, and the mark lands at −100. The core stores those
+      // coordinates unsigned, so a single negative one makes the **whole** save
+      // fail — crop and every other mark with it — and all the user sees is a
+      // toast. So the shift is limited to what the mark's own extent allows.
+      const xs = [from.x1, from.x2, ...(from.points?.map(([x]) => x) ?? [])];
+      const ys = [from.y1, from.y2, ...(from.points?.map(([, y]) => y) ?? [])];
+      const shift = (raw: number, low: number, high: number) =>
+        Math.min(Math.max(raw, -low), high);
+      const dx = shift(point.x - state.grabX, Math.min(...xs), width - Math.max(...xs));
+      const dy = shift(point.y - state.grabY, Math.min(...ys), height - Math.max(...ys));
       replace(state.id, {
         x1: from.x1 + dx,
         y1: from.y1 + dy,
@@ -918,14 +928,15 @@ function BlurPatch({
 /**
  * The radius CSS has to be given so the preview blurs as hard as the file.
  *
- * `blur()` is a Gaussian and takes a standard deviation; the core runs two box
- * passes of half-width `radius`, and two of those have a variance of
- * `2·r·(r+1)/3`. Handing CSS the radius itself makes the preview about a fifth
- * softer than what is written — for a redacted name that is exactly the wrong
+ * `blur()` is a Gaussian and takes a standard deviation. The core runs **one**
+ * box pass of half-width `radius` per axis, and blurring is separable — so per
+ * axis it is a single box, whose variance is `r·(r+1)/3`. Counting both passes
+ * onto the same axis gives `2·r·(r+1)/3` and makes the preview a good 40 %
+ * softer than what is written; for a redacted name that is exactly the wrong
  * direction to be wrong in.
  */
 function sigmaOf(radius: number): number {
-  return Math.sqrt((2 * radius * (radius + 1)) / 3);
+  return Math.sqrt((radius * (radius + 1)) / 3);
 }
 
 /**
