@@ -1,3 +1,5 @@
+# ClippiBoy
+
 <div align="center">
 
 <img src="docs/banner.svg" alt="ClippiBoy" width="900">
@@ -46,6 +48,10 @@ along.
 
 Requirements: Windows 10 or 11 and WebView2, which ships with Windows 11 and
 arrives through Windows Update on 10. Nothing else.
+
+One caveat on 10: capturing a **single application's** audio needs the process
+loopback API, and that arrived with Windows 11 (build 20348). Output devices and
+microphones work on 10 as they do everywhere.
 
 Updates come from the same Releases page. The app checks once at startup and
 then leaves you alone: installing means quitting and starting the installer, and
@@ -120,9 +126,14 @@ have to convert itself. That was exactly the judder. The zero point for both
 tracks is the first frame that arrived, so audio and video share one time origin.
 
 The audio rings run from program start for the level meters, but are emptied
-before every recording and limited to 40 ms of lag while it runs. Without that
-they would hold old audio nobody ever collected, and the clip would run behind
-the picture from the very first second.
+before every recording. Without that they would stand at their limit — a whole
+second of audio nobody ever collected — and the clip would run behind the picture
+from the very first second.
+
+While it runs, the mixer deliberately stays **80 ms behind the present**. WASAPI
+only hands a block over once it is full; mixing closer to now would fetch silence
+where real audio arrives a moment later, and by then its slot in the track is
+already taken.
 
 ---
 
@@ -134,12 +145,12 @@ Three source types, combinable at will:
 
 * **Output device (loopback)** — an endpoint's complete audio
 * **Application** — process loopback via `ActivateAudioInterfaceAsync`, so
-  Discord can sit apart from the game (Windows 10 build 20348+)
+  Discord can sit apart from the game (needs Windows 11, build 20348+)
 * **Input device** — microphone
 
 Every source has gain, mute, solo and a live level. Sources without *own track*
-run into the main mix; the others are written along in parallel as PCM and muxed
-into the MP4 as extra audio tracks on save.
+run into the main mix; the others are written along in parallel and land beside
+the clip on save, as a file of their own.
 
 A source with its own track keeps that track as long as it is enabled — even
 while it is muted or another one is soloed. The mixer pushes silence into it
@@ -182,7 +193,8 @@ falls back to the old route over `volume` after two seconds without a sample.
 
 ## Editing clips
 
-In the player, **Edit** (or `E`) opens a pane beside the picture:
+The player has no edit mode. The pane beside the picture is always open, and
+whatever is set in it the core remembers on the clip:
 
 * **Name, description, game** — these land in the clip database, not in the file
   name; the file keeps its own. The gallery's search finds all three. The name
@@ -200,6 +212,9 @@ into the app data directory and the pane offers **Undo trim** — one click and 
 whole clip is back. Trimming further inwards works without undoing first; the
 handles run over the trimmed file's timeline while the arithmetic happens in the
 original.
+
+**A trimmed clip needs twice the space** for as long as that original sits beside
+it. It disappears as soon as the trim is undone or the clip is deleted.
 
 > **Shortening at the back is lossless, at the front it is not.** A cut that
 > starts at zero only copies the video and is done in a second or two. A cut at
@@ -247,10 +262,11 @@ A **favorite is a category at the same time**: the file lives in `Favorites`
 while the clip stays findable under its game inside the app — both are filters
 over the same database.
 
-Game names are made safe for a folder: forbidden characters are dropped, so are
-trailing dots and spaces, reserved names like `CON` get an underscore in front,
-and after 60 characters it stops. Game names sometimes come from window titles,
-and those can be whole sentences.
+Game names are made safe for a folder: forbidden characters become a space and
+runs of whitespace collapse into one (`Hitman:Absolution` → `Hitman Absolution`),
+trailing dots and spaces fall away, reserved names like `CON` get an underscore
+in front, and after 60 characters it stops. Game names sometimes come from window
+titles, and those can be whole sentences.
 
 Thumbnails do not sit beside the clip but in the app data directory. The clip
 folder belongs to the user and should hold nothing but videos — whoever opens it
@@ -448,6 +464,14 @@ cargo test --lib                            # buffer, mixer, filing and DB logic
 cargo check --target x86_64-pc-windows-gnu  # type-checks the Windows code too
 ```
 
+From WSL that check aborts with `Inconsistency detected by ld.so` inside a build
+script when the target directory sits on the Windows disk — WSL cannot start
+every binary from there. Redirect it once:
+
+```bash
+export CARGO_TARGET_DIR=~/.cache/clippiboy-target
+```
+
 ### Releases
 
 Pushing a `v*` tag builds, signs and publishes through GitHub Actions. Packages
@@ -461,6 +485,19 @@ is lost, no existing installation can accept an update any more.
 git tag v0.2.0
 git push origin v0.2.0
 ```
+
+Locally the key lives under `%USERPROFILE%\.clippiboy\updater.key` with its
+password beside it in `updater.password` — the two secrets are the contents of
+those files. Building and signing by hand, should Actions be out of reach:
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.clippiboy\updater.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content "$env:USERPROFILE\.clippiboy\updater.password"
+npm run app:build
+```
+
+Without the password in the environment the build stops and asks for it
+interactively.
 
 ---
 
@@ -476,13 +513,21 @@ src/                          React UI
   routes/                     Overview, Clips, Audio mixer, Recording, Settings
   components/ClipPlayer.tsx   player over the gallery
   components/ClipEditor.tsx   editing pane: metadata, tracks, export
+  components/ClipMeta.tsx     name, description, game — shared by both viewers
+  components/clipMenu.tsx     the entries of a clip's right-click menu
+  components/ShotViewer.tsx   screenshot viewer over the gallery
+  components/ShotAnnotate.tsx non-destructive editor: crop, marks, blur
   components/ui/Menu.tsx      right-click menu (one menu, global)
   components/TextMenu.tsx     WebView menu off, own menu in text fields
   components/SourceTrouble.tsx  audio sources that do not run, or run doubled
+  components/NavBar.tsx       the sidebar, components/TitleBar.tsx the frame
+  components/Toasts.tsx       short notices, components/icons.tsx inline icons
+  styles/tokens.css           colours and radii, styles/motion.css the timings
   overlay/                    a window of its own: the banner over the game
 
 src-tauri/src/
   model.rs                    shared data types
+  state.rs                    shared state; buffer automation and its run-on
   pipeline.rs                 capture → encoder → packet ring
   wgc.rs                      Windows.Graphics.Capture, frames as D3D11 textures
   gpu.rs                      D3D11 device, shared by capture and encoder

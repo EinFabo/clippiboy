@@ -4,8 +4,9 @@
 //!   * input device   — normal capture (microphone)
 //!   * output device  — loopback of the whole endpoint
 //!   * application    — process loopback via `ActivateAudioInterfaceAsync`
-//!     (Windows 10 build 20348+); this is what lets Discord, say, be recorded
-//!     separately from the game without virtual cables.
+//!     (Windows 11, build 20348+ — the API does not exist on 10); this is what
+//!     lets Discord, say, be recorded separately from the game without virtual
+//!     cables.
 //!
 //! Every stream runs on a thread of its own, writes 48 kHz/stereo/f32 into a
 //! ring buffer and updates its peak level for the display.
