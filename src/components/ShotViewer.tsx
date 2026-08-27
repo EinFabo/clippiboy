@@ -168,6 +168,15 @@ export function ShotViewer({
     defaultStyles(clips[index]?.width ?? 1920),
   );
   const [shapes, setShapes] = useState<Shape[]>([]);
+  /**
+   * Marks drawn since the last save.
+   *
+   * Whoever leaves the picture takes them with them, and there is no undo for
+   * that — so every way out that is not the button labelled "Discard" has to
+   * ask first.
+   */
+  const [unsaved, setUnsaved] = useState(false);
+  const [askingDiscard, setAskingDiscard] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
   const [open, setOpen] = useState({ annotate: true, crop: false });
 
@@ -217,6 +226,12 @@ export function ShotViewer({
     else onIndexChange(Math.min(index, clips.length - 2));
   }, [clip, clips.length, index, close, onDelete, onIndexChange]);
 
+  /** Every change to the marks that comes from the user — and only those. */
+  const editShapes: typeof setShapes = useCallback((next) => {
+    setShapes(next);
+    setUnsaved(true);
+  }, []);
+
   const step = useCallback(
     (delta: number) => {
       const next = index + delta;
@@ -239,6 +254,8 @@ export function ShotViewer({
     setMode("view");
     setSel(null);
     setShapes([]);
+    setUnsaved(false);
+    setAskingDiscard(false);
     setSelected(null);
     setEdit(null);
     // The defaults are reckoned from the picture: a stroke that reads well on
@@ -252,6 +269,7 @@ export function ShotViewer({
         if (!current) return;
         setEdit(loaded);
         setShapes(readMarks(loaded));
+        setUnsaved(false);
       })
       .catch(() => {});
     return () => {
@@ -273,11 +291,11 @@ export function ShotViewer({
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
       if (event.key === "Escape") {
-        if (askingDelete) return; // the question takes it — see ConfirmDelete
+        if (askingDelete || askingDiscard) return; // the question takes it
         // One step at a time: Escape leaves the crop, and only the next one
         // closes the viewer. Otherwise a mis-drawn rectangle would cost the
         // whole picture you were looking at.
-        if (mode !== "view") leaveEditing();
+        if (mode !== "view") tryLeaveEditing();
         else close();
       } else if (
         mode === "draw" &&
@@ -290,7 +308,7 @@ export function ShotViewer({
         // The last mark back, one at a time. Nothing to redo: whoever wants it
         // again draws it again — that is quicker than finding the button.
         event.preventDefault();
-        setShapes((drawn) => drawn.slice(0, -1));
+        editShapes((drawn) => drawn.slice(0, -1));
         // Or the panel keeps offering the options of a mark that is gone, and
         // its handles stay lying over the picture.
         setSelected(null);
@@ -304,7 +322,11 @@ export function ShotViewer({
     return () => window.removeEventListener("keydown", onKey);
     // `dropSelected` is stable enough for this: it only reads state setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [askingDelete, close, mode, selected, step]);
+  // `unsaved`, `askingDiscard` and `edit` are in here because the handler reads
+  // them through `tryLeaveEditing`. Without them Escape would keep asking a
+  // closure from an earlier render whether anything is unsaved, and act on its
+  // stale answer — which is the very loss this is meant to prevent.
+  }, [askingDelete, askingDiscard, close, edit, mode, selected, step, unsaved]);
 
   if (!clip) return null;
 
@@ -361,6 +383,19 @@ export function ShotViewer({
     setSel(null);
     setSelected(null);
     if (edit) setShapes(readMarks(edit));
+    setUnsaved(false);
+    setAskingDiscard(false);
+  };
+
+  /**
+   * The same, but for the ways out that were not asked for in words.
+   *
+   * "Discard" says what it does and needs no question. Escape does not: in the
+   * crop it costs a rectangle, among the marks it costs every one of them.
+   */
+  const tryLeaveEditing = () => {
+    if (unsaved) setAskingDiscard(true);
+    else leaveEditing();
   };
 
   const pickTool = (next: Tool) => {
@@ -413,6 +448,7 @@ export function ShotViewer({
       const loaded = await api.screenshotEdit(clip.id);
       setEdit(loaded);
       setShapes(readMarks(loaded));
+      setUnsaved(false);
       setSelected(null);
       setSel(null);
       setMode("view");
@@ -445,7 +481,7 @@ export function ShotViewer({
 
   const restyle = (patch: Partial<Style>) => {
     if (chosen) {
-      setShapes((drawn) =>
+      editShapes((drawn) =>
         drawn.map((shape) => (shape.id === chosen.id ? { ...shape, ...patch } : shape)),
       );
       return;
@@ -455,9 +491,12 @@ export function ShotViewer({
 
   const sizeRange = range(active, full.width);
 
+  /** The editor is open — the picture underneath must not change now. */
+  const editing = mode !== "view";
+
   const dropSelected = () => {
     if (selected === null) return;
-    setShapes((drawn) => drawn.filter((shape) => shape.id !== selected));
+    editShapes((drawn) => drawn.filter((shape) => shape.id !== selected));
     setSelected(null);
   };
 
@@ -555,7 +594,7 @@ export function ShotViewer({
                     tool={tool}
                     style={style}
                     shapes={shapes}
-                    onShapes={setShapes}
+                    onShapes={editShapes}
                     selected={selected}
                     onSelect={setSelected}
                   />
@@ -704,15 +743,27 @@ export function ShotViewer({
                       variant="ghost"
                       disabled={shapes.length === 0}
                       onClick={() => {
-                        setShapes((drawn) => drawn.slice(0, -1));
+                        editShapes((drawn) => drawn.slice(0, -1));
                         setSelected(null);
                       }}
                     >
                       Undo
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={leaveEditing}>
-                      Discard
-                    </Button>
+                    {askingDiscard ? (
+                      <ConfirmDelete
+                        question="Discard unsaved marks?"
+                        confirmLabel="Discard the marks"
+                        confirmTitle="Throw them away"
+                        cancelLabel="Keep drawing"
+                        cancelTitle="Back to the marks — Escape does the same"
+                        onConfirm={leaveEditing}
+                        onCancel={() => setAskingDiscard(false)}
+                      />
+                    ) : (
+                      <Button size="sm" variant="ghost" onClick={leaveEditing}>
+                        Discard
+                      </Button>
+                    )}
                   </div>
                   {/* Only the marks go — the crop is kept apart from them. */}
                   {edit?.marks && (
@@ -774,9 +825,21 @@ export function ShotViewer({
                     >
                       {busy ? "Cropping …" : "Crop"}
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={leaveEditing}>
-                      Cancel
-                    </Button>
+                    {askingDiscard ? (
+                      <ConfirmDelete
+                        question="Discard unsaved marks?"
+                        confirmLabel="Discard the marks"
+                        confirmTitle="Throw them away"
+                        cancelLabel="Keep drawing"
+                        cancelTitle="Back to the marks — Escape does the same"
+                        onConfirm={leaveEditing}
+                        onCancel={() => setAskingDiscard(false)}
+                      />
+                    ) : (
+                      <Button size="sm" variant="ghost" onClick={leaveEditing}>
+                        Cancel
+                      </Button>
+                    )}
                   </div>
                   <p className="text-xs text-ink-faint">
                     Drag on the picture to select, drag inside it to move it.
@@ -853,10 +916,23 @@ export function ShotViewer({
             </Button>
           )}
 
-          <span className="ml-auto text-xs text-ink-faint">←/→ next picture</span>
+          <span className="ml-auto text-xs text-ink-faint">
+            {editing ? "Save or discard first" : "←/→ next picture"}
+          </span>
 
+          {/*
+            Disabled while the editor is open, exactly as the arrow keys are.
+            They ask `mode === "view"` and always have; these two did not, and a
+            click on › changed the picture, on which the effect below empties the
+            marks — a dozen of them gone without a question and with nothing to
+            undo it with.
+          */}
           <div className="flex items-center gap-1">
-            <Step label="Previous" disabled={index === 0} onClick={() => step(-1)}>
+            <Step
+              label="Previous"
+              disabled={editing || index === 0}
+              onClick={() => step(-1)}
+            >
               ‹
             </Step>
             <span className="w-16 text-center text-xs text-ink-muted tabular-nums">
@@ -864,7 +940,7 @@ export function ShotViewer({
             </span>
             <Step
               label="Next"
-              disabled={index >= clips.length - 1}
+              disabled={editing || index >= clips.length - 1}
               onClick={() => step(1)}
             >
               ›

@@ -15,6 +15,10 @@ import { IconCheck, IconClose } from "../icons";
 export function ConfirmDelete({
   question = "Delete?",
   origin = "left",
+  confirmLabel = "Confirm deletion",
+  confirmTitle = "Delete for good",
+  cancelLabel = "Keep the clip",
+  cancelTitle = "Keep it — Escape does the same",
   onConfirm,
   onCancel,
   className,
@@ -22,6 +26,11 @@ export function ConfirmDelete({
   question?: string;
   /** Which end it grows out of — the side the control it replaced sat on. */
   origin?: "left" | "right";
+  /** What the two buttons are called, for anything that is not a deletion. */
+  confirmLabel?: string;
+  confirmTitle?: string;
+  cancelLabel?: string;
+  cancelTitle?: string;
   onConfirm: () => void;
   onCancel: () => void;
   className?: string;
@@ -51,16 +60,16 @@ export function ConfirmDelete({
     >
       <span className="whitespace-nowrap">{question}</span>
       <button
-        aria-label="Confirm deletion"
-        title="Delete for good"
+        aria-label={confirmLabel}
+        title={confirmTitle}
         onClick={onConfirm}
         className="ml-1 grid h-6 w-6 shrink-0 place-items-center rounded-pill hover:bg-live/30"
       >
         <IconCheck className="h-3.5 w-3.5" />
       </button>
       <button
-        aria-label="Keep the clip"
-        title="Keep it — Escape does the same"
+        aria-label={cancelLabel}
+        title={cancelTitle}
         onClick={onCancel}
         className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-pill text-white/70
           hover:bg-white/15 hover:text-white"
