@@ -474,6 +474,16 @@ export function ShotViewer({
    */
   const chosen = shapes.find((shape) => shape.id === selected) ?? null;
   const active: Tool = chosen?.tool ?? tool;
+  /**
+   * Is there anything for the controls below to act on?
+   *
+   * `active` is the chosen mark's tool, and a mark is never a "select" — so
+   * `active === "select"` means exactly: the Select tool, with nothing picked.
+   * The controls were shown all the same and wrote into `styles.select`, an
+   * entry that only exists to keep the index complete and that no mark ever
+   * reads. Every adjustment made there went nowhere.
+   */
+  const styling = active !== "select";
   const style: Style = chosen
     ? {
         color: chosen.color,
@@ -648,7 +658,7 @@ export function ShotViewer({
 
               {/* Only what this tool actually has. A colour for the blur or a
                   fill for an arrow would be a control that does nothing. */}
-              {hasColor(active) && (
+              {styling && hasColor(active) && (
                 <div className="space-y-1.5">
                   <span className="text-xs text-ink-faint">
                     {active === "text" ? "Text" : "Colour"}
@@ -661,7 +671,7 @@ export function ShotViewer({
                 </div>
               )}
 
-              {hasAltColor(active, style) && (
+              {styling && hasAltColor(active, style) && (
                 <div className="space-y-1.5">
                   <span className="text-xs text-ink-faint">
                     {active === "text" ? "Rim" : "Border"}
@@ -674,23 +684,29 @@ export function ShotViewer({
                 </div>
               )}
 
-              <div className="flex items-center gap-2">
-                <span className="w-16 shrink-0 text-xs text-ink-faint">
-                  {sizeLabel(active)}
-                </span>
-                <Slider
-                  label={sizeLabel(active)}
-                  value={style.size}
-                  min={sizeRange[0]}
-                  max={sizeRange[1]}
-                  onChange={(size) => restyle({ size })}
-                />
-                <span className="w-8 shrink-0 text-right text-xs text-ink-muted tabular-nums">
-                  {Math.round(style.size)}
-                </span>
-              </div>
+              {styling ? (
+                <div className="flex items-center gap-2">
+                  <span className="w-16 shrink-0 text-xs text-ink-faint">
+                    {sizeLabel(active)}
+                  </span>
+                  <Slider
+                    label={sizeLabel(active)}
+                    value={style.size}
+                    min={sizeRange[0]}
+                    max={sizeRange[1]}
+                    onChange={(size) => restyle({ size })}
+                  />
+                  <span className="w-8 shrink-0 text-right text-xs text-ink-muted tabular-nums">
+                    {Math.round(style.size)}
+                  </span>
+                </div>
+              ) : (
+                <p className="text-xs text-ink-faint">
+                  Pick a mark on the picture — colour and size then belong to it.
+                </p>
+              )}
 
-              {hasLook(active) && (
+              {styling && hasLook(active) && (
                 <div className="flex items-center gap-2">
                   <span className="w-16 shrink-0 text-xs text-ink-faint">Look</span>
                   <Segmented
@@ -704,7 +720,7 @@ export function ShotViewer({
                 </div>
               )}
 
-              {hasShape(active) && (
+              {styling && hasShape(active) && (
                 <div className="flex items-center gap-2">
                   <span className="w-16 shrink-0 text-xs text-ink-faint">Shape</span>
                   <Segmented

@@ -450,9 +450,14 @@ export function toSteps(shapes: Shape[]): Step[] {
       run.push(shape);
       continue;
     }
-    flush();
     const frame = bounds(shape);
+    // Measured before the run is broken up. A blur too small to paint anything
+    // is dropped — but the flush had already happened, so one slip of the hand
+    // split a single layer into two: two canvases at the picture's full
+    // resolution in the preview, and on every save two full-size PNGs encoded
+    // and shipped over the IPC as arrays of numbers.
     if (frame.width < 2 || frame.height < 2) continue;
+    flush();
     steps.push({
       kind: "blur",
       x: Math.round(frame.x),
@@ -468,24 +473,46 @@ export function toSteps(shapes: Shape[]): Step[] {
   return steps;
 }
 
+interface LayerProps {
+  shapes: Shape[];
+  width: number;
+  height: number;
+  box: PictureBox;
+}
+
+/**
+ * Did this layer's marks really change?
+ *
+ * `memo` compares props by identity, and `toSteps` builds a fresh array for
+ * every run whenever `shapes` changes — so on a move or resize drag, which
+ * writes `shapes` on every pointermove, every layer saw a new array and
+ * repainted. On a 4K still with three blurs between the marks that is four
+ * canvases of 3840×2160 cleared and drawn per pointer event: exactly the cost
+ * the memo was put there to avoid.
+ *
+ * The marks themselves keep their identity — `replace` rebuilds only the one it
+ * touches — so comparing them one by one separates the layer that changed from
+ * the ones that did not.
+ */
+function sameLayer(before: LayerProps, after: LayerProps): boolean {
+  return (
+    before.width === after.width &&
+    before.height === after.height &&
+    before.box === after.box &&
+    before.shapes.length === after.shapes.length &&
+    before.shapes.every((shape, at) => shape === after.shapes[at])
+  );
+}
+
 /**
  * A run of marks, painted onto a canvas of its own.
  *
  * Wrapped in `memo` on purpose: the canvas carries the picture's full
  * resolution, and on a 4K still clearing and repainting one costs a good part
- * of a frame. Only the layer whose marks really changed may do that.
+ * of a frame. Only the layer whose marks really changed may do that — see
+ * [`sameLayer`] for why the default comparison was not enough.
  */
-const ShapeLayer = memo(function ShapeLayer({
-  shapes,
-  width,
-  height,
-  box,
-}: {
-  shapes: Shape[];
-  width: number;
-  height: number;
-  box: PictureBox;
-}) {
+const ShapeLayer = memo(function ShapeLayer({ shapes, width, height, box }: LayerProps) {
   const canvas = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -505,7 +532,7 @@ const ShapeLayer = memo(function ShapeLayer({
       style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
     />
   );
-});
+}, sameLayer);
 
 interface Props {
   stage: React.RefObject<HTMLDivElement | null>;
@@ -728,11 +755,21 @@ export function AnnotateLayer({
     }
 
     if (!draft) return;
-    setDraft(
-      draft.tool === "pen"
-        ? { ...draft, points: [...(draft.points ?? []), [point.x, point.y]] }
-        : { ...draft, x2: point.x, y2: point.y },
-    );
+    if (draft.tool !== "pen") {
+      setDraft({ ...draft, x2: point.x, y2: point.y });
+      return;
+    }
+
+    // Only points that change the shape of the line. The pointer fires up to a
+    // thousand times a second, and every sample used to be appended: the array
+    // copied whole each time, the whole path re-stroked on a full-resolution
+    // canvas, and every one of those points later written into shot.json and
+    // walked again by each hit test. Closer together than one displayed pixel,
+    // none of it can be seen.
+    const points = draft.points ?? [];
+    const last = points[points.length - 1];
+    if (last && Math.hypot(point.x - last[0], point.y - last[1]) * box.scale < 1) return;
+    setDraft({ ...draft, points: [...points, [point.x, point.y]] });
   };
 
   const onUp = (event: ReactPointerEvent) => {
