@@ -1073,8 +1073,12 @@ function CropLayer({
   const onUp = (event: ReactPointerEvent) => {
     (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
     // A click without a drag means "start over", not a rectangle of nothing.
+    // Starting over keeps the chosen ratio: dropping back to the picture's own
+    // edges left the 16:9 button lit over a selection that was not 16:9, and
+    // the Crop button greyed out because the whole picture counts as no crop.
     if (rect && (rect.width < MIN_EDGE || rect.height < MIN_EDGE)) {
-      onRect({ x: 0, y: 0, width, height });
+      const whole = { x: 0, y: 0, width, height };
+      onRect(ratio ? fitRatio(whole, ratio, width, height) : whole);
     }
     drag.current = null;
   };

@@ -587,7 +587,15 @@ export function AnnotateLayer({
   // joining the run before it. It changes with every movement, and sharing a
   // canvas would repaint every finished mark along with it — at 4K a
   // full-resolution canvas per frame, for every layer there is.
-  const layers = useMemo(() => toSteps(shapes), [shapes]);
+  // The caption being typed is left off the canvas: the field stands in its
+  // place and shows the same thing. Painted as well, the old wording stayed
+  // underneath the new one — delete "Hello World" down to "Hi" and the picture
+  // still read "Hello World" behind the field until the text was committed.
+  const written = typing?.id ?? null;
+  const layers = useMemo(
+    () => toSteps(written === null ? shapes : shapes.filter((shape) => shape.id !== written)),
+    [shapes, written],
+  );
   const drawing = useMemo(() => (draft ? toSteps([draft]) : []), [draft]);
 
   if (!box) return null;
@@ -805,6 +813,13 @@ export function AnnotateLayer({
           const y = (event.clientY - rect.top - box.top) / box.scale;
           const under = hit(shapes, x, y, slack, measure);
           if (under?.tool === "text") {
+            // Selected first, and only then the field: `style` is the chosen
+            // mark's as soon as there is one, and otherwise the active tool's.
+            // Without this the field appeared in whatever the panel happened to
+            // be set to — red at 9 px over a caption that is white at 60 — and
+            // the promise below, that you type in the size and colour it will
+            // have, held for new captions only.
+            onSelect(under.id);
             setTyping({ x: under.x1, y: under.y1, id: under.id, value: under.text ?? "" });
           }
         }}
