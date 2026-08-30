@@ -139,10 +139,14 @@ impl AudioEngine {
         }
         *self.errors.lock() = failures;
         // Sorted, because session enumeration does not promise an order and the
-        // comparison in `apply_if_changed` would otherwise see a change in every
+        // comparison in `refresh` would otherwise see a change in every
         // reshuffle.
         let mut keys: Vec<String> = wanted.into_iter().map(|(key, _)| key).collect();
         keys.sort();
+        // Worth a line in the log every time it changes: "what is actually in
+        // the leftovers" is the question this whole part keeps raising, and
+        // without a device to point at there is nothing else to look at.
+        log::info!("audio streams: {}", keys.join(" "));
         *self.wanted.lock() = keys;
     }
 
