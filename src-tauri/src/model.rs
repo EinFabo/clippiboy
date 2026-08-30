@@ -39,20 +39,17 @@ pub enum SourceKind {
     /// a PID: a stored one is dead after the first restart of the game.
     /// [`crate::audio::resolve`] puts the current one in.
     Game,
+    /// Everything no other source records, assembled from one process loopback
+    /// per remaining application.
+    ///
+    /// Deliberately without a device: process loopback is not tied to an
+    /// endpoint (see `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`, which names a
+    /// process and nothing else), so naming one would be a promise Windows
+    /// cannot keep. For the same reason exactly one of these is meaningful — a
+    /// second would capture the same applications again.
+    Leftovers,
     #[serde(rename_all = "camelCase")]
-    OutputDevice {
-        device_id: String,
-        /// Only what no other source records — the game and every separately
-        /// captured application left out. [`crate::audio::resolve`] then builds
-        /// the source from one process loopback per remaining application
-        /// instead of taking the endpoint as a whole.
-        ///
-        /// `default` is not cosmetic: `config::load` throws away the *whole*
-        /// configuration on any deserialization error, so a new mandatory field
-        /// would cost everyone their sources, hotkeys and clip directory.
-        #[serde(default)]
-        leftovers_only: bool,
-    },
+    OutputDevice { device_id: String },
     #[serde(rename_all = "camelCase")]
     InputDevice { device_id: String },
     #[serde(rename_all = "camelCase")]
@@ -363,7 +360,6 @@ mod tests {
             parsed.kind,
             SourceKind::OutputDevice {
                 device_id: "dev-1".into(),
-                leftovers_only: false,
             }
         );
     }
@@ -373,15 +369,15 @@ mod tests {
     fn the_source_kinds_are_tagged_the_way_the_ui_expects() {
         let json = |kind: &SourceKind| serde_json::to_string(kind).unwrap();
         assert_eq!(json(&SourceKind::Game), r#"{"type":"game"}"#);
+        assert_eq!(json(&SourceKind::Leftovers), r#"{"type":"leftovers"}"#);
         assert_eq!(
             json(&SourceKind::OutputDevice {
                 device_id: "d".into(),
-                leftovers_only: true,
             }),
-            r#"{"type":"outputDevice","deviceId":"d","leftoversOnly":true}"#
+            r#"{"type":"outputDevice","deviceId":"d"}"#
         );
 
-        let back: SourceKind = serde_json::from_str(r#"{"type":"game"}"#).unwrap();
-        assert_eq!(back, SourceKind::Game);
+        let back: SourceKind = serde_json::from_str(r#"{"type":"leftovers"}"#).unwrap();
+        assert_eq!(back, SourceKind::Leftovers);
     }
 }

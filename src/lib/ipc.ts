@@ -155,4 +155,12 @@ export const events = {
     cb: (warnings: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>
     listen<Record<string, string>>("audio-warnings", (e) => cb(e.payload)),
+  /**
+   * Which processes each source is tapping. For the leftovers there is no
+   * device to look at, so this is the only way to see what is in the track.
+   */
+  onAudioTaps: (
+    cb: (taps: Record<string, number[]>) => void,
+  ): Promise<UnlistenFn> =>
+    listen<Record<string, number[]>>("audio-taps", (e) => cb(e.payload)),
 };

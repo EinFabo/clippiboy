@@ -5,7 +5,6 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::audio::engine::AudioEngine;
-use crate::audio::Stream;
 use crate::clips::Library;
 use crate::config;
 use crate::pipeline::{Pipeline, Shared};
@@ -178,10 +177,18 @@ impl AppState {
         // The sources run from startup — that is the only way the mixer shows
         // real levels even before the buffer is active.
         let audio = Arc::new(AudioEngine::new());
-        // No game is being tracked yet, so a game source simply has nothing to
-        // bind to; the first status tick brings it up.
-        let playing = crate::audio::playing_now(&config.sources);
-        audio.apply(&crate::audio::resolve(&config.sources, None, &playing));
+        // Devices and processes are deliberately **not** enumerated here: this
+        // runs on the main thread, and the COM initialisation that comes with it
+        // would leave that thread in the multithreaded apartment, where Tauri's
+        // window layer refuses to start (`RPC_E_CHANGED_MODE`). So only what
+        // needs no enumeration starts right away — the first status tick, two
+        // seconds later, brings up the game and the leftovers.
+        audio.apply(&crate::audio::resolve(
+            &config.sources,
+            None,
+            &[],
+            &std::collections::HashMap::new(),
+        ));
 
         Self {
             config: Mutex::new(config),
@@ -210,27 +217,14 @@ impl AppState {
         self.game_pid.lock().as_ref().map(|(pid, _)| *pid)
     }
 
-    /// The streams the engine has to run: the game binding filled in with the
-    /// process actually running, and the leftovers source spread across the
-    /// applications nothing else records.
-    ///
-    /// Everything that talks to [`AudioEngine`] goes through here. A path that
-    /// forgot to resolve would try to open a `SourceKind::Game`, which no
-    /// WASAPI call can do.
-    pub fn audio_streams(&self) -> Vec<Stream> {
-        let sources = self.config.lock().sources.clone();
-        let playing = crate::audio::playing_now(&sources);
-        crate::audio::resolve(&sources, self.game_pid(), &playing)
-    }
-
     /// Bring the running streams in line with config, detected game and what is
     /// playing right now.
     ///
-    /// Blocking — callers on the status tick take
-    /// [`AudioEngine::apply_if_changed`] instead.
+    /// Always off-thread: the work behind it is COM, and it must not land on the
+    /// main thread (see [`AudioEngine::refresh_async`]).
     pub fn apply_audio(&self) {
-        let streams = self.audio_streams();
-        self.audio.apply(&streams);
+        self.audio
+            .refresh_async(self.config.lock().sources.clone(), self.game_pid());
     }
 
     /// Replace the config, write it to disk and pull the dependent parts along

@@ -18,6 +18,9 @@ struct Running {
     /// Which mixer source this stream feeds. Several streams can share one —
     /// the leftovers track is one WASAPI client per application.
     source_id: String,
+    /// The process being tapped, for [`AudioEngine::taps`]. `None` for device
+    /// streams.
+    pid: Option<u32>,
 }
 
 #[derive(Default)]
@@ -39,7 +42,7 @@ fn fingerprint(kind: &SourceKind) -> String {
         SourceKind::OutputDevice { device_id, .. } => format!("out:{device_id}"),
         SourceKind::Process { pid, mode } => format!("proc:{pid}:{mode:?}"),
         // Never reached after `resolve` — see `capture::start`.
-        SourceKind::Game => "game:unresolved".into(),
+        SourceKind::Game | SourceKind::Leftovers => "unresolved".into(),
     }
 }
 
@@ -121,6 +124,10 @@ impl AudioEngine {
                             handle: Some(handle),
                             ring,
                             source_id: stream.source_id.clone(),
+                            pid: match stream.kind {
+                                SourceKind::Process { pid, .. } => Some(pid),
+                                _ => None,
+                            },
                         },
                     );
                 }
@@ -139,44 +146,22 @@ impl AudioEngine {
         *self.wanted.lock() = keys;
     }
 
-    /// [`Self::apply_async`], but only when the stream set actually differs from
-    /// the last one.
+    /// Ask Windows who is playing, work out the streams and bring them up —
+    /// all on a thread of its own, and only when something actually changed.
     ///
-    /// The status tick calls this every two seconds — that is how a newly
-    /// started application finds its way into the leftovers track. Without the
-    /// comparison every tick would spawn a thread and re-enumerate for nothing,
-    /// and a source that cannot start would be retried every two seconds instead
-    /// of every ten (see [`Self::retry_failed`]), each attempt blocking for the
-    /// full five-second timeout.
-    pub fn apply_if_changed(self: &Arc<Self>, streams: Vec<Stream>) {
-        let mut keys: Vec<String> = streams.iter().map(stream_key).collect();
-        keys.sort();
-        if *self.wanted.lock() == keys {
-            return;
-        }
-        self.apply_async(streams);
-    }
-
-    /// [`Self::apply`] on a thread of its own.
+    /// The enumeration belongs here rather than at the call site for two
+    /// reasons. It is COM work: doing it on the main thread puts that thread into
+    /// the multithreaded apartment, and Tauri's window layer then fails to start
+    /// with `RPC_E_CHANGED_MODE`. And it is a round trip per output device — on a
+    /// machine with a hardware mixer that is nine of them, every two seconds, on
+    /// the same thread that ships the level meters.
     ///
-    /// Everything called from the status tick has to go through here. Stopping a
-    /// source joins its thread (up to 200 ms), and starting one waits on a
-    /// device that does not answer (up to five seconds) — on the tick thread all
-    /// level meters would stand still for that whole time, because they need the
-    /// same lock.
-    ///
-    /// A second call while one is running is dropped: the caller repeats every
-    /// two seconds anyway, and two `apply`s in parallel would fight over the
-    /// same sources.
-    pub fn apply_async(self: &Arc<Self>, streams: Vec<Stream>) {
-        if self.applying.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let engine = self.clone();
-        std::thread::spawn(move || {
-            engine.apply(&streams);
-            engine.applying.store(false, Ordering::SeqCst);
-        });
+    /// The comparison against the last stream set is what keeps the two-second
+    /// tick cheap: without it a source that cannot start would be retried every
+    /// two seconds instead of every ten (see [`Self::retry_failed`]), each
+    /// attempt blocking for the full five-second timeout.
+    pub fn refresh_async(self: &Arc<Self>, sources: Vec<AudioSource>, game_pid: Option<u32>) {
+        self.refresh(sources, game_pid, false);
     }
 
     /// Try sources that failed to start last time once more.
@@ -184,11 +169,37 @@ impl AudioEngine {
     /// A device that was busy or has just been plugged in is often there a few
     /// seconds later. Without this the source would stay dead until the next
     /// program start — and the track in the clip silent, without anyone noticing.
-    pub fn retry_failed(self: &Arc<Self>, streams: Vec<Stream>) {
+    /// This is the one caller that works past the unchanged-set shortcut, because
+    /// a failed stream looks exactly like an unchanged one.
+    pub fn retry_failed(self: &Arc<Self>, sources: Vec<AudioSource>, game_pid: Option<u32>) {
         if self.errors.lock().is_empty() {
             return;
         }
-        self.apply_async(streams);
+        self.refresh(sources, game_pid, true);
+    }
+
+    fn refresh(self: &Arc<Self>, sources: Vec<AudioSource>, game_pid: Option<u32>, force: bool) {
+        // A second call while one is running is dropped: every caller repeats
+        // within two seconds, and two `apply`s in parallel would fight over the
+        // same streams.
+        if self.applying.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let engine = self.clone();
+        std::thread::spawn(move || {
+            let streams = crate::audio::resolve(
+                &sources,
+                game_pid,
+                &crate::audio::devices::everything_playing(),
+                &crate::audio::devices::process_tree(),
+            );
+            let mut keys: Vec<String> = streams.iter().map(stream_key).collect();
+            keys.sort();
+            if force || *engine.wanted.lock() != keys {
+                engine.apply(&streams);
+            }
+            engine.applying.store(false, Ordering::SeqCst);
+        });
     }
 
     pub fn stop_all(&self) {
@@ -227,6 +238,26 @@ impl AudioEngine {
 
     pub fn errors(&self) -> HashMap<String, String> {
         self.errors.lock().clone()
+    }
+
+    /// Which processes each source is tapping right now.
+    ///
+    /// For the leftovers there is no device to look at and no list to compare
+    /// against — this is the only way to see whether something is missing from
+    /// the track or sitting in it twice. No process names here: turning a PID
+    /// into a name is COM work, and the UI has that list already.
+    pub fn taps(&self) -> HashMap<String, Vec<u32>> {
+        let running = self.running.lock();
+        let mut out: HashMap<String, Vec<u32>> = HashMap::new();
+        for run in running.values() {
+            if let Some(pid) = run.pid {
+                out.entry(run.source_id.clone()).or_default().push(pid);
+            }
+        }
+        for pids in out.values_mut() {
+            pids.sort();
+        }
+        out
     }
 
     /// Notices that are not errors: the source runs, but not the way the user
@@ -390,20 +421,16 @@ mod tests {
         );
     }
 
-    /// An endpoint stream is identified by its device alone. `leftovers_only`
-    /// deliberately plays no part: such a source never reaches the engine as an
-    /// endpoint at all, because `resolve` has already spread it across one
-    /// process stream per application.
+    /// An endpoint stream is identified by its device.
     #[test]
     fn an_endpoint_is_identified_by_its_device() {
-        let endpoint = |leftovers_only| {
+        let endpoint = |device_id: &str| {
             fingerprint(&SourceKind::OutputDevice {
-                device_id: "spk".into(),
-                leftovers_only,
+                device_id: device_id.into(),
             })
         };
-        assert_eq!(endpoint(false), "out:spk");
-        assert_eq!(endpoint(false), endpoint(true));
+        assert_eq!(endpoint("spk"), "out:spk");
+        assert_ne!(endpoint("spk"), endpoint("headset"));
     }
 
     /// Two sources of the same kind stay apart, and one source can hold several

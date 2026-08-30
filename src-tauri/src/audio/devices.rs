@@ -6,7 +6,13 @@ use crate::model::{AudioDevice, AudioProcess, DeviceKind};
 #[cfg(windows)]
 mod win {
     use super::*;
+    use std::collections::HashMap;
     use windows::core::Interface;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
     use windows::Win32::Media::Audio::{
         eCapture, eMultimedia, eRender, EDataFlow, IAudioSessionControl2, IAudioSessionEnumerator,
@@ -96,6 +102,46 @@ mod win {
             }
             Some(String::from_utf16_lossy(&buf[..len as usize]))
         }
+    }
+
+    /// Every process on the machine as pid -> (parent pid, exe name).
+    ///
+    /// Needed because `INCLUDE_TARGET_PROCESS_TREE` covers a process *and its
+    /// children*: without knowing who descends from whom, tapping a parent and a
+    /// child separately records the child twice, and an application that holds
+    /// several sessions gets torn apart across sources.
+    pub fn process_tree() -> HashMap<u32, (u32, String)> {
+        let mut out = HashMap::new();
+        unsafe {
+            let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+                return out;
+            };
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|c| *c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    out.insert(
+                        entry.th32ProcessID,
+                        (
+                            entry.th32ParentProcessID,
+                            String::from_utf16_lossy(&entry.szExeFile[..end]),
+                        ),
+                    );
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+        }
+        out
     }
 
     /// The sessions on `device_id` — empty string for the default output device.
@@ -201,7 +247,6 @@ pub fn list_devices() -> Vec<AudioDevice> {
 }
 
 /// The PIDs playing on this output device right now — `""` for the default one.
-/// What the leftovers track is assembled from.
 #[cfg(windows)]
 pub fn session_pids(device_id: &str) -> Vec<u32> {
     win::session_pids(device_id)
@@ -211,6 +256,39 @@ pub fn session_pids(device_id: &str) -> Vec<u32> {
 pub fn session_pids(device_id: &str) -> Vec<u32> {
     let _ = device_id;
     Vec::new()
+}
+
+/// Every process as pid -> (parent pid, exe name).
+#[cfg(windows)]
+pub fn process_tree() -> std::collections::HashMap<u32, (u32, String)> {
+    win::process_tree()
+}
+
+#[cfg(not(windows))]
+pub fn process_tree() -> std::collections::HashMap<u32, (u32, String)> {
+    std::collections::HashMap::new()
+}
+
+/// Everything playing anywhere right now, deduplicated.
+///
+/// Across *all* output devices on purpose: a process loopback does not know
+/// about endpoints anyway, and on a machine with a hardware mixer the
+/// applications are spread over its virtual devices. Asking only the default one
+/// would silently miss whatever is routed elsewhere.
+pub fn everything_playing() -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for device in list_devices() {
+        if !matches!(device.kind, DeviceKind::Output) {
+            continue;
+        }
+        for pid in session_pids(&device.id) {
+            if !out.contains(&pid) {
+                out.push(pid);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 #[cfg(windows)]

@@ -19,17 +19,12 @@ export interface AudioProcess {
 export type SourceKind =
   /** The detected game — the backend puts the current process in. */
   | { type: "game" }
-  | {
-      type: "outputDevice";
-      deviceId: string;
-      /**
-       * Only what no other source records. The backend then builds the source
-       * from one tap per application instead of taking the device as a whole.
-       * Optional on purpose: an older config does not carry the field, and a
-       * config the backend cannot read is thrown away whole.
-       */
-      leftoversOnly?: boolean;
-    }
+  /**
+   * Everything no other source records. Without a device on purpose: a process
+   * tap is not tied to an endpoint, so only one of these is meaningful.
+   */
+  | { type: "leftovers" }
+  | { type: "outputDevice"; deviceId: string }
   | { type: "inputDevice"; deviceId: string }
   | { type: "process"; pid: number; mode: "include" | "exclude" };
 

@@ -77,6 +77,13 @@ export const IconGamepad = ({ className = base }: P) => (
   </svg>
 );
 
+export const IconLayers = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
+    <path d="m12 3 8.5 4.5L12 12 3.5 7.5 12 3Z" />
+    <path d="m4 12 8 4.5 8-4.5M4 16.5 12 21l8-4.5" strokeLinecap="round" />
+  </svg>
+);
+
 export const IconPlus = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="2" stroke="currentColor" strokeLinecap="round">
     <path d="M12 5v14M5 12h14" />

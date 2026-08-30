@@ -30,7 +30,7 @@ afterwards. In ClippiBoy itself, without an editor.
 |---|---|
 | **Replay buffer** | One encoder runs continuously, the packets live in memory, saving cuts them out — nothing is re-encoded |
 | **Per-source audio** | The detected game, devices, applications and microphones side by side, each with gain, mute, solo and a live level |
-| **Game on its own** | The game's audio follows the detected game by itself; the desktop source can be limited to the leftovers, so nothing lands in the clip twice |
+| **Game on its own** | The game's audio follows the detected game by itself, and "everything else" picks up the rest — so nothing lands in the clip twice |
 | **Separate tracks** | Sources with their own track are written alongside the clip; the mix stays changeable afterwards |
 | **Zero-copy capture** | The picture goes from Windows.Graphics.Capture into the hardware encoder as a D3D11 texture |
 | **Clip editing** | Name, description, game, track mix and a frame-accurate trim — all inside the app |
@@ -142,36 +142,55 @@ already taken.
 
 <div align="center"><img src="docs/audio.svg" alt="Audio routing: sources through the mixer into the main mix and separate tracks" width="900"></div>
 
-Four source types, combinable at will:
+Five source types:
 
 * **The game** — whatever game detection has found, on its own track. It
   follows the game by itself: no PID to pick, and a restart of the game
   does not break it. It also holds on while you alt-tab away, and only lets go
   once the process is really gone.
-* **Output device (loopback)** — an endpoint's complete audio, or only its
-  **leftovers**: what no other source already records
+* **Everything else** — whatever no other source records; the background the
+  others are lifted out of
 * **Application** — process loopback via `ActivateAudioInterfaceAsync`, so
   Discord can sit apart from the game (needs Windows 11, build 20348+)
 * **Input device** — microphone
+* **Output device (loopback)** — an endpoint's complete audio
 
 Nothing is filtered out of a finished mix — that would leave residue. Windows
 mixes the applications together only at the very end, and process loopback taps
 *before* that. Every source is an independent tap, cleanly apart from the others.
 Playback is untouched, you keep hearing everything.
 
-The leftovers deserve a word, because they are the piece that makes separate
-tracks worth anything. Without them, an application with its own track sits in
-the clip **twice** — once as its own track and once inside the device's, which
-also means muting that track afterwards does not remove the sound. Windows has no
-"everything except these three" tap: `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names
-exactly one process. So the leftovers source is not taken as one endpoint
-loopback but assembled from one tap per application playing on that device that
-nothing else records. ClippiBoy leaves itself out too, so previewing a clip while
-the buffer runs does not end up in the next one.
+### Separate by application **or** by device, never both
+
+This is the one rule worth knowing. **ClippiBoy separates by process, and a
+process tap does not know about devices.** `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`
+names a process and nothing else, and Microsoft says so plainly: *"The capture is
+not tied to a specific audio endpoint."*
+
+So if the game runs on its own track and a whole output device is recorded
+alongside, the game is in the clip **twice** — once as its own track and once
+inside the device's. Muting the game track afterwards then does not remove the
+sound, because it is in the main mix as well. The mixer notices that combination
+and offers to switch the device off.
+
+Anyone separating in hardware — a GoXLR routes applications to its own virtual
+outputs — should take those outputs as plain device loopback and add *no*
+application sources. Everyone else takes "everything else" plus whatever deserves
+its own track.
+
+**Everything else** is the piece that makes separate tracks worth anything.
+Since Windows offers no "everything except these three" tap, it is not one
+endpoint loopback but one tap per application that nothing else records, assembled
+from the sessions on **all** output devices — otherwise anything routed elsewhere
+would go missing. Applications are grouped by process tree, because a tap covers a
+process *and its children*: Discord holds two sessions in two child processes and
+is still recorded exactly once. ClippiBoy leaves itself out too, so previewing a
+clip while the buffer runs does not end up in the next one.
 
 The price is a thread and a one-second ring per application, and that an
 application which has just started playing joins within two seconds — the same
-tick that watches for the game.
+tick that watches for the game. Which applications it actually holds is written
+on the source, since there is no device to look at.
 
 Every source has gain, mute, solo and a live level. Sources without *own track*
 run into the main mix; the others are written along in parallel and land beside

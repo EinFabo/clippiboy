@@ -6,6 +6,7 @@ import { Meter, Slider, Toggle } from "@/components/ui/Controls";
 import {
   IconApp,
   IconGamepad,
+  IconLayers,
   IconMic,
   IconPlus,
   IconSpeaker,
@@ -19,15 +20,17 @@ import type { AudioSource, SourceKind } from "@/lib/types";
  *
  * The game, the microphone and individual applications yes: those are exactly
  * what you want to turn down or drop entirely in the clip later, and that only
- * works if they were not already folded into the main mix while recording. An
- * output device carries whatever is left over — that stays the main mix.
+ * works if they were not already folded into the main mix while recording. A
+ * whole device and the leftovers are the background everything else is lifted
+ * out of — those stay the main mix.
  */
 function wantsOwnTrack(kind: SourceKind): boolean {
-  return kind.type !== "outputDevice";
+  return kind.type !== "outputDevice" && kind.type !== "leftovers";
 }
 
 function sourceIcon(kind: SourceKind) {
   if (kind.type === "game") return <IconGamepad className="h-4 w-4" />;
+  if (kind.type === "leftovers") return <IconLayers className="h-4 w-4" />;
   if (kind.type === "inputDevice") return <IconMic className="h-4 w-4" />;
   if (kind.type === "outputDevice") return <IconSpeaker className="h-4 w-4" />;
   return <IconApp className="h-4 w-4" />;
@@ -37,16 +40,21 @@ function sourceHint(
   kind: SourceKind,
   deviceName: (id: string) => string,
   game: string | null,
+  /** For the leftovers: the applications actually being tapped right now. */
+  tapped: string[],
 ) {
   switch (kind.type) {
     case "game":
       return game ? `Game · ${game}` : "Game · none detected right now";
+    // No device to name, so the only honest answer is the list itself.
+    case "leftovers":
+      return tapped.length > 0
+        ? `Everything else · ${tapped.join(", ")}`
+        : "Everything else · nothing left to record right now";
     case "inputDevice":
       return `Input · ${deviceName(kind.deviceId)}`;
     case "outputDevice":
-      return kind.leftoversOnly
-        ? `Leftovers · ${deviceName(kind.deviceId)} minus everything recorded separately`
-        : `Output (loopback) · ${deviceName(kind.deviceId)}`;
+      return `Output (loopback) · ${deviceName(kind.deviceId)}`;
     case "process":
       return kind.mode === "include"
         ? `Application · PID ${kind.pid}`
@@ -63,6 +71,7 @@ export function AudioMixer() {
     sourceErrors,
     sourceWarnings,
     detectedGame,
+    taps,
     upsertSource,
     removeSource,
   } = useEngine();
@@ -72,6 +81,13 @@ export function AudioMixer() {
     () => (id: string) => devices.find((d) => d.id === id)?.name ?? id,
     [devices],
   );
+  // Anti-cheat games cannot be named — `list_processes` needs to read their
+  // memory and is refused. The bare PID is still better than nothing.
+  const processName = useMemo(
+    () => (pid: number) =>
+      processes.find((p) => p.pid === pid)?.name ?? `PID ${pid}`,
+    [processes],
+  );
 
   const anySolo = config.sources.some((s) => s.solo);
 
@@ -80,11 +96,11 @@ export function AudioMixer() {
       <header className="pt-10">
         <h1 className="display text-4xl">Audio mixer</h1>
         <p className="mt-3 max-w-lg text-[15px] leading-relaxed text-white/70">
-          Any number of sources at once: the detected game, output devices,
-          individual applications and microphones. Each source can run into the
-          main mix or onto a track of its own — and an output device can be
-          limited to the leftovers, so nothing you record separately ends up in
-          it a second time.
+          Any number of sources at once: the detected game, single applications,
+          microphones, whole output devices — and “everything else”, which picks
+          up whatever the others leave. Each source runs into the main mix or
+          onto a track of its own. Separate either by application or by device;
+          both at once puts the same sound in the clip twice.
         </p>
       </header>
 
@@ -109,6 +125,9 @@ export function AudioMixer() {
         {adding && (
           <AddSourcePanel
             hasGame={config.sources.some((s) => s.kind.type === "game")}
+            hasLeftovers={config.sources.some(
+              (s) => s.kind.type === "leftovers",
+            )}
             onClose={() => setAdding(false)}
             onAdd={(s) => {
               upsertSource(s);
@@ -121,10 +140,7 @@ export function AudioMixer() {
           {config.sources.map((source) => {
             const dimmed = anySolo && !source.solo;
             const level = levels[source.id] ?? 0;
-            // Only an endpoint can leave the game out — pulled out here so the
-            // narrowing survives into the click handler.
-            const output =
-              source.kind.type === "outputDevice" ? source.kind : null;
+            const tapped = (taps[source.id] ?? []).map(processName);
             return (
               <Card
                 key={source.id}
@@ -166,7 +182,7 @@ export function AudioMixer() {
                     >
                       {sourceErrors[source.id] ??
                         sourceWarnings[source.id] ??
-                        sourceHint(source.kind, deviceName, detectedGame)}
+                        sourceHint(source.kind, deviceName, detectedGame, tapped)}
                     </p>
                     <div className="mt-2.5 px-1.5">
                       <Meter level={source.muted ? 0 : level} />
@@ -220,24 +236,6 @@ export function AudioMixer() {
                     >
                       ⧉
                     </MiniToggle>
-                    {output && (
-                      <MiniToggle
-                        active={output.leftoversOnly === true}
-                        activeClass="bg-accent/25 text-accent-bright"
-                        title="Only what no other source records"
-                        onClick={() =>
-                          upsertSource({
-                            ...source,
-                            kind: {
-                              ...output,
-                              leftoversOnly: !output.leftoversOnly,
-                            },
-                          })
-                        }
-                      >
-                        ⊘
-                      </MiniToggle>
-                    )}
                     <span className="mx-1">
                       <Toggle
                         label={`${source.label} enabled`}
@@ -378,10 +376,14 @@ function DoubledHint({
   onFix: (source: AudioSource) => Promise<void>;
 }) {
   const separately = sources.filter(
-    (s) => s.enabled && (s.kind.type === "game" || s.kind.type === "process"),
+    (s) =>
+      s.enabled &&
+      (s.kind.type === "game" ||
+        s.kind.type === "process" ||
+        s.kind.type === "leftovers"),
   );
   const whole = sources.filter(
-    (s) => s.enabled && s.kind.type === "outputDevice" && !s.kind.leftoversOnly,
+    (s) => s.enabled && s.kind.type === "outputDevice",
   );
   if (separately.length === 0 || whole.length === 0) return null;
 
@@ -389,14 +391,16 @@ function DoubledHint({
     <Card className="mb-4 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
       <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-muted">
         <span className="font-medium text-ink">
-          {separately.map((s) => s.label).join(", ")}
-        </span>{" "}
-        {separately.length === 1 ? "is" : "are"} recorded twice — once on{" "}
-        {separately.length === 1 ? "its" : "their"} own track and once inside{" "}
-        <span className="font-medium text-ink">
           {whole.map((s) => s.label).join(", ")}
+        </span>{" "}
+        {whole.length === 1 ? "records a whole device" : "record whole devices"},
+        so whatever plays through{" "}
+        {whole.length === 1 ? "it" : "them"} is in the clip a second time —
+        alongside{" "}
+        <span className="font-medium text-ink">
+          {separately.map((s) => s.label).join(", ")}
         </span>
-        . Switching that source to the leftovers keeps every track apart.
+        . Separate by device or by application, not by both.
       </p>
       <Button
         size="sm"
@@ -405,17 +409,47 @@ function DoubledHint({
         // config, so in parallel the last answer would swallow the others.
         onClick={async () => {
           for (const source of whole) {
-            if (source.kind.type !== "outputDevice") continue;
-            await onFix({
-              ...source,
-              kind: { ...source.kind, leftoversOnly: true },
-            });
+            await onFix({ ...source, enabled: false });
           }
         }}
       >
-        Record only the leftovers
+        {whole.length === 1 ? "Switch it off" : "Switch them off"}
       </Button>
     </Card>
+  );
+}
+
+/** One of the two sources that pick their own processes. */
+function PickOne({
+  disabled,
+  icon,
+  title,
+  sub,
+  onPick,
+}: {
+  disabled: boolean;
+  icon: React.ReactNode;
+  title: string;
+  sub: string;
+  onPick: () => void;
+}) {
+  return (
+    <button
+      disabled={disabled}
+      onClick={onPick}
+      className={cn(
+        "flex items-center gap-3 rounded-inner border border-accent/30 bg-accent/10 px-4 py-3 text-left",
+        disabled
+          ? "cursor-not-allowed opacity-45"
+          : "transition-colors hover:bg-accent/20",
+      )}
+    >
+      {icon}
+      <span className="min-w-0">
+        <span className="block text-sm font-medium">{title}</span>
+        <span className="block truncate text-[11px] text-ink-faint">{sub}</span>
+      </span>
+    </button>
   );
 }
 
@@ -423,10 +457,12 @@ function AddSourcePanel({
   onAdd,
   onClose,
   hasGame,
+  hasLeftovers,
 }: {
   onAdd: (s: AudioSource) => void;
   onClose: () => void;
   hasGame: boolean;
+  hasLeftovers: boolean;
 }) {
   const { devices, processes, refreshSources, detectedGame } = useEngine();
   const outputs = devices.filter((d) => d.kind === "output");
@@ -457,30 +493,34 @@ function AddSourcePanel({
         </div>
       </div>
 
-      {/* Above the columns rather than in them: it is not one entry among many
-          but the one source that finds its process on its own. */}
-      <button
-        disabled={hasGame}
-        onClick={() => onAdd(make("Game", { type: "game" }))}
-        className={cn(
-          "mb-4 flex w-full items-center gap-3 rounded-inner border border-accent/30 bg-accent/10 px-4 py-3 text-left",
-          hasGame
-            ? "cursor-not-allowed opacity-45"
-            : "transition-colors hover:bg-accent/20",
-        )}
-      >
-        <IconGamepad className="h-4 w-4 shrink-0 text-accent-bright" />
-        <span className="min-w-0">
-          <span className="block text-sm font-medium">The detected game</span>
-          <span className="block truncate text-[11px] text-ink-faint">
-            {hasGame
+      {/* Above the columns rather than in them: these two are not entries among
+          many but the sources that find their processes on their own. */}
+      <div className="mb-4 grid grid-cols-2 gap-3">
+        <PickOne
+          disabled={hasGame}
+          icon={<IconGamepad className="h-4 w-4 shrink-0 text-accent-bright" />}
+          title="The detected game"
+          sub={
+            hasGame
               ? "already added"
               : detectedGame
                 ? `follows the game automatically · right now ${detectedGame}`
-                : "follows the game automatically · none detected right now"}
-          </span>
-        </span>
-      </button>
+                : "follows the game automatically · none detected right now"
+          }
+          onPick={() => onAdd(make("Game", { type: "game" }))}
+        />
+        <PickOne
+          disabled={hasLeftovers}
+          icon={<IconLayers className="h-4 w-4 shrink-0 text-accent-bright" />}
+          title="Everything else"
+          sub={
+            hasLeftovers
+              ? "already added — a second one would record the same twice"
+              : "whatever no other source records, and nothing twice"
+          }
+          onPick={() => onAdd(make("Everything else", { type: "leftovers" }))}
+        />
+      </div>
 
       <div className="grid grid-cols-3 gap-6">
         <SourceColumn

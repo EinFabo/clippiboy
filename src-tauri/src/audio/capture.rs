@@ -437,10 +437,12 @@ mod win {
                 *pid,
                 matches!(mode, crate::model::ProcessMode::Include),
             ),
-            // `resolve` turns this into a `Process` source long before the
-            // engine sees it, and drops it while no game is detected. Reaching
-            // here means an `apply` path forgot to resolve.
-            SourceKind::Game => Err(windows::core::Error::from(E_INVALIDARG)),
+            // `resolve` turns these into `Process` sources long before the engine
+            // sees them, and drops them while there is nothing to bind to.
+            // Reaching here means an `apply` path forgot to resolve.
+            SourceKind::Game | SourceKind::Leftovers => {
+                Err(windows::core::Error::from(E_INVALIDARG))
+            }
         };
 
         let (client, format) = match started {

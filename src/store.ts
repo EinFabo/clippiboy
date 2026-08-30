@@ -28,6 +28,9 @@ interface EngineState {
   /** The source runs, but doubled or on a fallback clock — not an error, but
    *  something you want to know before recording. */
   sourceWarnings: Record<string, string>;
+  /** Which processes each source taps. Only the leftovers have no other way of
+   *  showing what is actually in the track. */
+  taps: Record<string, number[]>;
   bufferActive: boolean;
   bufferedSeconds: number;
   /** Game detected in the foreground, reported by the core. */
@@ -104,6 +107,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   levels: {},
   sourceErrors: {},
   sourceWarnings: {},
+  taps: {},
   bufferActive: false,
   bufferedSeconds: 0,
   detectedGame: null,
@@ -182,6 +186,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       );
       await events.onAudioErrors((sourceErrors) => set({ sourceErrors }));
       await events.onAudioWarnings((sourceWarnings) => set({ sourceWarnings }));
+      await events.onAudioTaps((taps) => set({ taps }));
     } catch (err) {
       set({ ready: true, lastError: String(err) });
     }
