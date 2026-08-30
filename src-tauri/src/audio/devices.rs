@@ -15,9 +15,9 @@ mod win {
     };
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
     use windows::Win32::Media::Audio::{
-        eCapture, eMultimedia, eRender, EDataFlow, IAudioSessionControl2, IAudioSessionEnumerator,
-        IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-        DEVICE_STATE_ACTIVE,
+        eCapture, eMultimedia, eRender, AudioSessionStateActive, EDataFlow, IAudioSessionControl2,
+        IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
+        MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
@@ -166,6 +166,46 @@ mod win {
         }
     }
 
+    /// The sessions on `device_id` as (pid, is it actually rendering right now).
+    ///
+    /// The state is what tells a device an application really plays on from one
+    /// it merely opened a stream on and left lying: a session that holds a
+    /// stream without running reports `Inactive`.
+    pub fn session_states(device_id: &str) -> Vec<(u32, bool)> {
+        let Some(sessions) = sessions_of(device_id) else {
+            return Vec::new();
+        };
+        unsafe {
+            let count = sessions.GetCount().unwrap_or(0);
+            let mut out: Vec<(u32, bool)> = Vec::new();
+            for index in 0..count {
+                let Ok(control) = sessions.GetSession(index) else {
+                    continue;
+                };
+                let active = control
+                    .GetState()
+                    .map(|state| state == AudioSessionStateActive)
+                    .unwrap_or(false);
+                let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+                    continue;
+                };
+                let Ok(pid) = control2.GetProcessId() else {
+                    continue;
+                };
+                if pid == 0 {
+                    continue;
+                }
+                match out.iter_mut().find(|(seen, _)| *seen == pid) {
+                    // One process can hold several sessions on one device —
+                    // playing on any of them counts.
+                    Some(entry) => entry.1 |= active,
+                    None => out.push((pid, active)),
+                }
+            }
+            out
+        }
+    }
+
     /// The PIDs holding an audio session on `device_id`.
     ///
     /// Deliberately without process names: `GetProcessId` needs no handle on the
@@ -254,6 +294,28 @@ pub fn session_pids(device_id: &str) -> Vec<u32> {
 
 #[cfg(not(windows))]
 pub fn session_pids(device_id: &str) -> Vec<u32> {
+    let _ = device_id;
+    Vec::new()
+}
+
+/// The id of the default output device — the catch-all everything lands on
+/// unless it was routed somewhere on purpose.
+pub fn default_output_id() -> String {
+    list_devices()
+        .into_iter()
+        .find(|device| matches!(device.kind, DeviceKind::Output) && device.is_default)
+        .map(|device| device.id)
+        .unwrap_or_default()
+}
+
+/// The sessions on this output device as (pid, is it rendering right now).
+#[cfg(windows)]
+pub fn session_states(device_id: &str) -> Vec<(u32, bool)> {
+    win::session_states(device_id)
+}
+
+#[cfg(not(windows))]
+pub fn session_states(device_id: &str) -> Vec<(u32, bool)> {
     let _ = device_id;
     Vec::new()
 }

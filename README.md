@@ -171,17 +171,28 @@ because a tap covers a process *and its children* — Discord holds two sessions
 two child processes and is still recorded exactly once. ClippiBoy leaves itself
 out, so previewing a clip while the buffer runs does not end up in the next one.
 
-Several devices may have ⊘. They are served **top to bottom** and share one
-ledger, so nothing is recorded twice. What cannot be done is splitting an
-application by device: `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names a process and
-nothing else, and Microsoft says so plainly — *"The capture is not tied to a
-specific audio endpoint."* An application playing on two of those devices
-therefore lands with the upper source, whole.
+Several devices may have ⊘, and **which application goes where is decided by
+Windows, not by you**. A session reports whether it is *rendering* or merely
+open, and that is precisely the difference between "this plays on that device"
+and "it opened a stream there once and left it lying". So an application lands on
+the device it is audibly playing on.
 
-That makes the order a real control, not decoration, and the ▲▼ arrows on each
-source set it. It matters most with a hardware mixer: the default output device
-carries a session for nearly everything, so left at the top it takes the lot.
-Put the specific channels above it and they get first pick.
+That matters with a hardware mixer, where routing is the whole point: the default
+output device lists a session for nearly everything, so going by sessions alone
+it would swallow the lot. Going by what is *rendering*, Discord lands on the chat
+channel, the game on the game channel, the browser on the default one — the
+routing set up in the mixer, read back rather than guessed.
+
+Two rules fill the gaps. An application playing nowhere in particular — Steam
+sits open on every device without a sound — goes to the default device, the
+catch-all. And one that falls silent for a moment stays where it is instead of
+moving and cutting its stream.
+
+What cannot be done is splitting an application *by* device.
+`AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names a process and nothing else, and
+Microsoft says so plainly — *"The capture is not tied to a specific audio
+endpoint."* An application really playing on two devices at once therefore lands
+on one of them, whole.
 
 The price is a thread and a one-second ring per application, and that an
 application which has just started playing joins within two seconds — the same

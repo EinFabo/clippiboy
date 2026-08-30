@@ -83,6 +83,6 @@
     <text x="748" y="338" font-size="12.5" fill="#8a8a96">the mix stays changeable long after the recording</text>
 
     <text x="40" y="404" font-size="12.5" fill="#8a8a96">A source with its own track keeps it while it is enabled — muted or not. The mixer pushes silence into it instead of dropping the track.</text>
-    <text x="40" y="424" font-size="12.5" fill="#8a8a96">⊘ follows applications, not devices: several devices may have it, but an application playing on two of them lands with the upper source.</text>
+    <text x="40" y="424" font-size="12.5" fill="#8a8a96">⊘ sorts itself: an application lands on the device it is audibly playing on, and one playing nowhere in particular on the default device.</text>
   </g>
 </svg>

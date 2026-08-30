@@ -61,11 +61,12 @@ pub fn app_root(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
     current
 }
 
-/// The processes holding a session on each device a leftovers source asks about.
+/// What plays on each device a leftovers source asks about, as
+/// (pid, is it rendering right now).
 ///
 /// Only those devices: the enumeration is a COM round trip each, and this runs
 /// on the two-second tick.
-pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<u32>> {
+pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<(u32, bool)>> {
     let mut out = HashMap::new();
     for source in sources.iter().filter(|s| s.enabled) {
         if let SourceKind::OutputDevice {
@@ -74,10 +75,114 @@ pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<u32>> 
         } = &source.kind
         {
             out.entry(device_id.clone())
-                .or_insert_with(|| devices::session_pids(device_id));
+                .or_insert_with(|| devices::session_states(device_id));
         }
     }
     out
+}
+
+/// Decides which leftovers source each application belongs to.
+///
+/// The point is that nobody should have to sort this out by hand. Windows says
+/// whether a session is *rendering* or merely open, and that is exactly the
+/// difference between "this application plays on that device" and "it once
+/// opened a stream there and left it lying". So an application goes where it is
+/// audibly playing, and everything else is only there to break ties.
+#[derive(Default)]
+pub struct Leftovers {
+    /// The default output device — where anything not routed on purpose ends up,
+    /// and therefore the right home for an application that is playing nowhere in
+    /// particular.
+    pub default_device: String,
+    /// Who owned which application last time, so a moment of silence does not
+    /// move it to another source and cost a stream restart.
+    pub previous: HashMap<u32, String>,
+}
+
+impl Leftovers {
+    fn assign(
+        &self,
+        sources: &[AudioSource],
+        playing: &HashMap<String, Vec<(u32, bool)>>,
+        tree: &HashMap<u32, (u32, String)>,
+        taken: &[u32],
+    ) -> Vec<(u32, String)> {
+        // (source id, device id) of every source asking for leftovers, in the
+        // order they sit in the mixer.
+        let buckets: Vec<(&str, &str)> = sources
+            .iter()
+            .filter(|source| source.enabled)
+            .filter_map(|source| match &source.kind {
+                SourceKind::OutputDevice {
+                    device_id,
+                    leftovers_only: true,
+                } => Some((source.id.as_str(), device_id.as_str())),
+                SourceKind::Leftovers => Some((source.id.as_str(), "")),
+                _ => None,
+            })
+            .collect();
+
+        // One entry per application rather than per session: Discord holds two,
+        // and tapping both would split it for no gain. Ancestors first, so a
+        // chosen tap already covers its own descendants when they come up.
+        let mut roots: Vec<u32> = Vec::new();
+        for sessions in playing.values() {
+            for (pid, _) in sessions {
+                let root = app_root(*pid, tree);
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+        }
+        roots.sort_by_key(|root| ancestors(*root, tree).len());
+
+        let mut out: Vec<(u32, String)> = Vec::new();
+        let mut spoken_for: Vec<u32> = taken.to_vec();
+        for root in roots {
+            // A tap covers the target and its children, so anything below an
+            // application another source records is already in the clip.
+            let covered = spoken_for.contains(&root)
+                || ancestors(root, tree)
+                    .iter()
+                    .any(|parent| spoken_for.contains(parent));
+            if covered {
+                continue;
+            }
+
+            // Does this application have a session on that bucket's device, and
+            // is it rendering there?
+            let state = |device: &str| {
+                playing.get(device)?.iter().find_map(|(pid, active)| {
+                    (app_root(*pid, tree) == root).then_some(*active)
+                })
+            };
+
+            let owner = buckets
+                .iter()
+                // Where it is audibly playing. That is the whole rule.
+                .find(|(_, device)| state(device) == Some(true))
+                // It went quiet: stay put rather than move and cut the stream.
+                .or_else(|| {
+                    buckets.iter().find(|(id, device)| {
+                        self.previous.get(&root).map(String::as_str) == Some(*id)
+                            && state(device).is_some()
+                    })
+                })
+                // Playing nowhere in particular belongs on the catch-all.
+                .or_else(|| {
+                    buckets
+                        .iter()
+                        .find(|(_, device)| *device == self.default_device && state(device).is_some())
+                })
+                .or_else(|| buckets.iter().find(|(_, device)| state(device).is_some()));
+
+            if let Some((id, _)) = owner {
+                spoken_for.push(root);
+                out.push((root, (*id).to_string()));
+            }
+        }
+        out
+    }
 }
 
 /// Turns the stored, abstract sources into the streams the engine can open.
@@ -103,15 +208,14 @@ pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<u32>> 
 ///   the target *and its children*, so a parent and a child taken separately
 ///   would record the child twice.
 ///
-///   Several devices may ask for the leftovers. They are served in the order they
-///   sit in the mixer and share one ledger of what is already taken, so nothing
-///   is recorded twice. An application playing on two of those devices therefore
-///   lands with the upper source, whole — a tap cannot be split by device.
+///   Several devices may ask for the leftovers, and each application goes to
+///   exactly one of them — see [`Leftovers`].
 pub fn resolve(
     sources: &[AudioSource],
     game_pid: Option<u32>,
-    playing: &HashMap<String, Vec<u32>>,
+    playing: &HashMap<String, Vec<(u32, bool)>>,
     tree: &HashMap<u32, (u32, String)>,
+    ledger: &Leftovers,
 ) -> Vec<Stream> {
     let enabled = || sources.iter().filter(|s| s.enabled);
 
@@ -131,6 +235,10 @@ pub fn resolve(
         }
     }
 
+    // Which leftovers source each application belongs to, decided once for all
+    // of them so no two can claim the same one.
+    let home = ledger.assign(sources, playing, tree, &taken);
+
     let mut out = Vec::with_capacity(sources.len());
     for source in enabled() {
         let include = |pid: u32| Stream {
@@ -140,44 +248,22 @@ pub fn resolve(
                 mode: ProcessMode::Include,
             },
         };
-        let leftovers_of = |device_id: &str, taken: &mut Vec<u32>| {
-            // One entry per application rather than per session: Discord holds
-            // two, and tapping both would split it for no gain.
-            let mut roots: Vec<u32> = Vec::new();
-            for pid in playing.get(device_id).map(Vec::as_slice).unwrap_or(&[]) {
-                let root = app_root(*pid, tree);
-                if !roots.contains(&root) {
-                    roots.push(root);
-                }
-            }
-            // Ancestors first, so a chosen tap already covers its own descendants
-            // when they come up and they are skipped instead of taken again.
-            roots.sort_by_key(|root| ancestors(*root, tree).len());
-
-            let mut streams = Vec::new();
-            for root in roots {
-                let covered = taken.contains(&root)
-                    || ancestors(root, tree)
-                        .iter()
-                        .any(|parent| taken.contains(parent));
-                if covered {
-                    continue;
-                }
-                taken.push(root);
-                streams.push(include(root));
-            }
-            streams
+        let leftovers = || {
+            home.iter()
+                .filter(|(_, owner)| owner == &source.id)
+                .map(|(root, _)| include(*root))
+                .collect::<Vec<_>>()
         };
 
         match &source.kind {
             SourceKind::Game => out.extend(game_pid.map(include)),
             SourceKind::OutputDevice {
-                device_id,
                 leftovers_only: true,
-            } => out.extend(leftovers_of(device_id, &mut taken)),
+                ..
+            }
             // Only ever read from an old configuration; `config::migrate_sources`
             // turns it into the option above before it gets here.
-            SourceKind::Leftovers => out.extend(leftovers_of("", &mut taken)),
+            | SourceKind::Leftovers => out.extend(leftovers()),
             other => out.push(Stream {
                 source_id: source.id.clone(),
                 kind: other.clone(),
@@ -290,16 +376,29 @@ mod tests {
         }
     }
 
-    /// Sessions per device, the shape `resolve` wants.
-    fn playing(devices: &[(&str, &[u32])]) -> HashMap<String, Vec<u32>> {
+    /// Sessions per device as (pid, rendering right now).
+    fn playing(devices: &[(&str, &[(u32, bool)])]) -> HashMap<String, Vec<(u32, bool)>> {
         devices
             .iter()
-            .map(|(device, pids)| ((*device).to_string(), pids.to_vec()))
+            .map(|(device, sessions)| ((*device).to_string(), sessions.to_vec()))
             .collect()
     }
 
-    fn nothing() -> HashMap<String, Vec<u32>> {
+    /// Sessions that merely sit open — the state most of them are in.
+    fn idle(pids: &[u32]) -> Vec<(u32, bool)> {
+        pids.iter().map(|pid| (*pid, false)).collect()
+    }
+
+    fn nothing() -> HashMap<String, Vec<(u32, bool)>> {
         HashMap::new()
+    }
+
+    /// No previous assignment, and the named device is the catch-all.
+    fn ledger(default_device: &str) -> Leftovers {
+        Leftovers {
+            default_device: default_device.into(),
+            previous: HashMap::new(),
+        }
     }
 
     /// A process tree as (pid, parent, exe).
@@ -355,6 +454,7 @@ mod tests {
             Some(4711),
             &nothing(),
             &loose(),
+            &ledger(""),
         );
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].source_id, "game");
@@ -369,7 +469,7 @@ mod tests {
             of_kind("game", SourceKind::Game),
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
         ];
-        let streams = resolve(&sources, None, &nothing(), &loose());
+        let streams = resolve(&sources, None, &nothing(), &loose(), &ledger(""));
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].source_id, "mic");
     }
@@ -379,7 +479,13 @@ mod tests {
     #[test]
     fn the_leftovers_become_one_stream_per_application() {
         let sources = vec![of_kind("rest", leftovers("spk"))];
-        let streams = resolve(&sources, None, &playing(&[("spk", &[10, 11, 12])]), &loose());
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("spk", &idle(&[10, 11, 12]))]),
+            &loose(),
+            &ledger("spk"),
+        );
         assert_eq!(pids_of(&streams, "rest"), vec![10, 11, 12]);
     }
 
@@ -395,19 +501,22 @@ mod tests {
         let streams = resolve(
             &sources,
             Some(10),
-            &playing(&[("spk", &[10, 11, 12, 13])]),
+            &playing(&[("spk", &idle(&[10, 11, 12, 13]))]),
             &loose(),
+            &ledger("spk"),
         );
         assert_eq!(pids_of(&streams, "rest"), vec![12, 13]);
         assert_eq!(pids_of(&streams, "game"), vec![10]);
         assert_eq!(pids_of(&streams, "discord"), vec![11]);
     }
 
-    /// Several devices may ask for the leftovers. Each application goes to the
-    /// first that wants it — a tap cannot be split by device, so anything
-    /// playing on two of them lands with the upper source, whole.
+    /// The rule that makes sorting by hand unnecessary, in the shape it really
+    /// occurs: a hardware mixer routes Discord to its chat channel, and the
+    /// default device still lists a session for it because everything opens one
+    /// there. Only one of the two is *rendering*, and that is the one that
+    /// decides — regardless of which source sits higher.
     #[test]
-    fn several_devices_share_out_the_applications() {
+    fn an_application_goes_where_it_is_actually_playing() {
         let sources = vec![
             of_kind("system", leftovers("system")),
             of_kind("chat", leftovers("chat")),
@@ -415,12 +524,55 @@ mod tests {
         let streams = resolve(
             &sources,
             None,
-            // 20 plays on both, 21 only on system, 22 only on chat.
-            &playing(&[("system", &[20, 21]), ("chat", &[20, 22])]),
+            &playing(&[
+                ("system", &[(5556, false), (900, true)]),
+                ("chat", &[(5556, true)]),
+            ]),
             &loose(),
+            &ledger("system"),
         );
-        assert_eq!(pids_of(&streams, "system"), vec![20, 21]);
-        assert_eq!(pids_of(&streams, "chat"), vec![22]);
+        assert_eq!(pids_of(&streams, "chat"), vec![5556]);
+        assert_eq!(pids_of(&streams, "system"), vec![900]);
+    }
+
+    /// Steam sits open on every device without playing anywhere. It belongs on
+    /// the catch-all, not on whichever specific channel happens to come first.
+    #[test]
+    fn something_playing_nowhere_lands_on_the_default_device() {
+        let sources = vec![
+            of_kind("chat", leftovers("chat")),
+            of_kind("system", leftovers("system")),
+        ];
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("chat", &idle(&[33264])), ("system", &idle(&[33264]))]),
+            &loose(),
+            &ledger("system"),
+        );
+        assert_eq!(pids_of(&streams, "system"), vec![33264]);
+        assert!(pids_of(&streams, "chat").is_empty());
+    }
+
+    /// Between two sentences a voice chat falls silent for a moment. Moving it
+    /// to another source and back would restart the stream and punch a hole in
+    /// the track each time.
+    #[test]
+    fn a_moment_of_silence_does_not_move_an_application() {
+        let sources = vec![
+            of_kind("system", leftovers("system")),
+            of_kind("chat", leftovers("chat")),
+        ];
+        let quiet_everywhere = playing(&[
+            ("system", &idle(&[5556])),
+            ("chat", &idle(&[5556])),
+        ]);
+        let mut ledger = ledger("system");
+        ledger.previous.insert(5556, "chat".into());
+
+        let streams = resolve(&sources, None, &quiet_everywhere, &loose(), &ledger);
+        assert_eq!(pids_of(&streams, "chat"), vec![5556]);
+        assert!(pids_of(&streams, "system").is_empty());
     }
 
     /// Discord's two sessions are one application. Tapping both would split it
@@ -431,8 +583,9 @@ mod tests {
         let streams = resolve(
             &sources,
             None,
-            &playing(&[("spk", &[2584, 30988])]),
+            &playing(&[("spk", &idle(&[2584, 30988]))]),
             &discord(),
+            &ledger("spk"),
         );
         assert_eq!(pids_of(&streams, "rest"), vec![5556]);
     }
@@ -452,8 +605,9 @@ mod tests {
         let streams = resolve(
             &sources,
             None,
-            &playing(&[("spk", &[2584, 30988, 40944])]),
+            &playing(&[("spk", &idle(&[2584, 30988, 40944]))]),
             &processes,
+            &ledger("spk"),
         );
         assert_eq!(pids_of(&streams, "rest"), vec![40944]);
     }
@@ -472,8 +626,9 @@ mod tests {
         let streams = resolve(
             &sources,
             None,
-            &playing(&[("spk", &[12604, 33264])]),
+            &playing(&[("spk", &idle(&[12604, 33264]))]),
             &processes,
+            &ledger("spk"),
         );
         assert_eq!(pids_of(&streams, "rest"), vec![33264]);
     }
@@ -484,7 +639,13 @@ mod tests {
     fn the_leftovers_never_record_clippiboy_itself() {
         let sources = vec![of_kind("rest", leftovers("spk"))];
         let own = std::process::id();
-        let streams = resolve(&sources, None, &playing(&[("spk", &[own, own + 1])]), &loose());
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("spk", &idle(&[own, own + 1]))]),
+            &loose(),
+            &ledger("spk"),
+        );
         assert_eq!(pids_of(&streams, "rest"), vec![own + 1]);
     }
 
@@ -493,7 +654,7 @@ mod tests {
     fn disabled_sources_produce_no_streams() {
         let mut source = of_kind("mic", SourceKind::InputDevice { device_id: "m".into() });
         source.enabled = false;
-        assert!(resolve(&[source], Some(1), &nothing(), &loose()).is_empty());
+        assert!(resolve(&[source], Some(1), &nothing(), &loose(), &ledger("")).is_empty());
     }
 
     #[test]
@@ -503,7 +664,7 @@ mod tests {
             of_kind("desktop", output("speakers")),
             of_kind("discord", include(7)),
         ];
-        let streams = resolve(&sources, Some(1234), &nothing(), &loose());
+        let streams = resolve(&sources, Some(1234), &nothing(), &loose(), &ledger(""));
         assert_eq!(streams.len(), 3);
         for (before, after) in sources.iter().zip(&streams) {
             assert_eq!(before.id, after.source_id);
@@ -524,7 +685,13 @@ mod tests {
         let layout = TrackLayout::from_sources(&sources);
         assert_eq!(layout.track_count(), 3);
 
-        let streams = resolve(&sources, Some(10), &playing(&[("spk", &[10, 12])]), &loose());
+        let streams = resolve(
+            &sources,
+            Some(10),
+            &playing(&[("spk", &idle(&[10, 12]))]),
+            &loose(),
+            &ledger("spk"),
+        );
         for id in &layout.separate {
             assert!(
                 streams.iter().any(|s| &s.source_id == id),

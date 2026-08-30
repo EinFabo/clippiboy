@@ -188,6 +188,7 @@ impl AppState {
             None,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            &crate::audio::Leftovers::default(),
         ));
 
         Self {

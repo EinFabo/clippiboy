@@ -191,11 +191,16 @@ impl AudioEngine {
         }
         let engine = self.clone();
         std::thread::spawn(move || {
+            let ledger = crate::audio::Leftovers {
+                default_device: crate::audio::devices::default_output_id(),
+                previous: engine.assignments(),
+            };
             let streams = crate::audio::resolve(
                 &sources,
                 game_pid,
                 &crate::audio::sessions_by_device(&sources),
                 &crate::audio::devices::process_tree(),
+                &ledger,
             );
             let mut keys: Vec<String> = streams.iter().map(stream_key).collect();
             keys.sort();
@@ -242,6 +247,17 @@ impl AudioEngine {
 
     pub fn errors(&self) -> HashMap<String, String> {
         self.errors.lock().clone()
+    }
+
+    /// Which source is tapping which process, the other way round from
+    /// [`Self::taps`]. Feeds `Leftovers::previous` so an application that falls
+    /// silent for a moment is not moved to another source and back.
+    pub fn assignments(&self) -> HashMap<u32, String> {
+        let running = self.running.lock();
+        running
+            .values()
+            .filter_map(|run| Some((run.pid?, run.source_id.clone())))
+            .collect()
     }
 
     /// Which processes each source is tapping right now.
