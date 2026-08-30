@@ -40,29 +40,12 @@ pub enum SourceKind {
     /// [`crate::audio::resolve`] puts the current one in.
     Game,
     /// Only ever **read**, never written: one version stored the leftovers as a
-    /// kind of their own. `config::migrate_sources` turns it back into an output
-    /// device with the option below. Removing it here would make those
-    /// configurations unreadable — and an unreadable one is thrown away whole.
+    /// kind of their own. `config::migrate_sources` turns it back into a plain
+    /// output device. Removing it here would make those configurations
+    /// unreadable — and an unreadable one is thrown away whole.
     Leftovers,
     #[serde(rename_all = "camelCase")]
-    OutputDevice {
-        device_id: String,
-        /// Record only what no other source records: the game, single
-        /// applications and any source above this one are left out.
-        ///
-        /// Several devices may ask for this. Nothing is then recorded twice —
-        /// the sources are served in order and each application goes to the
-        /// first that wants it. What cannot be done is splitting an application
-        /// by device: `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names a process and
-        /// nothing else, so an application playing on two devices lands with the
-        /// upper source, whole.
-        ///
-        /// `default` is not cosmetic: `config::load` throws away the *whole*
-        /// configuration on any deserialization error, so a new mandatory field
-        /// would cost everyone their sources, hotkeys and clip directory.
-        #[serde(default)]
-        leftovers_only: bool,
-    },
+    OutputDevice { device_id: String },
     #[serde(rename_all = "camelCase")]
     InputDevice { device_id: String },
     #[serde(rename_all = "camelCase")]
@@ -373,7 +356,6 @@ mod tests {
             parsed.kind,
             SourceKind::OutputDevice {
                 device_id: "dev-1".into(),
-                leftovers_only: false,
             }
         );
     }
@@ -386,9 +368,8 @@ mod tests {
         assert_eq!(
             json(&SourceKind::OutputDevice {
                 device_id: "d".into(),
-                leftovers_only: true,
             }),
-            r#"{"type":"outputDevice","deviceId":"d","leftoversOnly":true}"#
+            r#"{"type":"outputDevice","deviceId":"d"}"#
         );
 
         // Written by one intermediate version, still has to load — see

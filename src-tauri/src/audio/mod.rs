@@ -61,19 +61,38 @@ pub fn app_root(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
     current
 }
 
-/// What plays on each device a leftovers source asks about, as
-/// (pid, is it rendering right now).
+/// Is anything being recorded application by application right now?
 ///
-/// Only those devices: the enumeration is a COM round trip each, and this runs
-/// on the two-second tick.
+/// This is the whole switch. As long as nothing is, an output device is simply
+/// that device's audio. The moment the game — or a single application — gets a
+/// source of its own, recording the device whole would put that sound in the
+/// clip twice, so every output device turns into its leftovers instead. Derived
+/// rather than stored: there is nothing here a user could get wrong, and nothing
+/// that can drift out of step with the sources.
+pub fn records_single_applications(sources: &[AudioSource]) -> bool {
+    sources.iter().filter(|s| s.enabled).any(|source| {
+        matches!(
+            source.kind,
+            SourceKind::Game
+                | SourceKind::Process {
+                    mode: ProcessMode::Include,
+                    ..
+                }
+        )
+    })
+}
+
+/// What plays on each output device, as (pid, is it rendering right now).
+///
+/// Empty while nothing is recorded application by application — the enumeration
+/// is a COM round trip per device and runs on the two-second tick.
 pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<(u32, bool)>> {
     let mut out = HashMap::new();
+    if !records_single_applications(sources) {
+        return out;
+    }
     for source in sources.iter().filter(|s| s.enabled) {
-        if let SourceKind::OutputDevice {
-            device_id,
-            leftovers_only: true,
-        } = &source.kind
-        {
+        if let SourceKind::OutputDevice { device_id } = &source.kind {
             out.entry(device_id.clone())
                 .or_insert_with(|| devices::session_states(device_id));
         }
@@ -113,10 +132,9 @@ impl Leftovers {
             .iter()
             .filter(|source| source.enabled)
             .filter_map(|source| match &source.kind {
-                SourceKind::OutputDevice {
-                    device_id,
-                    leftovers_only: true,
-                } => Some((source.id.as_str(), device_id.as_str())),
+                SourceKind::OutputDevice { device_id } => {
+                    Some((source.id.as_str(), device_id.as_str()))
+                }
                 SourceKind::Leftovers => Some((source.id.as_str(), "")),
                 _ => None,
             })
@@ -235,8 +253,10 @@ pub fn resolve(
         }
     }
 
-    // Which leftovers source each application belongs to, decided once for all
-    // of them so no two can claim the same one.
+    // Which output device each application belongs to, decided once for all of
+    // them so no two can claim the same one. Empty unless something is recorded
+    // application by application — then a device is simply itself.
+    let leftovers_mode = records_single_applications(sources);
     let home = ledger.assign(sources, playing, tree, &taken);
 
     let mut out = Vec::with_capacity(sources.len());
@@ -257,13 +277,10 @@ pub fn resolve(
 
         match &source.kind {
             SourceKind::Game => out.extend(game_pid.map(include)),
-            SourceKind::OutputDevice {
-                leftovers_only: true,
-                ..
-            }
+            SourceKind::OutputDevice { .. } if leftovers_mode => out.extend(leftovers()),
             // Only ever read from an old configuration; `config::migrate_sources`
-            // turns it into the option above before it gets here.
-            | SourceKind::Leftovers => out.extend(leftovers()),
+            // turns it into a plain output device before it gets here.
+            SourceKind::Leftovers => out.extend(leftovers()),
             other => out.push(Stream {
                 source_id: source.id.clone(),
                 kind: other.clone(),
@@ -365,15 +382,20 @@ mod tests {
     fn output(device_id: &str) -> SourceKind {
         SourceKind::OutputDevice {
             device_id: device_id.into(),
-            leftovers_only: false,
         }
     }
 
+    /// The same thing — an output device only records its leftovers while
+    /// something else records applications, so the tests that expect that pair
+    /// it with a game source.
     fn leftovers(device_id: &str) -> SourceKind {
-        SourceKind::OutputDevice {
-            device_id: device_id.into(),
-            leftovers_only: true,
-        }
+        output(device_id)
+    }
+
+    /// A game source, so the leftovers rule is in force. Detected as pid 1 in the
+    /// tests that use it, which no other fixture claims.
+    fn recording_by_app() -> AudioSource {
+        of_kind("the-game", SourceKind::Game)
     }
 
     /// Sessions per device as (pid, rendering right now).
@@ -478,7 +500,7 @@ mod tests {
     /// but many.
     #[test]
     fn the_leftovers_become_one_stream_per_application() {
-        let sources = vec![of_kind("rest", leftovers("spk"))];
+        let sources = vec![recording_by_app(), of_kind("rest", leftovers("spk"))];
         let streams = resolve(
             &sources,
             None,
@@ -518,6 +540,7 @@ mod tests {
     #[test]
     fn an_application_goes_where_it_is_actually_playing() {
         let sources = vec![
+            recording_by_app(),
             of_kind("system", leftovers("system")),
             of_kind("chat", leftovers("chat")),
         ];
@@ -540,6 +563,7 @@ mod tests {
     #[test]
     fn something_playing_nowhere_lands_on_the_default_device() {
         let sources = vec![
+            recording_by_app(),
             of_kind("chat", leftovers("chat")),
             of_kind("system", leftovers("system")),
         ];
@@ -560,6 +584,7 @@ mod tests {
     #[test]
     fn a_moment_of_silence_does_not_move_an_application() {
         let sources = vec![
+            recording_by_app(),
             of_kind("system", leftovers("system")),
             of_kind("chat", leftovers("chat")),
         ];
@@ -579,7 +604,7 @@ mod tests {
     /// across the leftovers for nothing; the common parent covers them at once.
     #[test]
     fn an_application_with_two_sessions_is_tapped_once() {
-        let sources = vec![of_kind("rest", leftovers("spk"))];
+        let sources = vec![recording_by_app(), of_kind("rest", leftovers("spk"))];
         let streams = resolve(
             &sources,
             None,
@@ -620,7 +645,7 @@ mod tests {
             (33264, 0, "steam.exe"),
             (12604, 33264, "steamwebhelper.exe"),
         ]);
-        let sources = vec![of_kind("rest", leftovers("spk"))];
+        let sources = vec![recording_by_app(), of_kind("rest", leftovers("spk"))];
         // Deliberately the child first: the order of the session list must not
         // decide the outcome.
         let streams = resolve(
@@ -637,7 +662,7 @@ mod tests {
     /// one.
     #[test]
     fn the_leftovers_never_record_clippiboy_itself() {
-        let sources = vec![of_kind("rest", leftovers("spk"))];
+        let sources = vec![recording_by_app(), of_kind("rest", leftovers("spk"))];
         let own = std::process::id();
         let streams = resolve(
             &sources,
@@ -657,19 +682,43 @@ mod tests {
         assert!(resolve(&[source], Some(1), &nothing(), &loose(), &ledger("")).is_empty());
     }
 
+    /// While nothing is recorded application by application there is nothing to
+    /// leave out, so a device is simply that device.
     #[test]
-    fn other_sources_pass_through_unchanged() {
+    fn devices_pass_through_while_nothing_is_recorded_per_application() {
         let sources = vec![
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
             of_kind("desktop", output("speakers")),
-            of_kind("discord", include(7)),
         ];
         let streams = resolve(&sources, Some(1234), &nothing(), &loose(), &ledger(""));
-        assert_eq!(streams.len(), 3);
+        assert_eq!(streams.len(), 2);
         for (before, after) in sources.iter().zip(&streams) {
             assert_eq!(before.id, after.source_id);
             assert_eq!(before.kind, after.kind);
         }
+    }
+
+    /// And the moment one is, the device turns into its leftovers by itself —
+    /// nothing to switch, because recording it whole would put that application
+    /// in the clip a second time.
+    #[test]
+    fn one_application_source_turns_every_device_into_its_leftovers() {
+        let sources = vec![
+            of_kind("discord", include(7)),
+            of_kind("desktop", output("speakers")),
+        ];
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("speakers", &idle(&[7, 8]))]),
+            &loose(),
+            &ledger("speakers"),
+        );
+        assert_eq!(pids_of(&streams, "discord"), vec![7]);
+        // 7 is already recorded, so only 8 is left over — and the device itself
+        // is not opened at all.
+        assert_eq!(pids_of(&streams, "desktop"), vec![8]);
+        assert!(!streams.iter().any(|s| matches!(s.kind, SourceKind::OutputDevice { .. })));
     }
 
     /// The layout must not shift underneath the recording just because a game

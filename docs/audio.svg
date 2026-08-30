@@ -30,7 +30,7 @@
       <rect x="40" y="152" width="336" height="68" rx="16" fill="#17171d" stroke="#34343d"/>
       <circle cx="76" cy="186" r="14" fill="#4c1d95"/><circle cx="76" cy="186" r="5" fill="#a78bfa"/>
       <text x="108" y="182" font-size="18" font-weight="600" fill="#ffffff">Output device</text>
-      <text x="108" y="202" font-size="12.5" fill="#8a8a96">a whole endpoint — or with ⊘ only its leftovers</text>
+      <text x="108" y="202" font-size="12.5" fill="#8a8a96">a whole endpoint — or only what the others leave over</text>
 
       <rect x="40" y="232" width="336" height="68" rx="16" fill="#17171d" stroke="#34343d"/>
       <circle cx="76" cy="266" r="14" fill="#4c1d95"/><rect x="71" y="261" width="10" height="10" rx="2" fill="#a78bfa"/>
@@ -83,6 +83,6 @@
     <text x="748" y="338" font-size="12.5" fill="#8a8a96">the mix stays changeable long after the recording</text>
 
     <text x="40" y="404" font-size="12.5" fill="#8a8a96">A source with its own track keeps it while it is enabled — muted or not. The mixer pushes silence into it instead of dropping the track.</text>
-    <text x="40" y="424" font-size="12.5" fill="#8a8a96">⊘ sorts itself: an application lands on the device it is audibly playing on, and one playing nowhere in particular on the default device.</text>
+    <text x="40" y="424" font-size="12.5" fill="#8a8a96">The leftovers sort themselves: an application lands on the device it is audibly playing on, one playing nowhere on the default device.</text>
   </g>
 </svg>

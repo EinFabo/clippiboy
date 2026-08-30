@@ -447,7 +447,6 @@ mod tests {
         let endpoint = |device_id: &str| {
             fingerprint(&SourceKind::OutputDevice {
                 device_id: device_id.into(),
-                leftovers_only: false,
             })
         };
         assert_eq!(endpoint("spk"), "out:spk");

@@ -148,8 +148,8 @@ Four source types:
   follows the game by itself: no PID to pick, and a restart of the game
   does not break it. It also holds on while you alt-tab away, and only lets go
   once the process is really gone.
-* **Output device (loopback)** — an endpoint's complete audio, or with **⊘** only
-  what no other source records
+* **Output device (loopback)** — an endpoint's complete audio, or only what the
+  other sources leave over; see below
 * **Application** — process loopback via `ActivateAudioInterfaceAsync`, so
   Discord can sit apart from the game (needs Windows 11, build 20348+)
 * **Input device** — microphone
@@ -159,19 +159,26 @@ mixes the applications together only at the very end, and process loopback taps
 *before* that. Every source is an independent tap, cleanly apart from the others.
 Playback is untouched, you keep hearing everything.
 
-### ⊘ — only the leftovers
+### The leftovers — no setting, just a consequence
 
-Without it, an application that has its own track is in the clip **twice**: once
-as its own track, once inside the device's. Muting that track afterwards then
-does not remove the sound, because it is in the main mix as well.
+An application that has its own track and is *also* inside a whole recorded
+device is in the clip **twice**. Muting that track afterwards then does not
+remove the sound, because it sits in the main mix as well.
 
-⊘ turns the source from one endpoint loopback into one tap per application on
-that device that nothing else records. Applications are grouped by process tree,
-because a tap covers a process *and its children* — Discord holds two sessions in
-two child processes and is still recorded exactly once. ClippiBoy leaves itself
-out, so previewing a clip while the buffer runs does not end up in the next one.
+So as soon as anything is recorded application by application — the game, or a
+single application you picked — every output device records only what those leave
+over. There is nothing to switch on: it follows from the sources, and switching
+it off would only ever produce the doubling. While nothing is recorded that way,
+a device is simply that device.
 
-Several devices may have ⊘, and **which application goes where is decided by
+Behind it, the source stops being one endpoint loopback and becomes one tap per
+application on that device that nothing else records. Applications are grouped by
+process tree, because a tap covers a process *and its children* — Discord holds
+two sessions in two child processes and is still recorded exactly once. ClippiBoy
+leaves itself out, so previewing a clip while the buffer runs does not end up in
+the next one.
+
+Every output device takes part, and **which application goes where is decided by
 Windows, not by you**. A session reports whether it is *rendering* or merely
 open, and that is precisely the difference between "this plays on that device"
 and "it opened a stream there once and left it lying". So an application lands on
@@ -196,8 +203,8 @@ on one of them, whole.
 
 The price is a thread and a one-second ring per application, and that an
 application which has just started playing joins within two seconds — the same
-tick that watches for the game. Which applications a ⊘ source actually holds is
-written on it, since the device no longer tells you.
+tick that watches for the game. Which applications a device actually holds is
+written on it, since the device alone no longer tells you.
 
 Every source has gain, mute, solo and a live level. Sources without *own track*
 run into the main mix; the others are written along in parallel and land beside

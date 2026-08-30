@@ -53,12 +53,11 @@ pub fn default_config() -> AppConfig {
 /// Undo the detour where the leftovers were briefly a source kind of their own,
 /// limited to one, with the other endpoint sources switched off.
 ///
-/// They are an option on an output device again, and several devices may have
-/// it. The device that source once pointed at is not recoverable — the kind
-/// carried no id — so it falls back to the default output device, which is what
-/// an empty id means everywhere else (see `capture::device_client`). The
-/// endpoints that detour switched off are turned back on with the option set,
-/// because that is what they were before it.
+/// There is nothing to switch on any more — an output device records its
+/// leftovers by itself as soon as something is recorded application by
+/// application. The device that source once pointed at is not recoverable, the
+/// kind carried no id, so it falls back to the default output device, which is
+/// what an empty id means everywhere else (see `capture::device_client`).
 fn migrate_sources(config: &mut AppConfig) {
     if !config
         .sources
@@ -73,18 +72,13 @@ fn migrate_sources(config: &mut AppConfig) {
             SourceKind::Leftovers => {
                 source.kind = SourceKind::OutputDevice {
                     device_id: String::new(),
-                    leftovers_only: true,
                 };
                 log::info!(
-                    "'{}' records the leftovers of the default output device again",
+                    "'{}' is the default output device again",
                     source.label
                 );
             }
-            SourceKind::OutputDevice { device_id, .. } if !source.enabled => {
-                source.kind = SourceKind::OutputDevice {
-                    device_id: device_id.clone(),
-                    leftovers_only: true,
-                };
+            SourceKind::OutputDevice { .. } if !source.enabled => {
                 source.enabled = true;
                 log::info!("'{}' switched back on", source.label);
             }
@@ -140,10 +134,9 @@ mod tests {
         }
     }
 
-    fn endpoint(device_id: &str, leftovers_only: bool) -> SourceKind {
+    fn endpoint(device_id: &str) -> SourceKind {
         SourceKind::OutputDevice {
             device_id: device_id.into(),
-            leftovers_only,
         }
     }
 
@@ -157,22 +150,22 @@ mod tests {
     /// What the intermediate version left behind: one source turned into a kind
     /// of its own, the other endpoints switched off.
     #[test]
-    fn the_one_leftovers_kind_becomes_an_option_again() {
+    fn the_leftovers_kind_becomes_a_plain_device_again() {
         let mut config = with(vec![
             source("system", SourceKind::Leftovers, true),
-            source("chat", endpoint("dev-chat", false), false),
-            source("music", endpoint("dev-music", false), false),
+            source("chat", endpoint("dev-chat"), false),
+            source("music", endpoint("dev-music"), false),
         ]);
         migrate_sources(&mut config);
 
         // The kind carried no device, so the default output device it is.
-        assert_eq!(config.sources[0].kind, endpoint("", true));
+        assert_eq!(config.sources[0].kind, endpoint(""));
         for source in &config.sources[1..] {
             assert!(source.enabled, "switched off by the detour, not by the user");
             assert_eq!(
                 source.kind,
-                endpoint(&format!("dev-{}", source.id), true),
-                "they asked for the leftovers before the detour"
+                endpoint(&format!("dev-{}", source.id)),
+                "the device has to survive"
             );
         }
     }
@@ -181,8 +174,8 @@ mod tests {
     #[test]
     fn a_configuration_without_the_detour_is_left_alone() {
         let mut config = with(vec![
-            source("speakers", endpoint("dev-1", false), true),
-            source("headset", endpoint("dev-2", false), false),
+            source("speakers", endpoint("dev-1"), true),
+            source("headset", endpoint("dev-2"), false),
         ]);
         let before = config.sources.clone();
         migrate_sources(&mut config);
@@ -193,11 +186,13 @@ mod tests {
         }
     }
 
-    /// The flag on the device survived the detour and must load as it is.
+    /// The flag one version wrote onto the device is gone from the model. Serde
+    /// has to shrug it off rather than fail — a configuration it cannot read is
+    /// thrown away whole.
     #[test]
-    fn the_option_still_deserializes() {
+    fn the_old_flag_on_a_device_is_ignored() {
         let raw = r#"{"type":"outputDevice","deviceId":"d","leftoversOnly":true}"#;
         let kind: SourceKind = serde_json::from_str(raw).unwrap();
-        assert_eq!(kind, endpoint("d", true));
+        assert_eq!(kind, endpoint("d"));
     }
 }

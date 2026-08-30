@@ -19,17 +19,7 @@ export interface AudioProcess {
 export type SourceKind =
   /** The detected game — the backend puts the current process in. */
   | { type: "game" }
-  | {
-      type: "outputDevice";
-      deviceId: string;
-      /**
-       * Record only what no other source records. Several devices may ask for
-       * it; each application goes to the first one that does. Optional on
-       * purpose — an older config does not carry the field, and a config the
-       * backend cannot read is thrown away whole.
-       */
-      leftoversOnly?: boolean;
-    }
+  | { type: "outputDevice"; deviceId: string }
   | { type: "inputDevice"; deviceId: string }
   | { type: "process"; pid: number; mode: "include" | "exclude" };
 
