@@ -79,6 +79,7 @@ export function AudioMixer() {
     taps,
     upsertSource,
     removeSource,
+    patchConfig,
   } = useEngine();
   const [adding, setAdding] = useState(false);
 
@@ -95,6 +96,16 @@ export function AudioMixer() {
   );
 
   const anySolo = config.sources.some((s) => s.solo);
+
+  /// The order is not cosmetic: several ⊘ sources are served top to bottom, so
+  /// this is what decides which of them gets an application both could take.
+  const move = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= config.sources.length) return;
+    const sources = [...config.sources];
+    [sources[index], sources[target]] = [sources[target], sources[index]];
+    patchConfig({ sources });
+  };
 
   return (
     <div className="space-y-8">
@@ -136,7 +147,7 @@ export function AudioMixer() {
         )}
 
         <div className="space-y-3">
-          {config.sources.map((source) => {
+          {config.sources.map((source, index) => {
             const dimmed = anySolo && !source.solo;
             const level = levels[source.id] ?? 0;
             const tapped = (taps[source.id] ?? []).map(processName);
@@ -152,6 +163,26 @@ export function AudioMixer() {
                 )}
               >
                 <div className="flex items-center gap-4">
+                  {config.sources.length > 1 && (
+                    <span className="-mr-2 flex shrink-0 flex-col text-ink-faint">
+                      <button
+                        aria-label={`Move ${source.label} up`}
+                        disabled={index === 0}
+                        onClick={() => move(index, -1)}
+                        className="px-1 text-[9px] leading-tight transition-colors hover:text-ink disabled:opacity-25 disabled:hover:text-ink-faint"
+                      >
+                        ▲
+                      </button>
+                      <button
+                        aria-label={`Move ${source.label} down`}
+                        disabled={index === config.sources.length - 1}
+                        onClick={() => move(index, 1)}
+                        className="px-1 text-[9px] leading-tight transition-colors hover:text-ink disabled:opacity-25 disabled:hover:text-ink-faint"
+                      >
+                        ▼
+                      </button>
+                    </span>
+                  )}
                   <span className="grid h-9 w-9 shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
                     {sourceIcon(source.kind)}
                   </span>
@@ -433,7 +464,8 @@ function Notes({
       {leftovers.length > 1 && (
         <Note tone="info">
           ⊘ follows applications, not devices — anything playing on several of
-          these {leftovers.length} sources lands on the topmost one, whole.
+          these {leftovers.length} sources lands on the topmost one, whole. The
+          ▲▼ arrows decide which that is.
         </Note>
       )}
     </>

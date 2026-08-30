@@ -171,12 +171,17 @@ because a tap covers a process *and its children* — Discord holds two sessions
 two child processes and is still recorded exactly once. ClippiBoy leaves itself
 out, so previewing a clip while the buffer runs does not end up in the next one.
 
-Several devices may have ⊘. They are served top to bottom and share one ledger,
-so nothing is recorded twice. What cannot be done is splitting an application by
-device: `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names a process and nothing else,
-and Microsoft says so plainly — *"The capture is not tied to a specific audio
-endpoint."* An application playing on two of those devices therefore lands with
-the upper source, whole. The mixer says so where it matters.
+Several devices may have ⊘. They are served **top to bottom** and share one
+ledger, so nothing is recorded twice. What cannot be done is splitting an
+application by device: `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names a process and
+nothing else, and Microsoft says so plainly — *"The capture is not tied to a
+specific audio endpoint."* An application playing on two of those devices
+therefore lands with the upper source, whole.
+
+That makes the order a real control, not decoration, and the ▲▼ arrows on each
+source set it. It matters most with a hardware mixer: the default output device
+carries a session for nearly everything, so left at the top it takes the lot.
+Put the specific channels above it and they get first pick.
 
 The price is a thread and a one-second ring per application, and that an
 application which has just started playing joins within two seconds — the same
