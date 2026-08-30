@@ -23,16 +23,25 @@ struct Running {
 pub struct AudioEngine {
     running: Mutex<HashMap<String, Running>>,
     errors: Mutex<HashMap<String, String>>,
-    /// Is a retry running right now? On failure `capture::start` waits up to five
-    /// seconds — that must not stack up.
-    retrying: std::sync::atomic::AtomicBool,
+    /// Is an off-thread `apply` running right now? On failure `capture::start`
+    /// waits up to five seconds — that must not stack up.
+    applying: std::sync::atomic::AtomicBool,
 }
 
 fn fingerprint(kind: &SourceKind) -> String {
     match kind {
         SourceKind::InputDevice { device_id } => format!("in:{device_id}"),
-        SourceKind::OutputDevice { device_id } => format!("out:{device_id}"),
+        SourceKind::OutputDevice { device_id, exclude_game } => {
+            // Without the flag the same string as before, so an existing
+            // endpoint source is not restarted by this change alone.
+            match exclude_game {
+                true => format!("out:{device_id}:without-game"),
+                false => format!("out:{device_id}"),
+            }
+        }
         SourceKind::Process { pid, mode } => format!("proc:{pid}:{mode:?}"),
+        // Never reached after `resolve` — see `capture::start`.
+        SourceKind::Game => "game:unresolved".into(),
     }
 }
 
@@ -119,26 +128,38 @@ impl AudioEngine {
         }
     }
 
-    /// Try sources that failed to start last time once more.
+    /// [`Self::apply`] on a thread of its own.
     ///
-    /// A device that was busy or has just been plugged in is often there a few
-    /// seconds later. Without this the source would stay dead until the next
-    /// program start — and the track in the clip silent, without anyone noticing.
+    /// Everything called from the status tick has to go through here. Stopping a
+    /// source joins its thread (up to 200 ms), and starting one waits on a
+    /// device that does not answer (up to five seconds) — on the tick thread all
+    /// level meters would stand still for that whole time, because they need the
+    /// same lock.
     ///
-    /// Runs on a thread of its own: on failure `capture::start` waits for a
-    /// timeout, and the level meters would otherwise stand still all that time.
-    pub fn retry_failed(self: &Arc<Self>, sources: Vec<AudioSource>) {
-        if self.errors.lock().is_empty() {
-            return;
-        }
-        if self.retrying.swap(true, Ordering::SeqCst) {
+    /// A second call while one is running is dropped: the caller repeats every
+    /// two seconds anyway, and two `apply`s in parallel would fight over the
+    /// same sources.
+    pub fn apply_async(self: &Arc<Self>, sources: Vec<AudioSource>) {
+        if self.applying.swap(true, Ordering::SeqCst) {
             return;
         }
         let engine = self.clone();
         std::thread::spawn(move || {
             engine.apply(&sources);
-            engine.retrying.store(false, Ordering::SeqCst);
+            engine.applying.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Try sources that failed to start last time once more.
+    ///
+    /// A device that was busy or has just been plugged in is often there a few
+    /// seconds later. Without this the source would stay dead until the next
+    /// program start — and the track in the clip silent, without anyone noticing.
+    pub fn retry_failed(self: &Arc<Self>, sources: Vec<AudioSource>) {
+        if self.errors.lock().is_empty() {
+            return;
+        }
+        self.apply_async(sources);
     }
 
     pub fn stop_all(&self) {
@@ -200,18 +221,6 @@ impl AudioEngine {
         for run in self.running.lock().values() {
             run.ring.clear();
         }
-    }
-
-    /// How far along the QPC timeline every running source has material.
-    ///
-    /// The mixer may only work up to here: whatever it has produced is written —
-    /// if a source's audio arrived after that, its slot would already be taken.
-    pub fn ready_until_100ns(&self) -> Option<i64> {
-        let running = self.running.lock();
-        running
-            .values()
-            .filter_map(|run| run.ring.end_100ns())
-            .min()
     }
 
     /// Mixes the window starting at `from_100ns` over `frames` frames into `out`:
@@ -293,5 +302,50 @@ impl AudioEngine {
                 *sample = (*sample * gain).clamp(-1.0, 1.0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ProcessMode;
+
+    /// The whole "follow the game" mechanism rests on this: `apply` restarts a
+    /// source exactly when its fingerprint changes. A new PID therefore has to
+    /// look different — and so does a flipped loopback mode.
+    #[test]
+    fn a_different_process_gives_a_different_fingerprint() {
+        let include = |pid| {
+            fingerprint(&SourceKind::Process {
+                pid,
+                mode: ProcessMode::Include,
+            })
+        };
+        assert_ne!(include(100), include(200));
+        assert_ne!(
+            include(100),
+            fingerprint(&SourceKind::Process {
+                pid: 100,
+                mode: ProcessMode::Exclude,
+            })
+        );
+    }
+
+    /// Existing endpoint sources must not be restarted just because the field
+    /// was added.
+    #[test]
+    fn an_untouched_endpoint_keeps_its_fingerprint() {
+        let plain = fingerprint(&SourceKind::OutputDevice {
+            device_id: "spk".into(),
+            exclude_game: false,
+        });
+        assert_eq!(plain, "out:spk");
+        assert_ne!(
+            plain,
+            fingerprint(&SourceKind::OutputDevice {
+                device_id: "spk".into(),
+                exclude_game: true,
+            })
+        );
     }
 }

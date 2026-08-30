@@ -15,9 +15,20 @@ export interface AudioProcess {
   exe: string;
 }
 
-/** The mixer's three source types. */
+/** The mixer's source types. */
 export type SourceKind =
-  | { type: "outputDevice"; deviceId: string }
+  /** The detected game — the backend puts the current process in. */
+  | { type: "game" }
+  | {
+      type: "outputDevice";
+      deviceId: string;
+      /**
+       * Everything on this device except the game. Optional on purpose: an
+       * older config does not carry the field, and a config the backend cannot
+       * read is thrown away whole.
+       */
+      excludeGame?: boolean;
+    }
   | { type: "inputDevice"; deviceId: string }
   | { type: "process"; pid: number; mode: "include" | "exclude" };
 

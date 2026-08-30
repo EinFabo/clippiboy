@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Meter, Slider, Toggle } from "@/components/ui/Controls";
 import {
   IconApp,
+  IconGamepad,
   IconMic,
   IconPlus,
   IconSpeaker,
@@ -16,27 +17,39 @@ import type { AudioSource, SourceKind } from "@/lib/types";
 /**
  * Does the source get a track of its own by default?
  *
- * Microphone and individual applications yes: those are exactly what you want to
- * turn down or drop entirely in the clip later, and that only works if they were
- * not already folded into the main mix while recording. An output device is the
- * game audio itself — that stays the main mix.
+ * The game, the microphone and individual applications yes: those are exactly
+ * what you want to turn down or drop entirely in the clip later, and that only
+ * works if they were not already folded into the main mix while recording. An
+ * output device carries whatever is left over — that stays the main mix.
  */
 function wantsOwnTrack(kind: SourceKind): boolean {
   return kind.type !== "outputDevice";
 }
 
 function sourceIcon(kind: SourceKind) {
+  if (kind.type === "game") return <IconGamepad className="h-4 w-4" />;
   if (kind.type === "inputDevice") return <IconMic className="h-4 w-4" />;
   if (kind.type === "outputDevice") return <IconSpeaker className="h-4 w-4" />;
   return <IconApp className="h-4 w-4" />;
 }
 
-function sourceHint(kind: SourceKind, deviceName: (id: string) => string) {
+function sourceHint(
+  kind: SourceKind,
+  deviceName: (id: string) => string,
+  game: string | null,
+) {
   switch (kind.type) {
+    case "game":
+      return game ? `Game · ${game}` : "Game · none detected right now";
     case "inputDevice":
       return `Input · ${deviceName(kind.deviceId)}`;
     case "outputDevice":
-      return `Output (loopback) · ${deviceName(kind.deviceId)}`;
+      if (!kind.excludeGame) return `Output (loopback) · ${deviceName(kind.deviceId)}`;
+      // Process loopback is not tied to an endpoint, so saying "headphones
+      // minus game" here would be a promise the API does not keep.
+      return game
+        ? `Everything except ${game} · not limited to one device`
+        : `Output (loopback) · ${deviceName(kind.deviceId)} — no game to leave out`;
     case "process":
       return kind.mode === "include"
         ? `Application · PID ${kind.pid}`
@@ -52,6 +65,7 @@ export function AudioMixer() {
     levels,
     sourceErrors,
     sourceWarnings,
+    detectedGame,
     upsertSource,
     removeSource,
   } = useEngine();
@@ -69,9 +83,10 @@ export function AudioMixer() {
       <header className="pt-10">
         <h1 className="display text-4xl">Audio mixer</h1>
         <p className="mt-3 max-w-lg text-[15px] leading-relaxed text-white/70">
-          Any number of sources at once: output devices, individual
-          applications and microphones. Each source can run into the main mix or
-          onto a track of its own in the clip.
+          Any number of sources at once: the detected game, output devices,
+          individual applications and microphones. Each source can run into the
+          main mix or onto a track of its own in the clip — and an output device
+          can leave the game out, so the two never end up on top of each other.
         </p>
       </header>
 
@@ -91,9 +106,11 @@ export function AudioMixer() {
         />
 
         <MixedInHint sources={config.sources} onFix={upsertSource} />
+        <DoubledGameHint sources={config.sources} onFix={upsertSource} />
 
         {adding && (
           <AddSourcePanel
+            hasGame={config.sources.some((s) => s.kind.type === "game")}
             onClose={() => setAdding(false)}
             onAdd={(s) => {
               upsertSource(s);
@@ -106,6 +123,10 @@ export function AudioMixer() {
           {config.sources.map((source) => {
             const dimmed = anySolo && !source.solo;
             const level = levels[source.id] ?? 0;
+            // Only an endpoint can leave the game out — pulled out here so the
+            // narrowing survives into the click handler.
+            const output =
+              source.kind.type === "outputDevice" ? source.kind : null;
             return (
               <Card
                 key={source.id}
@@ -147,7 +168,7 @@ export function AudioMixer() {
                     >
                       {sourceErrors[source.id] ??
                         sourceWarnings[source.id] ??
-                        sourceHint(source.kind, deviceName)}
+                        sourceHint(source.kind, deviceName, detectedGame)}
                     </p>
                     <div className="mt-2.5 px-1.5">
                       <Meter level={source.muted ? 0 : level} />
@@ -201,6 +222,21 @@ export function AudioMixer() {
                     >
                       ⧉
                     </MiniToggle>
+                    {output && (
+                      <MiniToggle
+                        active={output.excludeGame === true}
+                        activeClass="bg-accent/25 text-accent-bright"
+                        title="Leave the game out of this track"
+                        onClick={() =>
+                          upsertSource({
+                            ...source,
+                            kind: { ...output, excludeGame: !output.excludeGame },
+                          })
+                        }
+                      >
+                        ⊘
+                      </MiniToggle>
+                    )}
                     <span className="mx-1">
                       <Toggle
                         label={`${source.label} enabled`}
@@ -233,8 +269,9 @@ export function AudioMixer() {
       </section>
 
       <p className="pb-4 text-xs leading-relaxed text-ink-faint">
-        Application sources use process loopback (Windows 10 build 20348+). On
-        older systems only capturing whole output devices is available.
+        The game, application sources and “leave the game out” all use process
+        loopback (Windows 10 build 20348+). On older systems only capturing whole
+        output devices is available.
       </p>
 
       <AvailableSources processes={processes} />
@@ -324,14 +361,66 @@ function MixedInHint({
   );
 }
 
+/**
+ * A game source next to a plain endpoint loopback means the game is in the clip
+ * twice — once on its own track, once inside the main mix. Nothing about that is
+ * visible while recording; it only shows up when the game track is muted in the
+ * editor and the game keeps playing.
+ */
+function DoubledGameHint({
+  sources,
+  onFix,
+}: {
+  sources: AudioSource[];
+  onFix: (source: AudioSource) => Promise<void>;
+}) {
+  const hasGame = sources.some((s) => s.kind.type === "game" && s.enabled);
+  const doubled = sources.filter(
+    (s) => s.enabled && s.kind.type === "outputDevice" && !s.kind.excludeGame,
+  );
+  if (!hasGame || doubled.length === 0) return null;
+
+  return (
+    <Card className="mb-4 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
+      <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-muted">
+        The game is recorded twice: on its own track and inside{" "}
+        <span className="font-medium text-ink">
+          {doubled.map((s) => s.label).join(", ")}
+        </span>
+        . Leaving it out there gives you the game and everything else cleanly
+        apart.
+      </p>
+      <Button
+        size="sm"
+        className="shrink-0"
+        // One after another, like above: each call answers with the whole
+        // config, so in parallel the last answer would swallow the others.
+        onClick={async () => {
+          for (const source of doubled) {
+            if (source.kind.type !== "outputDevice") continue;
+            await onFix({
+              ...source,
+              kind: { ...source.kind, excludeGame: true },
+            });
+          }
+        }}
+      >
+        Leave the game out
+      </Button>
+    </Card>
+  );
+}
+
 function AddSourcePanel({
   onAdd,
   onClose,
+  hasGame,
 }: {
   onAdd: (s: AudioSource) => void;
   onClose: () => void;
+  hasGame: boolean;
 }) {
-  const { devices, processes, refreshSources } = useEngine();
+  const { devices, processes, refreshSources, detectedGame } = useEngine();
   const outputs = devices.filter((d) => d.kind === "output");
   const inputs = devices.filter((d) => d.kind === "input");
 
@@ -359,6 +448,31 @@ function AddSourcePanel({
           </Button>
         </div>
       </div>
+
+      {/* Above the columns rather than in them: it is not one entry among many
+          but the one source that finds its process on its own. */}
+      <button
+        disabled={hasGame}
+        onClick={() => onAdd(make("Game", { type: "game" }))}
+        className={cn(
+          "mb-4 flex w-full items-center gap-3 rounded-inner border border-accent/30 bg-accent/10 px-4 py-3 text-left",
+          hasGame
+            ? "cursor-not-allowed opacity-45"
+            : "transition-colors hover:bg-accent/20",
+        )}
+      >
+        <IconGamepad className="h-4 w-4 shrink-0 text-accent-bright" />
+        <span className="min-w-0">
+          <span className="block text-sm font-medium">The detected game</span>
+          <span className="block truncate text-[11px] text-ink-faint">
+            {hasGame
+              ? "already added"
+              : detectedGame
+                ? `follows the game automatically · right now ${detectedGame}`
+                : "follows the game automatically · none detected right now"}
+          </span>
+        </span>
+      </button>
 
       <div className="grid grid-cols-3 gap-6">
         <SourceColumn

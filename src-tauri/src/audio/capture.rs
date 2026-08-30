@@ -148,7 +148,7 @@ mod win {
     use super::*;
     use std::sync::mpsc::Sender;
     use windows::core::{implement, IUnknown, Interface, PCWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, E_INVALIDARG, HANDLE, S_OK, WAIT_OBJECT_0};
     use windows::Win32::Media::Audio::{
         eMultimedia, eRender, ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
         IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
@@ -432,11 +432,15 @@ mod win {
 
         let started = match kind {
             SourceKind::InputDevice { device_id } => device_client(device_id, false),
-            SourceKind::OutputDevice { device_id } => device_client(device_id, true),
+            SourceKind::OutputDevice { device_id, .. } => device_client(device_id, true),
             SourceKind::Process { pid, mode } => process_client(
                 *pid,
                 matches!(mode, crate::model::ProcessMode::Include),
             ),
+            // `resolve` turns this into a `Process` source long before the
+            // engine sees it, and drops it while no game is detected. Reaching
+            // here means an `apply` path forgot to resolve.
+            SourceKind::Game => Err(windows::core::Error::from(E_INVALIDARG)),
         };
 
         let (client, format) = match started {

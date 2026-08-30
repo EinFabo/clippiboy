@@ -32,11 +32,26 @@ pub enum ProcessMode {
     Exclude,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SourceKind {
+    /// The audio of whichever game is detected right now. Deliberately without
+    /// a PID: a stored one is dead after the first restart of the game.
+    /// [`crate::audio::resolve`] puts the current one in.
+    Game,
     #[serde(rename_all = "camelCase")]
-    OutputDevice { device_id: String },
+    OutputDevice {
+        device_id: String,
+        /// Everything on this endpoint **except** the game. Resolves to process
+        /// loopback in exclude mode; without a detected game the source falls
+        /// back to the plain endpoint, where there is no game audio anyway.
+        ///
+        /// `default` is not cosmetic: `config::load` throws away the *whole*
+        /// configuration on any deserialization error, so a new mandatory field
+        /// would cost everyone their sources, hotkeys and clip directory.
+        #[serde(default)]
+        exclude_game: bool,
+    },
     #[serde(rename_all = "camelCase")]
     InputDevice { device_id: String },
     #[serde(rename_all = "camelCase")]
@@ -320,4 +335,52 @@ pub struct EngineStatus {
     pub fps: f32,
     /// Game last detected in the foreground, `None` when none is running.
     pub game: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `config::load` throws the **whole** configuration away when it cannot be
+    /// parsed — sources, hotkeys, clip directory. A file written before
+    /// `excludeGame` existed therefore has to keep loading, or the feature costs
+    /// everyone their setup on first start.
+    #[test]
+    fn a_source_written_before_this_change_still_loads() {
+        let old = r#"{
+            "id": "src-1",
+            "label": "Headphones",
+            "kind": { "type": "outputDevice", "deviceId": "dev-1" },
+            "enabled": true,
+            "gainDb": 0.0,
+            "muted": false,
+            "solo": false,
+            "separateTrack": false
+        }"#;
+        let parsed: AudioSource = serde_json::from_str(old).expect("old source no longer loads");
+        assert_eq!(
+            parsed.kind,
+            SourceKind::OutputDevice {
+                device_id: "dev-1".into(),
+                exclude_game: false,
+            }
+        );
+    }
+
+    /// The wire format the mixer in `src/lib/types.ts` is written against.
+    #[test]
+    fn the_source_kinds_are_tagged_the_way_the_ui_expects() {
+        let json = |kind: &SourceKind| serde_json::to_string(kind).unwrap();
+        assert_eq!(json(&SourceKind::Game), r#"{"type":"game"}"#);
+        assert_eq!(
+            json(&SourceKind::OutputDevice {
+                device_id: "d".into(),
+                exclude_game: true,
+            }),
+            r#"{"type":"outputDevice","deviceId":"d","excludeGame":true}"#
+        );
+
+        let back: SourceKind = serde_json::from_str(r#"{"type":"game"}"#).unwrap();
+        assert_eq!(back, SourceKind::Game);
+    }
 }

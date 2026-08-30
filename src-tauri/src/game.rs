@@ -315,7 +315,7 @@ mod win {
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -403,8 +403,8 @@ mod win {
         }
     }
 
-    /// Exe name, window title and fullscreen flag of the foreground window.
-    pub fn foreground() -> Option<(String, String, bool)> {
+    /// PID, exe name, window title and fullscreen flag of the foreground window.
+    pub fn foreground() -> Option<(u32, String, String, bool)> {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.0.is_null() {
@@ -416,21 +416,71 @@ mod win {
                 return None;
             }
             let exe = exe_name(pid)?;
-            Some((exe, window_title(hwnd), covers_monitor(hwnd)))
+            Some((pid, exe, window_title(hwnd), covers_monitor(hwnd)))
+        }
+    }
+
+    /// `STILL_ACTIVE` — the exit code of a process that has not exited.
+    const STILL_ACTIVE: u32 = 259;
+
+    /// Is this still the same running process?
+    ///
+    /// `OpenProcess` alone does not answer that: it succeeds for a long-dead
+    /// process as long as someone still holds a handle. And the exe has to
+    /// match, because Windows reuses PIDs — without that check the game track
+    /// would eventually follow whatever program inherited the number.
+    pub fn still_running(pid: u32, exe: &str) -> bool {
+        unsafe {
+            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return false;
+            };
+            let mut code = 0u32;
+            let alive = GetExitCodeProcess(handle, &mut code).is_ok() && code == STILL_ACTIVE;
+            let _ = CloseHandle(handle);
+            alive && exe_name(pid).is_some_and(|now| now.eq_ignore_ascii_case(exe))
         }
     }
 }
 
-/// Which game is in the foreground right now? `None` if none is recognizable.
+/// A recognized game in the foreground, with the process behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Detected {
+    pub name: String,
+    pub pid: u32,
+    pub exe: String,
+}
+
+/// Which game is in the foreground right now, and which process is it?
+///
+/// The PID is what lets the audio source follow the game instead of hanging on
+/// a number that dies with it.
 #[cfg(windows)]
-pub fn detect() -> Option<String> {
-    let (exe, title, fullscreen) = win::foreground()?;
-    resolve_name(&exe, &title, fullscreen)
+pub fn detect_detailed() -> Option<Detected> {
+    let (pid, exe, title, fullscreen) = win::foreground()?;
+    let name = resolve_name(&exe, &title, fullscreen)?;
+    Some(Detected { name, pid, exe })
 }
 
 #[cfg(not(windows))]
-pub fn detect() -> Option<String> {
+pub fn detect_detailed() -> Option<Detected> {
     None
+}
+
+/// Which game is in the foreground right now? `None` if none is recognizable.
+pub fn detect() -> Option<String> {
+    detect_detailed().map(|game| game.name)
+}
+
+/// Is the process the game audio is bound to still the same one?
+#[cfg(windows)]
+pub fn still_running(pid: u32, exe: &str) -> bool {
+    win::still_running(pid, exe)
+}
+
+#[cfg(not(windows))]
+pub fn still_running(pid: u32, exe: &str) -> bool {
+    let _ = (pid, exe);
+    false
 }
 
 /// Centre of the foreground window — for the overlay's monitor choice.

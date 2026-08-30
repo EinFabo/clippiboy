@@ -29,7 +29,8 @@ afterwards. In ClippiBoy itself, without an editor.
 | | |
 |---|---|
 | **Replay buffer** | One encoder runs continuously, the packets live in memory, saving cuts them out — nothing is re-encoded |
-| **Per-source audio** | Devices, applications and microphones side by side, each with gain, mute, solo and a live level |
+| **Per-source audio** | The detected game, devices, applications and microphones side by side, each with gain, mute, solo and a live level |
+| **Game on its own** | The game's audio follows the detected game by itself and can be left out of the desktop track, so the two never overlap |
 | **Separate tracks** | Sources with their own track are written alongside the clip; the mix stays changeable afterwards |
 | **Zero-copy capture** | The picture goes from Windows.Graphics.Capture into the hardware encoder as a D3D11 texture |
 | **Clip editing** | Name, description, game, track mix and a frame-accurate trim — all inside the app |
@@ -141,12 +142,29 @@ already taken.
 
 <div align="center"><img src="docs/audio.svg" alt="Audio routing: sources through the mixer into the main mix and separate tracks" width="900"></div>
 
-Three source types, combinable at will:
+Four source types, combinable at will:
 
-* **Output device (loopback)** — an endpoint's complete audio
+* **The game** — whatever game detection has found, on its own track. It
+  follows the game by itself: no PID to pick, and a restart of the game
+  does not break it. It also holds on while you alt-tab away, and only lets go
+  once the process is really gone.
+* **Output device (loopback)** — an endpoint's complete audio, optionally
+  **without the game**
 * **Application** — process loopback via `ActivateAudioInterfaceAsync`, so
   Discord can sit apart from the game (needs Windows 11, build 20348+)
 * **Input device** — microphone
+
+Nothing is filtered out of a finished mix — that would leave residue. Windows
+mixes the applications together only at the very end, and process loopback taps
+*before* that: the game and everything-except-the-game are two independent taps
+of the same source, cleanly apart. Playback is untouched, you keep hearing
+everything.
+
+Two things to know about leaving the game out. The exclude tap is not tied to an
+endpoint — it is "everything except that process tree", so with the game on
+headphones and music on speakers it catches both; the mixer says so on the
+source. And while no game is detected there is nothing to leave out, so the
+source falls back to the plain endpoint and the device choice applies again.
 
 Every source has gain, mute, solo and a live level. Sources without *own track*
 run into the main mix; the others are written along in parallel and land beside
@@ -542,7 +560,7 @@ src-tauri/src/
   audio/engine.rs             running streams, levels, mixing
   audio/ring.rs               ring buffer per source (+ unit tests)
   audio/devices.rs            WASAPI endpoints and processes with an audio session
-  audio/mod.rs                track layout, gain (+ unit tests)
+  audio/mod.rs                track layout, source resolution, gain (+ unit tests)
   capture.rs                  monitors and windows as capture targets, incl. Hz
   game.rs                     game detection (+ unit tests)
   games.json                  exe → game name

@@ -23,6 +23,13 @@ pub struct AppState {
     pub shared: Mutex<Option<Arc<Shared>>>,
     /// Foreground game last detected, updated continuously.
     pub current_game: Mutex<Option<String>>,
+    /// The process the game audio source is bound to, with its exe name.
+    ///
+    /// Deliberately stickier than `current_game`: detection looks at the
+    /// foreground window, so alt-tabbing into a browser must not tear the game's
+    /// audio stream down. The exe is kept for the liveness check — Windows
+    /// reuses PIDs.
+    game_pid: Mutex<Option<(u32, String)>>,
     /// The game that was running when the buffer last ran — the name on the
     /// clip.
     ///
@@ -170,7 +177,9 @@ impl AppState {
         // The sources run from startup — that is the only way the mixer shows
         // real levels even before the buffer is active.
         let audio = Arc::new(AudioEngine::new());
-        audio.apply(&config.sources);
+        // No game is being tracked yet, so a game source simply has nothing to
+        // bind to; the first status tick brings it up.
+        audio.apply(&crate::audio::resolve(&config.sources, None));
 
         Self {
             config: Mutex::new(config),
@@ -180,6 +189,7 @@ impl AppState {
             pipeline: Mutex::new(None),
             shared: Mutex::new(None),
             current_game: Mutex::new(None),
+            game_pid: Mutex::new(None),
             buffering_game: Mutex::new(None),
             quitting: std::sync::atomic::AtomicBool::new(false),
             auto: AutoBuffer::default(),
@@ -193,21 +203,48 @@ impl AppState {
         self.config.lock().clone()
     }
 
+    /// The process the game audio currently follows.
+    pub fn game_pid(&self) -> Option<u32> {
+        self.game_pid.lock().as_ref().map(|(pid, _)| *pid)
+    }
+
+    /// The sources as the engine has to see them — game bindings replaced by the
+    /// process actually running.
+    ///
+    /// Everything that talks to [`AudioEngine`] goes through here. A path that
+    /// forgot to resolve would try to open a `SourceKind::Game`, which no
+    /// WASAPI call can do.
+    pub fn resolved_sources(&self) -> Vec<AudioSource> {
+        crate::audio::resolve(&self.config.lock().sources, self.game_pid())
+    }
+
+    /// Bring the running streams in line with config and detected game.
+    ///
+    /// Blocking — callers on the status tick take
+    /// [`AudioEngine::apply_async`] instead.
+    pub fn apply_audio(&self) {
+        let sources = self.resolved_sources();
+        self.audio.apply(&sources);
+    }
+
     /// Replace the config, write it to disk and pull the dependent parts along
     /// (buffer length and audio sources). The video source of a running
     /// recording is changed by `commands::set_config` — the restart can be
     /// reported there too.
     pub fn replace_config(&self, mut next: AppConfig) -> AppConfig {
         next.recording.encoder = crate::encode::resolve(next.recording.encoder);
-        self.audio.apply(&next.sources);
-        // If a recording is running it has to learn about the changed sources
-        // too — otherwise it mixes the old ones until the next restart.
-        if let Some(shared) = self.shared.lock().as_ref() {
-            shared.set_sources(next.sources.clone());
-        }
         {
             let mut guard = self.config.lock();
             *guard = next.clone();
+        }
+        self.apply_audio();
+        // If a recording is running it has to learn about the changed sources
+        // too — otherwise it mixes the old ones until the next restart. It gets
+        // the **unresolved** ones: it only needs id, gain, mute, solo and the
+        // track flag, and that way a game source keeps its track even while no
+        // game is running.
+        if let Some(shared) = self.shared.lock().as_ref() {
+            shared.set_sources(next.sources.clone());
         }
         if let Err(err) = config::save(&next) {
             log::error!("could not save the config: {err}");
@@ -316,13 +353,38 @@ impl AppState {
     /// While buffering, only a real detection overwrites the remembered name —
     /// switching from the game to the desktop still leaves the clip assigned to
     /// the game.
-    pub fn track_game(&self) -> Option<String> {
-        let detected = crate::game::detect();
-        *self.current_game.lock() = detected.clone();
-        if detected.is_some() && self.status.lock().buffer_active {
-            *self.buffering_game.lock() = detected.clone();
+    ///
+    /// Returns the detected name and whether the process the game audio is bound
+    /// to has changed — the caller then has to rebuild the streams.
+    pub fn track_game(&self) -> (Option<String>, bool) {
+        let detected = crate::game::detect_detailed();
+        let name = detected.as_ref().map(|game| game.name.clone());
+        *self.current_game.lock() = name.clone();
+        if name.is_some() && self.status.lock().buffer_active {
+            *self.buffering_game.lock() = name.clone();
         }
-        detected
+
+        // The binding outlives the detection: leaving the game for the browser
+        // must not silence the game track. Only the end of the process releases
+        // it — and the exe has to still match, because Windows reuses PIDs.
+        let mut bound = self.game_pid.lock();
+        let before = bound.as_ref().map(|(pid, _)| *pid);
+        match detected {
+            Some(game) => *bound = Some((game.pid, game.exe)),
+            None => {
+                let alive = bound
+                    .as_ref()
+                    .is_some_and(|(pid, exe)| crate::game::still_running(*pid, exe));
+                if !alive {
+                    *bound = None;
+                }
+            }
+        }
+        let now = bound.as_ref().map(|(pid, _)| *pid);
+        if now != before {
+            log::info!("game audio now follows {now:?} (was {before:?})");
+        }
+        (name, now != before)
     }
 
     /// Carry the running recording's current metrics into the status.
