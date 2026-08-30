@@ -23,11 +23,12 @@ export type SourceKind =
       type: "outputDevice";
       deviceId: string;
       /**
-       * Everything on this device except the game. Optional on purpose: an
-       * older config does not carry the field, and a config the backend cannot
-       * read is thrown away whole.
+       * Only what no other source records. The backend then builds the source
+       * from one tap per application instead of taking the device as a whole.
+       * Optional on purpose: an older config does not carry the field, and a
+       * config the backend cannot read is thrown away whole.
        */
-      excludeGame?: boolean;
+      leftoversOnly?: boolean;
     }
   | { type: "inputDevice"; deviceId: string }
   | { type: "process"; pid: number; mode: "include" | "exclude" };

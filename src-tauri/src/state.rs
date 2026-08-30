@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::audio::engine::AudioEngine;
+use crate::audio::Stream;
 use crate::clips::Library;
 use crate::config;
 use crate::pipeline::{Pipeline, Shared};
@@ -179,7 +180,8 @@ impl AppState {
         let audio = Arc::new(AudioEngine::new());
         // No game is being tracked yet, so a game source simply has nothing to
         // bind to; the first status tick brings it up.
-        audio.apply(&crate::audio::resolve(&config.sources, None));
+        let playing = crate::audio::playing_now(&config.sources);
+        audio.apply(&crate::audio::resolve(&config.sources, None, &playing));
 
         Self {
             config: Mutex::new(config),
@@ -208,23 +210,27 @@ impl AppState {
         self.game_pid.lock().as_ref().map(|(pid, _)| *pid)
     }
 
-    /// The sources as the engine has to see them — game bindings replaced by the
-    /// process actually running.
+    /// The streams the engine has to run: the game binding filled in with the
+    /// process actually running, and the leftovers source spread across the
+    /// applications nothing else records.
     ///
     /// Everything that talks to [`AudioEngine`] goes through here. A path that
     /// forgot to resolve would try to open a `SourceKind::Game`, which no
     /// WASAPI call can do.
-    pub fn resolved_sources(&self) -> Vec<AudioSource> {
-        crate::audio::resolve(&self.config.lock().sources, self.game_pid())
+    pub fn audio_streams(&self) -> Vec<Stream> {
+        let sources = self.config.lock().sources.clone();
+        let playing = crate::audio::playing_now(&sources);
+        crate::audio::resolve(&sources, self.game_pid(), &playing)
     }
 
-    /// Bring the running streams in line with config and detected game.
+    /// Bring the running streams in line with config, detected game and what is
+    /// playing right now.
     ///
     /// Blocking — callers on the status tick take
-    /// [`AudioEngine::apply_async`] instead.
+    /// [`AudioEngine::apply_if_changed`] instead.
     pub fn apply_audio(&self) {
-        let sources = self.resolved_sources();
-        self.audio.apply(&sources);
+        let streams = self.audio_streams();
+        self.audio.apply(&streams);
     }
 
     /// Replace the config, write it to disk and pull the dependent parts along

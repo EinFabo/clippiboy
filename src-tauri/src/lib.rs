@@ -387,17 +387,17 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // not plugged in at program start would otherwise not run along until
             // the next restart.
             if tick % 200 == 0 {
-                state.audio.retry_failed(state.resolved_sources());
+                state.audio.retry_failed(state.audio_streams());
             }
             // Every 2 s, look which game is running in the foreground.
             if tick % 40 == 0 {
-                let (game, followed_game_changed) = state.track_game();
-                // The game audio has to move to the new process. Off-thread:
-                // rebuilding a stream blocks for up to five seconds, and the
-                // levels above run on this very thread.
-                if followed_game_changed {
-                    state.audio.apply_async(state.resolved_sources());
-                }
+                let (game, _) = state.track_game();
+                // Whatever moved — the game to a new process, an application
+                // that started playing and now belongs in the leftovers — the
+                // streams follow. Off-thread and only on a real change:
+                // rebuilding blocks for up to five seconds, and the levels above
+                // run on this very thread.
+                state.audio.apply_if_changed(state.audio_streams());
                 apply_auto_buffer(&handle, game.as_ref());
             }
             // If the recording reports a problem, somebody has to hear about it.

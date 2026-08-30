@@ -44,12 +44,9 @@ function sourceHint(
     case "inputDevice":
       return `Input · ${deviceName(kind.deviceId)}`;
     case "outputDevice":
-      if (!kind.excludeGame) return `Output (loopback) · ${deviceName(kind.deviceId)}`;
-      // Process loopback is not tied to an endpoint, so saying "headphones
-      // minus game" here would be a promise the API does not keep.
-      return game
-        ? `Everything except ${game} · not limited to one device`
-        : `Output (loopback) · ${deviceName(kind.deviceId)} — no game to leave out`;
+      return kind.leftoversOnly
+        ? `Leftovers · ${deviceName(kind.deviceId)} minus everything recorded separately`
+        : `Output (loopback) · ${deviceName(kind.deviceId)}`;
     case "process":
       return kind.mode === "include"
         ? `Application · PID ${kind.pid}`
@@ -85,8 +82,9 @@ export function AudioMixer() {
         <p className="mt-3 max-w-lg text-[15px] leading-relaxed text-white/70">
           Any number of sources at once: the detected game, output devices,
           individual applications and microphones. Each source can run into the
-          main mix or onto a track of its own in the clip — and an output device
-          can leave the game out, so the two never end up on top of each other.
+          main mix or onto a track of its own — and an output device can be
+          limited to the leftovers, so nothing you record separately ends up in
+          it a second time.
         </p>
       </header>
 
@@ -106,7 +104,7 @@ export function AudioMixer() {
         />
 
         <MixedInHint sources={config.sources} onFix={upsertSource} />
-        <DoubledGameHint sources={config.sources} onFix={upsertSource} />
+        <DoubledHint sources={config.sources} onFix={upsertSource} />
 
         {adding && (
           <AddSourcePanel
@@ -224,13 +222,16 @@ export function AudioMixer() {
                     </MiniToggle>
                     {output && (
                       <MiniToggle
-                        active={output.excludeGame === true}
+                        active={output.leftoversOnly === true}
                         activeClass="bg-accent/25 text-accent-bright"
-                        title="Leave the game out of this track"
+                        title="Only what no other source records"
                         onClick={() =>
                           upsertSource({
                             ...source,
-                            kind: { ...output, excludeGame: !output.excludeGame },
+                            kind: {
+                              ...output,
+                              leftoversOnly: !output.leftoversOnly,
+                            },
                           })
                         }
                       >
@@ -269,9 +270,10 @@ export function AudioMixer() {
       </section>
 
       <p className="pb-4 text-xs leading-relaxed text-ink-faint">
-        The game, application sources and “leave the game out” all use process
-        loopback (Windows 10 build 20348+). On older systems only capturing whole
-        output devices is available.
+        The game, application sources and the leftovers all use process loopback
+        (Windows 10 build 20348+). On older systems only capturing whole output
+        devices is available. The leftovers follow what is playing: an
+        application that starts is picked up within two seconds.
       </p>
 
       <AvailableSources processes={processes} />
@@ -362,33 +364,39 @@ function MixedInHint({
 }
 
 /**
- * A game source next to a plain endpoint loopback means the game is in the clip
- * twice — once on its own track, once inside the main mix. Nothing about that is
- * visible while recording; it only shows up when the game track is muted in the
- * editor and the game keeps playing.
+ * A whole output device next to sources that record single applications means
+ * those applications are in the clip twice — once on their own track, once
+ * inside the device's. Nothing about that is visible while recording: it shows
+ * up as a doubled level, and as a track that cannot be muted away afterwards
+ * because the sound is in the main mix as well.
  */
-function DoubledGameHint({
+function DoubledHint({
   sources,
   onFix,
 }: {
   sources: AudioSource[];
   onFix: (source: AudioSource) => Promise<void>;
 }) {
-  const hasGame = sources.some((s) => s.kind.type === "game" && s.enabled);
-  const doubled = sources.filter(
-    (s) => s.enabled && s.kind.type === "outputDevice" && !s.kind.excludeGame,
+  const separately = sources.filter(
+    (s) => s.enabled && (s.kind.type === "game" || s.kind.type === "process"),
   );
-  if (!hasGame || doubled.length === 0) return null;
+  const whole = sources.filter(
+    (s) => s.enabled && s.kind.type === "outputDevice" && !s.kind.leftoversOnly,
+  );
+  if (separately.length === 0 || whole.length === 0) return null;
 
   return (
     <Card className="mb-4 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
       <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-muted">
-        The game is recorded twice: on its own track and inside{" "}
         <span className="font-medium text-ink">
-          {doubled.map((s) => s.label).join(", ")}
+          {separately.map((s) => s.label).join(", ")}
+        </span>{" "}
+        {separately.length === 1 ? "is" : "are"} recorded twice — once on{" "}
+        {separately.length === 1 ? "its" : "their"} own track and once inside{" "}
+        <span className="font-medium text-ink">
+          {whole.map((s) => s.label).join(", ")}
         </span>
-        . Leaving it out there gives you the game and everything else cleanly
-        apart.
+        . Switching that source to the leftovers keeps every track apart.
       </p>
       <Button
         size="sm"
@@ -396,16 +404,16 @@ function DoubledGameHint({
         // One after another, like above: each call answers with the whole
         // config, so in parallel the last answer would swallow the others.
         onClick={async () => {
-          for (const source of doubled) {
+          for (const source of whole) {
             if (source.kind.type !== "outputDevice") continue;
             await onFix({
               ...source,
-              kind: { ...source.kind, excludeGame: true },
+              kind: { ...source.kind, leftoversOnly: true },
             });
           }
         }}
       >
-        Leave the game out
+        Record only the leftovers
       </Button>
     </Card>
   );

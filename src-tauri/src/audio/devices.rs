@@ -98,27 +98,65 @@ mod win {
         }
     }
 
-    /// Every process holding an audio session on the default output device.
-    pub fn list_processes() -> Vec<AudioProcess> {
+    /// The sessions on `device_id` — empty string for the default output device.
+    fn sessions_of(device_id: &str) -> Option<IAudioSessionEnumerator> {
         ensure_com();
         unsafe {
-            let Ok(enumerator) =
+            let enumerator =
                 CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            else {
-                return Vec::new();
+                    .ok()?;
+            let device = if device_id.is_empty() {
+                enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)
+            } else {
+                let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+                enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr()))
             };
-            let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) else {
-                return Vec::new();
-            };
-            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else {
-                return Vec::new();
-            };
-            let Ok(sessions): windows::core::Result<IAudioSessionEnumerator> =
-                manager.GetSessionEnumerator()
-            else {
-                return Vec::new();
-            };
+            device
+                .ok()?
+                .Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
+                .ok()?
+                .GetSessionEnumerator()
+                .ok()
+        }
+    }
 
+    /// The PIDs holding an audio session on `device_id`.
+    ///
+    /// Deliberately without process names: `GetProcessId` needs no handle on the
+    /// process at all, so unlike [`list_processes`] this also sees games running
+    /// as administrator. That matters here — this list decides what the
+    /// leftovers track is built from, and a missing entry means missing audio.
+    pub fn session_pids(device_id: &str) -> Vec<u32> {
+        let Some(sessions) = sessions_of(device_id) else {
+            return Vec::new();
+        };
+        unsafe {
+            let count = sessions.GetCount().unwrap_or(0);
+            let mut out: Vec<u32> = Vec::new();
+            for index in 0..count {
+                let Ok(control) = sessions.GetSession(index) else {
+                    continue;
+                };
+                let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+                    continue;
+                };
+                let Ok(pid) = control2.GetProcessId() else {
+                    continue;
+                };
+                if pid != 0 && !out.contains(&pid) {
+                    out.push(pid);
+                }
+            }
+            out
+        }
+    }
+
+    /// Every process holding an audio session on the default output device.
+    pub fn list_processes() -> Vec<AudioProcess> {
+        let Some(sessions) = sessions_of("") else {
+            return Vec::new();
+        };
+        unsafe {
             let count = sessions.GetCount().unwrap_or(0);
             let mut seen: Vec<u32> = Vec::new();
             let mut out = Vec::new();
@@ -160,6 +198,19 @@ mod win {
 #[cfg(windows)]
 pub fn list_devices() -> Vec<AudioDevice> {
     win::list_devices()
+}
+
+/// The PIDs playing on this output device right now — `""` for the default one.
+/// What the leftovers track is assembled from.
+#[cfg(windows)]
+pub fn session_pids(device_id: &str) -> Vec<u32> {
+    win::session_pids(device_id)
+}
+
+#[cfg(not(windows))]
+pub fn session_pids(device_id: &str) -> Vec<u32> {
+    let _ = device_id;
+    Vec::new()
 }
 
 #[cfg(windows)]

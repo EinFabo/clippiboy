@@ -8,42 +8,98 @@ pub mod ring;
 
 use crate::model::{AudioSource, ProcessMode, SourceKind};
 
-/// Turns the stored, abstract sources into the concrete ones the engine can
-/// open. `id` and every mixer setting survive untouched — only `kind` is
-/// replaced — so levels, [`TrackLayout`] and the stems all keep working off the
-/// unresolved configuration.
+/// One WASAPI client the engine has to run, and the mixer source it feeds.
 ///
-/// Without a detected game the game source **drops out** rather than staying on
-/// disabled: only that way does `AudioEngine::apply` stop its stream instead of
-/// reporting a source that cannot start. In the configuration it stays enabled,
-/// keeps its `TrackRing` and therefore its track — the mixer pushes silence into
-/// it until a game turns up.
-pub fn resolve(sources: &[AudioSource], game_pid: Option<u32>) -> Vec<AudioSource> {
+/// Several streams can carry the same `source_id`: the leftovers track is one
+/// process loopback per application, because Windows can only ever name a single
+/// process per client.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stream {
+    pub source_id: String,
+    pub kind: SourceKind,
+}
+
+/// Which processes the leftovers source has to be assembled from.
+///
+/// Empty when no enabled source asks for them — the session enumeration is a COM
+/// round trip, and this runs on the two-second tick.
+pub fn playing_now(sources: &[AudioSource]) -> Vec<u32> {
+    sources
+        .iter()
+        .find_map(|source| match &source.kind {
+            SourceKind::OutputDevice {
+                device_id,
+                leftovers_only: true,
+            } if source.enabled => Some(devices::session_pids(device_id)),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Turns the stored, abstract sources into the streams the engine can open.
+///
+/// `playing` are the processes currently holding a session on the leftovers
+/// source's output device.
+///
+/// Two things cannot be expressed in the configuration and are only decided
+/// here:
+///
+/// * **The game.** Its PID would be dead after the first restart of the game, so
+///   it is filled in from the live detection. Without a detected game the source
+///   **drops out** rather than staying on disabled — only that way does
+///   `AudioEngine::apply` stop its stream instead of reporting a source that
+///   cannot start. In the configuration it stays enabled, keeps its `TrackRing`
+///   and therefore its track; the mixer pushes silence into it until a game
+///   turns up.
+///
+/// * **The leftovers.** Windows has no "everything except these three" tap:
+///   `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names exactly one process. So the
+///   leftovers are not taken as one endpoint loopback but assembled from one tap
+///   per application that no other source already records. Otherwise Discord
+///   would sit in the clip twice — once on its own track and once inside the
+///   main mix.
+pub fn resolve(sources: &[AudioSource], game_pid: Option<u32>, playing: &[u32]) -> Vec<Stream> {
+    let enabled = || sources.iter().filter(|s| s.enabled);
+
+    // Everything another source already records, plus ClippiBoy itself: playing
+    // a clip back while the buffer runs must not end up in the next one.
+    let mut claimed: Vec<u32> = vec![std::process::id()];
+    for source in enabled() {
+        match &source.kind {
+            SourceKind::Game => claimed.extend(game_pid),
+            SourceKind::Process {
+                pid,
+                mode: ProcessMode::Include,
+            } => claimed.push(*pid),
+            _ => {}
+        }
+    }
+
     let mut out = Vec::with_capacity(sources.len());
-    for source in sources {
-        let kind = match (&source.kind, game_pid) {
-            (SourceKind::Game, Some(pid)) => SourceKind::Process {
+    for source in enabled() {
+        let include = |pid: u32| Stream {
+            source_id: source.id.clone(),
+            kind: SourceKind::Process {
                 pid,
                 mode: ProcessMode::Include,
             },
-            (SourceKind::Game, None) => continue,
-            (
-                SourceKind::OutputDevice {
-                    exclude_game: true, ..
-                },
-                Some(pid),
-            ) => SourceKind::Process {
-                pid,
-                mode: ProcessMode::Exclude,
-            },
-            // No game, nothing to leave out: the endpoint carries no game audio
-            // anyway, and this way the device choice applies again.
-            (other, _) => other.clone(),
         };
-        out.push(AudioSource {
-            kind,
-            ..source.clone()
-        });
+        match &source.kind {
+            SourceKind::Game => out.extend(game_pid.map(include)),
+            SourceKind::OutputDevice {
+                leftovers_only: true,
+                ..
+            } => out.extend(
+                playing
+                    .iter()
+                    .filter(|pid| !claimed.contains(pid))
+                    .map(|pid| include(*pid)),
+            ),
+            other => out.push(Stream {
+                source_id: source.id.clone(),
+                kind: other.clone(),
+            }),
+        }
     }
     out
 }
@@ -137,42 +193,41 @@ mod tests {
         }
     }
 
-    fn output(device_id: &str, exclude_game: bool) -> SourceKind {
+    fn output(device_id: &str, leftovers_only: bool) -> SourceKind {
         SourceKind::OutputDevice {
             device_id: device_id.into(),
-            exclude_game,
+            leftovers_only,
         }
+    }
+
+    fn include(pid: u32) -> SourceKind {
+        SourceKind::Process {
+            pid,
+            mode: ProcessMode::Include,
+        }
+    }
+
+    /// The PIDs of one source, so a test does not depend on the order the
+    /// session enumeration happens to return.
+    fn pids_of(streams: &[Stream], source_id: &str) -> Vec<u32> {
+        let mut out: Vec<u32> = streams
+            .iter()
+            .filter(|s| s.source_id == source_id)
+            .filter_map(|s| match s.kind {
+                SourceKind::Process { pid, .. } => Some(pid),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     #[test]
     fn the_game_source_takes_the_detected_pid() {
-        let sources = vec![of_kind("game", SourceKind::Game)];
-        let resolved = resolve(&sources, Some(4711));
-        assert_eq!(
-            resolved[0].kind,
-            SourceKind::Process {
-                pid: 4711,
-                mode: ProcessMode::Include
-            }
-        );
-    }
-
-    /// Everything the mixer, the levels and the stems key off has to survive —
-    /// only `kind` may change.
-    #[test]
-    fn resolving_touches_nothing_but_the_kind() {
-        let mut original = of_kind("game", SourceKind::Game);
-        original.label = "Apex Legends".into();
-        original.gain_db = -4.5;
-        original.solo = true;
-        let resolved = resolve(std::slice::from_ref(&original), Some(1));
-
-        assert_eq!(resolved[0].id, original.id);
-        assert_eq!(resolved[0].label, original.label);
-        assert_eq!(resolved[0].gain_db, original.gain_db);
-        assert!(resolved[0].solo);
-        assert!(resolved[0].separate_track);
-        assert!(resolved[0].enabled);
+        let streams = resolve(&[of_kind("game", SourceKind::Game)], Some(4711), &[]);
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].source_id, "game");
+        assert_eq!(streams[0].kind, include(4711));
     }
 
     /// Not "disabled but present": only dropping it makes `apply` stop the
@@ -183,29 +238,51 @@ mod tests {
             of_kind("game", SourceKind::Game),
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
         ];
-        let resolved = resolve(&sources, None);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].id, "mic");
+        let streams = resolve(&sources, None, &[]);
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].source_id, "mic");
     }
 
+    /// Windows names one process per client, so the leftovers are not one tap
+    /// but many.
     #[test]
-    fn an_excluding_output_becomes_process_loopback() {
-        let sources = vec![of_kind("desktop", output("headphones", true))];
-        let resolved = resolve(&sources, Some(99));
-        assert_eq!(
-            resolved[0].kind,
-            SourceKind::Process {
-                pid: 99,
-                mode: ProcessMode::Exclude
-            }
-        );
+    fn the_leftovers_become_one_stream_per_application() {
+        let sources = vec![of_kind("rest", output("headphones", true))];
+        let streams = resolve(&sources, None, &[10, 11, 12]);
+        assert_eq!(pids_of(&streams, "rest"), vec![10, 11, 12]);
     }
 
+    /// The whole point: what another source already records must not land in
+    /// the leftovers as well, or it sits in the clip twice.
     #[test]
-    fn without_a_game_the_output_keeps_its_device() {
-        let sources = vec![of_kind("desktop", output("headphones", true))];
-        let resolved = resolve(&sources, None);
-        assert_eq!(resolved[0].kind, output("headphones", true));
+    fn the_leftovers_leave_out_what_is_recorded_elsewhere() {
+        let sources = vec![
+            of_kind("game", SourceKind::Game),
+            of_kind("discord", include(11)),
+            of_kind("rest", output("headphones", true)),
+        ];
+        let streams = resolve(&sources, Some(10), &[10, 11, 12, 13]);
+        assert_eq!(pids_of(&streams, "rest"), vec![12, 13]);
+        assert_eq!(pids_of(&streams, "game"), vec![10]);
+        assert_eq!(pids_of(&streams, "discord"), vec![11]);
+    }
+
+    /// Playing a clip back while the buffer runs must not end up in the next
+    /// one.
+    #[test]
+    fn the_leftovers_never_record_clippiboy_itself() {
+        let sources = vec![of_kind("rest", output("headphones", true))];
+        let own = std::process::id();
+        let streams = resolve(&sources, None, &[own, own + 1]);
+        assert_eq!(pids_of(&streams, "rest"), vec![own + 1]);
+    }
+
+    /// A disabled source that still held a stream would keep recording.
+    #[test]
+    fn disabled_sources_produce_no_streams() {
+        let mut source = of_kind("mic", SourceKind::InputDevice { device_id: "m".into() });
+        source.enabled = false;
+        assert!(resolve(&[source], Some(1), &[2]).is_empty());
     }
 
     #[test]
@@ -213,32 +290,35 @@ mod tests {
         let sources = vec![
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
             of_kind("desktop", output("speakers", false)),
-            of_kind(
-                "discord",
-                SourceKind::Process {
-                    pid: 7,
-                    mode: ProcessMode::Include,
-                },
-            ),
+            of_kind("discord", include(7)),
         ];
-        let resolved = resolve(&sources, Some(1234));
-        for (before, after) in sources.iter().zip(&resolved) {
+        let streams = resolve(&sources, Some(1234), &[7, 8]);
+        assert_eq!(streams.len(), 3);
+        for (before, after) in sources.iter().zip(&streams) {
+            assert_eq!(before.id, after.source_id);
             assert_eq!(before.kind, after.kind);
         }
     }
 
     /// The layout must not shift underneath the recording just because a game
     /// started — otherwise the clip would suddenly have a track more or less.
+    /// It is built from the stored sources, so resolving may not touch it.
     #[test]
-    fn resolving_does_not_move_the_tracks() {
+    fn every_track_of_the_layout_has_its_streams() {
         let sources = vec![
             of_kind("game", SourceKind::Game),
-            of_kind("desktop", output("headphones", true)),
+            of_kind("rest", output("headphones", true)),
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
         ];
-        let plain = TrackLayout::from_sources(&sources);
-        let running = TrackLayout::from_sources(&resolve(&sources, Some(5)));
-        assert_eq!(plain.separate, running.separate);
-        assert_eq!(plain.track_count(), running.track_count());
+        let layout = TrackLayout::from_sources(&sources);
+        assert_eq!(layout.track_count(), 3);
+
+        let streams = resolve(&sources, Some(10), &[10, 12]);
+        for id in &layout.separate {
+            assert!(
+                streams.iter().any(|s| &s.source_id == id),
+                "track '{id}' has no stream"
+            );
+        }
     }
 }

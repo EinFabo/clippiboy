@@ -42,15 +42,16 @@ pub enum SourceKind {
     #[serde(rename_all = "camelCase")]
     OutputDevice {
         device_id: String,
-        /// Everything on this endpoint **except** the game. Resolves to process
-        /// loopback in exclude mode; without a detected game the source falls
-        /// back to the plain endpoint, where there is no game audio anyway.
+        /// Only what no other source records — the game and every separately
+        /// captured application left out. [`crate::audio::resolve`] then builds
+        /// the source from one process loopback per remaining application
+        /// instead of taking the endpoint as a whole.
         ///
         /// `default` is not cosmetic: `config::load` throws away the *whole*
         /// configuration on any deserialization error, so a new mandatory field
         /// would cost everyone their sources, hotkeys and clip directory.
         #[serde(default)]
-        exclude_game: bool,
+        leftovers_only: bool,
     },
     #[serde(rename_all = "camelCase")]
     InputDevice { device_id: String },
@@ -362,7 +363,7 @@ mod tests {
             parsed.kind,
             SourceKind::OutputDevice {
                 device_id: "dev-1".into(),
-                exclude_game: false,
+                leftovers_only: false,
             }
         );
     }
@@ -375,9 +376,9 @@ mod tests {
         assert_eq!(
             json(&SourceKind::OutputDevice {
                 device_id: "d".into(),
-                exclude_game: true,
+                leftovers_only: true,
             }),
-            r#"{"type":"outputDevice","deviceId":"d","excludeGame":true}"#
+            r#"{"type":"outputDevice","deviceId":"d","leftoversOnly":true}"#
         );
 
         let back: SourceKind = serde_json::from_str(r#"{"type":"game"}"#).unwrap();
