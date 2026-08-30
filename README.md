@@ -142,55 +142,46 @@ already taken.
 
 <div align="center"><img src="docs/audio.svg" alt="Audio routing: sources through the mixer into the main mix and separate tracks" width="900"></div>
 
-Five source types:
+Four source types:
 
 * **The game** — whatever game detection has found, on its own track. It
   follows the game by itself: no PID to pick, and a restart of the game
   does not break it. It also holds on while you alt-tab away, and only lets go
   once the process is really gone.
-* **Everything else** — whatever no other source records; the background the
-  others are lifted out of
+* **Output device (loopback)** — an endpoint's complete audio, or with **⊘** only
+  what no other source records
 * **Application** — process loopback via `ActivateAudioInterfaceAsync`, so
   Discord can sit apart from the game (needs Windows 11, build 20348+)
 * **Input device** — microphone
-* **Output device (loopback)** — an endpoint's complete audio
 
 Nothing is filtered out of a finished mix — that would leave residue. Windows
 mixes the applications together only at the very end, and process loopback taps
 *before* that. Every source is an independent tap, cleanly apart from the others.
 Playback is untouched, you keep hearing everything.
 
-### Separate by application **or** by device, never both
+### ⊘ — only the leftovers
 
-This is the one rule worth knowing. **ClippiBoy separates by process, and a
-process tap does not know about devices.** `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`
-names a process and nothing else, and Microsoft says so plainly: *"The capture is
-not tied to a specific audio endpoint."*
+Without it, an application that has its own track is in the clip **twice**: once
+as its own track, once inside the device's. Muting that track afterwards then
+does not remove the sound, because it is in the main mix as well.
 
-So if the game runs on its own track and a whole output device is recorded
-alongside, the game is in the clip **twice** — once as its own track and once
-inside the device's. Muting the game track afterwards then does not remove the
-sound, because it is in the main mix as well. The mixer notices that combination
-and offers to switch the device off.
+⊘ turns the source from one endpoint loopback into one tap per application on
+that device that nothing else records. Applications are grouped by process tree,
+because a tap covers a process *and its children* — Discord holds two sessions in
+two child processes and is still recorded exactly once. ClippiBoy leaves itself
+out, so previewing a clip while the buffer runs does not end up in the next one.
 
-Anyone separating in hardware — a GoXLR routes applications to its own virtual
-outputs — should take those outputs as plain device loopback and add *no*
-application sources. Everyone else takes "everything else" plus whatever deserves
-its own track.
-
-**Everything else** is the piece that makes separate tracks worth anything.
-Since Windows offers no "everything except these three" tap, it is not one
-endpoint loopback but one tap per application that nothing else records, assembled
-from the sessions on **all** output devices — otherwise anything routed elsewhere
-would go missing. Applications are grouped by process tree, because a tap covers a
-process *and its children*: Discord holds two sessions in two child processes and
-is still recorded exactly once. ClippiBoy leaves itself out too, so previewing a
-clip while the buffer runs does not end up in the next one.
+Several devices may have ⊘. They are served top to bottom and share one ledger,
+so nothing is recorded twice. What cannot be done is splitting an application by
+device: `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names a process and nothing else,
+and Microsoft says so plainly — *"The capture is not tied to a specific audio
+endpoint."* An application playing on two of those devices therefore lands with
+the upper source, whole. The mixer says so where it matters.
 
 The price is a thread and a one-second ring per application, and that an
 application which has just started playing joins within two seconds — the same
-tick that watches for the game. Which applications it actually holds is written
-on the source, since there is no device to look at.
+tick that watches for the game. Which applications a ⊘ source actually holds is
+written on it, since the device no longer tells you.
 
 Every source has gain, mute, solo and a live level. Sources without *own track*
 run into the main mix; the others are written along in parallel and land beside

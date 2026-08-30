@@ -21,18 +21,22 @@ import type { AudioSource, SourceKind } from "@/lib/types";
  * The game, the microphone and individual applications yes: those are exactly
  * what you want to turn down or drop entirely in the clip later, and that only
  * works if they were not already folded into the main mix while recording. A
- * whole device and the leftovers are the background everything else is lifted
- * out of — those stay the main mix.
+ * output device is the background everything else is lifted out of — with or
+ * without ⊘, that stays the main mix.
  */
 function wantsOwnTrack(kind: SourceKind): boolean {
-  return kind.type !== "outputDevice" && kind.type !== "leftovers";
+  return kind.type !== "outputDevice";
 }
 
 function sourceIcon(kind: SourceKind) {
   if (kind.type === "game") return <IconGamepad className="h-4 w-4" />;
-  if (kind.type === "leftovers") return <IconLayers className="h-4 w-4" />;
   if (kind.type === "inputDevice") return <IconMic className="h-4 w-4" />;
-  if (kind.type === "outputDevice") return <IconSpeaker className="h-4 w-4" />;
+  if (kind.type === "outputDevice")
+    return kind.leftoversOnly ? (
+      <IconLayers className="h-4 w-4" />
+    ) : (
+      <IconSpeaker className="h-4 w-4" />
+    );
   return <IconApp className="h-4 w-4" />;
 }
 
@@ -46,15 +50,16 @@ function sourceHint(
   switch (kind.type) {
     case "game":
       return game ? `Game · ${game}` : "Game · none detected right now";
-    // No device to name, so the only honest answer is the list itself.
-    case "leftovers":
-      return tapped.length > 0
-        ? `Everything else · ${tapped.join(", ")}`
-        : "Everything else · nothing left to record right now";
     case "inputDevice":
       return `Input · ${deviceName(kind.deviceId)}`;
     case "outputDevice":
-      return `Output (loopback) · ${deviceName(kind.deviceId)}`;
+      if (!kind.leftoversOnly)
+        return `Output (loopback) · ${deviceName(kind.deviceId)}`;
+      // Which applications it holds is the only thing worth reading here: the
+      // device no longer tells you what is in the track.
+      return tapped.length > 0
+        ? `Leftovers · ${tapped.join(", ")}`
+        : "Leftovers · nothing left to record right now";
     case "process":
       return kind.mode === "include"
         ? `Application · PID ${kind.pid}`
@@ -96,11 +101,8 @@ export function AudioMixer() {
       <header className="pt-10">
         <h1 className="display text-4xl">Audio mixer</h1>
         <p className="mt-3 max-w-lg text-[15px] leading-relaxed text-white/70">
-          Any number of sources at once: the detected game, single applications,
-          microphones, whole output devices — and “everything else”, which picks
-          up whatever the others leave. Each source runs into the main mix or
-          onto a track of its own. Separate either by application or by device;
-          both at once puts the same sound in the clip twice.
+          Any number of sources at once, each into the main mix or onto a track
+          of its own in the clip.
         </p>
       </header>
 
@@ -120,14 +122,11 @@ export function AudioMixer() {
         />
 
         <MixedInHint sources={config.sources} onFix={upsertSource} />
-        <DoubledHint sources={config.sources} onFix={upsertSource} />
+        <Notes sources={config.sources} onFix={upsertSource} />
 
         {adding && (
           <AddSourcePanel
             hasGame={config.sources.some((s) => s.kind.type === "game")}
-            hasLeftovers={config.sources.some(
-              (s) => s.kind.type === "leftovers",
-            )}
             onClose={() => setAdding(false)}
             onAdd={(s) => {
               upsertSource(s);
@@ -141,6 +140,9 @@ export function AudioMixer() {
             const dimmed = anySolo && !source.solo;
             const level = levels[source.id] ?? 0;
             const tapped = (taps[source.id] ?? []).map(processName);
+            // Pulled out so the narrowing survives into the click handler.
+            const output =
+              source.kind.type === "outputDevice" ? source.kind : null;
             return (
               <Card
                 key={source.id}
@@ -236,6 +238,24 @@ export function AudioMixer() {
                     >
                       ⧉
                     </MiniToggle>
+                    {output && (
+                      <MiniToggle
+                        active={output.leftoversOnly === true}
+                        activeClass="bg-accent/25 text-accent-bright"
+                        title="Record only what no other source records"
+                        onClick={() =>
+                          upsertSource({
+                            ...source,
+                            kind: {
+                              ...output,
+                              leftoversOnly: !output.leftoversOnly,
+                            },
+                          })
+                        }
+                      >
+                        ⊘
+                      </MiniToggle>
+                    )}
                     <span className="mx-1">
                       <Toggle
                         label={`${source.label} enabled`}
@@ -267,11 +287,8 @@ export function AudioMixer() {
         )}
       </section>
 
-      <p className="pb-4 text-xs leading-relaxed text-ink-faint">
-        The game, application sources and the leftovers all use process loopback
-        (Windows 10 build 20348+). On older systems only capturing whole output
-        devices is available. The leftovers follow what is playing: an
-        application that starts is picked up within two seconds.
+      <p className="pb-4 text-xs text-ink-faint">
+        Game, applications and ⊘ need process loopback (Windows 10 build 20348+).
       </p>
 
       <AvailableSources processes={processes} />
@@ -362,60 +379,88 @@ function MixedInHint({
 }
 
 /**
- * A whole output device next to sources that record single applications means
- * those applications are in the clip twice — once on their own track, once
- * inside the device's. Nothing about that is visible while recording: it shows
- * up as a doubled level, and as a track that cannot be muted away afterwards
- * because the sound is in the main mix as well.
+ * Two notes that are easy to get wrong and expensive to notice late — kept to
+ * one line each, because nobody reads a paragraph above a mixer.
  */
-function DoubledHint({
+function Notes({
   sources,
   onFix,
 }: {
   sources: AudioSource[];
   onFix: (source: AudioSource) => Promise<void>;
 }) {
-  const separately = sources.filter(
-    (s) =>
-      s.enabled &&
-      (s.kind.type === "game" ||
-        s.kind.type === "process" ||
-        s.kind.type === "leftovers"),
+  const byApp = sources.filter(
+    (s) => s.enabled && (s.kind.type === "game" || s.kind.type === "process"),
   );
+  // A whole device next to application sources records those a second time.
   const whole = sources.filter(
-    (s) => s.enabled && s.kind.type === "outputDevice",
+    (s) => s.enabled && s.kind.type === "outputDevice" && !s.kind.leftoversOnly,
   );
-  if (separately.length === 0 || whole.length === 0) return null;
+  const leftovers = sources.filter(
+    (s) => s.enabled && s.kind.type === "outputDevice" && s.kind.leftoversOnly,
+  );
 
   return (
-    <Card className="mb-4 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
-      <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-muted">
-        <span className="font-medium text-ink">
-          {whole.map((s) => s.label).join(", ")}
-        </span>{" "}
-        {whole.length === 1 ? "records a whole device" : "record whole devices"},
-        so whatever plays through{" "}
-        {whole.length === 1 ? "it" : "them"} is in the clip a second time —
-        alongside{" "}
-        <span className="font-medium text-ink">
-          {separately.map((s) => s.label).join(", ")}
-        </span>
-        . Separate by device or by application, not by both.
-      </p>
-      <Button
-        size="sm"
-        className="shrink-0"
-        // One after another, like above: each call answers with the whole
-        // config, so in parallel the last answer would swallow the others.
-        onClick={async () => {
-          for (const source of whole) {
-            await onFix({ ...source, enabled: false });
-          }
-        }}
-      >
-        {whole.length === 1 ? "Switch it off" : "Switch them off"}
-      </Button>
-    </Card>
+    <>
+      {byApp.length > 0 && whole.length > 0 && (
+        <Note tone="warn">
+          <span className="font-medium text-ink">
+            {whole.map((s) => s.label).join(", ")}
+          </span>{" "}
+          {whole.length === 1 ? "records" : "record"} a whole device, so{" "}
+          {byApp.map((s) => s.label).join(", ")}{" "}
+          {byApp.length === 1 ? "is" : "are"} in the clip twice.
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-2 align-baseline"
+            // One after another: each call answers with the whole config, so in
+            // parallel the last answer would swallow the others.
+            onClick={async () => {
+              for (const source of whole) {
+                if (source.kind.type !== "outputDevice") continue;
+                await onFix({
+                  ...source,
+                  kind: { ...source.kind, leftoversOnly: true },
+                });
+              }
+            }}
+          >
+            Set ⊘
+          </Button>
+        </Note>
+      )}
+      {leftovers.length > 1 && (
+        <Note tone="info">
+          ⊘ follows applications, not devices — anything playing on several of
+          these {leftovers.length} sources lands on the topmost one, whole.
+        </Note>
+      )}
+    </>
+  );
+}
+
+function Note({
+  tone,
+  children,
+}: {
+  tone: "warn" | "info";
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        "mb-3 flex items-center gap-2.5 rounded-inner border-l-[3px] px-3.5 py-2.5 text-[13px] text-ink-muted",
+        tone === "warn"
+          ? "border-l-warn bg-warn/10"
+          : "border-l-accent bg-accent/10",
+      )}
+    >
+      <span className={tone === "warn" ? "text-warn" : "text-accent-bright"}>
+        {tone === "warn" ? "▲" : "ⓘ"}
+      </span>
+      <span className="min-w-0 flex-1">{children}</span>
+    </div>
   );
 }
 
@@ -438,7 +483,7 @@ function PickOne({
       disabled={disabled}
       onClick={onPick}
       className={cn(
-        "flex items-center gap-3 rounded-inner border border-accent/30 bg-accent/10 px-4 py-3 text-left",
+        "mb-4 flex w-full items-center gap-3 rounded-inner border border-accent/30 bg-accent/10 px-4 py-3 text-left",
         disabled
           ? "cursor-not-allowed opacity-45"
           : "transition-colors hover:bg-accent/20",
@@ -457,12 +502,10 @@ function AddSourcePanel({
   onAdd,
   onClose,
   hasGame,
-  hasLeftovers,
 }: {
   onAdd: (s: AudioSource) => void;
   onClose: () => void;
   hasGame: boolean;
-  hasLeftovers: boolean;
 }) {
   const { devices, processes, refreshSources, detectedGame } = useEngine();
   const outputs = devices.filter((d) => d.kind === "output");
@@ -495,32 +538,19 @@ function AddSourcePanel({
 
       {/* Above the columns rather than in them: these two are not entries among
           many but the sources that find their processes on their own. */}
-      <div className="mb-4 grid grid-cols-2 gap-3">
-        <PickOne
-          disabled={hasGame}
-          icon={<IconGamepad className="h-4 w-4 shrink-0 text-accent-bright" />}
-          title="The detected game"
-          sub={
-            hasGame
-              ? "already added"
-              : detectedGame
-                ? `follows the game automatically · right now ${detectedGame}`
-                : "follows the game automatically · none detected right now"
-          }
-          onPick={() => onAdd(make("Game", { type: "game" }))}
-        />
-        <PickOne
-          disabled={hasLeftovers}
-          icon={<IconLayers className="h-4 w-4 shrink-0 text-accent-bright" />}
-          title="Everything else"
-          sub={
-            hasLeftovers
-              ? "already added — a second one would record the same twice"
-              : "whatever no other source records, and nothing twice"
-          }
-          onPick={() => onAdd(make("Everything else", { type: "leftovers" }))}
-        />
-      </div>
+      <PickOne
+        disabled={hasGame}
+        icon={<IconGamepad className="h-4 w-4 shrink-0 text-accent-bright" />}
+        title="The detected game"
+        sub={
+          hasGame
+            ? "already added"
+            : detectedGame
+              ? `follows the game automatically · right now ${detectedGame}`
+              : "follows the game automatically · none detected right now"
+        }
+        onPick={() => onAdd(make("Game", { type: "game" }))}
+      />
 
       <div className="grid grid-cols-3 gap-6">
         <SourceColumn

@@ -186,7 +186,7 @@ impl AppState {
         audio.apply(&crate::audio::resolve(
             &config.sources,
             None,
-            &[],
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         ));
 

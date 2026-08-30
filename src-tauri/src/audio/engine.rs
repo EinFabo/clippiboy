@@ -194,7 +194,7 @@ impl AudioEngine {
             let streams = crate::audio::resolve(
                 &sources,
                 game_pid,
-                &crate::audio::devices::everything_playing(),
+                &crate::audio::sessions_by_device(&sources),
                 &crate::audio::devices::process_tree(),
             );
             let mut keys: Vec<String> = streams.iter().map(stream_key).collect();
@@ -431,6 +431,7 @@ mod tests {
         let endpoint = |device_id: &str| {
             fingerprint(&SourceKind::OutputDevice {
                 device_id: device_id.into(),
+                leftovers_only: false,
             })
         };
         assert_eq!(endpoint("spk"), "out:spk");

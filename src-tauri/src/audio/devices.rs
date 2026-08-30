@@ -269,27 +269,6 @@ pub fn process_tree() -> std::collections::HashMap<u32, (u32, String)> {
     std::collections::HashMap::new()
 }
 
-/// Everything playing anywhere right now, deduplicated.
-///
-/// Across *all* output devices on purpose: a process loopback does not know
-/// about endpoints anyway, and on a machine with a hardware mixer the
-/// applications are spread over its virtual devices. Asking only the default one
-/// would silently miss whatever is routed elsewhere.
-pub fn everything_playing() -> Vec<u32> {
-    let mut out: Vec<u32> = Vec::new();
-    for device in list_devices() {
-        if !matches!(device.kind, DeviceKind::Output) {
-            continue;
-        }
-        for pid in session_pids(&device.id) {
-            if !out.contains(&pid) {
-                out.push(pid);
-            }
-        }
-    }
-    out.sort();
-    out
-}
 
 #[cfg(windows)]
 pub fn list_processes() -> Vec<AudioProcess> {

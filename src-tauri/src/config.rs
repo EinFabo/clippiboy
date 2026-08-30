@@ -50,53 +50,45 @@ pub fn default_config() -> AppConfig {
     }
 }
 
-/// Sources written while "leftovers" was still a flag on an output device.
+/// Undo the detour where the leftovers were briefly a source kind of their own,
+/// limited to one, with the other endpoint sources switched off.
 ///
-/// The flag is gone from the model, so serde drops it silently — and a
-/// configuration where several devices all claimed the leftovers would come back
-/// as several *full* endpoint loopbacks, which doubles far worse than the bug
-/// this replaces. So the raw JSON is consulted once more: the first such source
-/// becomes the one leftovers source, every further one is switched off with its
-/// device left intact, so it can be turned back on by hand.
-fn migrate_leftovers(config: &mut AppConfig, raw: &str) {
-    let flagged: Vec<String> = serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .as_ref()
-        .and_then(|value| value.pointer("/sources"))
-        .and_then(|sources| sources.as_array())
-        .map(|sources| {
-            sources
-                .iter()
-                .filter(|source| {
-                    source
-                        .pointer("/kind/leftoversOnly")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                })
-                .filter_map(|source| source.get("id")?.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    if flagged.is_empty() {
+/// They are an option on an output device again, and several devices may have
+/// it. The device that source once pointed at is not recoverable — the kind
+/// carried no id — so it falls back to the default output device, which is what
+/// an empty id means everywhere else (see `capture::device_client`). The
+/// endpoints that detour switched off are turned back on with the option set,
+/// because that is what they were before it.
+fn migrate_sources(config: &mut AppConfig) {
+    if !config
+        .sources
+        .iter()
+        .any(|source| matches!(source.kind, SourceKind::Leftovers))
+    {
         return;
     }
 
-    let mut kept = false;
-    for source in config
-        .sources
-        .iter_mut()
-        .filter(|source| flagged.contains(&source.id))
-    {
-        if !kept {
-            source.kind = SourceKind::Leftovers;
-            kept = true;
-            log::info!("'{}' is now the leftovers source", source.label);
-        } else {
-            source.enabled = false;
-            log::info!(
-                "'{}' switched off: there can only be one leftovers source",
-                source.label
-            );
+    for source in &mut config.sources {
+        match &source.kind {
+            SourceKind::Leftovers => {
+                source.kind = SourceKind::OutputDevice {
+                    device_id: String::new(),
+                    leftovers_only: true,
+                };
+                log::info!(
+                    "'{}' records the leftovers of the default output device again",
+                    source.label
+                );
+            }
+            SourceKind::OutputDevice { device_id, .. } if !source.enabled => {
+                source.kind = SourceKind::OutputDevice {
+                    device_id: device_id.clone(),
+                    leftovers_only: true,
+                };
+                source.enabled = true;
+                log::info!("'{}' switched back on", source.label);
+            }
+            _ => {}
         }
     }
 }
@@ -108,7 +100,7 @@ pub fn load() -> AppConfig {
             Ok(mut config) => {
                 // Check the encoder against the hardware actually present.
                 config.recording.encoder = encode::resolve(config.recording.encoder);
-                migrate_leftovers(&mut config, &text);
+                migrate_sources(&mut config);
                 config
             }
             Err(err) => {
@@ -133,75 +125,79 @@ pub fn save(config: &AppConfig) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::AudioSource;
 
-    /// A source in the shape written while "leftovers" was a flag on the device.
-    fn old_source(id: &str, leftovers: bool) -> String {
-        format!(
-            r#"{{
-                "id": "{id}",
-                "label": "{id}",
-                "kind": {{
-                    "type": "outputDevice",
-                    "deviceId": "dev-{id}",
-                    "leftoversOnly": {leftovers}
-                }},
-                "enabled": true,
-                "gainDb": 0.0,
-                "muted": false,
-                "solo": false,
-                "separateTrack": false
-            }}"#
-        )
-    }
-
-    fn config_with(sources: &[String]) -> (AppConfig, String) {
-        let mut config = default_config();
-        let raw = format!(r#"{{ "sources": [{}] }}"#, sources.join(","));
-        config.sources = serde_json::from_str::<serde_json::Value>(&raw).unwrap()["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| serde_json::from_value(s.clone()).unwrap())
-            .collect();
-        (config, raw)
-    }
-
-    /// The real shape of a GoXLR setup: five virtual devices, every one of them
-    /// asking for the leftovers. Left alone, all five would come back as full
-    /// endpoint loopbacks and record everything five times over.
-    #[test]
-    fn only_one_source_survives_as_the_leftovers() {
-        let (mut config, raw) = config_with(&[
-            old_source("system", true),
-            old_source("chat", true),
-            old_source("music", true),
-            old_source("game", true),
-            old_source("sample", true),
-        ]);
-        migrate_leftovers(&mut config, &raw);
-
-        assert_eq!(config.sources[0].kind, SourceKind::Leftovers);
-        assert!(config.sources[0].enabled);
-        for source in &config.sources[1..] {
-            assert!(
-                matches!(source.kind, SourceKind::OutputDevice { .. }),
-                "the device has to survive so it can be switched back on"
-            );
-            assert!(!source.enabled, "a second leftovers source must not run");
+    fn source(id: &str, kind: SourceKind, enabled: bool) -> AudioSource {
+        AudioSource {
+            id: id.into(),
+            label: id.into(),
+            kind,
+            enabled,
+            gain_db: 0.0,
+            muted: false,
+            solo: false,
+            separate_track: false,
         }
     }
 
-    /// A configuration that never had the flag has to come through untouched.
+    fn endpoint(device_id: &str, leftovers_only: bool) -> SourceKind {
+        SourceKind::OutputDevice {
+            device_id: device_id.into(),
+            leftovers_only,
+        }
+    }
+
+    fn with(sources: Vec<AudioSource>) -> AppConfig {
+        AppConfig {
+            sources,
+            ..default_config()
+        }
+    }
+
+    /// What the intermediate version left behind: one source turned into a kind
+    /// of its own, the other endpoints switched off.
     #[test]
-    fn a_configuration_without_the_flag_is_left_alone() {
-        let (mut config, raw) =
-            config_with(&[old_source("speakers", false), old_source("headset", false)]);
+    fn the_one_leftovers_kind_becomes_an_option_again() {
+        let mut config = with(vec![
+            source("system", SourceKind::Leftovers, true),
+            source("chat", endpoint("dev-chat", false), false),
+            source("music", endpoint("dev-music", false), false),
+        ]);
+        migrate_sources(&mut config);
+
+        // The kind carried no device, so the default output device it is.
+        assert_eq!(config.sources[0].kind, endpoint("", true));
+        for source in &config.sources[1..] {
+            assert!(source.enabled, "switched off by the detour, not by the user");
+            assert_eq!(
+                source.kind,
+                endpoint(&format!("dev-{}", source.id), true),
+                "they asked for the leftovers before the detour"
+            );
+        }
+    }
+
+    /// Nothing to undo — a disabled endpoint stays disabled.
+    #[test]
+    fn a_configuration_without_the_detour_is_left_alone() {
+        let mut config = with(vec![
+            source("speakers", endpoint("dev-1", false), true),
+            source("headset", endpoint("dev-2", false), false),
+        ]);
         let before = config.sources.clone();
-        migrate_leftovers(&mut config, &raw);
+        migrate_sources(&mut config);
 
         for (before, after) in before.iter().zip(&config.sources) {
             assert_eq!(before.kind, after.kind);
             assert_eq!(before.enabled, after.enabled);
         }
+    }
+
+    /// The flag on the device survived the detour and must load as it is.
+    #[test]
+    fn the_option_still_deserializes() {
+        let raw = r#"{"type":"outputDevice","deviceId":"d","leftoversOnly":true}"#;
+        let kind: SourceKind = serde_json::from_str(raw).unwrap();
+        assert_eq!(kind, endpoint("d", true));
     }
 }

@@ -61,10 +61,29 @@ pub fn app_root(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
     current
 }
 
+/// The processes holding a session on each device a leftovers source asks about.
+///
+/// Only those devices: the enumeration is a COM round trip each, and this runs
+/// on the two-second tick.
+pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<u32>> {
+    let mut out = HashMap::new();
+    for source in sources.iter().filter(|s| s.enabled) {
+        if let SourceKind::OutputDevice {
+            device_id,
+            leftovers_only: true,
+        } = &source.kind
+        {
+            out.entry(device_id.clone())
+                .or_insert_with(|| devices::session_pids(device_id));
+        }
+    }
+    out
+}
+
 /// Turns the stored, abstract sources into the streams the engine can open.
 ///
-/// `playing` are the processes holding a render session anywhere right now,
-/// `tree` the process parentage both rules below need.
+/// `playing` maps a device id to the processes holding a session on it, `tree`
+/// is the process parentage both rules below need.
 ///
 /// Two things cannot be expressed in the configuration and are only decided
 /// here:
@@ -79,20 +98,27 @@ pub fn app_root(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
 ///
 /// * **The leftovers.** Windows has no "everything except these three" tap:
 ///   `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` names exactly one process. So they are
-///   assembled from one tap per application that no other source records.
-///   Membership is decided by descent, not by an equal PID: a tap covers the
-///   target *and its children*, so a parent and a child taken separately would
-///   record the child twice.
+///   assembled from one tap per application on that device that no other source
+///   records. Membership is decided by descent, not by an equal PID: a tap covers
+///   the target *and its children*, so a parent and a child taken separately
+///   would record the child twice.
+///
+///   Several devices may ask for the leftovers. They are served in the order they
+///   sit in the mixer and share one ledger of what is already taken, so nothing
+///   is recorded twice. An application playing on two of those devices therefore
+///   lands with the upper source, whole — a tap cannot be split by device.
 pub fn resolve(
     sources: &[AudioSource],
     game_pid: Option<u32>,
-    playing: &[u32],
+    playing: &HashMap<String, Vec<u32>>,
     tree: &HashMap<u32, (u32, String)>,
 ) -> Vec<Stream> {
     let enabled = || sources.iter().filter(|s| s.enabled);
 
     // Everything another source already records, plus ClippiBoy itself: playing a
-    // clip back while the buffer runs must not end up in the next one.
+    // clip back while the buffer runs must not end up in the next one. The
+    // leftovers add to this as they go, which is what keeps several of them from
+    // taking the same application.
     let mut taken: Vec<u32> = vec![std::process::id()];
     for source in enabled() {
         match &source.kind {
@@ -105,19 +131,6 @@ pub fn resolve(
         }
     }
 
-    // One entry per application rather than per session: Discord holds two, and
-    // tapping both would split it across sources for no gain.
-    let mut roots: Vec<u32> = Vec::new();
-    for pid in playing {
-        let root = app_root(*pid, tree);
-        if !roots.contains(&root) {
-            roots.push(root);
-        }
-    }
-    // Ancestors first, so a chosen tap already covers its own descendants when
-    // they come up and they are skipped instead of taken a second time.
-    roots.sort_by_key(|root| ancestors(*root, tree).len());
-
     let mut out = Vec::with_capacity(sources.len());
     for source in enabled() {
         let include = |pid: u32| Stream {
@@ -127,21 +140,44 @@ pub fn resolve(
                 mode: ProcessMode::Include,
             },
         };
-        match &source.kind {
-            SourceKind::Game => out.extend(game_pid.map(include)),
-            SourceKind::Leftovers => {
-                for root in &roots {
-                    let covered = taken.contains(root)
-                        || ancestors(*root, tree)
-                            .iter()
-                            .any(|parent| taken.contains(parent));
-                    if covered {
-                        continue;
-                    }
-                    taken.push(*root);
-                    out.push(include(*root));
+        let leftovers_of = |device_id: &str, taken: &mut Vec<u32>| {
+            // One entry per application rather than per session: Discord holds
+            // two, and tapping both would split it for no gain.
+            let mut roots: Vec<u32> = Vec::new();
+            for pid in playing.get(device_id).map(Vec::as_slice).unwrap_or(&[]) {
+                let root = app_root(*pid, tree);
+                if !roots.contains(&root) {
+                    roots.push(root);
                 }
             }
+            // Ancestors first, so a chosen tap already covers its own descendants
+            // when they come up and they are skipped instead of taken again.
+            roots.sort_by_key(|root| ancestors(*root, tree).len());
+
+            let mut streams = Vec::new();
+            for root in roots {
+                let covered = taken.contains(&root)
+                    || ancestors(root, tree)
+                        .iter()
+                        .any(|parent| taken.contains(parent));
+                if covered {
+                    continue;
+                }
+                taken.push(root);
+                streams.push(include(root));
+            }
+            streams
+        };
+
+        match &source.kind {
+            SourceKind::Game => out.extend(game_pid.map(include)),
+            SourceKind::OutputDevice {
+                device_id,
+                leftovers_only: true,
+            } => out.extend(leftovers_of(device_id, &mut taken)),
+            // Only ever read from an old configuration; `config::migrate_sources`
+            // turns it into the option above before it gets here.
+            SourceKind::Leftovers => out.extend(leftovers_of("", &mut taken)),
             other => out.push(Stream {
                 source_id: source.id.clone(),
                 kind: other.clone(),
@@ -243,7 +279,27 @@ mod tests {
     fn output(device_id: &str) -> SourceKind {
         SourceKind::OutputDevice {
             device_id: device_id.into(),
+            leftovers_only: false,
         }
+    }
+
+    fn leftovers(device_id: &str) -> SourceKind {
+        SourceKind::OutputDevice {
+            device_id: device_id.into(),
+            leftovers_only: true,
+        }
+    }
+
+    /// Sessions per device, the shape `resolve` wants.
+    fn playing(devices: &[(&str, &[u32])]) -> HashMap<String, Vec<u32>> {
+        devices
+            .iter()
+            .map(|(device, pids)| ((*device).to_string(), pids.to_vec()))
+            .collect()
+    }
+
+    fn nothing() -> HashMap<String, Vec<u32>> {
+        HashMap::new()
     }
 
     /// A process tree as (pid, parent, exe).
@@ -297,7 +353,7 @@ mod tests {
         let streams = resolve(
             &[of_kind("game", SourceKind::Game)],
             Some(4711),
-            &[],
+            &nothing(),
             &loose(),
         );
         assert_eq!(streams.len(), 1);
@@ -313,7 +369,7 @@ mod tests {
             of_kind("game", SourceKind::Game),
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
         ];
-        let streams = resolve(&sources, None, &[], &loose());
+        let streams = resolve(&sources, None, &nothing(), &loose());
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].source_id, "mic");
     }
@@ -322,8 +378,8 @@ mod tests {
     /// but many.
     #[test]
     fn the_leftovers_become_one_stream_per_application() {
-        let sources = vec![of_kind("rest", SourceKind::Leftovers)];
-        let streams = resolve(&sources, None, &[10, 11, 12], &loose());
+        let sources = vec![of_kind("rest", leftovers("spk"))];
+        let streams = resolve(&sources, None, &playing(&[("spk", &[10, 11, 12])]), &loose());
         assert_eq!(pids_of(&streams, "rest"), vec![10, 11, 12]);
     }
 
@@ -334,20 +390,50 @@ mod tests {
         let sources = vec![
             of_kind("game", SourceKind::Game),
             of_kind("discord", include(11)),
-            of_kind("rest", SourceKind::Leftovers),
+            of_kind("rest", leftovers("spk")),
         ];
-        let streams = resolve(&sources, Some(10), &[10, 11, 12, 13], &loose());
+        let streams = resolve(
+            &sources,
+            Some(10),
+            &playing(&[("spk", &[10, 11, 12, 13])]),
+            &loose(),
+        );
         assert_eq!(pids_of(&streams, "rest"), vec![12, 13]);
         assert_eq!(pids_of(&streams, "game"), vec![10]);
         assert_eq!(pids_of(&streams, "discord"), vec![11]);
+    }
+
+    /// Several devices may ask for the leftovers. Each application goes to the
+    /// first that wants it — a tap cannot be split by device, so anything
+    /// playing on two of them lands with the upper source, whole.
+    #[test]
+    fn several_devices_share_out_the_applications() {
+        let sources = vec![
+            of_kind("system", leftovers("system")),
+            of_kind("chat", leftovers("chat")),
+        ];
+        let streams = resolve(
+            &sources,
+            None,
+            // 20 plays on both, 21 only on system, 22 only on chat.
+            &playing(&[("system", &[20, 21]), ("chat", &[20, 22])]),
+            &loose(),
+        );
+        assert_eq!(pids_of(&streams, "system"), vec![20, 21]);
+        assert_eq!(pids_of(&streams, "chat"), vec![22]);
     }
 
     /// Discord's two sessions are one application. Tapping both would split it
     /// across the leftovers for nothing; the common parent covers them at once.
     #[test]
     fn an_application_with_two_sessions_is_tapped_once() {
-        let sources = vec![of_kind("rest", SourceKind::Leftovers)];
-        let streams = resolve(&sources, None, &[2584, 30988], &discord());
+        let sources = vec![of_kind("rest", leftovers("spk"))];
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("spk", &[2584, 30988])]),
+            &discord(),
+        );
         assert_eq!(pids_of(&streams, "rest"), vec![5556]);
     }
 
@@ -358,12 +444,17 @@ mod tests {
     fn the_leftovers_skip_a_child_of_a_recorded_application() {
         let sources = vec![
             of_kind("discord", include(5556)),
-            of_kind("rest", SourceKind::Leftovers),
+            of_kind("rest", leftovers("spk")),
         ];
         // 2584 is a child of the recorded 5556; 40944 belongs to nobody.
         let mut processes = discord();
         processes.insert(40944, (0, "VALORANT-Win64-Shipping.exe".into()));
-        let streams = resolve(&sources, None, &[2584, 30988, 40944], &processes);
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("spk", &[2584, 30988, 40944])]),
+            &processes,
+        );
         assert_eq!(pids_of(&streams, "rest"), vec![40944]);
     }
 
@@ -375,10 +466,15 @@ mod tests {
             (33264, 0, "steam.exe"),
             (12604, 33264, "steamwebhelper.exe"),
         ]);
-        let sources = vec![of_kind("rest", SourceKind::Leftovers)];
+        let sources = vec![of_kind("rest", leftovers("spk"))];
         // Deliberately the child first: the order of the session list must not
         // decide the outcome.
-        let streams = resolve(&sources, None, &[12604, 33264], &processes);
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("spk", &[12604, 33264])]),
+            &processes,
+        );
         assert_eq!(pids_of(&streams, "rest"), vec![33264]);
     }
 
@@ -386,9 +482,9 @@ mod tests {
     /// one.
     #[test]
     fn the_leftovers_never_record_clippiboy_itself() {
-        let sources = vec![of_kind("rest", SourceKind::Leftovers)];
+        let sources = vec![of_kind("rest", leftovers("spk"))];
         let own = std::process::id();
-        let streams = resolve(&sources, None, &[own, own + 1], &loose());
+        let streams = resolve(&sources, None, &playing(&[("spk", &[own, own + 1])]), &loose());
         assert_eq!(pids_of(&streams, "rest"), vec![own + 1]);
     }
 
@@ -397,7 +493,7 @@ mod tests {
     fn disabled_sources_produce_no_streams() {
         let mut source = of_kind("mic", SourceKind::InputDevice { device_id: "m".into() });
         source.enabled = false;
-        assert!(resolve(&[source], Some(1), &[2], &loose()).is_empty());
+        assert!(resolve(&[source], Some(1), &nothing(), &loose()).is_empty());
     }
 
     #[test]
@@ -407,7 +503,7 @@ mod tests {
             of_kind("desktop", output("speakers")),
             of_kind("discord", include(7)),
         ];
-        let streams = resolve(&sources, Some(1234), &[7, 8], &loose());
+        let streams = resolve(&sources, Some(1234), &nothing(), &loose());
         assert_eq!(streams.len(), 3);
         for (before, after) in sources.iter().zip(&streams) {
             assert_eq!(before.id, after.source_id);
@@ -422,13 +518,13 @@ mod tests {
     fn every_track_of_the_layout_has_its_streams() {
         let sources = vec![
             of_kind("game", SourceKind::Game),
-            of_kind("rest", SourceKind::Leftovers),
+            of_kind("rest", leftovers("spk")),
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
         ];
         let layout = TrackLayout::from_sources(&sources);
         assert_eq!(layout.track_count(), 3);
 
-        let streams = resolve(&sources, Some(10), &[10, 12], &loose());
+        let streams = resolve(&sources, Some(10), &playing(&[("spk", &[10, 12])]), &loose());
         for id in &layout.separate {
             assert!(
                 streams.iter().any(|s| &s.source_id == id),
