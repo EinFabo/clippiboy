@@ -77,6 +77,12 @@ can be switched, a clip saved and the window brought back; the tooltip shows the
 buffer level and the game that was detected. Quitting happens through *Quit* in
 the tray menu.
 
+Starting ClippiBoy while it is already running does not open a second one: the
+new process hands its arguments to the one already there and ends itself, and
+that one brings its window up. Anything else would be two apps fighting over the
+same hotkeys, the same tray icon and the same graphics card — and the second one
+would look like the app had simply forgotten the running buffer.
+
 ---
 
 ## How the replay buffer works

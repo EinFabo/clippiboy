@@ -492,6 +492,19 @@ pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let app = tauri::Builder::default()
+        // First of all the plugins on purpose: a second start must find out
+        // that it is one before it has set anything up. It hands its arguments
+        // over here and then ends itself — the window that is already there
+        // comes up instead of a second one that would fight the first over
+        // hotkeys, tray icon and the replay buffer.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Except when the second start is the auto-start one: that one is
+            // supposed to stay in the tray, not tear a window open.
+            if args.iter().any(|arg| arg == AUTOSTART_ARG) {
+                return;
+            }
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
