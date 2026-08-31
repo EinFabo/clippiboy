@@ -196,8 +196,8 @@ export function ClipPlayer({
     };
   }, [flight]);
 
-  // The video element's volume belongs to the mixer: track 0 is the main mix,
-  // and that has to match the other tracks.
+  // The video element's volume belongs to the mixer: it plays the clip's own
+  // audio track, and that has to match the individual tracks.
   const mix = useClipMix(clip, video, muted ? 0 : volume, reload);
 
   // The success message belongs to exactly one clip — when paging through, it

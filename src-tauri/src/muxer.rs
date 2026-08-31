@@ -13,9 +13,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use crate::pipeline::ClipSnapshot;
+use crate::pipeline::{self, ClipSnapshot};
 use crate::stems;
 
 #[cfg(windows)]
@@ -131,11 +131,46 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     std::fs::write(&video_path, &stream).map_err(|e| e.to_string())?;
 
     // Audio tracks as WAV, cut to the same QPC as the first frame.
+    //
+    // The buffer holds one ring per source; which of them belong together is
+    // decided here and now. Everything without a track of its own is summed into
+    // the main mix, and that sum is drawn at this moment rather than while
+    // recording — so a ⧉ flipped during the recording applies to the whole clip
+    // and not just to the seconds after it.
     let mut wavs: Vec<(PathBuf, String)> = Vec::new();
-    for track in &snapshot.tracks {
-        let path = request
+    let wav_path = |name: &str| {
+        request
             .temp_dir
-            .join(format!("track_{stem}_{}.wav", sanitize(&track.source_id)));
+            .join(format!("track_{stem}_{}.wav", sanitize(name)))
+    };
+
+    let mut into_mix: Vec<&pipeline::TrackRing> = Vec::new();
+    let mut own: Vec<&Arc<pipeline::TrackRing>> = Vec::new();
+    for track in &snapshot.tracks {
+        if snapshot.main_mix.contains(&track.source_id) {
+            into_mix.push(track);
+        } else {
+            own.push(track);
+        }
+    }
+
+    // No main mix when nothing runs into it — every source has a track of its
+    // own, and a track nobody feeds would only be a slider in the editor that
+    // moves nothing.
+    if !into_mix.is_empty() {
+        let path = wav_path("mix");
+        match pipeline::write_mix_wav(
+            &into_mix,
+            &path,
+            snapshot.start_100ns,
+            snapshot.audio_frames,
+        ) {
+            Ok(()) => wavs.push((path, "Main mix".into())),
+            Err(err) => log::warn!("could not write the main mix: {err}"),
+        }
+    }
+    for track in own {
+        let path = wav_path(&track.source_id);
         // Silently dropping a track would be the worst outcome: the clip would
         // simply be mute with nothing anywhere saying why.
         match track.write_wav_window(&path, snapshot.start_100ns, snapshot.audio_frames) {

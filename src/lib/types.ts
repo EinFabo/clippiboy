@@ -182,7 +182,11 @@ export interface ClipProgress {
   progress: number;
 }
 
-/** One individual track of a clip. Track 0 is the main mix. */
+/**
+ * One individual track of a clip. The main mix comes first, then the sources
+ * that were given their own track — unless nothing ever ran into the main mix,
+ * in which case the clip has none and the first track is a source.
+ */
 export interface ClipTrack {
   index: number;
   label: string;

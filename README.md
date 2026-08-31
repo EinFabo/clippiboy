@@ -213,8 +213,29 @@ tick that watches for the game. Which applications a device actually holds is
 written on it, since the device alone no longer tells you.
 
 Every source has gain, mute, solo and a live level. Sources without *own track*
-run into the main mix; the others are written along in parallel and land beside
-the clip on save, as a file of their own.
+run into the main mix; the others land beside the clip on save, as a file of
+their own. If every source has a track of its own, nothing is left for the main
+mix — then the clip has none, rather than a slider in the editor that moves
+nothing.
+
+The main mix is **not recorded as a mix**. Every source has a ring of its own in
+the buffer, including the ones that have no track of their own, and the sum is
+drawn only when a clip is saved, out of whatever runs into the main mix at that
+moment. That is what makes the ⧉ switch reach backwards: flip it while the
+buffer is running and it applies to the whole clip, not just to the seconds
+after the click. Recorded as a sum, the past could never be taken apart again —
+and switching back would have thrown away the minutes already recorded for that
+source.
+
+A ring per source sounds like more memory than one shared one, and as an upper
+bound it is: 192 kB per second and source. But **silence is counted, not
+stored** — the quiet blocks only raise a number, and it becomes the zeros it
+stands for the moment sound arrives again, sample for sample. A source quiet for
+longer than the buffer is long hands its memory back entirely. Which is the
+normal state of most of them: a device nobody plays on, a microphone on mute, a
+chat channel between two sentences. Six sources on a 90-second buffer are 99 MB
+if everything is loud at once, and around 49 MB while a game, a chat and a
+microphone are actually running.
 
 The sources are dragged into order by the grip on the left of each row (or moved
 with ↑/↓ once it has focus). That order is the order of the tracks in the clip —

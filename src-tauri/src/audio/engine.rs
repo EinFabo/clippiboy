@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 
 use crate::audio::capture::{self, StreamHandle, CHANNELS, SAMPLE_RATE};
 use crate::audio::ring::SampleRing;
-use crate::audio::{gain_factor, Stream, TrackLayout};
+use crate::audio::{audible, gain_factor, recorded, Stream};
 use crate::model::{AudioSource, SourceKind};
 
 struct Running {
@@ -315,9 +315,15 @@ impl AudioEngine {
         }
     }
 
-    /// Mixes the window starting at `from_100ns` over `frames` frames into `out`:
-    /// index 0 is the main mix, then the sources with their own track (in layout
-    /// order).
+    /// Mixes the window starting at `from_100ns` over `frames` frames into `out`
+    /// — **one buffer per recorded source**, in the order they sit in the mixer
+    /// (see [`recorded`]). A source that cannot be heard right now gets silence
+    /// rather than being left out: it keeps its place, and its track keeps the
+    /// minutes already in it.
+    ///
+    /// No main mix is drawn here. Which of these buffers are summed into one is
+    /// decided when a clip is saved, so the assignment can still be changed
+    /// while the buffer runs.
     ///
     /// Reading is explicitly **by time**, not "whatever is next". Previously each
     /// source took from the front of its ring, and how much was worked out from
@@ -329,64 +335,37 @@ impl AudioEngine {
     pub fn mix_window(
         &self,
         sources: &[AudioSource],
-        layout: &TrackLayout,
         from_100ns: i64,
         frames: usize,
         out: &mut Vec<Vec<f32>>,
     ) {
         let sample_count = frames * CHANNELS;
-        let track_count = layout.track_count();
 
-        out.resize_with(track_count, Vec::new);
+        out.resize_with(recorded(sources).count(), Vec::new);
         for track in out.iter_mut() {
             track.clear();
             track.resize(sample_count, 0.0);
         }
 
         let running = self.running.lock();
-        let find = |id: &str| sources.iter().find(|s| s.id == id);
         // A source can own several streams, so every read is a sum — the buffers
         // above start at zero.
         let mut scratch: Vec<f32> = Vec::new();
-        let mut index = 0;
 
-        if !layout.main_mix.is_empty() {
-            let mix = &mut out[0];
-            for id in &layout.main_mix {
-                let Some(source) = find(id) else {
-                    continue;
-                };
-                add_streams(
-                    &running,
-                    id,
-                    from_100ns,
-                    gain_factor(source.gain_db),
-                    mix,
-                    &mut scratch,
-                );
-            }
-            // Summing can overshoot — hard clipping here is better than a crack
-            // from wrap-around at the encoder.
-            for sample in mix.iter_mut() {
-                *sample = sample.clamp(-1.0, 1.0);
-            }
-            index = 1;
-        }
-
-        for id in &layout.separate {
-            let track = &mut out[index];
-            index += 1;
-            let Some(source) = find(id) else {
+        for (track, source) in out.iter_mut().zip(recorded(sources)) {
+            if !audible(sources, source) {
                 continue;
-            };
+            }
             add_streams(
                 &running,
-                id,
+                &source.id,
                 from_100ns,
                 gain_factor(source.gain_db),
                 track,
                 &mut scratch,
             );
+            // Several streams can overshoot together — hard clipping here is
+            // better than a crack from wrap-around at the encoder.
             for sample in track.iter_mut() {
                 *sample = sample.clamp(-1.0, 1.0);
             }

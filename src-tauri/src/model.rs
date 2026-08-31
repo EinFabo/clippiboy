@@ -295,8 +295,9 @@ pub struct ClipProgress {
     pub progress: f32,
 }
 
-/// An audio track as it sits in the finished MP4 file. Track 0 is the main mix,
-/// followed by the sources that were given their own tracks.
+/// An audio track as it sits in the finished MP4 file: the main mix first, then
+/// the sources that were given their own tracks. A main mix with nothing in it —
+/// every source on its own track — is left out on save and is missing here too.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipTrack {

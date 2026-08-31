@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 
 use crate::audio::capture::{now_100ns, CHANNELS, SAMPLE_RATE};
 use crate::audio::engine::AudioEngine;
-use crate::audio::TrackLayout;
+use crate::audio::recorded;
 use crate::buffer::{EncodedPacket, ReplayBuffer};
 use crate::model::{AudioSource, EncoderId, RecordingConfig};
 
@@ -42,10 +42,6 @@ const AUDIO_LAG_100NS: i64 = 80 * 10_000;
 
 /// The mixer's tick.
 const MIX_INTERVAL: Duration = Duration::from_millis(10);
-
-/// Source id of the main mix track. It belongs to no source and therefore
-/// collides with no id from the config.
-const MAIN_TRACK_ID: &str = "__mix";
 
 /// Ring buffer of one audio track (16-bit PCM), on the same QPC timeline as the
 /// video.
@@ -63,6 +59,9 @@ struct TrackInner {
     /// QPC of the first sample in the ring.
     start_100ns: i64,
     primed: bool,
+    /// Silence that has come in but is not stored — see [`TrackRing::push`].
+    /// Counted in samples and never larger than the ring itself.
+    silence: usize,
 }
 
 impl TrackRing {
@@ -74,6 +73,7 @@ impl TrackRing {
                 samples: VecDeque::new(),
                 start_100ns: 0,
                 primed: false,
+                silence: 0,
             }),
             // One buffer across the full clip length, plus some slack.
             capacity: (seconds as usize + 2) * SAMPLE_RATE as usize * CHANNELS,
@@ -89,13 +89,55 @@ impl TrackRing {
     }
 
     /// The mixer produces gapless consecutive windows; `at_100ns` therefore only
-    /// sets the timeline on the very first block.
+    /// sets the timeline on the very first stored block.
+    ///
+    /// **Silence is counted, not stored.** A ring holding minutes of a source
+    /// that says nothing would be minutes of zeros, and there are as many of
+    /// those rings as there are sources: a device nobody plays on, a microphone
+    /// on mute, a chat channel between two sentences. Instead the quiet blocks
+    /// only raise a counter, and the moment real audio arrives it is turned into
+    /// the zeros it stands for — so the new block cannot slide forward in time.
+    ///
+    /// Silence longer than the whole ring means everything stored is older than
+    /// the buffer anyway. Then the ring is emptied and hands its memory back —
+    /// a device nobody has played on for two minutes costs nothing at all.
     fn push(&self, block: &[i16], at_100ns: i64) {
         let mut inner = self.inner.lock();
+
+        if block.iter().all(|sample| *sample == 0) {
+            // Before the first real block there is nothing to count: leading
+            // silence is what the read fills in by itself, and it must not set
+            // the timeline.
+            if !inner.primed {
+                return;
+            }
+            inner.silence += block.len();
+            // Quiet for longer than the ring is long: everything in it is now
+            // older than the buffer and nobody will ever read it again. Give
+            // the memory back instead of holding minutes of nothing.
+            if inner.silence >= self.capacity {
+                inner.samples.clear();
+                inner.samples.shrink_to_fit();
+                inner.primed = false;
+                inner.silence = 0;
+            }
+            return;
+        }
+
+        // Deliberately counted in samples rather than worked out from the
+        // clock: exactly as many zeros come back as were pushed in, so the
+        // stream is sample for sample the one the ring would hold if it had
+        // stored every quiet block. A gap worked out from timestamps would be
+        // off by the rounding of every single window.
+        let gap = std::mem::take(&mut inner.silence);
+
         if !inner.primed {
             inner.start_100ns = at_100ns;
             inner.primed = true;
+        } else {
+            inner.samples.extend(std::iter::repeat(0).take(gap));
         }
+
         inner.samples.extend(block.iter().copied());
         if inner.samples.len() > self.capacity {
             let excess = inner.samples.len() - self.capacity;
@@ -105,16 +147,12 @@ impl TrackRing {
         }
     }
 
-    /// Write the window starting at `from_100ns` over `frames` frames as WAV.
+    /// The window starting at `from_100ns` over `frames` frames, as interleaved
+    /// PCM.
     ///
     /// Missing stretches become silence — that keeps the track exactly as long as
     /// the video, even when a source only joined later.
-    pub fn write_wav_window(
-        &self,
-        path: &Path,
-        from_100ns: i64,
-        frames: usize,
-    ) -> std::io::Result<()> {
+    fn window(&self, from_100ns: i64, frames: usize) -> Vec<i16> {
         let wanted = frames * CHANNELS;
         let mut data = vec![0i16; wanted];
         {
@@ -139,25 +177,64 @@ impl TrackRing {
             }
         }
 
-        let byte_len = (data.len() * 2) as u32;
-        let mut out = Vec::with_capacity(byte_len as usize + 44);
-        out.extend_from_slice(b"RIFF");
-        out.extend_from_slice(&(36 + byte_len).to_le_bytes());
-        out.extend_from_slice(b"WAVEfmt ");
-        out.extend_from_slice(&16u32.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-        out.extend_from_slice(&(CHANNELS as u16).to_le_bytes());
-        out.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-        out.extend_from_slice(&(SAMPLE_RATE * CHANNELS as u32 * 2).to_le_bytes());
-        out.extend_from_slice(&((CHANNELS * 2) as u16).to_le_bytes());
-        out.extend_from_slice(&16u16.to_le_bytes());
-        out.extend_from_slice(b"data");
-        out.extend_from_slice(&byte_len.to_le_bytes());
-        for sample in data {
-            out.extend_from_slice(&sample.to_le_bytes());
-        }
-        std::fs::write(path, out)
+        data
     }
+
+    /// Write this track's window as WAV.
+    pub fn write_wav_window(
+        &self,
+        path: &Path,
+        from_100ns: i64,
+        frames: usize,
+    ) -> std::io::Result<()> {
+        write_wav(path, &self.window(from_100ns, frames))
+    }
+}
+
+/// Write several tracks summed into one WAV — the main mix.
+///
+/// It is not recorded as one: every source keeps a ring of its own, and the sum
+/// is drawn only here, out of whatever has no track of its own at the moment the
+/// clip is saved. That is what makes the ⧉ switch work backwards over the whole
+/// buffer instead of only from the moment it was flipped.
+///
+/// Summed with saturation rather than wrapping — the same reasoning as the hard
+/// clipping in the mixer: a clipped peak is better than a crack.
+pub fn write_mix_wav(
+    tracks: &[&TrackRing],
+    path: &Path,
+    from_100ns: i64,
+    frames: usize,
+) -> std::io::Result<()> {
+    let mut sum = vec![0i16; frames * CHANNELS];
+    for track in tracks {
+        for (slot, sample) in sum.iter_mut().zip(track.window(from_100ns, frames)) {
+            *slot = slot.saturating_add(sample);
+        }
+    }
+    write_wav(path, &sum)
+}
+
+/// PCM into a WAV file — 16 bit, [`CHANNELS`] channels, [`SAMPLE_RATE`].
+fn write_wav(path: &Path, data: &[i16]) -> std::io::Result<()> {
+    let byte_len = (data.len() * 2) as u32;
+    let mut out = Vec::with_capacity(byte_len as usize + 44);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + byte_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&(CHANNELS as u16).to_le_bytes());
+    out.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    out.extend_from_slice(&(SAMPLE_RATE * CHANNELS as u32 * 2).to_le_bytes());
+    out.extend_from_slice(&((CHANNELS * 2) as u16).to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&byte_len.to_le_bytes());
+    for sample in data {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(path, out)
 }
 
 /// State shared by capture, encoder and mixer.
@@ -166,7 +243,8 @@ pub struct Shared {
     pub fps: u32,
     /// The encoded video packets.
     pub packets: Mutex<ReplayBuffer>,
-    /// Main mix (index 0) and the sources with a track of their own.
+    /// One ring per enabled source — the main mix is not among them, it is
+    /// summed out of these on save.
     pub tracks: Mutex<Vec<Arc<TrackRing>>>,
     pub sources: Mutex<Vec<AudioSource>>,
     pub audio: Arc<AudioEngine>,
@@ -233,7 +311,13 @@ impl Shared {
 /// held across the whole ffmpeg run.
 pub struct ClipSnapshot {
     pub packets: Vec<EncodedPacket>,
+    /// One per recorded source, in mixer order.
     pub tracks: Vec<Arc<TrackRing>>,
+    /// Of those, the ones that have no track of their own and are summed into
+    /// the main mix. Read at this moment rather than while recording — that is
+    /// what lets the assignment still be changed for the minutes already in the
+    /// buffer.
+    pub main_mix: Vec<String>,
     pub sequence_header: Vec<u8>,
     /// QPC of the first frame in the clip — the audio is cut at exactly this
     /// value.
@@ -408,7 +492,6 @@ mod win {
 /// The mixer: produces gapless consecutive audio windows on the QPC axis.
 fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     let mut sources = shared.sources.lock().clone();
-    let mut layout = TrackLayout::from_sources(&sources);
     let mut generation = shared.sources_generation.load(Ordering::Relaxed);
 
     let mut buffers: Vec<Vec<f32>> = Vec::new();
@@ -424,7 +507,6 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         if current != generation {
             generation = current;
             sources = shared.sources.lock().clone();
-            layout = TrackLayout::from_sources(&sources);
             sync_tracks(&shared, &sources);
         }
 
@@ -438,37 +520,22 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             continue;
         }
 
-        shared
-            .audio
-            .mix_window(&sources, &layout, from, frames, &mut buffers);
-
-        let rings = shared.tracks.lock();
-        let has_main = !layout.main_mix.is_empty();
-        // Track 0 is always the main mix — even when no source is on it right
-        // now. Otherwise the clip would sometimes have one audio track more and
-        // sometimes one less, depending on what was switched on at save time.
-        if let Some(main) = rings.first() {
-            scratch.clear();
-            match (has_main, buffers.first()) {
-                (true, Some(mix)) => scratch.extend(mix.iter().map(|s| to_i16(*s))),
-                _ => scratch.resize(frames * CHANNELS, 0),
-            }
-            main.push(&scratch, from);
-        }
+        shared.audio.mix_window(&sources, from, frames, &mut buffers);
 
         // Every ring gets something in every window — whatever is audible right
         // now gets its mix, whatever is muted or soloed out gets silence. Pushing
         // nothing would be wrong: the ring only stamps its very first block, so a
         // gap would pull everything after it forward and from there on the audio
         // would run ahead of the picture.
-        let offset = usize::from(has_main);
-        for ring in rings.iter().skip(1) {
-            let slot = layout
-                .separate
-                .iter()
-                .position(|id| id == &ring.source_id);
+        //
+        // Matched by id rather than by position: the two lists are built from
+        // the same sources and agree, but a mismatch would put one source's
+        // audio onto another's track, and that is not worth risking.
+        let rings = shared.tracks.lock();
+        for ring in rings.iter() {
+            let slot = recorded(&sources).position(|s| s.id == ring.source_id);
             scratch.clear();
-            match slot.and_then(|index| buffers.get(offset + index)) {
+            match slot.and_then(|index| buffers.get(index)) {
                 Some(track) => scratch.extend(track.iter().map(|s| to_i16(*s))),
                 None => scratch.resize(frames * CHANNELS, 0),
             }
@@ -480,8 +547,9 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     }
 }
 
-/// The track list for a source list — track 0 (main mix) and behind it one track
-/// per source that has an audio track of its own.
+/// The ring list for a source list — one per recorded source, no main mix among
+/// them. What becomes a track of its own in the clip and what is summed into the
+/// main mix is decided on save (`muxer::build`).
 ///
 /// Rings that already exist are **passed through**. Creating them anew would be
 /// the convenient route but costs all of that source's buffered audio — and
@@ -489,24 +557,18 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
 /// volume slider. Previously that meant: turn the microphone up during recording
 /// and there is no microphone left in the clip.
 ///
-/// Deliberately **not** filtered by `muted`/`solo`. A muted source keeps its
-/// track and the mixer pushes silence into it; otherwise muting would make it
-/// disappear from the buffer retroactively as well.
+/// Deliberately **not** filtered by `muted`/`solo` — nor by `separate_track`.
+/// A muted source keeps its ring and the mixer pushes silence into it; a source
+/// that runs into the main mix keeps one so it can be lifted back out of it
+/// afterwards. Otherwise a ⧉ would only ever apply from the moment it was
+/// flipped, and flipping it back would cost the minutes recorded so far.
 fn tracks_for(
     sources: &[AudioSource],
     existing: &[Arc<TrackRing>],
     buffer_seconds: u32,
 ) -> Vec<Arc<TrackRing>> {
-    let main = existing.first().cloned().unwrap_or_else(|| {
-        Arc::new(TrackRing::new(
-            MAIN_TRACK_ID.into(),
-            "Mix".into(),
-            buffer_seconds,
-        ))
-    });
-
-    let mut out = vec![main];
-    for source in sources.iter().filter(|s| s.enabled && s.separate_track) {
+    let mut out = Vec::new();
+    for source in recorded(sources) {
         match existing.iter().find(|ring| ring.source_id == source.id) {
             Some(ring) => {
                 ring.set_label(source.label.clone());
@@ -540,7 +602,6 @@ impl Pipeline {
         sources: Vec<AudioSource>,
         audio: Arc<AudioEngine>,
     ) -> Result<Self, String> {
-        // Track 0 is the main mix and always present.
         let tracks = tracks_for(&sources, &[], buffer_seconds);
 
         // Without this, every ring still holds the last few minutes of audio that
@@ -608,8 +669,21 @@ impl Pipeline {
         let frame_us = 1_000_000 / self.shared.fps as i64;
         let span_us = (last - first_pts + frame_us).max(0);
 
+        // The assignment as it stands **now**, not as it stood while recording:
+        // every source has a ring of its own, so a ⧉ flipped a minute ago still
+        // reaches back over the whole buffer.
+        let main_mix = self
+            .shared
+            .sources
+            .lock()
+            .iter()
+            .filter(|s| s.enabled && !s.separate_track)
+            .map(|s| s.id.clone())
+            .collect();
+
         Ok(ClipSnapshot {
             tracks: self.shared.tracks.lock().clone(),
+            main_mix,
             sequence_header: self.shared.sequence_header.lock().clone(),
             start_100ns: self.shared.qpc_of(first_pts),
             audio_frames: (span_us * SAMPLE_RATE as i64 / 1_000_000) as usize,
@@ -682,11 +756,57 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The main mix is a sum drawn at save time, not a track that was recorded.
+    /// This is what makes a ⧉ flipped mid-recording reach back over the whole
+    /// buffer — the sources are still lying there one by one.
+    #[test]
+    fn the_main_mix_is_summed_from_the_tracks() {
+        let dir = std::env::temp_dir().join("clippiboy-test-mix");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let game = TrackRing::new("game".into(), "Game".into(), 5);
+        game.push(&[100, -100], qpc_of_frame(0));
+        let mic = TrackRing::new("mic".into(), "Microphone".into(), 5);
+        mic.push(&[25, 25], qpc_of_frame(0));
+
+        let path = dir.join("mix.wav");
+        write_mix_wav(&[&game, &mic], &path, qpc_of_frame(0), 1).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let sample = |at: usize| i16::from_le_bytes([bytes[44 + at * 2], bytes[45 + at * 2]]);
+        assert_eq!((sample(0), sample(1)), (125, -75));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Summing must not wrap around: two loud tracks together are a clipped peak
+    /// at worst, never a crack from the sign flipping.
+    #[test]
+    fn the_sum_saturates_instead_of_wrapping() {
+        let dir = std::env::temp_dir().join("clippiboy-test-mix-loud");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let one = TrackRing::new("a".into(), "A".into(), 5);
+        one.push(&[30000, -30000], qpc_of_frame(0));
+        let two = TrackRing::new("b".into(), "B".into(), 5);
+        two.push(&[30000, -30000], qpc_of_frame(0));
+
+        let path = dir.join("loud.wav");
+        write_mix_wav(&[&one, &two], &path, qpc_of_frame(0), 1).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let sample = |at: usize| i16::from_le_bytes([bytes[44 + at * 2], bytes[45 + at * 2]]);
+        assert_eq!((sample(0), sample(1)), (i16::MAX, i16::MIN));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_oldest_audio_is_dropped_and_the_start_moves_with_it() {
         // 1 s capacity + 2 s slack = 3 s.
         let ring = TrackRing::new("a".into(), "A".into(), 1);
-        let block = vec![0i16; SAMPLE_RATE as usize * CHANNELS];
+        // Not zeros: silence is not stored at all, and the ring would stay empty.
+        let block = vec![7i16; SAMPLE_RATE as usize * CHANNELS];
         for second in 0..5 {
             ring.push(&block, qpc_of_frame(second * SAMPLE_RATE as i64));
         }
@@ -697,6 +817,78 @@ mod tests {
             inner.start_100ns > 0,
             "the ring start has to move along, otherwise every window points beside"
         );
+    }
+
+    /// Silence is the normal state of most tracks — a device nobody plays on,
+    /// a microphone on mute, a chat channel between two sentences. Storing it
+    /// would be minutes of zeros per source.
+    #[test]
+    fn silence_costs_the_ring_nothing() {
+        let ring = TrackRing::new("a".into(), "A".into(), 1);
+        let quiet = vec![0i16; SAMPLE_RATE as usize * CHANNELS];
+        for second in 0..3 {
+            ring.push(&quiet, qpc_of_frame(second * SAMPLE_RATE as i64));
+        }
+        assert!(
+            ring.inner.lock().samples.is_empty(),
+            "silence must not take any room"
+        );
+    }
+
+    /// The whole point of counting it: what comes back has to be the very same
+    /// stream the ring would hold if it had stored every quiet block. One sample
+    /// too few and everything after the pause runs ahead of the picture.
+    #[test]
+    fn counted_silence_comes_back_as_the_zeros_it_stood_for() {
+        let block = STEP as usize * CHANNELS;
+        let ring = TrackRing::new("a".into(), "A".into(), 5);
+        // Six frames of sound, six of nothing, then sound again.
+        ring.push(&vec![11i16; block], qpc_of_frame(0));
+        ring.push(&vec![0i16; block], qpc_of_frame(STEP));
+        ring.push(&[33, 44], qpc_of_frame(STEP * 2));
+
+        {
+            let inner = ring.inner.lock();
+            assert_eq!(inner.samples.len(), block + block + 2);
+            assert_eq!(inner.samples[0], 11);
+            assert_eq!(inner.samples[block], 0, "the pause has to be there");
+            assert_eq!(inner.samples[block * 2], 33);
+            assert_eq!(inner.silence, 0);
+        }
+
+        // And it reads back at the place on the timeline it was pushed at — one
+        // sample too few and everything after the pause runs ahead of the
+        // picture.
+        let dir = std::env::temp_dir().join("clippiboy-test-gap");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("gap.wav");
+        ring.write_wav_window(&path, qpc_of_frame(STEP * 2), 1).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            &bytes[44..],
+            &[33i16.to_le_bytes(), 44i16.to_le_bytes()].concat()[..]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Quiet for longer than the ring is long: everything in it is older than
+    /// the buffer, so it goes and the memory with it.
+    #[test]
+    fn a_track_quiet_for_a_whole_buffer_gives_its_memory_back() {
+        // 1 s capacity + 2 s slack = 3 s.
+        let ring = TrackRing::new("a".into(), "A".into(), 1);
+        ring.push(&[7, 7], qpc_of_frame(0));
+        assert!(!ring.inner.lock().samples.is_empty());
+
+        let quiet = vec![0i16; SAMPLE_RATE as usize * CHANNELS];
+        for second in 1..=4 {
+            ring.push(&quiet, qpc_of_frame(second * SAMPLE_RATE as i64));
+        }
+
+        let inner = ring.inner.lock();
+        assert!(inner.samples.is_empty(), "stale audio was kept");
+        assert!(!inner.primed, "the timeline has to start again with the sound");
+        assert_eq!(inner.silence, 0);
     }
 
     fn source(id: &str, label: &str, separate: bool) -> AudioSource {
@@ -721,17 +913,16 @@ mod tests {
     fn a_changed_source_keeps_its_ring_and_its_audio() {
         let mut sources = vec![source("mic", "Microphone", true)];
         let first = tracks_for(&sources, &[], 5);
-        first[1].push(&[123, 456], qpc_of_frame(0));
+        first[0].push(&[123, 456], qpc_of_frame(0));
 
         // Turned up and renamed — neither may cost it its track.
         sources[0].gain_db = 6.0;
         sources[0].label = "My mic".into();
         let second = tracks_for(&sources, &first, 5);
 
-        assert!(Arc::ptr_eq(&first[0], &second[0]), "main mix was recreated");
-        assert!(Arc::ptr_eq(&first[1], &second[1]), "microphone track was recreated");
-        assert_eq!(second[1].label(), "My mic", "name was not carried over");
-        assert_eq!(second[1].inner.lock().samples.len(), 2, "Ton verloren");
+        assert!(Arc::ptr_eq(&first[0], &second[0]), "microphone track was recreated");
+        assert_eq!(second[0].label(), "My mic", "name was not carried over");
+        assert_eq!(second[0].inner.lock().samples.len(), 2, "Ton verloren");
     }
 
     /// Muting means "silence from here on", not "the track never existed".
@@ -742,21 +933,32 @@ mod tests {
         sources[0].muted = true;
         let second = tracks_for(&sources, &first, 5);
 
-        assert_eq!(second.len(), 2);
-        assert!(Arc::ptr_eq(&first[1], &second[1]));
+        assert_eq!(second.len(), 1);
+        assert!(Arc::ptr_eq(&first[0], &second[0]));
     }
 
-    /// Sources without a track of their own run into the main mix and get no ring.
+    /// The whole point of the rebuild: a source that runs into the main mix is
+    /// recorded on a ring of its own just the same, and switching ⧉ keeps that
+    /// ring. Only then does the switch reach the minutes already buffered.
     #[test]
-    fn only_separate_sources_get_a_track() {
-        let sources = vec![
+    fn a_source_in_the_main_mix_has_a_ring_of_its_own() {
+        let mut sources = vec![
             source("game", "Game", false),
             source("mic", "Microphone", true),
         ];
-        let tracks = tracks_for(&sources, &[], 5);
-        assert_eq!(tracks.len(), 2);
-        assert_eq!(tracks[0].source_id, MAIN_TRACK_ID);
-        assert_eq!(tracks[1].source_id, "mic");
+        let first = tracks_for(&sources, &[], 5);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].source_id, "game");
+        assert_eq!(first[1].source_id, "mic");
+        first[0].push(&[123, 456], qpc_of_frame(0));
+
+        sources[0].separate_track = true;
+        let second = tracks_for(&sources, &first, 5);
+        assert!(
+            Arc::ptr_eq(&first[0], &second[0]),
+            "the ring must survive the switch, or the buffered minutes are gone"
+        );
+        assert_eq!(second[0].inner.lock().samples.len(), 2);
     }
 
     /// A removed source disappears, a new one joins empty.
@@ -765,8 +967,16 @@ mod tests {
         let first = tracks_for(&[source("mic", "Microphone", true)], &[], 5);
         let second = tracks_for(&[source("discord", "Discord", true)], &first, 5);
 
-        assert_eq!(second.len(), 2);
-        assert_eq!(second[1].source_id, "discord");
-        assert!(!second[1].inner.lock().primed);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].source_id, "discord");
+        assert!(!second[0].inner.lock().primed);
+    }
+
+    /// A disabled source is not recorded at all — it has no streams either.
+    #[test]
+    fn a_disabled_source_gets_no_ring() {
+        let mut sources = vec![source("mic", "Microphone", true)];
+        sources[0].enabled = false;
+        assert!(tracks_for(&sources, &[], 5).is_empty());
     }
 }

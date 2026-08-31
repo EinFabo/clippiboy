@@ -217,7 +217,7 @@ export const mockClips: Clip[] = [
 
 /** Without a backend there are no real audio tracks — the mixer should still be there. */
 export const mockTracks: ClipTrack[] = [
-  { index: 0, label: "Hauptmix", channels: 2, previewPath: "mock/0.m4a" },
+  { index: 0, label: "Main mix", channels: 2, previewPath: "mock/0.m4a" },
   { index: 1, label: "Discord", channels: 2, previewPath: "mock/1.m4a" },
   { index: 2, label: "Mikrofon", channels: 2, previewPath: "mock/2.m4a" },
 ];

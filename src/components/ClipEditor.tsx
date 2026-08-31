@@ -105,7 +105,7 @@ export function ClipEditor({
           {tracks.map((track) => (
             <TrackRow
               key={track.index}
-              label={track.index === 0 ? "Main mix" : track.label}
+              label={track.label}
               state={mix[track.index] ?? { gainDb: 0, muted: false, solo: false }}
               anySolo={anySolo}
               onChange={(patch) => onTrack(track.index, patch)}
@@ -115,9 +115,9 @@ export function ClipEditor({
           {!loadingTracks && !separateTracks && (
             <div className="space-y-2 rounded-inner bg-elevated p-3">
               <p className="text-xs leading-relaxed text-ink-muted">
-                This clip has no separate tracks — microphone and apps are mixed
-                in for good and cannot be separated any more. To control them
-                individually later, give them their own track in the mixer; that
+                This clip carries a single audio track — nothing in it can be
+                turned down on its own any more. Whatever you want to control
+                separately later needs a track of its own in the mixer; that
                 applies to the next recordings.
               </p>
               <Button size="sm" onClick={onOpenMixer}>

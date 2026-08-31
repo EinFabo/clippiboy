@@ -290,34 +290,27 @@ pub fn resolve(
     out
 }
 
-/// Summarizes which sources go into the main mix and which onto a track of their
-/// own. Track 0 is video, track 1 the main mix.
-pub struct TrackLayout {
-    pub main_mix: Vec<String>,
-    pub separate: Vec<String>,
+/// Every source the buffer records — one track each, in the order they sit in
+/// the mixer.
+///
+/// Deliberately **regardless of `separate_track`**: which of these tracks end up
+/// as their own in the clip and which are summed into the main mix is decided on
+/// save (`muxer::build`), not here. That is what lets the assignment still be
+/// changed while the buffer is running — it then applies to the whole buffer
+/// rather than only from that moment on. Recorded as one sum, the past could
+/// never be taken apart again.
+pub fn recorded(sources: &[AudioSource]) -> impl Iterator<Item = &AudioSource> {
+    sources.iter().filter(|s| s.enabled)
 }
 
-impl TrackLayout {
-    pub fn from_sources(sources: &[AudioSource]) -> Self {
-        let any_solo = sources.iter().any(|s| s.solo);
-        let audible = |s: &AudioSource| s.enabled && !s.muted && (!any_solo || s.solo);
-
-        let mut main_mix = Vec::new();
-        let mut separate = Vec::new();
-        for source in sources.iter().filter(|s| audible(s)) {
-            if source.separate_track {
-                separate.push(source.id.clone());
-            } else {
-                main_mix.push(source.id.clone());
-            }
-        }
-        Self { main_mix, separate }
-    }
-
-    /// Number of audio tracks in the resulting MP4.
-    pub fn track_count(&self) -> usize {
-        usize::from(!self.main_mix.is_empty()) + self.separate.len()
-    }
+/// Is the source heard right now?
+///
+/// Solo beats mute: as soon as solo is set anywhere, only the soloed sources
+/// count. An inaudible source keeps its track and is given silence — anything
+/// else would make muting throw it out of the buffer retroactively.
+pub fn audible(sources: &[AudioSource], source: &AudioSource) -> bool {
+    let any_solo = sources.iter().any(|s| s.solo);
+    source.enabled && !source.muted && (!any_solo || source.solo)
 }
 
 /// dB to a linear factor.
@@ -351,19 +344,29 @@ mod tests {
             source("a", false, false, false),
             source("b", true, false, false),
         ];
-        let layout = TrackLayout::from_sources(&sources);
-        assert_eq!(layout.main_mix, vec!["b".to_string()]);
+        assert!(!audible(&sources, &sources[0]));
+        assert!(audible(&sources, &sources[1]));
     }
 
+    /// A muted source stays in the buffer and is given silence. Dropping it
+    /// would take the minutes already recorded with it.
     #[test]
-    fn separate_tracks_are_counted_extra() {
+    fn a_muted_source_is_still_recorded() {
+        let sources = vec![source("mic", false, true, true)];
+        assert_eq!(recorded(&sources).count(), 1);
+        assert!(!audible(&sources, &sources[0]));
+    }
+
+    /// Whether a source runs into the main mix says nothing about whether it is
+    /// recorded — every one of them gets a track of its own in the buffer.
+    #[test]
+    fn the_main_mix_is_not_recorded_as_one() {
         let sources = vec![
             source("game", false, false, false),
             source("discord", false, false, true),
             source("mic", false, false, true),
         ];
-        let layout = TrackLayout::from_sources(&sources);
-        assert_eq!(layout.track_count(), 3);
+        assert_eq!(recorded(&sources).count(), 3);
     }
 
     #[test]
@@ -721,18 +724,17 @@ mod tests {
         assert!(!streams.iter().any(|s| matches!(s.kind, SourceKind::OutputDevice { .. })));
     }
 
-    /// The layout must not shift underneath the recording just because a game
-    /// started — otherwise the clip would suddenly have a track more or less.
-    /// It is built from the stored sources, so resolving may not touch it.
+    /// The track list must not shift underneath the recording just because a
+    /// game started — otherwise the clip would suddenly have a track more or
+    /// less. It is built from the stored sources, so resolving may not touch it.
     #[test]
-    fn every_track_of_the_layout_has_its_streams() {
+    fn every_recorded_track_has_its_streams() {
         let sources = vec![
             of_kind("game", SourceKind::Game),
             of_kind("rest", leftovers("spk")),
             of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
         ];
-        let layout = TrackLayout::from_sources(&sources);
-        assert_eq!(layout.track_count(), 3);
+        assert_eq!(recorded(&sources).count(), 3);
 
         let streams = resolve(
             &sources,
@@ -741,10 +743,11 @@ mod tests {
             &loose(),
             &ledger("spk"),
         );
-        for id in &layout.separate {
+        for source in recorded(&sources) {
             assert!(
-                streams.iter().any(|s| &s.source_id == id),
-                "track '{id}' has no stream"
+                streams.iter().any(|s| s.source_id == source.id),
+                "track '{}' has no stream",
+                source.id
             );
         }
     }

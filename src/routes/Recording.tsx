@@ -51,6 +51,26 @@ function fit(height: number, source: CaptureTarget | null) {
   return { width: w, height: h };
 }
 
+/**
+ * The **upper** bound on what the buffer takes — picture plus sound.
+ *
+ * The sound is not an afterthought: every source keeps a ring of its own, so
+ * that the assignment to the main mix can still be changed afterwards (see
+ * `pipeline::tracks_for`). At 48 kHz in stereo that is 192 kB per second and
+ * source. In practice it stays well under this: a source that says nothing
+ * costs nothing, and one quiet for a whole buffer length hands its memory back
+ * (`TrackRing::push`). Which is exactly the normal state of most of them.
+ */
+function bufferMegabytes(
+  bitrateKbps: number,
+  seconds: number,
+  sources: number,
+): number {
+  const video = (bitrateKbps / 8 / 1024) * seconds;
+  const audio = (sources * seconds * 48000 * 2 * 2) / 1024 ** 2;
+  return Math.round(video + audio);
+}
+
 export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const { config, targets, encoders, patchConfig, refreshTargets } = useEngine();
   const rec = config.recording;
@@ -273,9 +293,11 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
             <div>
               <p className="text-sm font-medium">Buffer length</p>
               <p className="mt-1 text-xs text-ink-muted">
-                {formatBufferSeconds(config.buffer.seconds)} in memory · roughly{" "}
-                {Math.round(
-                  (rec.bitrateKbps / 8 / 1024) * config.buffer.seconds,
+                {formatBufferSeconds(config.buffer.seconds)} in memory · at most{" "}
+                {bufferMegabytes(
+                  rec.bitrateKbps,
+                  config.buffer.seconds,
+                  config.sources.filter((s) => s.enabled).length,
                 )}{" "}
                 MB RAM
               </p>
