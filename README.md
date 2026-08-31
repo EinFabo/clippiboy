@@ -216,6 +216,16 @@ Every source has gain, mute, solo and a live level. Sources without *own track*
 run into the main mix; the others are written along in parallel and land beside
 the clip on save, as a file of their own.
 
+The sources are dragged into order by the grip on the left of each row (or moved
+with ↑/↓ once it has focus). That order is the order of the tracks in the clip —
+and where the rule above leaves a tie, because an application really renders on
+two of the devices at once, the source standing higher gets it.
+
+That the dragging works at all is down to one line in `tauri.conf.json`:
+`dragDropEnabled: false`. With the default WebView2 grabs drag and drop for
+itself on Windows, so it can report dropped files to the app — and the HTML drag
+events then never reach the page. The app takes no files by drag anyway.
+
 A source with its own track keeps that track as long as it is enabled — even
 while it is muted or another one is soloed. The mixer pushes silence into it
 then. Anything else would mean that muting throws the source out of the buffer

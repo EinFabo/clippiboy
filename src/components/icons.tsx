@@ -84,6 +84,18 @@ export const IconLayers = ({ className = base }: P) => (
   </svg>
 );
 
+/** Grip for dragging — the six dots everything uses for exactly this. */
+export const IconGrip = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" className={className} fill="currentColor" stroke="none">
+    <circle cx="9" cy="6" r="1.5" />
+    <circle cx="15" cy="6" r="1.5" />
+    <circle cx="9" cy="12" r="1.5" />
+    <circle cx="15" cy="12" r="1.5" />
+    <circle cx="9" cy="18" r="1.5" />
+    <circle cx="15" cy="18" r="1.5" />
+  </svg>
+);
+
 export const IconPlus = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="2" stroke="currentColor" strokeLinecap="round">
     <path d="M12 5v14M5 12h14" />

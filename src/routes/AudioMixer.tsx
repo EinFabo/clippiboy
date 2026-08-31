@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -6,6 +6,7 @@ import { Meter, Slider, Toggle } from "@/components/ui/Controls";
 import {
   IconApp,
   IconGamepad,
+  IconGrip,
   IconLayers,
   IconMic,
   IconPlus,
@@ -13,6 +14,7 @@ import {
   IconTrash,
 } from "@/components/icons";
 import { cn } from "@/lib/cn";
+import { useFlip } from "@/lib/useFlip";
 import type { AudioSource, SourceKind } from "@/lib/types";
 
 /**
@@ -83,6 +85,14 @@ function sourceHint(
   }
 }
 
+/** A source on its way to a new place in the list. */
+interface Drag {
+  /** The source being carried. */
+  id: string;
+  /** The gap it is over right now — above or below that row. */
+  over: { id: string; before: boolean } | null;
+}
+
 export function AudioMixer() {
   const {
     config,
@@ -95,8 +105,12 @@ export function AudioMixer() {
     taps,
     upsertSource,
     removeSource,
+    patchConfig,
   } = useEngine();
   const [adding, setAdding] = useState(false);
+  /** The source being carried, and the gap it is hovering over. */
+  const [drag, setDrag] = useState<Drag | null>(null);
+  const list = useRef<HTMLDivElement>(null);
 
   const deviceName = useMemo(
     () => (id: string) => devices.find((d) => d.id === id)?.name ?? id,
@@ -112,6 +126,54 @@ export function AudioMixer() {
 
   const anySolo = config.sources.some((s) => s.solo);
   const leftovers = leftoversMode(config.sources);
+  const order = config.sources.map((s) => s.id).join(",");
+  // A row that has just been dropped somewhere else travels there instead of
+  // appearing there — otherwise nothing but the numbers would tell you the drop
+  // landed at all.
+  useFlip(list, order);
+
+  /**
+   * Put the carried source down in the gap it is hovering over.
+   *
+   * The order is not cosmetic: it is the order of the tracks in the clip, and
+   * several ⊘ sources are served from the top down — so it decides which of them
+   * gets an application that plays on both.
+   */
+  const drop = ({ id, over }: Drag) => {
+    setDrag(null);
+    if (!over) return;
+    const rest = config.sources.filter((s) => s.id !== id);
+    const source = config.sources.find((s) => s.id === id);
+    const at = rest.findIndex((s) => s.id === over.id);
+    if (!source || at < 0) return;
+    rest.splice(over.before ? at : at + 1, 0, source);
+    // Dropping a row back where it came from is not a change and must not cost
+    // a config write — the core restarts the audio engine for one.
+    if (rest.every((s, index) => s.id === config.sources[index].id)) return;
+    patchConfig({ sources: rest });
+  };
+
+  /** Which half of the row the pointer is on — that is the gap it means. */
+  const hover = (event: React.DragEvent, id: string) => {
+    if (!drag) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const box = event.currentTarget.getBoundingClientRect();
+    const before = event.clientY < box.top + box.height / 2;
+    if (drag.over?.id === id && drag.over.before === before) return;
+    setDrag({ ...drag, over: { id, before } });
+  };
+
+  /** Move by keyboard — a drag handle nobody can reach with Tab is half a
+      control. `delta` is one row up or down. */
+  const nudge = (id: string, delta: number) => {
+    const from = config.sources.findIndex((s) => s.id === id);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= config.sources.length) return;
+    const sources = [...config.sources];
+    [sources[from], sources[to]] = [sources[to], sources[from]];
+    patchConfig({ sources });
+  };
 
   return (
     <div className="space-y-8">
@@ -151,20 +213,86 @@ export function AudioMixer() {
           />
         )}
 
-        <div className="space-y-3">
+        <div className="space-y-3" ref={list}>
           {config.sources.map((source) => {
             const dimmed = anySolo && !source.solo;
             const level = levels[source.id] ?? 0;
             const tapped = (taps[source.id] ?? []).map(processName);
+            const carried = drag?.id === source.id;
+            const gap = drag?.over?.id === source.id ? drag.over.before : null;
             return (
               <Card
                 key={source.id}
+                data-flip={source.id}
+                onDragOver={(event) => hover(event, source.id)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (drag) drop(drag);
+                }}
                 className={cn(
-                  "p-4 transition-opacity duration-200",
-                  (!source.enabled || dimmed) && "opacity-45",
+                  "relative p-4 transition-opacity duration-200",
+                  // Only one opacity, never two: `cn` just joins, so a second
+                  // one would not override the first — the stylesheet's own
+                  // order would decide.
+                  carried
+                    ? // The row being carried steps back; the drag image under
+                      // the pointer is the one you are watching.
+                      "opacity-30"
+                    : (!source.enabled || dimmed) && "opacity-45",
                 )}
               >
+                {gap !== null && (
+                  <span
+                    className={cn(
+                      "pointer-events-none absolute inset-x-3 h-0.5 rounded-full bg-accent-bright",
+                      gap ? "-top-2" : "-bottom-2",
+                    )}
+                  />
+                )}
                 <div className="flex items-center gap-4">
+                  {config.sources.length > 1 && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Move ${source.label}`}
+                      title="Drag to reorder — the order of the tracks in the clip"
+                      draggable
+                      onDragStart={(event) => {
+                        // The handle is what is dragged, but the row is what
+                        // should hang under the pointer.
+                        const row = event.currentTarget.closest<HTMLElement>(
+                          "[data-flip]",
+                        );
+                        if (row) {
+                          event.dataTransfer.setDragImage(
+                            row,
+                            32,
+                            row.offsetHeight / 2,
+                          );
+                        }
+                        event.dataTransfer.effectAllowed = "move";
+                        // Firefox starts no drag at all without a payload.
+                        event.dataTransfer.setData("text/plain", source.id);
+                        setDrag({ id: source.id, over: null });
+                      }}
+                      onDragEnd={() => setDrag(null)}
+                      onKeyDown={(event) => {
+                        const delta =
+                          event.key === "ArrowUp"
+                            ? -1
+                            : event.key === "ArrowDown"
+                              ? 1
+                              : 0;
+                        if (delta === 0) return;
+                        event.preventDefault();
+                        nudge(source.id, delta);
+                      }}
+                      className="-mr-1 -ml-1 shrink-0 cursor-grab text-ink-faint transition-colors
+                        hover:text-ink focus-visible:text-ink active:cursor-grabbing"
+                    >
+                      <IconGrip className="h-5 w-5" />
+                    </span>
+                  )}
                   <span className="grid h-9 w-9 shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
                     {sourceIcon(source.kind, leftovers)}
                   </span>
