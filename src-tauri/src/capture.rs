@@ -164,6 +164,41 @@ pub fn list_targets() -> Vec<CaptureTarget> {
     win::list_targets()
 }
 
+/// Is the secure desktop in front — lock screen, sign-in, UAC prompt?
+///
+/// There is no plain "is the session locked" call for a process without a window
+/// and a message pump. `OpenInputDesktop` hands back the desktop that currently
+/// receives input, and on the secure desktop that is Winlogon's, which a normal
+/// user process may not open. The failure is the signal.
+///
+/// It matters because Windows.Graphics.Capture goes quiet there rather than
+/// reporting anything: no frame arrives, the clock keeps re-sending the last one
+/// it had (see `convert::pace`), and the ring quietly fills with a still. After
+/// a reboot that still was the lock screen, and every clip saved afterwards was
+/// ninety seconds of it.
+#[cfg(windows)]
+pub fn secure_desktop() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
+    };
+    unsafe {
+        match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
+            Ok(desktop) => {
+                let _ = CloseDesktop(desktop);
+                false
+            }
+            // Anything but success counts as "not ours": whatever is in front,
+            // it is not a desktop this process can record.
+            Err(_) => true,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn secure_desktop() -> bool {
+    false
+}
+
 // The foreground window is evaluated in `game.rs` — what matters there is not
 // just the title but the process behind it.
 

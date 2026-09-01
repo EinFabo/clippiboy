@@ -142,6 +142,15 @@ picture — the encoder therefore sees true CFR instead of a frame rate it would
 have to convert itself. That was exactly the judder. The zero point for both
 tracks is the first frame that arrived, so audio and video share one time origin.
 
+The buffer stays off behind a locked screen, and stops if the screen locks while
+it runs. Not a policy but a necessity: on the secure desktop
+Windows.Graphics.Capture delivers no frame and reports no error, so the clock
+goes on re-sending the last one it had and the ring fills with a still. After a
+reboot that still was the lock screen. Signing in brings the buffer back on its
+own. A UAC prompt raises the same secure desktop, so it takes ten seconds of it
+before the buffer gives way — a dialog answered in three must not cost a minute
+and a half of history.
+
 The audio rings run from program start for the level meters, but are emptied
 before every recording. Without that they would stand at their limit — a whole
 second of audio nobody ever collected — and the clip would run behind the picture

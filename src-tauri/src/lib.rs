@@ -194,6 +194,14 @@ fn start_buffer_if_configured(app: &tauri::AppHandle) {
     if !config.buffer.auto_start || config.only_buffer_in_game {
         return;
     }
+    // After a reboot ClippiBoy is up before anybody has signed in, and a capture
+    // started against the lock screen never recovers on its own — see
+    // `capture::secure_desktop`. `apply_auto_buffer` starts it on the next tick
+    // after the sign-in.
+    if capture::secure_desktop() {
+        log::info!("the screen is still locked — the buffer waits for the sign-in");
+        return;
+    }
     let app = app.clone();
     // Not on the setup thread: bringing up the recording takes a moment and the
     // window should already be there while it happens.
@@ -209,14 +217,26 @@ fn start_buffer_if_configured(app: &tauri::AppHandle) {
 fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
     let state = app.state::<AppState>();
     let config = state.config_snapshot();
-    if !config.buffer.auto_start {
-        return;
-    }
     let active = state.status.lock().buffer_active;
-    let action = if config.only_buffer_in_game {
-        state.auto.poll(game.is_some(), active)
-    } else {
-        state.auto.poll_always(active)
+
+    // The lock screen comes first, and it applies whatever the settings say: a
+    // buffer that cannot see anything is not worth keeping alive, and one the
+    // user started by hand is no exception. Only when the screen is ours does
+    // the question of *when* recording is wanted arise at all.
+    let locked = capture::secure_desktop();
+    let action = match state.auto.poll_lock(locked, active) {
+        state::AutoAction::Nothing if locked => return,
+        state::AutoAction::Nothing => {
+            if !config.buffer.auto_start {
+                return;
+            }
+            if config.only_buffer_in_game {
+                state.auto.poll(game.is_some(), active)
+            } else {
+                state.auto.poll_always(active)
+            }
+        }
+        lock_action => lock_action,
     };
     if action == state::AutoAction::Nothing {
         return;
