@@ -30,13 +30,16 @@ pub fn default_config() -> AppConfig {
             width: 1920,
             height: 1080,
             fps: 60,
-            bitrate_kbps: 40_000,
+            bitrate_kbps: encode::bitrate_for(1920, 1080, 60),
+            quality: crate::model::default_quality(),
             encoder: encode::preferred_encoder(),
             keyframe_seconds: 2,
         },
         buffer: BufferConfig {
             auto_start: false,
             seconds: 120,
+            clip_seconds: 0,
+            memory_mb: 0,
         },
         sources: Vec::new(),
         clip_dir: default_clip_dir().to_string_lossy().to_string(),
@@ -48,6 +51,38 @@ pub fn default_config() -> AppConfig {
         overlay: OverlayConfig::default(),
         tray_hint_shown: false,
     }
+}
+
+/// How many seconds a save actually writes.
+///
+/// `0` means "the whole buffer" — that was the only behaviour until this setting
+/// existed, so a config written before it keeps producing the same clips.
+///
+/// Never longer than the buffer either: asking for a two-minute clip out of a
+/// thirty-second buffer cannot give more than thirty seconds, and pretending
+/// otherwise would only put a number in the UI that the file then contradicts.
+pub fn effective_clip_seconds(buffer: &BufferConfig) -> u32 {
+    if buffer.clip_seconds == 0 {
+        return buffer.seconds;
+    }
+    buffer.clip_seconds.min(buffer.seconds)
+}
+
+/// How much memory the packet ring may take, in bytes.
+///
+/// `0` derives it from bitrate and buffer length, with half again on top for the
+/// peaks a variable bitrate produces. That is roughly what the ring cost before
+/// there was a budget at all, so a config written without one keeps behaving the
+/// way it did.
+pub fn effective_memory_bytes(recording: &RecordingConfig, buffer: &BufferConfig) -> u64 {
+    if buffer.memory_mb > 0 {
+        return buffer.memory_mb as u64 * 1024 * 1024;
+    }
+    let bytes_per_second = recording.bitrate_kbps as u64 * 1000 / 8;
+    let plain = bytes_per_second * buffer.seconds.max(1) as u64;
+    // A floor, so a tiny buffer at a low bitrate still has room to hold the
+    // group of pictures it must never drop.
+    (plain * 3 / 2).max(64 * 1024 * 1024)
 }
 
 /// Undo the detour where the leftovers were briefly a source kind of their own,
@@ -94,6 +129,15 @@ pub fn load() -> AppConfig {
             Ok(mut config) => {
                 // Check the encoder against the hardware actually present.
                 config.recording.encoder = encode::resolve(config.recording.encoder);
+                // The bitrate is derived from the picture, not chosen by hand —
+                // a config from when it was a slider carries a number that means
+                // nothing now (40 Mbit/s at any resolution, as it happens). It
+                // would otherwise still size the memory budget.
+                config.recording.bitrate_kbps = encode::bitrate_for(
+                    config.recording.width,
+                    config.recording.height,
+                    config.recording.fps,
+                );
                 migrate_sources(&mut config);
                 config
             }
@@ -184,6 +228,34 @@ mod tests {
             assert_eq!(before.kind, after.kind);
             assert_eq!(before.enabled, after.enabled);
         }
+    }
+
+    fn buffer(seconds: u32, clip_seconds: u32) -> BufferConfig {
+        BufferConfig {
+            auto_start: false,
+            seconds,
+            clip_seconds,
+            memory_mb: 0,
+        }
+    }
+
+    /// The value every config written before this setting existed carries. It has
+    /// to mean "the whole buffer", or an update would silently shorten everyone's
+    /// clips.
+    #[test]
+    fn zero_means_the_whole_buffer() {
+        assert_eq!(effective_clip_seconds(&buffer(120, 0)), 120);
+    }
+
+    #[test]
+    fn a_shorter_clip_is_taken_as_it_stands() {
+        assert_eq!(effective_clip_seconds(&buffer(120, 30)), 30);
+    }
+
+    /// The buffer is the hard limit — there is nothing older to write.
+    #[test]
+    fn a_clip_longer_than_the_buffer_is_capped() {
+        assert_eq!(effective_clip_seconds(&buffer(30, 120)), 30);
     }
 
     /// The flag one version wrote onto the device is gone from the model. Serde

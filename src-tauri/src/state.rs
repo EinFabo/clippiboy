@@ -170,6 +170,8 @@ impl AppState {
             buffer_bytes: 0,
             dropped_frames: 0,
             encoder: Some(config.recording.encoder),
+            // Not known until an encoder has really been built.
+            rate_control: None,
             fps: 0.0,
             game: None,
         };
@@ -310,6 +312,7 @@ impl AppState {
         let pipeline = Pipeline::start(
             &config.recording,
             config.buffer.seconds,
+            config::effective_memory_bytes(&config.recording, &config.buffer),
             config.sources.clone(),
             self.audio.clone(),
         )?;
@@ -395,6 +398,7 @@ impl AppState {
             status.buffered_seconds = shared.buffered_seconds();
             status.buffer_bytes = shared.buffer_bytes();
             status.dropped_frames = shared.dropped.load(std::sync::atomic::Ordering::Relaxed);
+            status.rate_control = *shared.rate_control.lock();
             // The encoder gets a constant `fps` frames — so the number alone
             // says nothing. What is interesting is how many of them were real:
             // the rest are repeats because the picture stood still.
@@ -409,10 +413,13 @@ impl AppState {
         status
     }
 
-    /// Writes the last `seconds` seconds as an MP4.
+    /// Writes the last `seconds` seconds as an MP4. `None` takes the clip length
+    /// from the settings, which is what the hotkey, the tray and the button do.
     pub fn save_clip(&self, seconds: Option<u32>) -> Result<Clip, String> {
         let config = self.config_snapshot();
-        let seconds = seconds.unwrap_or(config.buffer.seconds).max(1);
+        let seconds = seconds
+            .unwrap_or_else(|| config::effective_clip_seconds(&config.buffer))
+            .max(1);
 
         // Grab everything under a short lock and release it again right away:
         // muxing and the thumbnail take seconds, and "Quit" from the tray, say,
@@ -471,6 +478,7 @@ impl AppState {
             favorite: false,
             edit: None,
             original: None,
+            original_available: false,
             screenshot: false,
         })
     }
@@ -530,6 +538,7 @@ impl AppState {
             favorite: false,
             edit: None,
             original: None,
+            original_available: false,
             screenshot: true,
         })
     }

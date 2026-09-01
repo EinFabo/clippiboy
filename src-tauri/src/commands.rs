@@ -13,7 +13,7 @@ use crate::preview;
 use crate::stems;
 use crate::model::{
     AppConfig, AudioDevice, AudioProcess, AudioSource, CaptureTarget, Clip, ClipEdit, ClipTrack,
-    EncoderInfo, EngineStatus, TrackMix,
+    EncoderInfo, EngineStatus, StorageUsage, TrackMix,
 };
 use crate::state::AppState;
 
@@ -747,10 +747,10 @@ pub fn apply_clip_edit(
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
-    let (encoder, bitrate) = encoder_for(&state);
+    let (encoder, quality) = encoder_for(&state);
     let trim = edit::Trim { start_ms, end_ms };
 
-    let applied = edit::apply(&clip, trim, &tracks, encoder, bitrate, progress(&app, &id));
+    let applied = edit::apply(&clip, trim, &tracks, encoder, quality, progress(&app, &id));
     store(&state, &app, &clip, applied, tracks)
 }
 
@@ -767,20 +767,175 @@ pub fn restore_clip_original(
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
-    let (encoder, bitrate) = encoder_for(&state);
+    let (encoder, quality) = encoder_for(&state);
     let tracks = clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default();
 
     // If it fails, the record stays on the clip: it carries the offset the
     // individual tracks sit at. Throwing it away because the recording cannot
     // be found would leave the preview out of sync forever.
-    let applied = edit::restore(&clip, &tracks, encoder, bitrate, progress(&app, &id));
+    let applied = edit::restore(&clip, &tracks, encoder, quality, progress(&app, &id));
     store(&state, &app, &clip, applied, tracks)
 }
 
-/// Encoder and bitrate for a re-encode run, taken from the settings.
+/// Throw a clip's untouched recording away and keep the trimmed file.
+///
+/// The one way to get back what a trim costs: until this existed, the full
+/// original sat in the app data directory for good, so a trimmed clip occupied
+/// *more* than an untrimmed one. Undo is gone afterwards — the trim is not.
+///
+/// Not `async`: this deletes two files, it does not run ffmpeg.
+#[tauri::command]
+pub fn discard_clip_original(state: State<'_, AppState>, id: String) -> Result<Clip> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    edit::discard_original(&clip.id)?;
+    // The record on the clip stays: it carries the offset the individual tracks
+    // sit at, and a remix without it would run against the picture. What changed
+    // is `original_available`, which the library reads off the disk.
+    with_library(&state, |lib| {
+        lib.get(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "clip not found".to_string())
+    })
+}
+
+/// Write a copy of a clip that comes in under a size.
+///
+/// The counterpart to everything else here: recording and trimming aim at a
+/// quality and let the size follow, this aims at the size. It is what "will this
+/// go through Discord" needs, and no amount of quality helps a file that is
+/// refused at the door.
+///
+/// The original clip is not touched — this writes a second file wherever the
+/// user pointed the save dialog.
+#[tauri::command(async)]
+pub fn export_clip(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+    target_bytes: u64,
+    output: String,
+) -> Result<()> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    refuse_still(&clip)?;
+
+    let source = std::path::PathBuf::from(&clip.path);
+    if !source.is_file() {
+        return Err("The clip file is no longer there.".into());
+    }
+    let output = std::path::PathBuf::from(&output);
+    if output == source {
+        return Err("An export cannot overwrite the clip it comes from.".into());
+    }
+
+    // The length off the file, not out of the database: the arithmetic hangs on
+    // it, and a row that drifted from its file would put the export over the
+    // limit it exists to stay under.
+    let duration_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(clip.duration_ms);
+    let recipe = crate::export::recipe(&crate::export::Target {
+        bytes: target_bytes,
+        duration_ms,
+        width: clip.width,
+        height: clip.height,
+    });
+    let (encoder, _) = encoder_for(&state);
+    let args = crate::export::arguments(&source, &output, &recipe, clip.height, encoder);
+
+    match edit::run_with_progress(&args, duration_ms, &progress(&app, &id)) {
+        Ok(()) => {}
+        // The same fallback as a trim: a hardware encoder refuses often enough —
+        // busy sessions, driver trouble — and x264 is always there.
+        Err(err) if encoder != crate::model::EncoderId::X264 => {
+            log::warn!("export with {encoder:?} failed ({err}) — retrying with x264");
+            let _ = std::fs::remove_file(&output);
+            let args = crate::export::arguments(
+                &source,
+                &output,
+                &recipe,
+                clip.height,
+                crate::model::EncoderId::X264,
+            );
+            edit::run_with_progress(&args, duration_ms, &progress(&app, &id)).inspect_err(
+                |_| {
+                    let _ = std::fs::remove_file(&output);
+                },
+            )?;
+        }
+        Err(err) => {
+            // A half-written file looks like a finished one in the folder.
+            let _ = std::fs::remove_file(&output);
+            return Err(err);
+        }
+    }
+    progress(&app, &id)(1.0);
+
+    let written = std::fs::metadata(&output).map(|meta| meta.len()).unwrap_or(0);
+    if written == 0 {
+        let _ = std::fs::remove_file(&output);
+        return Err("The export came out empty.".into());
+    }
+    if written > target_bytes {
+        // Not an error: the file is there and usually only just over. Saying so
+        // beats letting it be refused somewhere else without explanation.
+        crate::notify(
+            &app,
+            "ok",
+            format!(
+                "Exported at {} MB — a little over the {} MB asked for.",
+                written / 1024 / 1024,
+                target_bytes / 1024 / 1024
+            ),
+        );
+    } else {
+        crate::notify(
+            &app,
+            "ok",
+            format!("Exported · {} MB", written.div_ceil(1024 * 1024)),
+        );
+    }
+    Ok(())
+}
+
+/// What the originals, the individual tracks and the thumbnails occupy.
+///
+/// The clips themselves are not counted — those lie in the user's own folder and
+/// are plainly visible there. This is the part that grows out of sight.
+#[tauri::command(async)]
+pub fn storage_usage() -> Result<StorageUsage> {
+    Ok(StorageUsage {
+        originals_bytes: dir_bytes(&edit::root()),
+        tracks_bytes: dir_bytes(&crate::stems::root()),
+        thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
+    })
+}
+
+/// Everything below a folder, in bytes. Missing folders count as nothing.
+///
+/// Hand-rolled rather than pulled in: the project carries no directory-walking
+/// dependency, and these three folders are one level of subfolders deep.
+fn dir_bytes(root: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.metadata() {
+            Ok(meta) if meta.is_dir() => dir_bytes(&entry.path()),
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// Encoder and quality for a re-encode run, taken from the settings.
+///
+/// Quality, not bitrate: a cut at the front re-encodes from the original, and
+/// aiming at the bitrate it was recorded with produced the same size at one
+/// generation less quality. The same number the recording itself aims at.
 fn encoder_for(state: &State<'_, AppState>) -> (crate::model::EncoderId, u32) {
     let recording = state.config_snapshot().recording;
-    (encode::resolve(recording.encoder), recording.bitrate_kbps)
+    (encode::resolve(recording.encoder), recording.quality)
 }
 
 /// Report progress to the UI. ffmpeg reports often enough that a bar moves

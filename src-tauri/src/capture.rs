@@ -241,6 +241,13 @@ pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
     let width = (height as u64 * native_width as u64 / native_height as u64) as u32;
     recording.height = height & !1;
     recording.width = width.max(2) & !1;
+    // The bitrate follows the picture rather than standing next to it. It is no
+    // longer a setting anyone makes by hand — the encoder aims at a quality —
+    // but it still sizes the memory budget and still governs on an encoder that
+    // refuses constant quality. A fixed number would mean 720p30 kept a budget
+    // meant for four times the pixels per second.
+    recording.bitrate_kbps =
+        crate::encode::bitrate_for(recording.width, recording.height, recording.fps);
 }
 
 #[cfg(test)]

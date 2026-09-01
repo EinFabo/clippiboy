@@ -25,6 +25,7 @@ import { usePresence } from "@/lib/usePresence";
 import { useCountUp } from "@/lib/useCountUp";
 import { HeartBurst } from "@/components/ui/HeartBurst";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
+import { ExportDialog } from "@/components/ExportDialog";
 import { animate, EASE_SPRING } from "@/lib/motion";
 import type { Clip } from "@/lib/types";
 
@@ -57,7 +58,8 @@ const LEAVE_MS = 200;
 let greeted = false;
 
 export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
-  const { clips, deleteClip, clearGame, setFavorite, fileClip } = useEngine();
+  const { clips, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
+    useEngine();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>(ALL);
   /** Which clip is in the player. Editing always happens there. */
@@ -86,6 +88,11 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
    * place on the tile.
    */
   const [confirming, setConfirming] = useState<string | null>(null);
+  // Throwing the untouched recording away cannot be undone either, so it asks
+  // in the same place and the same way as deleting does.
+  const [discarding, setDiscarding] = useState<string | null>(null);
+  // The clip whose export dialog is open, if any.
+  const [exporting, setExporting] = useState<Clip | null>(null);
   const clipMenu = useClipMenu();
   const grid = useRef<HTMLDivElement>(null);
   /**
@@ -298,6 +305,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                   onOpen: () => openAt(index),
                   onRename: () => setRenaming(clip.id),
                   onDelete: () => setConfirming(clip.id),
+                  onDiscardOriginal: () => setDiscarding(clip.id),
+                  onExport: () => setExporting(clip),
                 });
               }}
             >
@@ -395,7 +404,7 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                     "absolute top-3 right-3 flex gap-1.5 transition-opacity",
                     // While the question stands it has to stay up, even once
                     // the cursor has wandered off the tile.
-                    confirming === clip.id
+                    confirming === clip.id || discarding === clip.id
                       ? "opacity-100"
                       : "opacity-0 group-hover:opacity-100",
                   )}
@@ -408,6 +417,18 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                         void deleteClip(clip.id);
                       }}
                       onCancel={() => setConfirming(null)}
+                    />
+                  ) : discarding === clip.id ? (
+                    <ConfirmDelete
+                      origin="right"
+                      question="Throw the recording away?"
+                      confirmLabel="Throw away"
+                      confirmTitle="The trim stays, undo goes"
+                      onConfirm={() => {
+                        setDiscarding(null);
+                        void discardClipOriginal(clip.id);
+                      }}
+                      onCancel={() => setDiscarding(null)}
                     />
                   ) : (
                     <>
@@ -486,6 +507,10 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
             originOf={originOf}
           />
         )
+      )}
+
+      {exporting && (
+        <ExportDialog clip={exporting} onClose={() => setExporting(null)} />
       )}
     </div>
   );

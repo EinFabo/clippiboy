@@ -117,6 +117,38 @@ pub fn remove(clip_id: &str) {
     let _ = std::fs::remove_dir_all(dir(clip_id));
 }
 
+/// Throw the untouched recording away but keep the clip as it stands.
+///
+/// This is the one way to get the space back that a trim costs — until now a
+/// trimmed clip carried its full original in the app data directory forever, so
+/// cutting a two-minute recording down to fifteen seconds *raised* what it
+/// occupied. Only deleting the whole clip ever released it.
+///
+/// Two things it deliberately does **not** do:
+///
+/// 1. It leaves the record in the database alone. The individual tracks are
+///    stored in coordinates of the original, and `plan` reads the offset out of
+///    that record — dropping it would leave a later remix running against the
+///    picture. `repair` takes the same care for a recording that vanished by
+///    other means.
+/// 2. It does not call [`remove`]. That folder is shared with the screenshot
+///    originals (`shot::original_path` and friends), and `remove_dir_all` would
+///    take a screenshot's untouched copy with it. So: the two files that belong
+///    to the video, then an attempt at the folder, which fails by itself if
+///    anything else still lives there.
+pub fn discard_original(clip_id: &str) -> Result<(), String> {
+    let video = video_path(clip_id);
+    if !video.is_file() {
+        return Err("There is no original to throw away.".into());
+    }
+    std::fs::remove_file(&video).map_err(|err| {
+        format!("Could not throw the original away ({err}). Is the clip open somewhere right now?")
+    })?;
+    let _ = std::fs::remove_file(note_path(clip_id));
+    let _ = std::fs::remove_dir(dir(clip_id));
+    Ok(())
+}
+
 /// The excerpt the editor is showing right now — in seconds of the **current**
 /// file, converted to milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +282,7 @@ pub fn apply(
     trim: Trim,
     mix: &[TrackMix],
     encoder: EncoderId,
-    bitrate_kbps: u32,
+    quality: u32,
     on_progress: impl Fn(f32),
 ) -> Result<Applied, String> {
     // The record on the clip is the truth about the coordinates; the store only
@@ -261,7 +293,7 @@ pub fn apply(
         clip.duration_ms,
         trim,
     );
-    run(clip, &plan, mix, encoder, bitrate_kbps, &on_progress)
+    run(clip, &plan, mix, encoder, quality, &on_progress)
 }
 
 /// Undo the trim: pull the whole recording back, keep the mix.
@@ -269,7 +301,7 @@ pub fn restore(
     clip: &Clip,
     mix: &[TrackMix],
     encoder: EncoderId,
-    bitrate_kbps: u32,
+    quality: u32,
     on_progress: impl Fn(f32),
 ) -> Result<Applied, String> {
     let base = clip
@@ -277,7 +309,7 @@ pub fn restore(
         .filter(|_| has_original(&clip.id))
         .ok_or_else(|| "The original can no longer be found.".to_string())?;
     let plan = restore_plan(&base);
-    run(clip, &plan, mix, encoder, bitrate_kbps, &on_progress)
+    run(clip, &plan, mix, encoder, quality, &on_progress)
 }
 
 fn run(
@@ -285,7 +317,7 @@ fn run(
     plan: &RenderPlan,
     mix: &[TrackMix],
     encoder: EncoderId,
-    bitrate_kbps: u32,
+    quality: u32,
     on_progress: &impl Fn(f32),
 ) -> Result<Applied, String> {
     let _busy = WORKING.lock();
@@ -320,7 +352,7 @@ fn run(
     // ffmpeg must not write into its own input — so beside it, and over it
     // afterwards. The process id makes the file unique per run.
     let temp = target.with_extension(format!("{}.neu.mp4", std::process::id()));
-    let args = arguments(plan, &video, &list, mix, &temp, encoder, bitrate_kbps);
+    let args = arguments(plan, &video, &list, mix, &temp, encoder, quality);
 
     match run_with_progress(&args, plan.length_ms, on_progress) {
         Ok(()) => {}
@@ -336,7 +368,7 @@ fn run(
                 mix,
                 &temp,
                 EncoderId::X264,
-                bitrate_kbps,
+                quality,
             );
             if let Err(err) = run_with_progress(&fallback, plan.length_ms, on_progress) {
                 let _ = std::fs::remove_file(&temp);
@@ -451,7 +483,7 @@ fn arguments(
     mix: &[TrackMix],
     output: &Path,
     encoder: EncoderId,
-    bitrate_kbps: u32,
+    quality: u32,
 ) -> Vec<String> {
     let gains = stems::levels(list, mix);
 
@@ -537,7 +569,7 @@ fn arguments(
     }
 
     if plan.reencode {
-        args.extend(video_args(encoder, bitrate_kbps));
+        args.extend(video_args(encoder, quality));
     } else {
         args.extend(["-c:v", "copy"].map(String::from));
     }
@@ -562,37 +594,61 @@ fn recoverable(source: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn video_args(encoder: EncoderId, bitrate_kbps: u32) -> Vec<String> {
-    let rate = bitrate_kbps.max(4_000);
-    let bitrate = format!("{rate}k");
-    let maxrate = format!("{}k", rate * 3 / 2);
+/// The quantiser a quality level asks for, on H.264's own 0–51 scale where
+/// smaller is better.
+///
+/// The anchor is the encoder's own pairing: quality 70 is a quantiser of 24 for
+/// a Media Foundation transform, and x264 at CRF 20 lands in the same place for
+/// game footage. The ends are clamped because nothing above or below is worth
+/// the file it produces.
+fn quantiser(quality: u32) -> u32 {
+    let q = quality.clamp(1, 100) as f32;
+    (51.0 - q * 0.44).round().clamp(14.0, 28.0) as u32
+}
+
+/// The video half of the ffmpeg line for a re-encode.
+///
+/// Constant quality, not a bitrate. Re-encoding at the bitrate the clip was
+/// recorded with was the worst of both: the file came out the same size, one
+/// generation of quality poorer. The x264 branch always did this right with
+/// `-crf`; the hardware branches now match it.
+fn video_args(encoder: EncoderId, quality: u32) -> Vec<String> {
+    let qp = quantiser(quality).to_string();
     let common = |mut args: Vec<&str>| -> Vec<String> {
         args.extend(["-pix_fmt", "yuv420p"]);
         args.into_iter().map(String::from).collect()
     };
     match encoder {
+        // `-b:v 0` is not decoration: without it NVENC treats `-cq` as a ceiling
+        // on top of a bitrate target rather than as the target itself.
         EncoderId::Nvenc => {
             let mut args = common(vec!["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr"]);
-            args.extend(["-b:v".into(), bitrate, "-maxrate".into(), maxrate]);
+            args.extend(["-cq".into(), qp, "-b:v".into(), "0".into()]);
             args
         }
         EncoderId::Amf => {
-            let mut args = common(vec!["-c:v", "h264_amf", "-quality", "balanced"]);
-            args.extend(["-b:v".into(), bitrate]);
+            let mut args = common(vec!["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp"]);
+            args.extend(["-qp_i".into(), qp.clone(), "-qp_p".into(), qp]);
             args
         }
         EncoderId::Qsv => {
             let mut args = common(vec!["-c:v", "h264_qsv", "-preset", "medium"]);
-            args.extend(["-b:v".into(), bitrate]);
+            args.extend(["-global_quality".into(), qp]);
             args
         }
-        EncoderId::X264 => common(vec!["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]),
+        EncoderId::X264 => {
+            let mut args = common(vec!["-c:v", "libx264", "-preset", "veryfast"]);
+            args.extend(["-crf".into(), qp]);
+            args
+        }
     }
 }
 
 /// Start ffmpeg and read `-progress` along the way. Without it the app would
 /// stand there for minutes with no sign of life on a re-encoded clip.
-fn run_with_progress(
+///
+/// Shared with `export`, which has the same problem for the same reason.
+pub(crate) fn run_with_progress(
     args: &[String],
     length_ms: u64,
     on_progress: &impl Fn(f32),
@@ -790,6 +846,32 @@ mod tests {
         assert_eq!(plan.length_ms, 6_000);
     }
 
+    /// Throwing the original away must not take the tracks' zero point with it.
+    ///
+    /// `discard_original` deletes the file and keeps the record for exactly this
+    /// reason. Were the record dropped along with it, the offset would fall back
+    /// to zero and every later remix would run against the picture — by the five
+    /// seconds this clip was trimmed by.
+    #[test]
+    fn discarding_the_original_leaves_the_tracks_where_they_are() {
+        let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
+        let trim = Trim { start_ms: 2_000, end_ms: 8_000 };
+
+        let before = plan(Some(&base), true, 15_000, trim);
+        let after = plan(Some(&base), false, 15_000, trim);
+        assert_eq!(
+            before.stems_start_ms, after.stems_start_ms,
+            "the tracks' offset may not depend on whether the file is still there"
+        );
+
+        // And what it would be if the record went too — the bug this guards.
+        let lost = plan(None, false, 15_000, trim);
+        assert_ne!(
+            lost.stems_start_ms, after.stems_start_ms,
+            "without the record the offset collapses to the clip's own timeline"
+        );
+    }
+
     /// A handle that did not quite sit at the end stop must not trigger an
     /// encode run.
     #[test]
@@ -871,7 +953,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            40_000,
+            70,
         );
 
         let inputs: Vec<usize> = args
@@ -900,7 +982,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            40_000,
+            70,
         );
         let last_input = args.iter().rposition(|arg| arg == "-i").unwrap();
         let length = args.iter().position(|arg| arg == "-t").unwrap();
@@ -922,7 +1004,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            40_000,
+            70,
         );
         assert_eq!(args.iter().filter(|arg| *arg == "-i").count(), 1, "{args:?}");
         assert_eq!(args.iter().filter(|arg| *arg == "-ss").count(), 1, "{args:?}");
@@ -952,9 +1034,36 @@ mod tests {
     #[test]
     fn every_encoder_yields_a_complete_line() {
         for encoder in [EncoderId::Nvenc, EncoderId::Amf, EncoderId::Qsv, EncoderId::X264] {
-            let args = video_args(encoder, 100);
+            let args = video_args(encoder, 70);
             assert!(args.contains(&"-c:v".to_string()), "{encoder:?}: {args:?}");
             assert!(args.contains(&"-pix_fmt".to_string()), "{encoder:?}: {args:?}");
+        }
+    }
+
+    /// Aiming at the recording's own bitrate gave the same size back at one
+    /// generation less quality. `-b:v 0` is the exception that proves it: NVENC
+    /// needs it to read `-cq` as the target rather than as a ceiling.
+    #[test]
+    fn no_encoder_aims_at_a_bitrate_any_more() {
+        for encoder in [EncoderId::Nvenc, EncoderId::Amf, EncoderId::Qsv, EncoderId::X264] {
+            let args = video_args(encoder, 70);
+            if let Some(at) = args.iter().position(|a| a == "-b:v") {
+                assert_eq!(args[at + 1], "0", "{encoder:?} still aims at a bitrate: {args:?}");
+            }
+        }
+    }
+
+    /// Better quality has to mean a smaller quantiser, and nothing may leave the
+    /// range where H.264 still produces a picture worth its bytes.
+    #[test]
+    fn quality_maps_onto_a_sane_quantiser() {
+        // The encoder's own pairing — quality 70 is a quantiser of 24, and x264
+        // at CRF 20 sits in the same place for game footage.
+        assert_eq!(quantiser(70), 20);
+        assert!(quantiser(85) < quantiser(70));
+        assert!(quantiser(55) > quantiser(70));
+        for quality in [0, 1, 50, 70, 100, 999] {
+            assert!((14..=28).contains(&quantiser(quality)), "quality {quality}");
         }
     }
 }

@@ -8,6 +8,7 @@ pub mod config;
 pub mod convert;
 pub mod edit;
 pub mod encode;
+pub mod export;
 pub mod filing;
 pub mod game;
 pub mod gpu;
@@ -619,6 +620,9 @@ pub fn run() {
             commands::clip_waveform,
             commands::apply_clip_edit,
             commands::restore_clip_original,
+            commands::discard_clip_original,
+            commands::storage_usage,
+            commands::export_clip,
             commands::reveal_path,
             commands::app_version,
             commands::check_update,

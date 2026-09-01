@@ -2,11 +2,13 @@ import {
   IconArrowUpRight,
   IconCamera,
   IconCopy,
+  IconExport,
   IconFolder,
   IconHeart,
   IconPaste,
   IconPencil,
   IconPlay,
+  IconScissors,
   IconTrash,
 } from "@/components/icons";
 import { useMenu, type MenuEntry, type MenuTrigger } from "@/components/ui/Menu";
@@ -21,6 +23,14 @@ interface Options {
   /** Gallery only: the editor has a name field of its own. */
   onRename?: () => void;
   onDelete: () => void;
+  /** Write a smaller copy to send. Optional: it opens a dialog at the call site. */
+  onExport?: () => void;
+  /**
+   * Throw the untouched recording away. Optional because it has to ask first,
+   * and the asking belongs where the menu was opened from — the player has the
+   * button in its editor pane already and passes nothing.
+   */
+  onDiscardOriginal?: () => void;
 }
 
 const icon = "h-4 w-4";
@@ -103,6 +113,18 @@ export function useClipMenu() {
       disabled: !inTauri,
       onSelect: () => void api.copyClipFile(clip.id),
     });
+    // Recordings only: a still is small already, and the arithmetic here is all
+    // about length.
+    if (!clip.screenshot && options.onExport) {
+      const onExport = options.onExport;
+      entries.push({
+        kind: "item",
+        label: "Export a copy…",
+        icon: <IconExport className={icon} />,
+        disabled: !inTauri,
+        onSelect: onExport,
+      });
+    }
     entries.push({
       kind: "item",
       label: "Copy path",
@@ -117,6 +139,22 @@ export function useClipMenu() {
       disabled: !inTauri,
       onSelect: () => void api.revealClip(clip.id),
     });
+
+    // Only worth offering while there is something to release, and only where
+    // the calling site can ask first — throwing the recording away cannot be
+    // undone. The record on the clip outlives the file, so `originalAvailable`
+    // is the question, not `original`; see the note on the type.
+    if (clip.originalAvailable && options.onDiscardOriginal) {
+      const onDiscardOriginal = options.onDiscardOriginal;
+      entries.push({ kind: "separator" });
+      entries.push({
+        kind: "item",
+        label: "Free up space…",
+        icon: <IconScissors className={icon} />,
+        disabled: !inTauri,
+        onSelect: onDiscardOriginal,
+      });
+    }
 
     entries.push({ kind: "separator" });
     entries.push({

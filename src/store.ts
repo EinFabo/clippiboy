@@ -10,6 +10,7 @@ import type {
   Clip,
   EncoderInfo,
   LevelMap,
+  RateControl,
   ShotRect,
   ShotStep,
   TrackMix,
@@ -33,6 +34,10 @@ interface EngineState {
   taps: Record<string, number[]>;
   bufferActive: boolean;
   bufferedSeconds: number;
+  /** Bytes the packet ring currently holds — against the memory budget. */
+  bufferBytes: number;
+  /** What the encoder really does about bitrate. `null` while nothing runs. */
+  rateControl: RateControl | null;
   /** Game detected in the foreground, reported by the core. */
   detectedGame: string | null;
   lastError: string | null;
@@ -77,6 +82,8 @@ interface EngineState {
   ) => Promise<void>;
   /** Undo the trim and pull the whole recording back. */
   restoreClipOriginal: (id: string) => Promise<void>;
+  /** Throw the untouched recording away, keep the trimmed clip. */
+  discardClipOriginal: (id: string) => Promise<void>;
   /**
    * Write a screenshot from its original, its marks and its crop — see
    * `api.writeScreenshot`.
@@ -110,6 +117,8 @@ export const useEngine = create<EngineState>((set, get) => ({
   taps: {},
   bufferActive: false,
   bufferedSeconds: 0,
+  bufferBytes: 0,
+  rateControl: null,
   detectedGame: null,
   lastError: null,
 
@@ -174,6 +183,8 @@ export const useEngine = create<EngineState>((set, get) => ({
         set({
           bufferActive: s.bufferActive,
           bufferedSeconds: s.bufferedSeconds,
+          bufferBytes: s.bufferBytes,
+          rateControl: s.rateControl,
           detectedGame: s.game,
         }),
       );
@@ -405,6 +416,17 @@ export const useEngine = create<EngineState>((set, get) => ({
     // here, and if that fails the UI must not claim otherwise.
     try {
       const clip = await api.writeScreenshot(id, crop, steps, marks);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: String(err) });
+      throw err;
+    }
+  },
+
+  async discardClipOriginal(id) {
+    if (!inTauri) return;
+    try {
+      const clip = await api.discardClipOriginal(id);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       set({ lastError: String(err) });

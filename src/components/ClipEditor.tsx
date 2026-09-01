@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
 import { Slider } from "@/components/ui/Controls";
 import { IconSpeaker } from "@/components/icons";
 import { ClipMeta } from "@/components/ClipMeta";
@@ -39,6 +41,8 @@ interface Props {
   /** Undo the trim and pull the whole recording back. */
   onRestore: () => void;
   restoring: boolean;
+  /** Throw the untouched recording away and keep the trimmed clip. */
+  onDiscard: () => void;
   /** Switch to the audio mixer — that is where the separated tracks come from. */
   onOpenMixer: () => void;
 }
@@ -72,8 +76,12 @@ export function ClipEditor({
   onSave,
   onRestore,
   restoring,
+  onDiscard,
   onOpenMixer,
 }: Props) {
+  // Local, like `askingDelete` in the player: the confirmation replaces the
+  // button that opened it and nobody else needs to know about it.
+  const [discarding, setDiscarding] = useState(false);
   const trimmed = trim.start > 0.05 || trim.end < duration - 0.05;
   const length = Math.max(0, trim.end - trim.start);
   // A cut at the start has to be frame-accurate — when copying it slid to the
@@ -160,21 +168,54 @@ export function ClipEditor({
             </p>
           )}
 
-          {clip.original && (
+          {clip.original && clip.originalAvailable && (
             <div className="space-y-2 rounded-inner bg-elevated p-3">
               <p className="text-xs leading-relaxed text-ink-muted">
                 Trimmed from {clock(clip.original.durationMs / 1000)} — starting
                 at {clock(clip.original.startMs / 1000)}. The whole recording sits
                 beside it and comes back at the press of a button.
               </p>
-              <Button
-                size="sm"
-                disabled={busy || !inTauri}
-                onClick={onRestore}
-              >
-                {restoring ? "Restoring…" : "Undo trim"}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  disabled={busy || !inTauri}
+                  onClick={onRestore}
+                >
+                  {restoring ? "Restoring…" : "Undo trim"}
+                </Button>
+                {discarding ? (
+                  <ConfirmDelete
+                    question="Throw the recording away?"
+                    confirmLabel="Throw away"
+                    confirmTitle="The trim stays, undo goes"
+                    onConfirm={() => {
+                      setDiscarding(false);
+                      onDiscard();
+                    }}
+                    onCancel={() => setDiscarding(false)}
+                  />
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy || !inTauri}
+                    onClick={() => setDiscarding(true)}
+                  >
+                    Free up space
+                  </Button>
+                )}
+              </div>
             </div>
+          )}
+
+          {/* The record outlives the file — see `Clip.originalAvailable`. Saying
+              so beats an "Undo trim" button that fails when pressed. */}
+          {clip.original && !clip.originalAvailable && (
+            <p className="rounded-inner bg-elevated p-3 text-xs leading-relaxed text-ink-muted">
+              Trimmed from {clock(clip.original.durationMs / 1000)}. The whole
+              recording is no longer there, so the trim cannot be undone — the
+              mix can still be changed at any time.
+            </p>
           )}
         </section>
       </div>
@@ -204,7 +245,7 @@ export function ClipEditor({
                 ? "Not saved yet — the file in the folder is still a different one."
                 : justSaved
                   ? "Saved. That is how the clip sits in the folder now — ready to send."
-                  : clip.original
+                  : clip.original && clip.originalAvailable
                     ? "The trim sits in the file. The original is beside it, undoing works any time."
                     : "The file in the folder is exactly what stands here."}
           </span>

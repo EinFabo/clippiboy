@@ -37,6 +37,12 @@ export interface AudioSource {
 
 export type EncoderId = "nvenc" | "amf" | "qsv" | "x264";
 
+/** How the encoder decides how many bits a frame is worth. */
+export type RateControl =
+  | "quality"
+  | "peakConstrainedVbr"
+  | "unconstrainedVbr";
+
 export interface EncoderInfo {
   id: EncoderId;
   name: string;
@@ -66,7 +72,14 @@ export interface RecordingConfig {
   width: number;
   height: number;
   fps: number;
+  /**
+   * Derived from resolution and frame rate, not set by hand. With constant
+   * quality the encoder ignores it — it still sizes the memory budget and still
+   * governs on an encoder that refuses quality mode.
+   */
   bitrateKbps: number;
+  /** What the picture is worth, 1 (smallest) to 100 (best). The encoder's own default is 70. */
+  quality: number;
   encoder: EncoderId;
   keyframeSeconds: number;
 }
@@ -75,6 +88,17 @@ export interface BufferConfig {
   /** Switch the buffer on by itself — see `onlyBufferInGame`. */
   autoStart: boolean;
   seconds: number;
+  /**
+   * How much of the buffer a save writes. `0` means all of it — the behaviour
+   * of every version before this setting, and therefore what an existing config
+   * keeps doing.
+   */
+  clipSeconds: number;
+  /**
+   * Ceiling on what the packet ring may occupy, in megabytes. `0` derives it
+   * from bitrate and buffer length.
+   */
+  memoryMb: number;
 }
 
 export type OverlayCorner =
@@ -137,6 +161,13 @@ export interface Clip {
    * can be pulled open again with `restoreClipOriginal`.
    */
   original: ClipOriginal | null;
+  /**
+   * Is the untouched recording still on disk, so the trim can be undone?
+   *
+   * A separate question from `original` above: that record outlives the file,
+   * because the individual tracks are stored in its coordinates.
+   */
+  originalAvailable: boolean;
   /**
    * A still instead of a recording. Everything to do with time — the duration,
    * the trim, the individual tracks, the waveform — does not apply to it, and
@@ -205,12 +236,21 @@ export interface TrackMix {
   muted: boolean;
 }
 
+/** What ClippiBoy keeps out of sight in the app data directory. */
+export interface StorageUsage {
+  originalsBytes: number;
+  tracksBytes: number;
+  thumbsBytes: number;
+}
+
 export interface EngineStatus {
   bufferActive: boolean;
   bufferedSeconds: number;
   bufferBytes: number;
   droppedFrames: number;
   encoder: EncoderId | null;
+  /** What the encoder really does about bitrate. `null` until one is running. */
+  rateControl: RateControl | null;
   fps: number;
   /** Game last detected in the foreground. */
   game: string | null;

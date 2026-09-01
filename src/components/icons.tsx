@@ -41,6 +41,13 @@ export const IconArrowUpRight = ({ className = base }: P) => (
   </svg>
 );
 
+/** An arrow leaving a tray — "make me a copy to send". */
+export const IconExport = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 15V3m0 0L8 7m4-4 4 4M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" />
+  </svg>
+);
+
 export const IconScissors = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round">
     <circle cx="6" cy="18" r="2.5" />

@@ -30,6 +30,14 @@ impl EncodedPacket {
 
 pub struct ReplayBuffer {
     capacity_us: i64,
+    /// Hard ceiling on what the ring may hold.
+    ///
+    /// The length alone stopped being enough once the encoder was allowed to
+    /// pick its own bitrate for a constant quality: a quiet menu costs a
+    /// fraction of a firefight, so the same two minutes are no longer the same
+    /// number of bytes. Without this the ring would follow the picture straight
+    /// into memory the machine does not have.
+    capacity_bytes: u64,
     packets: VecDeque<EncodedPacket>,
     /// Sequence number of the frontmost packet — for stable keyframe positions.
     head_seq: u64,
@@ -41,9 +49,10 @@ pub struct ReplayBuffer {
 }
 
 impl ReplayBuffer {
-    pub fn new(capacity_seconds: u32) -> Self {
+    pub fn new(capacity_seconds: u32, capacity_bytes: u64) -> Self {
         Self {
             capacity_us: capacity_seconds as i64 * 1_000_000,
+            capacity_bytes,
             packets: VecDeque::new(),
             head_seq: 0,
             next_seq: 0,
@@ -53,8 +62,9 @@ impl ReplayBuffer {
         }
     }
 
-    pub fn set_capacity(&mut self, seconds: u32) {
+    pub fn set_capacity(&mut self, seconds: u32, bytes: u64) {
         self.capacity_us = seconds as i64 * 1_000_000;
+        self.capacity_bytes = bytes;
         self.trim();
     }
 
@@ -70,11 +80,17 @@ impl ReplayBuffer {
     }
 
     /// Drops from the front as long as the full buffer length starting at the
-    /// *next* keyframe still remains afterwards.
+    /// *next* keyframe still remains afterwards — or as long as the ring is over
+    /// its memory budget.
+    ///
+    /// Whole groups of pictures go at a time, and never the last one: a ring
+    /// that starts anywhere but a keyframe is not decodable.
     fn trim(&mut self) {
         while self.keyframes.len() > 1 {
             let (seq, pts) = self.keyframes[1];
-            if self.newest_pts - pts < self.capacity_us {
+            let too_long = self.newest_pts - pts >= self.capacity_us;
+            let too_big = self.bytes > self.capacity_bytes;
+            if !too_long && !too_big {
                 break;
             }
             let drop_count = (seq - self.head_seq) as usize;
@@ -144,6 +160,9 @@ impl ReplayBuffer {
 mod tests {
     use super::*;
 
+    /// The tests that predate the memory budget: only the length may cut.
+    const NO_LIMIT: u64 = u64::MAX;
+
     fn packet(track: u32, pts_ms: i64, keyframe: bool, size: usize) -> EncodedPacket {
         EncodedPacket {
             track,
@@ -167,7 +186,7 @@ mod tests {
 
     #[test]
     fn trims_to_capacity_but_keeps_a_leading_keyframe() {
-        let mut buf = ReplayBuffer::new(10);
+        let mut buf = ReplayBuffer::new(10, NO_LIMIT);
         fill(&mut buf, 60);
 
         let secs = buf.buffered_seconds();
@@ -182,7 +201,7 @@ mod tests {
 
     #[test]
     fn snapshot_starts_on_keyframe_and_covers_request() {
-        let mut buf = ReplayBuffer::new(30);
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
         fill(&mut buf, 30);
 
         let clip = buf.snapshot(10);
@@ -196,16 +215,64 @@ mod tests {
 
     #[test]
     fn shrinking_capacity_frees_memory() {
-        let mut buf = ReplayBuffer::new(30);
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
         fill(&mut buf, 30);
         let before = buf.bytes();
-        buf.set_capacity(5);
+        buf.set_capacity(5, NO_LIMIT);
         assert!(buf.bytes() < before / 2, "buffer was not shrunk");
+    }
+
+    /// The point of the budget: with a constant quality the bitrate follows the
+    /// picture, so thirty seconds of one scene are not thirty seconds of another.
+    /// Memory has to win over duration, or a busy scene takes the machine down.
+    #[test]
+    fn the_memory_budget_cuts_the_buffer_short() {
+        // `fill` writes 1000 bytes per frame plus audio — 30 s is well over this.
+        let mut buf = ReplayBuffer::new(30, 400_000);
+        fill(&mut buf, 30);
+
+        assert!(
+            buf.bytes() <= 400_000,
+            "the ring stayed over its budget: {} bytes",
+            buf.bytes()
+        );
+        assert!(
+            buf.buffered_seconds() < 30.0,
+            "the budget should have cost some length, held {} s",
+            buf.buffered_seconds()
+        );
+        // Still usable, still starting on a keyframe.
+        let first = buf.packets.front().unwrap();
+        assert!(first.is_video() && first.keyframe);
+    }
+
+    /// Even an absurd budget must leave a decodable group of pictures behind.
+    /// An empty ring would turn "save clip" into an error message for the rest
+    /// of the session.
+    #[test]
+    fn the_budget_never_empties_the_ring() {
+        let mut buf = ReplayBuffer::new(30, 1);
+        fill(&mut buf, 30);
+
+        assert!(!buf.is_empty(), "the last group of pictures has to stay");
+        let first = buf.packets.front().unwrap();
+        assert!(first.is_video() && first.keyframe);
+    }
+
+    /// Without a budget nothing about the old behaviour may change.
+    #[test]
+    fn an_unlimited_budget_leaves_the_length_in_charge() {
+        let mut capped = ReplayBuffer::new(10, NO_LIMIT);
+        let mut plain = ReplayBuffer::new(10, NO_LIMIT);
+        fill(&mut capped, 60);
+        fill(&mut plain, 60);
+        assert_eq!(capped.bytes(), plain.bytes());
+        assert_eq!(capped.len(), plain.len());
     }
 
     #[test]
     fn snapshot_of_empty_buffer_is_empty() {
-        let buf = ReplayBuffer::new(30);
+        let buf = ReplayBuffer::new(30, NO_LIMIT);
         assert!(buf.snapshot(10).is_empty());
     }
 }

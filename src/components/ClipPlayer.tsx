@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
 import { ClipEditor, type Trim } from "@/components/ClipEditor";
+import { ExportDialog } from "@/components/ExportDialog";
 import { useClipMenu } from "@/components/clipMenu";
 import { IconTrash } from "@/components/icons";
 import { HeartBurst } from "@/components/ui/HeartBurst";
@@ -83,6 +84,7 @@ export function ClipPlayer({
   const setFavorite = useEngine((state) => state.setFavorite);
   const clipMenu = useClipMenu();
   const restoreClipOriginal = useEngine((state) => state.restoreClipOriginal);
+  const discardClipOriginal = useEngine((state) => state.discardClipOriginal);
 
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
@@ -102,6 +104,7 @@ export function ClipPlayer({
    * everything else that asks in this app.
    */
   const [askingDelete, setAskingDelete] = useState(false);
+  const [exporting, setExporting] = useState(false);
   // Counts the video element's restarts. Serves as a `key`: after saving, the
   // player gets a fresh element rather than one whose source we pulled out from
   // under it. The audio tracks re-attach to it as well.
@@ -398,6 +401,7 @@ export function ClipPlayer({
         Escape: () => {
           if (document.fullscreenElement) return;
           if (askingDelete) return; // the question takes it — see ConfirmDelete
+          if (exporting) return; // likewise the export dialog
           close();
         },
       };
@@ -408,7 +412,19 @@ export function ClipPlayer({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggle, seek, seekTo, fullscreen, mark, step, close, askingDelete, trim.start, trim.end]);
+  }, [
+    toggle,
+    seek,
+    seekTo,
+    fullscreen,
+    mark,
+    step,
+    close,
+    askingDelete,
+    exporting,
+    trim.start,
+    trim.end,
+  ]);
 
   const base = clip ? fileUrl(clip.path) : undefined;
   // After saving the file is a different one — usually shorter, because the
@@ -501,6 +517,20 @@ export function ClipPlayer({
     }
   }
 
+  /**
+   * Throw the untouched recording away. Nothing about the file being played
+   * changes — only what lies beside it in the app data folder — so unlike
+   * [save] and [restoreOriginal] the video element can stay where it is.
+   */
+  async function discardOriginal() {
+    if (!clip || saving || restoring) return;
+    try {
+      await discardClipOriginal(clip.id);
+    } catch {
+      // The notice is already in the store.
+    }
+  }
+
   // A new state makes the success message obsolete.
   const showSaved = justSaved && !dirty;
 
@@ -557,7 +587,13 @@ export function ClipPlayer({
         <div
           ref={frame}
           onContextMenu={(event) =>
-            clip && clipMenu(event, clip, { onDelete: () => setAskingDelete(true) })
+            clip &&
+            clipMenu(event, clip, {
+              onDelete: () => setAskingDelete(true),
+              // No `onDiscardOriginal`: the editor pane beside the picture has
+              // that button already, with its question in place.
+              onExport: () => setExporting(true),
+            })
           }
           className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-card bg-black"
         >
@@ -657,6 +693,7 @@ export function ClipPlayer({
           dirty={dirty}
           progress={writeProgress}
           onRestore={() => void restoreOriginal()}
+          onDiscard={() => void discardOriginal()}
           restoring={restoring}
           saving={saving}
           justSaved={showSaved}
@@ -809,6 +846,10 @@ export function ClipPlayer({
             height: flight.from.height,
           }}
         />
+      )}
+
+      {exporting && clip && (
+        <ExportDialog clip={clip} onClose={() => setExporting(false)} />
       )}
     </div>,
     document.body,

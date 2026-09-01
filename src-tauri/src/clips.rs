@@ -117,8 +117,12 @@ impl Library {
              FROM clips ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
             Ok(Clip {
-                id: row.get(0)?,
+                // Not in the database: the file can disappear without the row
+                // hearing about it, so it is asked rather than remembered.
+                original_available: crate::edit::has_original(&id),
+                id,
                 path: row.get(1)?,
                 created_at: row.get(2)?,
                 duration_ms: row.get::<_, i64>(3)? as u64,
@@ -309,6 +313,7 @@ mod tests {
             description: None,
             edit: None,
             original: None,
+            original_available: false,
             favorite: false,
             screenshot: false,
         }

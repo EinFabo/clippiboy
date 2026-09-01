@@ -97,7 +97,17 @@ two seconds.
 
 The ring always cuts at a keyframe at the front — a clip that started in the
 middle of a group of pictures would have blocky artefacts at the beginning.
-Older packets fall away continuously, so exactly the configured length is kept.
+Older packets fall away continuously, so the configured length is kept — or as
+much of it as the memory budget allows. The encoder aims at a **quality**, not
+at a bitrate, so a firefight costs more bytes per second than a menu screen; the
+budget is the ceiling that keeps a busy scene from following the picture into
+memory the machine does not have. Run into it and the buffer holds a little less
+than its full length, which the dashboard shows as it happens.
+
+**Buffer length and clip length are two settings.** A long buffer is insurance
+against pressing the key three seconds late; it does not have to mean a long
+clip. Leave the clip length at the top of its range and it follows the buffer,
+the way it always did.
 
 The video reaches the hardware encoder as a Direct3D texture and is never copied
 through the CPU. Capture and encoder share one D3D11 device for that, and the
@@ -301,6 +311,11 @@ whatever is set in it the core remembers on the clip:
   the selection when it reaches the end.
 * **Save** — writes both into the file: the mix **and** the trim. What lies in
   the folder afterwards is the finished clip, ready to send as is.
+* **Export a copy** — for when "ready to send" runs into a limit. Pick a size
+  (10 MB, 25 MB, whatever), and ClippiBoy works backwards from it: the bitrate
+  comes out of the size and the length, and if that would be too thin for the
+  resolution the picture is made smaller rather than muddier. A sharp 720p beats
+  a smeared 1080p. The clip itself is not touched — this is a second file.
 
 Nothing is lost on the way. On the first real cut the untouched recording moves
 into the app data directory and the pane offers **Undo trim** — one click and the
@@ -309,7 +324,11 @@ handles run over the trimmed file's timeline while the arithmetic happens in the
 original.
 
 **A trimmed clip needs twice the space** for as long as that original sits beside
-it. It disappears as soon as the trim is undone or the clip is deleted.
+it. It disappears as soon as the trim is undone or the clip is deleted — or on
+**Free up space**, in the clip menu and beside the undo button, which throws the
+recording away and keeps the trim. Undo is gone afterwards; the mix can still be
+changed, because the individual tracks stay where they are. What all of this
+occupies is listed under *Storage location* in the settings.
 
 > **Shortening at the back is lossless, at the front it is not.** A cut that
 > starts at zero only copies the video and is done in a second or two. A cut at
@@ -431,6 +450,12 @@ rate offers the usual steps only up to the screen's refresh rate — plus that r
 itself, so a 165 Hz panel really does give 165. Capturing more frames than the
 screen puts out makes no motion smoother; it only produces duplicate frames that
 cost bitrate. For a window, the screen it sits on counts.
+
+There is no bitrate to set. The encoder is given a **quality** and spends what
+the picture needs — which is the whole point, because a fixed bitrate pays the
+same for a still menu as for a firefight. What a resolution and frame rate are
+worth is derived (`encode::bitrate_for`), so switching to 720p30 no longer keeps
+a budget meant for four times the pixels per second.
 
 A setting that no longer fits gets straightened out: switching from a 165 Hz
 monitor to a 60 Hz second screen leaves you with 60 there, rather than a number
@@ -610,6 +635,7 @@ src/                          React UI
   components/ClipEditor.tsx   editing pane: metadata, tracks, export
   components/ClipMeta.tsx     name, description, game — shared by both viewers
   components/clipMenu.tsx     the entries of a clip's right-click menu
+  components/ExportDialog.tsx pick a size, get a copy that fits it
   components/ShotViewer.tsx   screenshot viewer over the gallery
   components/ShotAnnotate.tsx non-destructive editor: crop, marks, blur
   components/ui/Menu.tsx      right-click menu (one menu, global)
@@ -632,6 +658,7 @@ src-tauri/src/
   muxer.rs                    packets + audio tracks → MP4 (ffmpeg, no re-encode)
   stems.rs                    store, extract and mix individual tracks (+ tests)
   edit.rs                     rewrite a clip: mix + trim (+ tests)
+  export.rs                   a copy that fits a size — the arithmetic (+ tests)
   preview.rs                  throwaway helper files (waveform for the timeline)
   audio/capture.rs            WASAPI per source (device, loopback, process)
   audio/engine.rs             running streams, levels, mixing
@@ -643,7 +670,7 @@ src-tauri/src/
   games.json                  exe → game name
   tray.rs                     tray icon, menu, tooltip
   overlay.rs                  driving the overlay window
-  encode.rs                   encoder detection (NVENC/AMF/QSV/x264 via DXGI)
+  encode.rs                   encoder detection + bitrate from the picture (+ tests)
   clipboard.rs                Windows clipboard: file (CF_HDROP) and text
   clips.rs                    SQLite clip index
   filing.rs                   order in the clip folder (+ tests)

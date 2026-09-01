@@ -30,7 +30,7 @@ use crate::audio::capture::{now_100ns, CHANNELS, SAMPLE_RATE};
 use crate::audio::engine::AudioEngine;
 use crate::audio::recorded;
 use crate::buffer::{EncodedPacket, ReplayBuffer};
-use crate::model::{AudioSource, EncoderId, RecordingConfig};
+use crate::model::{AudioSource, EncoderId, RateControl, RecordingConfig};
 
 /// How far behind the present the mixer stays.
 ///
@@ -268,6 +268,9 @@ pub struct Shared {
     pub sources_generation: AtomicU64,
     /// Which encoder is really running — not the requested one.
     pub encoder: Mutex<Option<EncoderId>>,
+    /// And what it agreed to do about bitrate — likewise not the wish, see
+    /// [`crate::model::RateControl`].
+    pub rate_control: Mutex<Option<RateControl>>,
     /// SPS/PPS that belong in front of the elementary stream when saving.
     pub sequence_header: Mutex<Vec<u8>>,
 }
@@ -400,6 +403,7 @@ mod win {
                     height: recording.height,
                     fps: recording.fps,
                     bitrate_kbps: recording.bitrate_kbps,
+                    quality: recording.quality,
                     keyframe_seconds: recording.keyframe_seconds,
                     requested: recording.encoder,
                 },
@@ -407,6 +411,7 @@ mod win {
             )?)
         };
         *shared.encoder.lock() = Some(encoder.chosen);
+        *shared.rate_control.lock() = Some(encoder.rate_control);
         *shared.sequence_header.lock() = encoder.sequence_header.clone();
 
         let capture = {
@@ -599,6 +604,7 @@ impl Pipeline {
     pub fn start(
         recording: &RecordingConfig,
         buffer_seconds: u32,
+        buffer_bytes: u64,
         sources: Vec<AudioSource>,
         audio: Arc<AudioEngine>,
     ) -> Result<Self, String> {
@@ -611,7 +617,7 @@ impl Pipeline {
         let shared = Arc::new(Shared {
             buffer_seconds,
             fps: recording.fps.max(1),
-            packets: Mutex::new(ReplayBuffer::new(buffer_seconds)),
+            packets: Mutex::new(ReplayBuffer::new(buffer_seconds, buffer_bytes)),
             tracks: Mutex::new(tracks),
             sources: Mutex::new(sources),
             audio,
@@ -624,6 +630,7 @@ impl Pipeline {
             error_seen: AtomicBool::new(false),
             sources_generation: AtomicU64::new(0),
             encoder: Mutex::new(None),
+            rate_control: Mutex::new(None),
             sequence_header: Mutex::new(Vec::new()),
         });
 

@@ -7,7 +7,7 @@ import type { Route } from "@/components/NavBar";
 import { Select, Slider } from "@/components/ui/Controls";
 import { formatBufferSeconds } from "@/lib/format";
 import { cn } from "@/lib/cn";
-import type { CaptureTarget, EncoderId } from "@/lib/types";
+import type { BufferConfig, CaptureTarget, EncoderId } from "@/lib/types";
 
 /** The usual steps; only what the source supports is offered. */
 const HEIGHTS = [720, 1080, 1440, 2160];
@@ -52,23 +52,47 @@ function fit(height: number, source: CaptureTarget | null) {
 }
 
 /**
- * The **upper** bound on what the buffer takes — picture plus sound.
+ * What the packet ring is allowed to hold, in megabytes.
  *
- * The sound is not an afterthought: every source keeps a ring of its own, so
- * that the assignment to the main mix can still be changed afterwards (see
- * `pipeline::tracks_for`). At 48 kHz in stereo that is 192 kB per second and
- * source. In practice it stays well under this: a source that says nothing
- * costs nothing, and one quiet for a whole buffer length hands its memory back
- * (`TrackRing::push`). Which is exactly the normal state of most of them.
+ * Mirrors `config::effective_memory_bytes`: `0` derives it from bitrate and
+ * buffer length with half again on top for the peaks a variable bitrate makes.
+ *
+ * This used to be an estimate with nothing behind it. It is a real ceiling now —
+ * with the encoder aiming at a quality rather than a bitrate, the length alone
+ * no longer says how many bytes a buffer costs, so the ring drops the oldest
+ * group of pictures when it runs over.
  */
-function bufferMegabytes(
-  bitrateKbps: number,
-  seconds: number,
-  sources: number,
-): number {
-  const video = (bitrateKbps / 8 / 1024) * seconds;
-  const audio = (sources * seconds * 48000 * 2 * 2) / 1024 ** 2;
-  return Math.round(video + audio);
+function memoryBudgetMb(rec: { bitrateKbps: number }, buffer: BufferConfig): number {
+  if (buffer.memoryMb > 0) return buffer.memoryMb;
+  const plain = (rec.bitrateKbps / 8 / 1024) * buffer.seconds;
+  return Math.max(64, Math.round((plain * 3) / 2));
+}
+
+/** The quality steps offered, and what to call them. */
+const QUALITY_STEPS: Array<{ value: number; label: string }> = [
+  { value: 55, label: "Smallest files" },
+  { value: 62, label: "Small" },
+  { value: 70, label: "Balanced" },
+  { value: 78, label: "High" },
+  { value: 85, label: "Highest" },
+];
+
+/**
+ * How long a saved clip is. Mirrors `config::effective_clip_seconds`: `0` means
+ * the whole buffer, and nothing can be longer than what is buffered.
+ */
+function clipLength(buffer: BufferConfig): number {
+  if (buffer.clipSeconds === 0) return buffer.seconds;
+  return Math.min(buffer.clipSeconds, buffer.seconds);
+}
+
+/**
+ * What the finished file costs. The picture is copied straight out of the
+ * buffer, so its bitrate is exactly the recording bitrate — the only thing on
+ * top is the one AAC track carrying the mix.
+ */
+function clipMegabytes(bitrateKbps: number, seconds: number): number {
+  return Math.round(((bitrateKbps + 192) / 8 / 1024) * seconds);
 }
 
 export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
@@ -240,21 +264,24 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
             />
           </Row>
           <Row
-            label="Bitrate"
-            hint={`${Math.round(rec.bitrateKbps / 1000)} Mbit/s — about ${Math.round(
-              (rec.bitrateKbps / 8 / 1024) * 60,
-            )} MB per minute`}
+            label="Quality"
+            hint="The encoder spends bits where the picture needs them — a menu screen costs a fraction of a firefight"
           >
-            <div className="w-64">
-              <Slider
-                label="Bitrate"
-                value={rec.bitrateKbps}
-                min={5000}
-                max={100000}
-                step={1000}
-                onChange={(bitrateKbps) => setRec({ bitrateKbps })}
-              />
-            </div>
+            <Select
+              value={String(
+                QUALITY_STEPS.reduce((best, step) =>
+                  Math.abs(step.value - rec.quality) <
+                  Math.abs(best.value - rec.quality)
+                    ? step
+                    : best,
+                ).value,
+              )}
+              options={QUALITY_STEPS.map((step) => ({
+                value: String(step.value),
+                label: step.label,
+              }))}
+              onChange={(v) => setRec({ quality: Number(v) })}
+            />
           </Row>
           <Row
             label="Encoder"
@@ -288,35 +315,112 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
       <section>
         <SectionTitle title="Replay buffer" />
-        <Card className="p-5">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">Buffer length</p>
-              <p className="mt-1 text-xs text-ink-muted">
-                {formatBufferSeconds(config.buffer.seconds)} in memory · at most{" "}
-                {bufferMegabytes(
-                  rec.bitrateKbps,
-                  config.buffer.seconds,
-                  config.sources.filter((s) => s.enabled).length,
-                )}{" "}
-                MB RAM
-              </p>
+        <Card className="divide-y divide-line">
+          <div className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">Buffer length</p>
+                <p className="mt-1 text-xs text-ink-muted">
+                  How far back you can still reach
+                </p>
+              </div>
+              <span className="font-mono text-sm text-ink-muted">
+                {formatBufferSeconds(config.buffer.seconds)}
+              </span>
             </div>
-            <span className="font-mono text-sm text-ink-muted">
-              {formatBufferSeconds(config.buffer.seconds)}
-            </span>
+            <div className="mt-4">
+              <Slider
+                label="Buffer length"
+                value={config.buffer.seconds}
+                min={15}
+                max={600}
+                step={15}
+                onChange={(seconds) =>
+                  patchConfig({
+                    buffer: {
+                      ...config.buffer,
+                      seconds,
+                      // A clip can never outlast the buffer it is cut from.
+                      clipSeconds: Math.min(config.buffer.clipSeconds, seconds),
+                    },
+                  })
+                }
+              />
+            </div>
           </div>
-          <div className="mt-4">
-            <Slider
-              label="Buffer length"
-              value={config.buffer.seconds}
-              min={15}
-              max={600}
-              step={15}
-              onChange={(seconds) =>
-                patchConfig({ buffer: { ...config.buffer, seconds } })
-              }
-            />
+
+          <div className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">Clip length</p>
+                <p className="mt-1 text-xs text-ink-muted">
+                  What a save actually writes ·{" "}
+                  {clipMegabytes(rec.bitrateKbps, clipLength(config.buffer))} MB
+                  per clip
+                </p>
+              </div>
+              <span className="font-mono text-sm text-ink-muted">
+                {formatBufferSeconds(clipLength(config.buffer))}
+              </span>
+            </div>
+            <div className="mt-4">
+              <Slider
+                label="Clip length"
+                value={clipLength(config.buffer)}
+                min={5}
+                max={config.buffer.seconds}
+                step={5}
+                onChange={(value) =>
+                  patchConfig({
+                    buffer: {
+                      ...config.buffer,
+                      // At the top end store 0, not the number: a longer buffer
+                      // later then carries the clip length along instead of
+                      // leaving it standing where it was.
+                      clipSeconds: value >= config.buffer.seconds ? 0 : value,
+                    },
+                  })
+                }
+              />
+            </div>
+            <p className="mt-3 text-xs text-ink-faint">
+              A long buffer is insurance against pressing the key late. It does
+              not have to mean a long clip — the buffer keeps the last{" "}
+              {formatBufferSeconds(config.buffer.seconds)}, the save takes the
+              last {formatBufferSeconds(clipLength(config.buffer))} of it.
+            </p>
+          </div>
+
+          <div className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">Memory budget</p>
+                <p className="mt-1 text-xs text-ink-muted">
+                  What the buffer may occupy in RAM
+                </p>
+              </div>
+              <span className="font-mono text-sm text-ink-muted">
+                {memoryBudgetMb(rec, config.buffer)} MB
+              </span>
+            </div>
+            <div className="mt-4">
+              <Slider
+                label="Memory budget"
+                value={memoryBudgetMb(rec, config.buffer)}
+                min={64}
+                max={4096}
+                step={64}
+                onChange={(memoryMb) =>
+                  patchConfig({ buffer: { ...config.buffer, memoryMb } })
+                }
+              />
+            </div>
+            <p className="mt-3 text-xs text-ink-faint">
+              The encoder aims at a quality, not at a fixed bitrate, so how much
+              a minute costs depends on what is on screen. This is the hard
+              ceiling: run into it in a busy scene and the buffer holds less than
+              its full length rather than taking the machine down with it.
+            </p>
           </div>
         </Card>
       </section>

@@ -12,12 +12,25 @@ import { cn } from "@/lib/cn";
 import { LiveDot } from "@/components/ui/LiveDot";
 import { useCountUp } from "@/lib/useCountUp";
 
+/**
+ * The quality steps by name. Kept in step with `QUALITY_STEPS` in the recording
+ * settings — the tile is a shortcut to that page, so it should say the same word.
+ */
+function qualityLabel(quality: number): string {
+  if (quality < 59) return "Smallest files";
+  if (quality < 66) return "Small";
+  if (quality < 74) return "Balanced";
+  if (quality < 82) return "High";
+  return "Highest";
+}
+
 export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const {
     config,
     clips,
     bufferActive,
     bufferedSeconds,
+    rateControl,
     detectedGame,
     toggleBuffer,
     saveClip,
@@ -87,7 +100,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         <Stat
           label="Recording"
           value={`${config.recording.height}p${config.recording.fps}`}
-          hint={`${Math.round(config.recording.bitrateKbps / 1000)} Mbit/s · ${config.recording.encoder.toUpperCase()}`}
+          hint={`${qualityLabel(config.recording.quality)} · ${config.recording.encoder.toUpperCase()}${
+            rateControl && rateControl !== "quality" ? " · fixed bitrate" : ""
+          }`}
           onClick={() => onNavigate("recording")}
         />
         <Stat

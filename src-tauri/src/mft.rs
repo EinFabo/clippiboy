@@ -22,7 +22,7 @@ use windows::Win32::System::Com::CoTaskMemFree;
 
 use crate::buffer::{EncodedPacket, VIDEO_TRACK};
 use crate::gpu::{GpuDevice, SendPtr};
-use crate::model::EncoderId;
+use crate::model::{EncoderId, RateControl};
 
 const VENDOR_NVIDIA: &str = "VEN_10DE";
 const VENDOR_AMD: &str = "VEN_1002";
@@ -47,6 +47,9 @@ pub struct EncoderSettings {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// 1 to 100, the encoder's own default being 70. Only used when the encoder
+    /// accepts constant quality; otherwise the bitrate governs.
+    pub quality: u32,
     pub keyframe_seconds: u32,
     pub requested: EncoderId,
 }
@@ -164,26 +167,109 @@ fn set_codec_property(codec: &ICodecAPI, name: &str, api: &GUID, value: VARIANT)
     }
 }
 
-fn configure_codec(transform: &IMFTransform, settings: &EncoderSettings) {
-    let Ok(codec) = transform.cast::<ICodecAPI>() else {
-        log::warn!("encoder offers no ICodecAPI — quality settings stay off");
-        return;
-    };
+/// Set the rate control mode and check that it took.
+///
+/// `SetValue` answering S_OK is not the same as the encoder doing it — the same
+/// trap as the keyframe distance below. So the mode is read back; only a
+/// matching answer counts as accepted. An encoder that will not report the mode
+/// at all gets the benefit of the doubt, because falling through to the default
+/// on a missing getter would cost quality for nothing.
+fn set_rate_control(codec: &ICodecAPI, mode: eAVEncCommonRateControlMode) -> bool {
+    let wanted = mode.0 as u32;
+    if !set_codec_property(
+        codec,
+        "rate control",
+        &CODECAPI_AVEncCommonRateControlMode,
+        VARIANT::from(wanted),
+    ) {
+        return false;
+    }
+    match read_u32(codec, &CODECAPI_AVEncCommonRateControlMode) {
+        Some(effective) => effective == wanted,
+        None => true,
+    }
+}
 
+/// Everything MSDN wants set **before** `SetOutputType`.
+///
+/// This split is not cosmetic. The documentation on `AVEncCommonQuality` says
+/// plainly: "set the property before calling IMFTransform::SetOutputType" — set
+/// afterwards it is accepted and then ignored. Every codec property used to be
+/// applied after both media types, which is why quality mode could never have
+/// worked here. (`AVEncMPVDefaultBPictureCount` carries the same requirement,
+/// should B-frames ever follow.)
+///
+/// Returns what the encoder actually agreed to.
+fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> RateControl {
     let mean = settings.bitrate_kbps.saturating_mul(1000);
     // Peaks may exceed the mean: on a fast turn in the game one frame needs a
     // multiple of a still one.
     let peak = mean.saturating_add(mean / 2);
+    let quality = settings.quality.clamp(1, 100);
+
+    // Constant quality first. This is the whole point: a bitrate target spends
+    // its budget whether the picture needs it or not, so a menu screen cost as
+    // much as a firefight. Certified hardware encoders are required to support
+    // it, but a driver is still a driver.
+    if set_rate_control(codec, eAVEncCommonRateControlMode_Quality) {
+        if set_codec_property(
+            codec,
+            "quality",
+            &CODECAPI_AVEncCommonQuality,
+            VARIANT::from(quality),
+        ) {
+            log::info!("encoder runs at constant quality {quality}");
+            return RateControl::Quality;
+        }
+        log::warn!("encoder takes quality mode but not a quality level — falling back");
+    }
+
+    // Second best: a bitrate, but with a ceiling that means something.
+    // `AVEncCommonMaxBitRate` only applies in this mode — in the unconstrained
+    // one below it is decoration, which is exactly what it used to be here.
+    if set_rate_control(codec, eAVEncCommonRateControlMode_PeakConstrainedVBR) {
+        let mean_ok = set_codec_property(
+            codec,
+            "bitrate",
+            &CODECAPI_AVEncCommonMeanBitRate,
+            VARIANT::from(mean),
+        );
+        let peak_ok = set_codec_property(
+            codec,
+            "peak bitrate",
+            &CODECAPI_AVEncCommonMaxBitRate,
+            VARIANT::from(peak),
+        );
+        if mean_ok && peak_ok {
+            log::info!(
+                "encoder does not do constant quality — {} kbit/s with a ceiling instead",
+                settings.bitrate_kbps
+            );
+            return RateControl::PeakConstrainedVbr;
+        }
+    }
+
+    // What every version until now did, whether it wanted to or not.
+    let _ = set_rate_control(codec, eAVEncCommonRateControlMode_UnconstrainedVBR);
+    let _ = set_codec_property(
+        codec,
+        "bitrate",
+        &CODECAPI_AVEncCommonMeanBitRate,
+        VARIANT::from(mean),
+    );
+    log::warn!(
+        "encoder only offers unconstrained VBR — clip size follows the {} kbit/s \
+         and nothing else",
+        settings.bitrate_kbps
+    );
+    RateControl::UnconstrainedVbr
+}
+
+/// The rest, which may be set once the media types stand.
+fn configure_codec(codec: &ICodecAPI, settings: &EncoderSettings) {
     let gop = settings.fps.max(1) * settings.keyframe_seconds.max(1);
 
     let wanted: Vec<(&str, &GUID, VARIANT)> = vec![
-        (
-            "Ratensteuerung",
-            &CODECAPI_AVEncCommonRateControlMode,
-            VARIANT::from(eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32),
-        ),
-        ("Bitrate", &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(mean)),
-        ("Spitzenbitrate", &CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(peak)),
         ("Keyframe-Abstand", &CODECAPI_AVEncMPVGOPSize, VARIANT::from(gop)),
         // 0 = as fast as possible, 100 = best quality. A replay buffer runs in
         // the background but is not in real-time distress — 70 is the point where
@@ -198,7 +284,7 @@ fn configure_codec(transform: &IMFTransform, settings: &EncoderSettings) {
 
     let rejected: Vec<&str> = wanted
         .into_iter()
-        .filter(|(name, api, value)| !set_codec_property(&codec, name, api, value.clone()))
+        .filter(|(name, api, value)| !set_codec_property(codec, name, api, value.clone()))
         .map(|(name, _, _)| name)
         .collect();
     if !rejected.is_empty() {
@@ -212,7 +298,7 @@ fn configure_codec(transform: &IMFTransform, settings: &EncoderSettings) {
     // keyframe distance with success but caps it at the frame rate — "every 2 s"
     // silently becomes "every second". Exactly those silent deviations were the
     // reason the settings previously did nothing without anyone noticing.
-    if let Some(effective) = read_u32(&codec, &CODECAPI_AVEncMPVGOPSize) {
+    if let Some(effective) = read_u32(codec, &CODECAPI_AVEncMPVGOPSize) {
         if effective != gop {
             log::info!(
                 "encoder does not honour the keyframe distance: asked for every {} frames, \
@@ -272,6 +358,8 @@ struct Transform {
     events: Option<IMFMediaEventGenerator>,
     provides_samples: bool,
     chosen: EncoderId,
+    /// What the encoder agreed to do about bitrate — see [`RateControl`].
+    rate_control: RateControl,
     /// SPS/PPS from the output type. Most encoders send them before every IDR
     /// anyway; if they are missing, the elementary stream is not decodable
     /// without this preamble. A duplicate does no harm; an absence does.
@@ -330,6 +418,19 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
             .map_err(|err| format!("device to encoder: {err}"))?;
     }
 
+    // Rate control has to be settled **before** the output type: MSDN says of
+    // `AVEncCommonQuality` that it must be set before `SetOutputType`, and an
+    // encoder simply ignores it afterwards. Everything else waits until the
+    // media types stand.
+    let codec = transform.cast::<ICodecAPI>().ok();
+    let rate_control = match &codec {
+        Some(codec) => configure_rate_control(codec, settings),
+        None => {
+            log::warn!("encoder offers no ICodecAPI — quality settings stay off");
+            RateControl::UnconstrainedVbr
+        }
+    };
+
     // The order is prescribed: output type before input type.
     let output = media_type_video(MFVideoFormat_H264, settings)?;
     unsafe {
@@ -357,7 +458,9 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
             .map_err(|err| format!("Eingabetyp: {err}"))?;
     }
 
-    configure_codec(&transform, settings);
+    if let Some(codec) = &codec {
+        configure_codec(codec, settings);
+    }
 
     let provides_samples = unsafe { transform.GetOutputStreamInfo(0) }
         .map(|info| info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0)
@@ -395,6 +498,7 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
         events,
         provides_samples,
         chosen,
+        rate_control,
         sequence_header,
     })
 }
@@ -522,6 +626,9 @@ pub struct VideoEncoder {
     /// Which encoder it actually turned out to be — so the status display shows
     /// the truth rather than the wish from the config.
     pub chosen: EncoderId,
+    /// What the encoder really does about bitrate — the wish from the config is
+    /// not the answer, see [`configure_rate_control`].
+    pub rate_control: RateControl,
     /// SPS/PPS that belong in front of the stream when saving.
     pub sequence_header: Vec<u8>,
 }
@@ -538,7 +645,7 @@ impl VideoEncoder {
     {
         let (jobs_tx, jobs_rx) = crossbeam_channel::bounded::<Job>(QUEUE_DEPTH);
         let (ready_tx, ready_rx) =
-            crossbeam_channel::bounded::<Result<(EncoderId, Vec<u8>), String>>(1);
+            crossbeam_channel::bounded::<Result<(EncoderId, RateControl, Vec<u8>), String>>(1);
         let running = Arc::new(AtomicBool::new(true));
 
         // The MFT is built and used on its own thread: that keeps the COM objects
@@ -551,8 +658,11 @@ impl VideoEncoder {
                 .spawn(move || {
                     let transform = match build(&gpu, &settings) {
                         Ok(transform) => {
-                            let _ = ready_tx
-                                .send(Ok((transform.chosen, transform.sequence_header.clone())));
+                            let _ = ready_tx.send(Ok((
+                                transform.chosen,
+                                transform.rate_control,
+                                transform.sequence_header.clone(),
+                            )));
                             transform
                         }
                         Err(err) => {
@@ -566,11 +676,12 @@ impl VideoEncoder {
         };
 
         match ready_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok((chosen, sequence_header))) => Ok(Self {
+            Ok(Ok((chosen, rate_control, sequence_header))) => Ok(Self {
                 jobs: jobs_tx,
                 running,
                 thread: Some(thread),
                 chosen,
+                rate_control,
                 sequence_header,
             }),
             Ok(Err(err)) => {

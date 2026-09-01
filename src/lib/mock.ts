@@ -44,11 +44,12 @@ export const mockConfig: AppConfig = {
     width: 1920,
     height: 1080,
     fps: 60,
-    bitrateKbps: 40000,
+    bitrateKbps: 19000,
+    quality: 70,
     encoder: "nvenc",
     keyframeSeconds: 2,
   },
-  buffer: { autoStart: false, seconds: 120 },
+  buffer: { autoStart: false, seconds: 120, clipSeconds: 0, memoryMb: 0 },
   sources: [
     {
       id: "src-game",
@@ -117,6 +118,7 @@ export const mockClips: Clip[] = [
     favorite: true,
     edit: null,
     original: null,
+    originalAvailable: false,
     screenshot: false,
   },
   {
@@ -134,6 +136,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    originalAvailable: false,
     screenshot: false,
   },
   {
@@ -151,6 +154,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    originalAvailable: false,
     screenshot: false,
   },
   // The gallery has to survive the bad case too: one clip with no game and three
@@ -172,6 +176,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    originalAvailable: false,
     screenshot: false,
   },
   ...[
@@ -193,6 +198,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    originalAvailable: false,
     screenshot: false,
   })),
   ...["Counter-Strike 2", null].map((game, i) => ({
@@ -211,6 +217,7 @@ export const mockClips: Clip[] = [
     favorite: false,
     edit: null,
     original: null,
+    originalAvailable: false,
     screenshot: true,
   })),
 ];

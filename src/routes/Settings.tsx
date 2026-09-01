@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/Button";
 import { Segmented, Select, Toggle } from "@/components/ui/Controls";
 import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
-import type { OverlayCorner, UpdateInfo } from "@/lib/types";
+import { formatSize } from "@/lib/format";
+import type { OverlayCorner, StorageUsage, UpdateInfo } from "@/lib/types";
 
 /**
  * The four corners in reading order: value, what it is called, and where the
@@ -209,6 +210,7 @@ export function Settings() {
       <section>
         <SectionTitle title="Storage location" />
         <ClipDir />
+        <Storage />
       </section>
 
       <section>
@@ -571,6 +573,63 @@ function Hotkey({ value }: { value: string }) {
 }
 
 /** Folder for new clips — pick, reset, open. */
+/**
+ * What ClippiBoy keeps outside the clip folder.
+ *
+ * These three grow out of sight: an untouched recording per trimmed clip, the
+ * individual tracks per clip with more than one source, a thumbnail each. The
+ * originals in particular are the reason a trimmed clip can occupy more than an
+ * untrimmed one — the clip menu has "Free up space" for that, this says how much
+ * there is to get.
+ */
+function Storage() {
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    void api
+      .storageUsage()
+      .then((value) => {
+        if (!cancelled) setUsage(value);
+      })
+      .catch(() => {
+        // Nothing to say: an unreadable folder is a missing number, not an error.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!usage) return null;
+  const rows: Array<[string, number, string]> = [
+    ["Untouched recordings", usage.originalsBytes, "One per trimmed clip. \u201cFree up space\u201d in the clip menu releases it."],
+    ["Individual audio tracks", usage.tracksBytes, "Kept so the mix can still be changed after the fact."],
+    ["Thumbnails", usage.thumbsBytes, "One per clip."],
+  ];
+  const total = usage.originalsBytes + usage.tracksBytes + usage.thumbsBytes;
+
+  return (
+    <Card className="mt-3 divide-y divide-line">
+      {rows.map(([label, bytes, hint]) => (
+        <div key={label} className="flex items-center justify-between gap-6 p-4">
+          <div>
+            <p className="text-sm">{label}</p>
+            <p className="mt-0.5 text-xs text-ink-faint">{hint}</p>
+          </div>
+          <span className="shrink-0 font-mono text-sm text-ink-muted">
+            {formatSize(bytes)}
+          </span>
+        </div>
+      ))}
+      <div className="flex items-center justify-between gap-6 p-4">
+        <p className="text-sm font-medium">Beside the clips, all told</p>
+        <span className="shrink-0 font-mono text-sm">{formatSize(total)}</span>
+      </div>
+    </Card>
+  );
+}
+
 function ClipDir() {
   const { config, setClipDir } = useEngine();
   const [error, setError] = useState<string | null>(null);

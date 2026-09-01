@@ -12,6 +12,7 @@ import type {
   EncoderInfo,
   EngineStatus,
   LevelMap,
+  StorageUsage,
   TrackMix,
   UpdateInfo,
   ShotEdit,
@@ -133,6 +134,20 @@ export const api = {
   /** Undo the trim: the whole recording back, keep the mix. */
   restoreClipOriginal: (id: string) =>
     invoke<Clip>("restore_clip_original", { id }),
+  /**
+   * Throw the untouched recording away and keep the trimmed clip. Undo is gone
+   * afterwards; the trim stays, and so does the mix.
+   */
+  discardClipOriginal: (id: string) =>
+    invoke<Clip>("discard_clip_original", { id }),
+  /** What the originals, tracks and thumbnails occupy in the app data folder. */
+  storageUsage: () => invoke<StorageUsage>("storage_usage"),
+  /**
+   * Write a copy of the clip that comes in under `targetBytes`. The clip itself
+   * is not touched — this is a second file at `output`.
+   */
+  exportClip: (id: string, targetBytes: number, output: string) =>
+    invoke<void>("export_clip", { id, targetBytes, output }),
 };
 
 export const events = {

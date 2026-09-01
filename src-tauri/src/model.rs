@@ -75,6 +75,25 @@ pub enum EncoderId {
     X264,
 }
 
+/// How the encoder decides how many bits a frame is worth.
+///
+/// Which one is really in force is not a matter of asking: a Media Foundation
+/// transform accepts a mode it then quietly ignores. `mft::configure` therefore
+/// reads it back and falls down this list until one sticks — and the answer
+/// belongs in the status display, because it decides how big clips get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RateControl {
+    /// Constant quality: the bitrate follows the picture. A menu screen costs a
+    /// fraction of a firefight. What ClippiBoy asks for.
+    Quality,
+    /// A bitrate target with a peak the encoder actually honours.
+    PeakConstrainedVbr,
+    /// A bitrate target and no ceiling at all — the transform's own default, and
+    /// the last resort.
+    UnconstrainedVbr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderInfo {
@@ -113,9 +132,24 @@ pub struct RecordingConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Only a fallback now: with constant quality the encoder ignores it (MSDN is
+    /// explicit that `AVEncCommonMeanBitRate` does not apply in quality mode).
+    /// It still decides the memory budget and still governs if the encoder
+    /// refuses quality mode.
     pub bitrate_kbps: u32,
+    /// What the picture is worth, 1 (smallest) to 100 (best). The encoder's own
+    /// default is 70, which it maps to a quantiser of 24.
+    #[serde(default = "default_quality")]
+    pub quality: u32,
     pub encoder: EncoderId,
     pub keyframe_seconds: u32,
+}
+
+/// The encoder's own default. A config written before this setting existed gets
+/// it, so the first run after an update is the encoder at its normal quality
+/// rather than at some number nobody chose.
+pub fn default_quality() -> u32 {
+    70
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +160,25 @@ pub struct BufferConfig {
     #[serde(default)]
     pub auto_start: bool,
     pub seconds: u32,
+    /// How much of the buffer a save actually writes. `0` means "all of it",
+    /// which is what every version up to here did — so an existing config keeps
+    /// behaving exactly as before without a migration.
+    ///
+    /// The two are deliberately separate: a long buffer is insurance against
+    /// pressing the key late, and that is a different question from how long the
+    /// finished clip should be. Tying them together meant a 2-minute buffer could
+    /// only ever produce 2-minute clips.
+    #[serde(default)]
+    pub clip_seconds: u32,
+    /// Ceiling on what the packet ring may occupy, in megabytes. `0` derives it
+    /// from bitrate and buffer length.
+    ///
+    /// It exists because the encoder now aims at a quality rather than a
+    /// bitrate: how many bytes a minute costs depends on what is on screen, so
+    /// the length alone no longer bounds the memory. The UI has always shown an
+    /// "at most X MB" line here — this is what finally makes it true.
+    #[serde(default)]
+    pub memory_mb: u32,
 }
 
 /// Which screen corner the overlay banner appears in.
@@ -239,10 +292,23 @@ pub struct Clip {
     /// untouched, i.e. the whole clip with all tracks.
     #[serde(default)]
     pub edit: Option<ClipEdit>,
-    /// Is the untouched recording still in the originals store? Then this clip
-    /// has been trimmed and can be pulled open again at any time.
+    /// Where the delivered excerpt sits inside the untouched recording.
+    ///
+    /// This record **outlives the file**. The individual tracks are stored in
+    /// coordinates of the original, so the offset here is what keeps a later
+    /// remix in sync — `edit::repair` deliberately keeps it when the recording
+    /// itself has gone, and so does discarding one by hand. Whether undo is
+    /// still possible is therefore a different question: [`Self::original_available`].
     #[serde(default)]
     pub original: Option<ClipOriginal>,
+    /// Is the untouched recording still on disk, so the trim can be undone?
+    ///
+    /// Derived when the clip is read, not stored — the file can go without the
+    /// database hearing about it. Until this existed the editor offered "undo
+    /// trim" whenever [`Self::original`] stood, and then failed on a file that
+    /// was no longer there.
+    #[serde(default)]
+    pub original_available: bool,
     /// A still instead of a recording. Everything to do with time — trimming,
     /// the tracks, the waveform — does not apply to it.
     #[serde(default)]
@@ -319,6 +385,20 @@ pub struct TrackMix {
     pub muted: bool,
 }
 
+/// What ClippiBoy keeps out of sight in the app data directory.
+///
+/// The clips themselves are not in here — those lie in the user's own folder,
+/// where they can be seen. These three grow quietly: an original per trimmed
+/// clip, the individual tracks per clip with more than one source, a thumbnail
+/// each.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsage {
+    pub originals_bytes: u64,
+    pub tracks_bytes: u64,
+    pub thumbs_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
@@ -327,6 +407,9 @@ pub struct EngineStatus {
     pub buffer_bytes: u64,
     pub dropped_frames: u64,
     pub encoder: Option<EncoderId>,
+    /// Which rate control the encoder really accepted — see [`RateControl`].
+    #[serde(default)]
+    pub rate_control: Option<RateControl>,
     pub fps: f32,
     /// Game last detected in the foreground, `None` when none is running.
     pub game: Option<String>,
