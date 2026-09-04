@@ -241,6 +241,102 @@
   animation: cb-draw 400ms var(--ease-entrance) both;
 }
 
+/* --- Saving and exporting ------------------------------------------------ */
+
+/* Where the write head stands. Registered as a property because a plain custom
+   property does not interpolate, and the indeterminate case has to animate this
+   one value — the greyed still, the coloured copy and the line itself all read
+   their position off it. */
+@property --cb-head {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 0%;
+}
+
+.cb-veil-in {
+  animation: cb-fade-in 240ms var(--ease-entrance) both;
+}
+
+/* LEAVE_MS in ui/BusyVeil.tsx has to match this duration. */
+.cb-veil-out {
+  animation: cb-fade-out 200ms var(--ease-exit) both;
+}
+
+/* The still loses its colour rather than arriving without it: for the first
+   frame it is exactly the picture that was there a moment ago, so the cut from
+   the running video to the frozen one cannot be seen. */
+@keyframes cb-desaturate {
+  from {
+    filter: none;
+  }
+  to {
+    filter: grayscale(0.92) brightness(0.42);
+  }
+}
+
+.cb-sweep-todo {
+  animation: cb-desaturate 320ms var(--ease-entrance) both;
+}
+
+/* Everything the head has passed carries its colour again. A filter cannot be
+   applied to half an element, which is why there are two stills and not one. */
+.cb-sweep-done {
+  clip-path: inset(0 calc(100% - var(--cb-head)) 0 0);
+}
+
+.cb-head-line {
+  left: var(--cb-head);
+  background: linear-gradient(
+    180deg,
+    transparent,
+    var(--color-accent-bright) 12%,
+    #ffffff 50%,
+    var(--color-accent-bright) 88%,
+    transparent
+  );
+  box-shadow: 0 0 18px 2px rgb(167 139 250 / 0.55);
+}
+
+@keyframes cb-head-run {
+  from {
+    --cb-head: 0%;
+  }
+  to {
+    --cb-head: 100%;
+  }
+}
+
+/* Nothing to report yet — a clip that is only rewritten is finished before the
+   core sends its first number. Until then the head walks by itself. */
+.cb-head-idle {
+  animation: cb-head-run 1.7s var(--ease-out-soft) infinite;
+}
+
+/* The export dialog's mark: the logo's own C fills up. The arc is that same C
+   run backwards, so it starts at the lower end and stops at the upper one — it
+   can never reach across the opening the play triangle points through. */
+.cb-ring-arc {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  transition: stroke-dashoffset 200ms linear;
+}
+
+@keyframes cb-ring-run {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+
+/* The same walk as the head, on the same arc: a short segment from the bottom
+   end to the top one, then again from the bottom. */
+.cb-ring-idle {
+  stroke-dasharray: 22 180;
+  animation: cb-ring-run 1.5s linear infinite;
+}
+
 /* --- Reduced motion ----------------------------------------------------- */
 
 /* Everything still ends in its final state — only the journey is skipped.

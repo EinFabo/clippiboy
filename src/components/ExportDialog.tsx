@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { Button } from "@/components/ui/Button";
+import { BusyRing } from "@/components/ui/BusyVeil";
 import { api, events, inTauri } from "@/lib/ipc";
 import { clipName } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -194,13 +195,15 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
           </p>
         )}
 
+        {/* Zero means the core has not reported anything yet, not that it is
+            nought per cent through — so the mark walks instead of standing
+            still at the bottom of its arc. */}
         {busy && (
-          <div className="mt-4 h-px w-full bg-line">
-            <div
-              className="h-px bg-white transition-[width] duration-200"
-              style={{ width: `${Math.round(progress * 100)}%` }}
-            />
-          </div>
+          <BusyRing
+            className="mt-4 rounded-inner bg-elevated px-3 py-2.5"
+            progress={progress > 0 ? progress : null}
+            label="The copy is being written."
+          />
         )}
 
         <div className="mt-6 flex justify-end gap-2">

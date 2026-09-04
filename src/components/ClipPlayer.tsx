@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
 import { ClipEditor, type Trim } from "@/components/ClipEditor";
+import { SaveVeil, type SaveVeilHandle } from "@/components/ui/BusyVeil";
 import { ExportDialog } from "@/components/ExportDialog";
 import { useClipMenu } from "@/components/clipMenu";
 import { IconTrash } from "@/components/icons";
@@ -109,10 +110,26 @@ export function ClipPlayer({
   // player gets a fresh element rather than one whose source we pulled out from
   // under it. The audio tracks re-attach to it as well.
   const [reload, setReload] = useState(0);
+  /**
+   * The write is through, but the fresh element has not reported a picture yet.
+   * The veil stays up for that stretch — letting it go the moment the core is
+   * finished would put a black frame between the still and the new video.
+   */
+  const [settling, setSettling] = useState(false);
   /** Where to jump back to after reloading. */
   const resumeAt = useRef<{ time: number; playing: boolean } | null>(null);
   /** Failed attempts at loading the current file. */
   const loadFailures = useRef(0);
+  /** Holds the last frame while the file underneath is being replaced. */
+  const veil = useRef<SaveVeilHandle>(null);
+
+  // A file that never loads must not leave the veil standing over the stage
+  // for good. Nothing else can end `settling` if no picture ever arrives.
+  useEffect(() => {
+    if (!settling) return;
+    const timer = window.setTimeout(() => setSettling(false), 4000);
+    return () => clearTimeout(timer);
+  }, [settling]);
 
   /** Play the exit, then really go. Everything that closes goes through here. */
   const close = useCallback(() => {
@@ -465,6 +482,8 @@ export function ClipPlayer({
     setSaving(true);
     setWriteProgress(0);
     setJustSaved(false);
+    // Take the picture first — a moment later there is nothing left to take.
+    veil.current?.freeze(element);
     // Let go of the file: Windows will not replace a file that is still open.
     element?.pause();
     element?.removeAttribute("src");
@@ -477,6 +496,7 @@ export function ClipPlayer({
       // is that the player gets a playable element back below.
     } finally {
       setSaving(false);
+      setSettling(true);
       setWriteProgress(null);
       // A fresh element instead of the detached one. That is the only route that
       // does not depend on whatever state the old one is in.
@@ -502,6 +522,7 @@ export function ClipPlayer({
     setRestoring(true);
     setWriteProgress(0);
     setJustSaved(false);
+    veil.current?.freeze(element);
     element?.pause();
     element?.removeAttribute("src");
     element?.load();
@@ -511,6 +532,7 @@ export function ClipPlayer({
       // The notice is already in the store.
     } finally {
       setRestoring(false);
+      setSettling(true);
       setWriteProgress(null);
       setBroken(false);
       setReload((n) => n + 1);
@@ -633,6 +655,8 @@ export function ClipPlayer({
               onLoadedMetadata={(e) => {
                 const element = e.currentTarget;
                 loadFailures.current = 0;
+                // There is a picture again — the still can go.
+                setSettling(false);
                 const length = element.duration;
                 setDuration(length);
                 const restored = Number.isFinite(length)
@@ -672,9 +696,21 @@ export function ClipPlayer({
                   return;
                 }
                 setBroken(true);
+                setSettling(false);
               }}
             />
           )}
+
+          {/* Sits over the picture, inside the frame that goes fullscreen, so
+              it stays centred there too. The canvases underneath it are always
+              mounted: `freeze` has to find them in the document before React
+              has heard that anything is being saved at all. */}
+          <SaveVeil
+            ref={veil}
+            active={saving || restoring || settling}
+            progress={writeProgress}
+            label={restoring ? "Restoring" : "Saving"}
+          />
         </div>
 
         <ClipEditor
