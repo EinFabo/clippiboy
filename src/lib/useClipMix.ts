@@ -338,6 +338,14 @@ export function useClipMix(
     element.addEventListener("pause", pause);
     element.addEventListener("waiting", pause);
     element.addEventListener("ended", pause);
+    // Saving is not covered by `pause`, however much it looks like it should be.
+    // The player pauses and then lets go of the file in the same breath
+    // (ClipPlayer.save): `pause()` only *queues* its event, and the `load()` that
+    // follows empties the element's task queue before it can be delivered — so
+    // the listener above never runs and the tracks played on through the whole
+    // write. `emptied` is fired by that same load, after the queue is cleared,
+    // and an element with no resource is nothing to play alongside.
+    element.addEventListener("emptied", pause);
     element.addEventListener("seeked", align);
     element.addEventListener("ratechange", rate);
     // Two elements run on two clocks; over a minute they drift audibly apart if
@@ -353,6 +361,7 @@ export function useClipMix(
       element.removeEventListener("pause", pause);
       element.removeEventListener("waiting", pause);
       element.removeEventListener("ended", pause);
+      element.removeEventListener("emptied", pause);
       element.removeEventListener("seeked", align);
       element.removeEventListener("ratechange", rate);
       pause();
