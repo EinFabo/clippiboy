@@ -65,6 +65,9 @@ export const SaveVeil = forwardRef<SaveVeilHandle, SaveVeilProps>(
     const todo = useRef<HTMLCanvasElement>(null);
     const done = useRef<HTMLCanvasElement>(null);
     const [held, setHeld] = useState(false);
+    /** Has this run reported a number at all? */
+    const reported = useRef(false);
+    if (progress !== null) reported.current = true;
 
     useImperativeHandle(ref, () => ({
       freeze(video) {
@@ -81,23 +84,32 @@ export const SaveVeil = forwardRef<SaveVeilHandle, SaveVeilProps>(
         return;
       }
       if (!held) return;
-      const timer = window.setTimeout(() => setHeld(false), LEAVE_MS);
+      const timer = window.setTimeout(() => {
+        setHeld(false);
+        reported.current = false;
+      }, LEAVE_MS);
       return () => clearTimeout(timer);
     }, [active, held]);
 
-    // The head walks by itself until the first number arrives. With movement
-    // turned down it does not walk at all, and the still simply stays grey.
-    const idle = progress === null;
+    // The core stops reporting the moment it is done, but the veil stays up a
+    // little longer while the fresh element loads. Dropping back to the walking
+    // head there would fling it back to the left in the last second of every
+    // save — so a run that has reported once finishes its journey instead.
+    // ffmpeg stops short at 99 %; this is what carries the head home.
+    const shown = progress ?? (active && reported.current ? 1 : null);
+
+    // Until the first number arrives the head walks by itself. With movement
+    // turned down it does not walk at all and the still simply stays grey.
+    const idle = shown === null;
     const walks = idle && !prefersReducedMotion();
 
     return (
       <div
         aria-hidden={!active}
-        style={
-          idle ? undefined : ({ "--cb-head": `${clamp(progress) * 100}%` } as CSSProperties)
-        }
+        style={idle ? undefined : ({ "--cb-head": `${clamp(shown) * 100}%` } as CSSProperties)}
         className={cn(
           "pointer-events-none absolute inset-0",
+          !idle && "cb-sweep",
           walks && "cb-head-idle",
           !held && "hidden",
           held && (active ? "cb-veil-in" : "cb-veil-out"),
@@ -109,18 +121,25 @@ export const SaveVeil = forwardRef<SaveVeilHandle, SaveVeilProps>(
           className="cb-sweep-done absolute inset-0 h-full w-full object-contain"
         />
 
-        {/* The head itself. Hidden only when there is neither a number to
-            place it by nor the movement to carry it. */}
-        {!(idle && !walks) && <span className="cb-head-line absolute inset-y-0 -ml-px w-0.5" />}
+        {/* The head. A full-width wrapper that the transform slides along, with
+            the line and its glow sitting at the wrapper's left edge — that way
+            nothing but a transform changes while it travels. Hidden only when
+            there is neither a number to place it by nor the movement to carry
+            it. */}
+        {!(idle && !walks) && (
+          <span className="cb-head absolute inset-y-0 left-0 w-full">
+            <span className="cb-head-glow absolute inset-y-0 left-0 w-14 -translate-x-1/2" />
+            <span className="cb-head-line absolute inset-y-0 left-0 w-0.5 -translate-x-1/2" />
+          </span>
+        )}
 
         <div
           className="absolute top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center
-            gap-2.5 rounded-pill border border-white/10 bg-black/70 py-2 pr-3.5 pl-2.5
-            backdrop-blur-md"
+            gap-2.5 rounded-pill border border-white/10 bg-black/75 py-2 pr-3.5 pl-2.5"
         >
           <Mark className="h-7 w-7" />
           <span className="font-mono text-[13px] tabular-nums">
-            {idle ? label : `${Math.round(clamp(progress) * 100)} %`}
+            {idle ? label : `${Math.round(clamp(shown) * 100)} %`}
           </span>
         </div>
       </div>

@@ -282,10 +282,29 @@
    applied to half an element, which is why there are two stills and not one. */
 .cb-sweep-done {
   clip-path: inset(0 calc(100% - var(--cb-head)) 0 0);
+  will-change: clip-path;
+}
+
+/* ffmpeg reports about twice a second, so the head would otherwise jump half a
+   second at a time. Interpolating the one value everything else is derived from
+   keeps the line, the glow and the edge of the colour in step by construction —
+   which is the reason --cb-head is a registered property and not a plain one.
+   Slightly longer than the reporting interval on purpose: the head is then
+   still travelling when the next number lands and never stands still. */
+.cb-sweep {
+  transition: --cb-head 600ms linear;
+}
+
+/* Carried by a transform rather than placed with `left`: the same movement, but
+   on the compositor instead of through a layout pass on every frame. The
+   wrapper is the full width of the stage, so translating it by a percentage
+   moves it by that much of the picture. */
+.cb-head {
+  transform: translateX(var(--cb-head));
+  will-change: transform;
 }
 
 .cb-head-line {
-  left: var(--cb-head);
   background: linear-gradient(
     180deg,
     transparent,
@@ -294,7 +313,18 @@
     var(--color-accent-bright) 88%,
     transparent
   );
-  box-shadow: 0 0 18px 2px rgb(167 139 250 / 0.55);
+}
+
+/* The glow is painted once and travels with the wrapper. As a box-shadow on the
+   moving line it would have to be redrawn across a wide band every frame. */
+.cb-head-glow {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(167 139 250 / 0.42) 45%,
+    rgb(167 139 250 / 0.42) 55%,
+    transparent
+  );
 }
 
 @keyframes cb-head-run {
@@ -318,7 +348,9 @@
 .cb-ring-arc {
   stroke-dasharray: 100;
   stroke-dashoffset: 100;
-  transition: stroke-dashoffset 200ms linear;
+  /* Same reasoning as .cb-sweep: bridge the gap between two reports so the arc
+     grows rather than clicking forward. */
+  transition: stroke-dashoffset 600ms linear;
 }
 
 @keyframes cb-ring-run {
