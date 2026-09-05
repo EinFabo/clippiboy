@@ -2,7 +2,7 @@
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
   "UUID": "com.einfabo.clippiboy",
   "Name": "ClippiBoy",
-  "Version": "0.3.2.0",
+  "Version": "0.4.0.0",
   "Author": "EinFabo",
   "URL": "https://github.com/EinFabo/clippiboy",
   "Description": "Save a clip, take a screenshot and switch the replay buffer — with the buffer level and the detected game on the key.",
