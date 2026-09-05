@@ -85,6 +85,39 @@ would look like the app had simply forgotten the running buffer.
 
 ---
 
+## Stream Deck
+
+There is a plugin, and it hangs with the installer under
+[Releases](../../releases) from 0.4.0 on: download
+`com.einfabo.clippiboy.streamDeckPlugin`, double-click it, the Stream Deck
+software asks once — that is the whole installation, no account and no
+marketplace in between. Three keys come with it: save a clip, take a screenshot,
+switch the replay buffer.
+
+|  | Key shows |
+|---|---|
+| **Save Clip** | how many seconds are in the buffer, `off` when it is not running, a checkmark once the clip is written |
+| **Screenshot** | nothing to report — a screenshot needs no buffer |
+| **Replay Buffer** | on or off, and it follows along when the buffer is switched by hotkey, from the tray or by the app itself |
+
+That display is the whole point of the plugin. For **only** triggering, nothing
+here is needed: the Stream Deck software brings a *Hotkey* action of its own, and
+a key that presses `Ctrl` + `Shift` + `S` does the same job without installing
+anything.
+
+Setting it up is one switch: *Settings → Stream Deck* in ClippiBoy has to be on.
+ClippiBoy then listens on `127.0.0.1:47653` and writes port and token into
+`%APPDATA%\ClippiBoy\streamdeck.json`, where the plugin picks them up — nothing
+to type, and nothing reachable from the network. Requests without the token are
+refused, and so are requests carrying an `Origin` header, which is how a web page
+would be recognised.
+
+The port and the token are in the same settings, for the two cases where that is
+not enough: something else already holds 47653, or the token got out and should
+stop working. A new token takes effect at once.
+
+---
+
 ## How the replay buffer works
 
 <div align="center"><img src="docs/pipeline.svg" alt="Capture pipeline: screen capture, GPU colour conversion, hardware encoder, packet ring, MP4" width="900"></div>
@@ -686,6 +719,7 @@ src-tauri/src/
   shot.rs                     one frame from the GPU into a PNG
   thumbs.rs                   thumbnails
   config.rs                   configuration as JSON
+  control.rs                  the local port the Stream Deck presses (+ tests)
   commands.rs                 Tauri commands
   updater.rs                  update check and installation
 
@@ -696,6 +730,13 @@ src-tauri/examples/
 
 scripts/fetch-ffmpeg.mjs      fetch ffmpeg/ffprobe for the package
 scripts/make-icons.py         every icon size from icons/icon.png
+scripts/make-streamdeck-icons.py  the plugin's key pictures
+
+streamdeck/                   the Stream Deck plugin (TypeScript, Node)
+  src/client.ts               one poller for all keys, and where ClippiBoy is
+  src/keys.ts                 what all three keys share
+  src/actions/                save a clip, screenshot, replay buffer
+  com.einfabo.clippiboy.sdPlugin/  what gets packed and shipped
 ```
 
 ## Status

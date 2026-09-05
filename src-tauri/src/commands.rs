@@ -51,6 +51,14 @@ pub fn set_config(
     config: AppConfig,
 ) -> AppConfig {
     let previous = state.config_snapshot();
+    // The token never travels to the UI as something to edit — only to display.
+    // Should it come back empty anyway (a settings page from an older version,
+    // say), the one already in use stays, or every Stream Deck key would go
+    // dead on the next unrelated change.
+    let mut config = config;
+    if config.control.token.is_empty() {
+        config.control.token = previous.control.token.clone();
+    }
     let next = state.replace_config(config);
     // Otherwise the player cannot reach clips outside the Videos folder.
     crate::allow_clip_dir(&app, &next.clip_dir);
@@ -80,6 +88,14 @@ pub fn set_config(
         if let Err(err) = crate::register_hotkeys(&app) {
             crate::notify(&app, "error", err);
         }
+    }
+
+    // Switched off, or moved to another port: the listener has to follow, and
+    // right away — otherwise the old port keeps answering until the next start.
+    if previous.control.enabled != next.control.enabled
+        || previous.control.port != next.control.port
+    {
+        crate::control::restart(&app);
     }
     next
 }
@@ -1019,6 +1035,17 @@ fn with_library<T>(
         Some(lib) => f(lib),
         None => Err("clip database is not available".into()),
     }
+}
+
+/// Throw the control port's token away and generate a new one.
+///
+/// For the moment somebody has handed the token on and wants it to stop working
+/// — the port restarts, and the plugin on this machine picks the new one up out
+/// of the handshake file by itself.
+#[tauri::command]
+pub fn regenerate_control_token(state: State<'_, AppState>, app: tauri::AppHandle) -> AppConfig {
+    crate::control::regenerate_token(&app);
+    state.config_snapshot()
 }
 
 /// Version from `tauri.conf.json` — the settings display it.

@@ -1,0 +1,10 @@
+{
+  "name": "com.einfabo.clippiboy",
+  "private": true,
+  "version": "0.3.2",
+  "description": "Runtime dependencies of the ClippiBoy Stream Deck plugin — this folder is what gets packed, so what the plugin needs at runtime has to be installed in here.",
+  "type": "module",
+  "dependencies": {
+    "@elgato/streamdeck": "^2.1.2"
+  }
+}

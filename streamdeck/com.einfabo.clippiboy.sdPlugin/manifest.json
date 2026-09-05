@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "UUID": "com.einfabo.clippiboy",
+  "Name": "ClippiBoy",
+  "Version": "0.3.2.0",
+  "Author": "EinFabo",
+  "URL": "https://github.com/EinFabo/clippiboy",
+  "Description": "Save a clip, take a screenshot and switch the replay buffer — with the buffer level and the detected game on the key.",
+  "Icon": "imgs/plugin/marketplace",
+  "Category": "ClippiBoy",
+  "CategoryIcon": "imgs/plugin/category",
+  "CodePath": "bin/plugin.js",
+  "PropertyInspectorPath": "ui/settings.html",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "Actions": [
+    {
+      "Name": "Save Clip",
+      "UUID": "com.einfabo.clippiboy.save",
+      "Icon": "imgs/actions/save/icon",
+      "Tooltip": "Writes the last seconds out of ClippiBoy's replay buffer. The key shows how much is in it.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/save/key",
+          "TitleAlignment": "bottom"
+        }
+      ]
+    },
+    {
+      "Name": "Screenshot",
+      "UUID": "com.einfabo.clippiboy.screenshot",
+      "Icon": "imgs/actions/screenshot/icon",
+      "Tooltip": "Takes a screenshot through ClippiBoy — into its folder and its gallery.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/screenshot/key",
+          "TitleAlignment": "bottom"
+        }
+      ]
+    },
+    {
+      "Name": "Replay Buffer",
+      "UUID": "com.einfabo.clippiboy.buffer",
+      "Icon": "imgs/actions/buffer/icon",
+      "Tooltip": "Switches the replay buffer on and off. The key follows along when it is switched anywhere else.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/buffer/off",
+          "Name": "Off",
+          "TitleAlignment": "bottom"
+        },
+        {
+          "Image": "imgs/actions/buffer/on",
+          "Name": "On",
+          "TitleAlignment": "bottom"
+        }
+      ]
+    }
+  ]
+}

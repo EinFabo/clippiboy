@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod clips;
 pub mod commands;
 pub mod config;
+pub mod control;
 pub mod convert;
 pub mod edit;
 pub mod encode;
@@ -585,6 +586,9 @@ pub fn run() {
             if let Err(err) = tray::build(handle) {
                 log::error!("could not create the tray icon: {err}");
             }
+            // The Stream Deck's way in. Deliberately after the tray: if the port
+            // is taken, the app is already usable by then.
+            control::start(handle);
             spawn_ui_updates(handle);
             if let Err(err) = register_hotkeys(handle) {
                 log::warn!("{err}");
@@ -647,6 +651,7 @@ pub fn run() {
             commands::app_version,
             commands::check_update,
             commands::install_update,
+            commands::regenerate_control_token,
         ])
         .build(tauri::generate_context!())
         .expect("could not start ClippiBoy");

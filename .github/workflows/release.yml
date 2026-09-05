@@ -43,6 +43,15 @@ jobs:
       # someone else's machine with nothing pre-installed.
       - run: npm run ffmpeg
 
+      # Deliberately before the installer: if the plugin does not build, no
+      # release has been created yet that would then be missing it.
+      - name: Build the Stream Deck plugin
+        working-directory: streamdeck
+        run: |
+          npm ci
+          npm ci --prefix com.einfabo.clippiboy.sdPlugin
+          npm run pack
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,10 +60,25 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: ClippiBoy ${{ github.ref_name }}
-          releaseBody: "Installer below under *Assets*. Existing installations announce it themselves."
+          releaseBody: |
+            Installer below under *Assets*. Existing installations announce it themselves.
+
+            `com.einfabo.clippiboy.streamDeckPlugin` is the Stream Deck plugin — double-click installs it.
           # Publishing as a draft would be safer, but the updater only sees
           # finished releases — otherwise nobody gets the update.
           releaseDraft: false
           prerelease: false
           # Additionally produces `latest.json`, which the updater queries.
           includeUpdaterJson: true
+
+      # The action above created the release; this hangs the plugin next to the
+      # installer. Only on a real tag — a `workflow_dispatch` trial run has no
+      # release to attach anything to.
+      - name: Attach the Stream Deck plugin
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release upload ${{ github.ref_name }}
+          streamdeck/dist/com.einfabo.clippiboy.streamDeckPlugin
+          --clobber

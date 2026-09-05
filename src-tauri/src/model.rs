@@ -231,6 +231,37 @@ impl Default for OverlayConfig {
     }
 }
 
+/// The local control port a Stream Deck — or anything else on this machine —
+/// presses the same buttons through that hotkey and tray already press.
+///
+/// It listens on `127.0.0.1` only and every request has to carry the token, so
+/// nothing reaches it from outside this machine. The token is generated once on
+/// first start; `port` is only in here because 47653 might already belong to
+/// something else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlConfig {
+    pub enabled: bool,
+    pub port: u16,
+    /// Empty means "not generated yet" — `control::start` fills it in.
+    #[serde(default)]
+    pub token: String,
+}
+
+/// Nothing well-known, and above the range Windows hands out for outgoing
+/// connections by itself.
+pub const DEFAULT_CONTROL_PORT: u16 = 47653;
+
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: DEFAULT_CONTROL_PORT,
+            token: String::new(),
+        }
+    }
+}
+
 /// S saves, B is the buffer, P is the picture.
 pub fn default_screenshot_hotkey() -> String {
     "Ctrl+Shift+P".into()
@@ -263,6 +294,9 @@ pub struct AppConfig {
     /// Has it already been explained that closing leaves the app in the tray?
     #[serde(default)]
     pub tray_hint_shown: bool,
+    /// The local port for the Stream Deck plugin — see [`ControlConfig`].
+    #[serde(default)]
+    pub control: ControlConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

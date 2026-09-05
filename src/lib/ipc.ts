@@ -62,6 +62,8 @@ export const api = {
   status: () => invoke<EngineStatus>("engine_status"),
 
   appVersion: () => invoke<string>("app_version"),
+  /** Throw the Stream Deck token away and generate a new one. */
+  regenerateControlToken: () => invoke<AppConfig>("regenerate_control_token"),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
 

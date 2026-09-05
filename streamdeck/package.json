@@ -1,0 +1,19 @@
+{
+  "name": "clippiboy-streamdeck",
+  "private": true,
+  "version": "0.3.2",
+  "description": "Stream Deck plugin for ClippiBoy",
+  "type": "module",
+  "scripts": {
+    "setup": "npm install && npm install --prefix com.einfabo.clippiboy.sdPlugin",
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "pack": "npm run build && streamdeck pack com.einfabo.clippiboy.sdPlugin --output dist --force",
+    "link": "streamdeck link com.einfabo.clippiboy.sdPlugin"
+  },
+  "devDependencies": {
+    "@elgato/cli": "^1.9.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.7.3"
+  }
+}

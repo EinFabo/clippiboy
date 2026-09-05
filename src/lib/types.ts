@@ -122,6 +122,16 @@ export interface OverlayConfig {
   followActiveScreen: boolean;
 }
 
+/**
+ * The local port a Stream Deck presses ClippiBoy's buttons through. Listens on
+ * 127.0.0.1 only, and every request has to carry the token.
+ */
+export interface ControlConfig {
+  enabled: boolean;
+  port: number;
+  token: string;
+}
+
 export interface AppConfig {
   recording: RecordingConfig;
   buffer: BufferConfig;
@@ -134,6 +144,7 @@ export interface AppConfig {
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;
   trayHintShown: boolean;
+  control: ControlConfig;
 }
 
 export interface Clip {

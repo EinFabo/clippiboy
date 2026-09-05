@@ -34,6 +34,10 @@ env_logger = "0.11"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
 jiff = "0.2"
+# The local control port for the Stream Deck plugin. Blocking, one thread, no
+# async runtime dragged in behind it — which is what the rest of this crate does
+# too.
+tiny_http = "0.12"
 # Screenshots. Small, pure Rust — the picture does not have to take a detour
 # through ffmpeg and a raw file of thirty megabytes.
 png = "0.17"

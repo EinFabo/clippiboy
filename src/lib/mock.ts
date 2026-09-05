@@ -100,6 +100,7 @@ export const mockConfig: AppConfig = {
     followActiveScreen: false,
   },
   trayHintShown: false,
+  control: { enabled: true, port: 47653, token: "mock-token" },
 };
 
 export const mockClips: Clip[] = [

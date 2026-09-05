@@ -1,0 +1,168 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>ClippiBoy</title>
+		<style>
+			:root {
+				color-scheme: dark;
+				--purple: #8b5cf6;
+				--ink: #d6d3e0;
+				--muted: #8b869c;
+				--line: #3a3646;
+			}
+			body {
+				margin: 0;
+				padding: 14px;
+				font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+				color: var(--ink);
+				background: transparent;
+			}
+			.state {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 10px 12px;
+				border: 1px solid var(--line);
+				border-radius: 8px;
+			}
+			.dot {
+				width: 9px;
+				height: 9px;
+				border-radius: 50%;
+				background: var(--muted);
+				flex: none;
+			}
+			.dot.on {
+				background: var(--purple);
+			}
+			.note {
+				margin: 10px 2px 0;
+				color: var(--muted);
+			}
+			details {
+				margin-top: 16px;
+				border-top: 1px solid var(--line);
+				padding-top: 12px;
+			}
+			summary {
+				cursor: pointer;
+				color: var(--muted);
+			}
+			label {
+				display: block;
+				margin-top: 10px;
+			}
+			input {
+				width: 100%;
+				box-sizing: border-box;
+				margin-top: 4px;
+				padding: 6px 8px;
+				font: inherit;
+				color: var(--ink);
+				background: #1c1926;
+				border: 1px solid var(--line);
+				border-radius: 6px;
+			}
+			button {
+				margin-top: 12px;
+				padding: 6px 14px;
+				font: inherit;
+				color: var(--ink);
+				background: var(--purple);
+				border: 0;
+				border-radius: 6px;
+				cursor: pointer;
+			}
+			code {
+				overflow-wrap: anywhere;
+				color: var(--muted);
+			}
+		</style>
+	</head>
+	<body>
+		<div class="state"><span class="dot" id="dot"></span><span id="state">Looking for ClippiBoy…</span></div>
+		<p class="note" id="note"></p>
+
+		<details id="manual">
+			<summary>Enter port and token by hand</summary>
+			<p class="note">
+				Only needed when ClippiBoy is not found by itself — normally it hands both over through
+				<code id="path"></code>. Both are in ClippiBoy under <em>Settings → Stream Deck</em>.
+			</p>
+			<label>Port <input id="port" type="number" min="1" max="65535" placeholder="47653" /></label>
+			<label>Token <input id="token" type="text" placeholder="from ClippiBoy's settings" /></label>
+			<button id="save">Save and check</button>
+		</details>
+
+		<script>
+			let socket;
+			let uuid;
+			// Which of the three keys the inspector was opened for — a message back to
+			// the plugin has to name it.
+			let actionUUID;
+
+			// The handshake the Stream Deck software performs with every property
+			// inspector: it calls this function with the port to talk back on.
+			function connectElgatoStreamDeckSocket(port, inPluginUUID, registerEvent, info, actionInfo) {
+				uuid = inPluginUUID;
+				actionUUID = JSON.parse(actionInfo).action;
+				socket = new WebSocket("ws://127.0.0.1:" + port);
+				socket.onopen = () => {
+					socket.send(JSON.stringify({ event: registerEvent, uuid }));
+					send({ event: "getGlobalSettings", context: uuid });
+				};
+				socket.onmessage = (message) => {
+					const data = JSON.parse(message.data);
+					if (data.event === "didReceiveGlobalSettings") {
+						fill(data.payload.settings ?? {});
+					} else if (data.event === "sendToPropertyInspector") {
+						show(data.payload);
+					}
+				};
+			}
+
+			function send(message) {
+				const post = () => socket.send(JSON.stringify(message));
+				socket.readyState === WebSocket.OPEN ? post() : socket.addEventListener("open", post, { once: true });
+			}
+
+			function fill(settings) {
+				if (settings.port) document.getElementById("port").value = settings.port;
+				if (settings.token) document.getElementById("token").value = settings.token;
+			}
+
+			function show(reach) {
+				const dot = document.getElementById("dot");
+				const state = document.getElementById("state");
+				const note = document.getElementById("note");
+				document.getElementById("path").textContent = reach.handshakePath ?? "";
+
+				if (reach.connected) {
+					dot.classList.add("on");
+					state.textContent = "ClippiBoy " + (reach.version ?? "") + " on port " + reach.port;
+					note.textContent =
+						reach.source === "handshake"
+							? "Found by itself — nothing to set up."
+							: "Using the port and token entered below.";
+					return;
+				}
+
+				dot.classList.remove("on");
+				state.textContent = "ClippiBoy is not answering";
+				note.textContent = reach.port
+					? "Nothing is listening on port " + reach.port + ". Is ClippiBoy running?"
+					: "Start ClippiBoy, and switch the control port on under Settings \u2192 Stream Deck.";
+				document.getElementById("manual").open = !reach.port;
+			}
+
+			document.getElementById("save").addEventListener("click", () => {
+				const port = Number(document.getElementById("port").value) || undefined;
+				const token = document.getElementById("token").value.trim() || undefined;
+				send({ event: "setGlobalSettings", context: uuid, payload: { port, token } });
+				// The plugin re-reads where ClippiBoy is and answers with the result.
+				send({ event: "sendToPlugin", context: uuid, action: actionUUID, payload: { command: "probe" } });
+			});
+		</script>
+	</body>
+</html>

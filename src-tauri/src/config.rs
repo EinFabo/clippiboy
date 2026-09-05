@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::encode;
 use crate::model::{
-    AppConfig, BufferConfig, OverlayConfig, RecordingConfig, SourceKind, TargetKind,
+    AppConfig, BufferConfig, ControlConfig, OverlayConfig, RecordingConfig, SourceKind, TargetKind,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -50,6 +50,7 @@ pub fn default_config() -> AppConfig {
         only_buffer_in_game: true,
         overlay: OverlayConfig::default(),
         tray_hint_shown: false,
+        control: ControlConfig::default(),
     }
 }
 
@@ -189,6 +190,29 @@ mod tests {
             sources,
             ..default_config()
         }
+    }
+
+    /// A config written before the Stream Deck port existed has no `control`
+    /// block. Without `#[serde(default)]` on that field the parse fails, and
+    /// `load()` answers a failed parse by throwing the **whole** configuration
+    /// away — audio sources, hotkeys and clip folder included. That is the most
+    /// expensive bug this file can have, so it gets a test rather than a comment.
+    #[test]
+    fn a_configuration_written_before_the_stream_deck_port_still_loads() {
+        let mut written =
+            serde_json::to_value(with(vec![source("mic", endpoint("dev-1"), true)])).unwrap();
+        written
+            .as_object_mut()
+            .expect("a config is an object")
+            .remove("control")
+            .expect("the field is called 'control' in JSON too");
+
+        let parsed: AppConfig =
+            serde_json::from_value(written).expect("a config without 'control' no longer loads");
+        assert_eq!(parsed.sources.len(), 1);
+        assert_eq!(parsed.control.port, crate::model::DEFAULT_CONTROL_PORT);
+        // Nothing generated yet — `control::start` fills it in on first use.
+        assert!(parsed.control.token.is_empty());
     }
 
     /// What the intermediate version left behind: one source turned into a kind

@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "node16",
+    "moduleResolution": "node16",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "sourceMap": true,
+    "outDir": "com.einfabo.clippiboy.sdPlugin/bin",
+    "rootDir": "src",
+    "skipLibCheck": true,
+    // The SDK is installed inside the .sdPlugin folder, because that folder is
+    // what gets packed and shipped — the plugin has to find it at runtime. tsc
+    // would not look there on its own, hence the pointer.
+    "paths": {
+      "@elgato/streamdeck": ["./com.einfabo.clippiboy.sdPlugin/node_modules/@elgato/streamdeck/dist/plugin/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

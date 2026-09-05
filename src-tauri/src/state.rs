@@ -317,6 +317,12 @@ impl AppState {
         }
     }
 
+    /// Is a clip being written right now? The control port reports it so a
+    /// Stream Deck key can wait instead of hammering.
+    pub fn is_saving(&self) -> bool {
+        self.saving.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Is a recording into the buffer running right now?
     pub fn is_buffering(&self) -> bool {
         self.pipeline.lock().is_some()
