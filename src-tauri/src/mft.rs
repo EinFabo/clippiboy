@@ -391,6 +391,43 @@ fn configure_bframes(codec: &ICodecAPI) -> Option<(u32, bool)> {
     Some((count, taken))
 }
 
+/// Whether to ask for low latency — and why that is not the same answer for
+/// every make of card.
+///
+/// This used to be off everywhere, and the reasoning was sound as far as it
+/// went: a replay buffer does not care about latency, the clip is cut out of a
+/// ring minutes later, and switching low latency on costs the lookahead. What
+/// the reasoning missed is who pays for that lookahead.
+///
+/// Measured on a Radeon RX 7600 XT: at the default quality preset the AMD
+/// transform holds **sixteen** frames at once and blocks the capture clock for
+/// sixteen of every thirty seconds. Not one frame is dropped and the rate stays
+/// at 60 — it is a queue, not slow encoding. But AMD run the lookahead on the
+/// shaders rather than on the dedicated video block, which is to say on the very
+/// part of the card the game is being drawn with. On an empty desktop that costs
+/// nothing anyone can see. In a game it comes straight out of the frame budget,
+/// and that is what "it lags on AMD" turned out to be. With this switch on, the
+/// queue is zero. Intel's transform behaves the same way and gains three times
+/// the speed from it.
+///
+/// NVENC does not need it: its queue stays shallow whatever it is told, so it
+/// keeps its lookahead and the compression that buys. Turning it on there could
+/// only cost.
+///
+/// What it costs where it is on is not a worse picture. The encoder is aiming at
+/// a **quality**, so without the lookahead it simply spends more bits to reach
+/// the same one: clips get a little bigger, and the ring holds a little less of
+/// its configured length inside the same memory budget. Against a game that
+/// stutters, that is a bargain.
+///
+/// `CLIPPIBOY_LOW_LATENCY` overrides this either way.
+fn low_latency_default(chosen: EncoderId) -> bool {
+    match chosen {
+        EncoderId::Amf | EncoderId::Qsv => true,
+        EncoderId::Nvenc | EncoderId::X264 => false,
+    }
+}
+
 /// What the encoder made of the settings after the media types stood.
 struct CodecReport {
     rejected: Vec<&'static str>,
@@ -403,16 +440,18 @@ struct CodecReport {
 }
 
 /// The rest, which may be set once the media types stand.
-fn configure_codec(codec: &ICodecAPI, settings: &EncoderSettings) -> CodecReport {
+fn configure_codec(
+    codec: &ICodecAPI,
+    settings: &EncoderSettings,
+    chosen: EncoderId,
+) -> CodecReport {
     let gop = settings.fps.max(1) * settings.keyframe_seconds.max(1);
 
     // 0 = as fast as possible, 100 = best quality. A replay buffer runs in the
     // background but is not in real-time distress — 70 is the point where NVENC
     // and AMF get noticeably better without losing frames.
     let quality_vs_speed = env_u32("CLIPPIBOY_QUALITY_VS_SPEED", 70).min(100);
-    // Low latency switches off lookahead and B-frames. For a replay buffer
-    // latency is beside the point; quality is not.
-    let low_latency = env_bool("CLIPPIBOY_LOW_LATENCY", false);
+    let low_latency = env_bool("CLIPPIBOY_LOW_LATENCY", low_latency_default(chosen));
 
     let wanted: Vec<(&'static str, &GUID, VARIANT)> = vec![
         ("Keyframe-Abstand", &CODECAPI_AVEncMPVGOPSize, VARIANT::from(gop)),
@@ -750,7 +789,9 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
             .map_err(|err| format!("Eingabetyp: {err}"))?;
     }
 
-    let report = codec.as_ref().map(|codec| configure_codec(codec, settings));
+    let report = codec
+        .as_ref()
+        .map(|codec| configure_codec(codec, settings, chosen));
 
     let provides_samples = unsafe { transform.GetOutputStreamInfo(0) }
         .map(|info| info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0)
