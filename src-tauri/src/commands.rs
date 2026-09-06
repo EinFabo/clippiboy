@@ -951,7 +951,7 @@ fn dir_bytes(root: &Path) -> u64 {
 /// generation less quality. The same number the recording itself aims at.
 fn encoder_for(state: &State<'_, AppState>) -> (crate::model::EncoderId, u32) {
     let recording = state.config_snapshot().recording;
-    (encode::resolve(recording.encoder), recording.quality)
+    (encode::effective(recording.encoder), recording.quality)
 }
 
 /// Report progress to the UI. ffmpeg reports often enough that a bar moves

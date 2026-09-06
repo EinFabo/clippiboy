@@ -390,7 +390,12 @@ mod win {
         shared: Arc<Shared>,
         recording: &RecordingConfig,
     ) -> Result<Running, String> {
-        let gpu = Arc::new(GpuDevice::new()?);
+        // Settled once, before anything is built: the same answer chooses the
+        // graphics adapter below and drives the MFT further down. Resolving it
+        // twice is how the encoder and the device it runs on came apart.
+        let wanted = crate::encode::for_recording(recording.encoder);
+
+        let gpu = Arc::new(GpuDevice::new(Some(wanted))?);
         let converter = Converter::new(&gpu, recording.width, recording.height, recording.fps)?;
         let latest = Latest::new(converter);
 
@@ -405,7 +410,7 @@ mod win {
                     bitrate_kbps: recording.bitrate_kbps,
                     quality: recording.quality,
                     keyframe_seconds: recording.keyframe_seconds,
-                    requested: recording.encoder,
+                    requested: wanted,
                 },
                 move |packet| shared.packets.lock().push(packet),
             )?)

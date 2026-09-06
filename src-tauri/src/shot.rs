@@ -423,7 +423,7 @@ pub fn read_png(path: &Path) -> Result<Shot, String> {
 pub fn grab(kind: TargetKind, id: Option<&str>) -> Result<Shot, String> {
     use std::sync::Arc;
 
-    let gpu = Arc::new(crate::gpu::GpuDevice::new()?);
+    let gpu = Arc::new(crate::gpu::GpuDevice::new(None)?);
     // Room for exactly one: whichever frame arrives first is the screenshot,
     // every one after it finds the channel full and is dropped.
     let (sender, receiver) = crossbeam_channel::bounded::<Result<Shot, String>>(1);

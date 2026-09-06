@@ -45,8 +45,14 @@ pub fn list_encoders() -> Vec<EncoderInfo> {
             hardware: true,
         },
         EncoderInfo {
-            // For recording this is the Windows software H.264 MFT, for export
-            // it is x264. Both are always there.
+            // For export and trimming this is x264, and it is always there.
+            //
+            // For *recording* it is not what it looks like: the Windows software
+            // MFT cannot take the GPU textures this pipeline hands over, so a
+            // recording asked to run on it runs on hardware instead and says so
+            // in the log (see `mft::build`). It stays listed because it is the
+            // truth for every other path, and because a machine with no hardware
+            // encoder at all still has to be told what it is getting.
             id: EncoderId::X264,
             name: "Software (CPU, fallback)".into(),
             available: true,
@@ -84,6 +90,73 @@ pub fn preferred_encoder() -> EncoderId {
         .find(|e| e.available && e.hardware)
         .map(|e| e.id)
         .unwrap_or(EncoderId::X264)
+}
+
+/// Encoder forced by the environment: `CLIPPIBOY_ENCODER=nvenc|amf|qsv|x264`.
+///
+/// This goes past the availability check on purpose. Diagnosing someone else's
+/// machine, the interesting encoder is exactly the one that is *not* on offer —
+/// either because Media Foundation does not list it, or because the pick
+/// quietly fell through to another one.
+///
+/// Deliberately **not** consulted by [`resolve`]: that one also runs when the
+/// configuration is written back (`state::replace_config`), and a diagnostic
+/// switch must not end up in someone's `config.json` where it would outlive the
+/// session that set it.
+pub fn forced() -> Option<EncoderId> {
+    let raw = std::env::var("CLIPPIBOY_ENCODER").ok()?;
+    let name = raw.trim().to_ascii_lowercase();
+    match name.as_str() {
+        "" => None,
+        "nvenc" | "nvidia" => Some(EncoderId::Nvenc),
+        "amf" | "amd" => Some(EncoderId::Amf),
+        "qsv" | "intel" | "quicksync" => Some(EncoderId::Qsv),
+        "x264" | "software" | "cpu" => Some(EncoderId::X264),
+        other => {
+            log::warn!("CLIPPIBOY_ENCODER=\"{other}\" is not an encoder name — ignored");
+            None
+        }
+    }
+}
+
+/// The encoder a run should actually use: the forced one if the environment
+/// names one, otherwise the configured one checked against the hardware.
+///
+/// This is the call for everything that *encodes*. [`resolve`] stays the call
+/// for everything that *stores* a setting.
+pub fn effective(requested: EncoderId) -> EncoderId {
+    match forced() {
+        Some(forced) => {
+            log::info!("encoder forced to {forced:?} by CLIPPIBOY_ENCODER");
+            forced
+        }
+        None => resolve(requested),
+    }
+}
+
+/// The encoder a **recording** will really run on.
+///
+/// Recording on the CPU is not implemented: the pipeline hands the encoder
+/// Direct3D textures and the Windows software MFT cannot take them. A request
+/// for it therefore ends up on hardware — and that has to be decided here, once,
+/// because two separate things need the same answer: which transform to build,
+/// and which graphics card to build the device on. Working it out twice is how
+/// they came apart in the first place.
+pub fn for_recording(requested: EncoderId) -> EncoderId {
+    match effective(requested) {
+        EncoderId::X264 => {
+            let hardware = preferred_encoder();
+            if hardware != EncoderId::X264 {
+                log::warn!(
+                    "software recording is not implemented — the pipeline hands over GPU \
+                     textures and the Windows software MFT cannot take them. Recording on \
+                     {hardware:?} instead."
+                );
+            }
+            hardware
+        }
+        other => other,
+    }
 }
 
 /// Falls back to an available encoder if the requested one is missing (a
