@@ -11,9 +11,10 @@
 
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface, GUID, VARIANT};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
@@ -24,13 +25,94 @@ use crate::buffer::{EncodedPacket, VIDEO_TRACK};
 use crate::gpu::{GpuDevice, SendPtr};
 use crate::model::{EncoderId, RateControl};
 
-const VENDOR_NVIDIA: &str = "VEN_10DE";
-const VENDOR_AMD: &str = "VEN_1002";
-const VENDOR_INTEL: &str = "VEN_8086";
+/// Media Foundation states a vendor as text — `"VEN_10DE"` — where DXGI states
+/// the same number as `0x10DE`. The numbers live in `gpu.rs`, because that is
+/// where the adapter is chosen from them; here they are only spelled out.
+fn vendor_tag(id: u32) -> String {
+    format!("VEN_{id:04X}")
+}
 
 /// How many frames may wait to be submitted. At 60 fps four slots are a good
 /// 66 ms of headroom for a brief stall of the encoder.
 const QUEUE_DEPTH: usize = 4;
+
+/// A knob the environment may turn.
+///
+/// These exist for one reason: the machines where the encoder misbehaves are
+/// not the machines we can build on. Someone else can set a variable and run
+/// the probe again; we cannot ship them a compiler. Every default is what
+/// ClippiBoy does without them.
+fn env_u32(name: &str, default: u32) -> u32 {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    match raw.trim().parse::<u32>() {
+        Ok(value) => {
+            log::info!("{name}={value} instead of the usual {default}");
+            value
+        }
+        Err(_) => {
+            log::warn!("{name}=\"{raw}\" is not a number — staying at {default}");
+            default
+        }
+    }
+}
+
+/// A knob with no default of our own — absent means the property is not touched
+/// at all, and the driver keeps whatever it would have done.
+fn env_opt_u32(name: &str) -> Option<u32> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().parse::<u32>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            log::warn!("{name}=\"{raw}\" is not a number — left alone");
+            None
+        }
+    }
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    let value = matches!(raw.trim(), "1" | "true" | "yes" | "on");
+    log::info!("{name}={value} instead of the usual {default}");
+    value
+}
+
+/// What the encoder costs, measured rather than assumed.
+///
+/// Until these existed the only signal was one warning line, printed after a
+/// frame had already been lost — which says that something went wrong but not
+/// how close the encoder had been running to the edge all along. On hardware we
+/// cannot see, that difference is the whole diagnosis.
+#[derive(Default)]
+pub struct EncoderStats {
+    /// Frames that could not be handed over straight away.
+    pub submit_waited: AtomicU64,
+    /// What those waits cost, in microseconds. This is time the pacer thread
+    /// stood still — which is exactly what a stutter is made of.
+    pub submit_wait_us: AtomicU64,
+    /// Packets that came back out.
+    pub encoded: AtomicU64,
+    /// How long the encoder kept a frame, summed, in microseconds.
+    pub encode_us: AtomicU64,
+    /// The single worst frame so far.
+    pub encode_worst_us: AtomicU64,
+    /// Frames handed over and not yet returned.
+    pub in_flight: AtomicU64,
+}
+
+impl EncoderStats {
+    /// Average time a frame spent inside the encoder, in microseconds.
+    pub fn encode_mean_us(&self) -> u64 {
+        let count = self.encoded.load(Ordering::Relaxed);
+        match count {
+            0 => 0,
+            count => self.encode_us.load(Ordering::Relaxed) / count,
+        }
+    }
+}
 
 /// How long the clock waits when the queue is full.
 ///
@@ -77,19 +159,42 @@ fn vendor_of(activate: &IMFActivate) -> Option<String> {
 }
 
 fn vendor_to_encoder(vendor: &str) -> Option<EncoderId> {
-    if vendor.contains(VENDOR_NVIDIA) {
-        Some(EncoderId::Nvenc)
-    } else if vendor.contains(VENDOR_AMD) {
-        Some(EncoderId::Amf)
-    } else if vendor.contains(VENDOR_INTEL) {
-        Some(EncoderId::Qsv)
-    } else {
-        None
+    [
+        (crate::gpu::VENDOR_NVIDIA, EncoderId::Nvenc),
+        (crate::gpu::VENDOR_AMD, EncoderId::Amf),
+        (crate::gpu::VENDOR_INTEL, EncoderId::Qsv),
+    ]
+    .into_iter()
+    .find(|(id, _)| vendor.contains(&vendor_tag(*id)))
+    .map(|(_, encoder)| encoder)
+}
+
+/// What the driver calls this transform, for the log.
+///
+/// Worth having verbatim: "AMD H.264 Hardware MFT Encoder" and the Microsoft
+/// software encoder are told apart at a glance, and a report from a machine we
+/// cannot see is otherwise guesswork.
+fn name_of(activate: &IMFActivate) -> String {
+    unsafe {
+        let mut len = 0u32;
+        let mut buf = [0u16; 256];
+        match activate.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut buf, Some(&mut len)) {
+            Ok(()) => String::from_utf16_lossy(&buf[..len as usize]),
+            Err(_) => "(unnamed)".into(),
+        }
     }
 }
 
 /// List all H.264 encoder MFTs, hardware first.
-fn enumerate() -> Result<Vec<(Option<EncoderId>, IMFActivate)>, String> {
+/// One H.264 encoder MFT as the registry offers it.
+struct Candidate {
+    /// `None` for anything without a vendor of its own — the software encoder.
+    id: Option<EncoderId>,
+    name: String,
+    activate: IMFActivate,
+}
+
+fn enumerate() -> Result<Vec<Candidate>, String> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -118,7 +223,8 @@ fn enumerate() -> Result<Vec<(Option<EncoderId>, IMFActivate)>, String> {
         for index in 0..count as usize {
             if let Some(activate) = (*array.add(index)).clone() {
                 let id = vendor_of(&activate).as_deref().and_then(vendor_to_encoder);
-                found.push((id, activate));
+                let name = name_of(&activate);
+                found.push(Candidate { id, name, activate });
             }
         }
         // The array is ours; we cloned the references in it above.
@@ -139,8 +245,8 @@ pub fn available_encoders() -> Vec<EncoderId> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for (id, _) in list {
-        if let Some(id) = id {
+    for candidate in list {
+        if let Some(id) = candidate.id {
             if !out.contains(&id) {
                 out.push(id);
             }
@@ -265,47 +371,81 @@ fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> Rate
     RateControl::UnconstrainedVbr
 }
 
+/// B-frames, but only when the environment asks.
+///
+/// ClippiBoy has never set this, so whatever the driver defaults to is what
+/// runs — and on AMD that is worth being able to change from outside, because
+/// B-frames are RDNA2-and-later, cost encoding time, and nobody here owns the
+/// hardware to find out how much.
+///
+/// Set **before** `SetOutputType`: MSDN puts it in the same class as
+/// `AVEncCommonQuality`, which is accepted and then ignored afterwards.
+fn configure_bframes(codec: &ICodecAPI) -> Option<(u32, bool)> {
+    let count = env_opt_u32("CLIPPIBOY_BFRAMES")?;
+    let taken = set_codec_property(
+        codec,
+        "B-frames",
+        &CODECAPI_AVEncMPVDefaultBPictureCount,
+        VARIANT::from(count),
+    );
+    Some((count, taken))
+}
+
+/// What the encoder made of the settings after the media types stood.
+struct CodecReport {
+    rejected: Vec<&'static str>,
+    gop_wanted: u32,
+    /// `None` when the encoder will not say. Anything other than `gop_wanted`
+    /// is a silent deviation, and those are the expensive kind.
+    gop_effective: Option<u32>,
+    quality_vs_speed: u32,
+    low_latency: bool,
+}
+
 /// The rest, which may be set once the media types stand.
-fn configure_codec(codec: &ICodecAPI, settings: &EncoderSettings) {
+fn configure_codec(codec: &ICodecAPI, settings: &EncoderSettings) -> CodecReport {
     let gop = settings.fps.max(1) * settings.keyframe_seconds.max(1);
 
-    let wanted: Vec<(&str, &GUID, VARIANT)> = vec![
+    // 0 = as fast as possible, 100 = best quality. A replay buffer runs in the
+    // background but is not in real-time distress — 70 is the point where NVENC
+    // and AMF get noticeably better without losing frames.
+    let quality_vs_speed = env_u32("CLIPPIBOY_QUALITY_VS_SPEED", 70).min(100);
+    // Low latency switches off lookahead and B-frames. For a replay buffer
+    // latency is beside the point; quality is not.
+    let low_latency = env_bool("CLIPPIBOY_LOW_LATENCY", false);
+
+    let wanted: Vec<(&'static str, &GUID, VARIANT)> = vec![
         ("Keyframe-Abstand", &CODECAPI_AVEncMPVGOPSize, VARIANT::from(gop)),
-        // 0 = as fast as possible, 100 = best quality. A replay buffer runs in
-        // the background but is not in real-time distress — 70 is the point where
-        // NVENC and AMF get noticeably better without losing frames.
-        ("quality/speed", &CODECAPI_AVEncCommonQualityVsSpeed, VARIANT::from(70u32)),
+        (
+            "quality/speed",
+            &CODECAPI_AVEncCommonQualityVsSpeed,
+            VARIANT::from(quality_vs_speed),
+        ),
         // CABAC instead of CAVLC: around 10 % fewer artefacts at the same bitrate.
         ("CABAC", &CODECAPI_AVEncH264CABACEnable, VARIANT::from(true)),
-        // Low latency switches off lookahead and B-frames. For a replay buffer
-        // latency is beside the point; quality is not.
-        ("low latency off", &CODECAPI_AVLowLatencyMode, VARIANT::from(false)),
+        (
+            "low latency",
+            &CODECAPI_AVLowLatencyMode,
+            VARIANT::from(low_latency),
+        ),
     ];
 
-    let rejected: Vec<&str> = wanted
+    let rejected: Vec<&'static str> = wanted
         .into_iter()
         .filter(|(name, api, value)| !set_codec_property(codec, name, api, value.clone()))
         .map(|(name, _, _)| name)
         .collect();
-    if !rejected.is_empty() {
-        log::warn!(
-            "encoder does not know these settings: {} — they stay at their defaults",
-            rejected.join(", ")
-        );
-    }
 
     // Accepted does not mean applied. The NVIDIA MFT, for one, acknowledges any
     // keyframe distance with success but caps it at the frame rate — "every 2 s"
     // silently becomes "every second". Exactly those silent deviations were the
     // reason the settings previously did nothing without anyone noticing.
-    if let Some(effective) = read_u32(codec, &CODECAPI_AVEncMPVGOPSize) {
-        if effective != gop {
-            log::info!(
-                "encoder does not honour the keyframe distance: asked for every {} frames, \
-                 actually every {effective}",
-                gop
-            );
-        }
+    CodecReport {
+        rejected,
+        gop_wanted: gop,
+        gop_effective: read_u32(codec, &CODECAPI_AVEncMPVGOPSize),
+        quality_vs_speed,
+        low_latency,
     }
 }
 
@@ -366,6 +506,130 @@ struct Transform {
     sequence_header: Vec<u8>,
 }
 
+/// Everything about this encoder, as one record in the log.
+///
+/// It used to be six `debug!` and `warn!` lines scattered through the setup, and
+/// in a release build none of them went anywhere at all — `main.rs` builds a GUI
+/// without a console. On a machine we can reach, that was merely inconvenient.
+/// On someone else's it meant the only answers we ever got were "it lags".
+///
+/// So it is one block, at `info`, listing what we would otherwise have to ask
+/// for one question at a time: what was wanted, what was found, what actually
+/// runs, on which card, and what the driver quietly refused.
+#[allow(clippy::too_many_arguments)]
+fn profile(
+    gpu: &GpuDevice,
+    settings: &EncoderSettings,
+    candidates: &[Candidate],
+    pick: usize,
+    chosen: EncoderId,
+    is_async: bool,
+    provides_samples: bool,
+    rate_control: RateControl,
+    report: Option<&CodecReport>,
+    bframes: Option<(u32, bool)>,
+) {
+    let mut lines = vec!["encoder profile".to_string()];
+
+    lines.push(format!("  requested        {:?}", settings.requested));
+    lines.push(format!(
+        "  running          {chosen:?}{}",
+        if chosen == settings.requested {
+            ""
+        } else {
+            "   <-- NOT what was asked for"
+        }
+    ));
+    lines.push(format!(
+        "  transform        {} ({})",
+        candidates[pick].name,
+        match candidates[pick].id {
+            Some(id) => format!("{id:?}"),
+            None => "no vendor, so software".into(),
+        }
+    ));
+    lines.push(format!(
+        "  adapter          {}",
+        match &gpu.adapter {
+            Some(info) => info.to_string(),
+            None => "DXGI default (nothing was requested)".into(),
+        }
+    ));
+    lines.push(format!(
+        "  picture          {}x{} @ {} fps, {} kbit/s, quality {}",
+        settings.width, settings.height, settings.fps, settings.bitrate_kbps, settings.quality
+    ));
+    lines.push(format!(
+        "  rate control     {rate_control:?}{}",
+        match rate_control {
+            RateControl::Quality => "",
+            _ => "   <-- not constant quality",
+        }
+    ));
+    lines.push(format!(
+        "  model            {}, samples {}",
+        if is_async {
+            "asynchronous (hardware)"
+        } else {
+            "synchronous (software)"
+        },
+        if provides_samples {
+            "from the encoder"
+        } else {
+            "ours to provide"
+        }
+    ));
+
+    match report {
+        Some(report) => {
+            lines.push(format!(
+                "  keyframes        every {} frames, encoder says {}",
+                report.gop_wanted,
+                match report.gop_effective {
+                    Some(value) => value.to_string(),
+                    None => "(will not say)".into(),
+                }
+            ));
+            lines.push(format!(
+                "  quality/speed    {}, low latency {}, B-frames {}",
+                report.quality_vs_speed,
+                report.low_latency,
+                match bframes {
+                    Some((count, true)) => format!("{count}"),
+                    Some((count, false)) => {
+                        format!("{count} asked for and REFUSED, so the driver's own")
+                    }
+                    None => "not asked, so the driver's own".into(),
+                }
+            ));
+            lines.push(format!(
+                "  refused          {}",
+                if report.rejected.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    report.rejected.join(", ")
+                }
+            ));
+        }
+        None => lines.push("  refused          no ICodecAPI at all — nothing could be set".into()),
+    }
+
+    lines.push(format!("  candidates       {}", candidates.len()));
+    for (index, candidate) in candidates.iter().enumerate() {
+        lines.push(format!(
+            "    [{index}]{} {} — {}",
+            if index == pick { " *" } else { "  " },
+            candidate.name,
+            match candidate.id {
+                Some(id) => format!("{id:?}"),
+                None => "software".into(),
+            }
+        ));
+    }
+
+    log::info!("{}", lines.join("\n"));
+}
+
 fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, String> {
     startup()?;
     let candidates = enumerate()?;
@@ -375,15 +639,33 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
 
     // The requested encoder first; otherwise the first hardware encoder;
     // otherwise the first one at all (software fallback).
-    let pick = candidates
-        .iter()
-        .position(|(id, _)| *id == Some(settings.requested))
-        .or_else(|| candidates.iter().position(|(id, _)| id.is_some()))
-        .unwrap_or(0);
-    let (chosen_id, activate) = &candidates[pick];
-    let chosen = chosen_id.unwrap_or(EncoderId::X264);
+    // The software encoder is the one candidate no vendor id can name — it has
+    // none, and matching on `Some(requested)` therefore never found it. Asking
+    // for software got you the first hardware encoder instead, without a word.
+    //
+    // Selecting it properly turns out not to help: it answers
+    // `MFT_MESSAGE_SET_D3D_MANAGER` with E_NOTIMPL, and it would not know what
+    // to do with a texture either. Recording on the CPU needs the picture read
+    // back out of the GPU first, and there is no such path — the whole point of
+    // this pipeline is that the frame never travels through main memory.
+    //
+    // So it is still passed over. The difference is that it now says so: a
+    // setting that silently does something else is how the encoder switch came
+    // to do nothing at all for so long.
+    // `encode::for_recording` has already turned a request for software into
+    // whatever hardware is there, so `X264` only survives this far on a machine
+    // that has none at all. It then lands on the software transform below and
+    // fails at the D3D manager, which is the truth: this pipeline cannot record
+    // without a hardware encoder.
+    let pick = match settings.requested {
+        EncoderId::X264 => None,
+        wanted => candidates.iter().position(|c| c.id == Some(wanted)),
+    }
+    .or_else(|| candidates.iter().position(|c| c.id.is_some()))
+    .unwrap_or(0);
+    let chosen = candidates[pick].id.unwrap_or(EncoderId::X264);
 
-    let transform: IMFTransform = unsafe { activate.ActivateObject() }
+    let transform: IMFTransform = unsafe { candidates[pick].activate.ActivateObject() }
         .map_err(|err| format!("Encoder starten: {err}"))?;
 
     // Hardware encoders are asynchronous and have to be unlocked for that first —
@@ -415,7 +697,16 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
                 MFT_MESSAGE_SET_D3D_MANAGER,
                 manager.as_raw() as usize,
             )
-            .map_err(|err| format!("device to encoder: {err}"))?;
+            // The software transform answers this with E_NOTIMPL, and a raw
+            // HRESULT is no way to tell somebody their machine cannot do the
+            // thing at all.
+            .map_err(|err| match chosen {
+                EncoderId::X264 => "no hardware H.264 encoder on this machine — ClippiBoy \
+                    encodes straight off the graphics card, and the Windows software \
+                    encoder cannot take its pictures"
+                    .to_string(),
+                _ => format!("device to encoder: {err}"),
+            })?;
     }
 
     // Rate control has to be settled **before** the output type: MSDN says of
@@ -430,6 +721,7 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
             RateControl::UnconstrainedVbr
         }
     };
+    let bframes = codec.as_ref().and_then(configure_bframes);
 
     // The order is prescribed: output type before input type.
     let output = media_type_video(MFVideoFormat_H264, settings)?;
@@ -458,9 +750,7 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
             .map_err(|err| format!("Eingabetyp: {err}"))?;
     }
 
-    if let Some(codec) = &codec {
-        configure_codec(codec, settings);
-    }
+    let report = codec.as_ref().map(|codec| configure_codec(codec, settings));
 
     let provides_samples = unsafe { transform.GetOutputStreamInfo(0) }
         .map(|info| info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0)
@@ -471,6 +761,19 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     } else {
         None
     };
+
+    profile(
+        gpu,
+        settings,
+        &candidates,
+        pick,
+        chosen,
+        is_async,
+        provides_samples,
+        rate_control,
+        report.as_ref(),
+        bframes,
+    );
 
     let sequence_header = unsafe {
         transform
@@ -631,6 +934,8 @@ pub struct VideoEncoder {
     pub rate_control: RateControl,
     /// SPS/PPS that belong in front of the stream when saving.
     pub sequence_header: Vec<u8>,
+    /// What it is costing while it runs — see [`EncoderStats`].
+    pub stats: Arc<EncoderStats>,
 }
 
 impl VideoEncoder {
@@ -643,7 +948,9 @@ impl VideoEncoder {
     where
         F: FnMut(EncodedPacket) + Send + 'static,
     {
-        let (jobs_tx, jobs_rx) = crossbeam_channel::bounded::<Job>(QUEUE_DEPTH);
+        let depth = env_u32("CLIPPIBOY_QUEUE_DEPTH", QUEUE_DEPTH as u32).max(1) as usize;
+        let (jobs_tx, jobs_rx) = crossbeam_channel::bounded::<Job>(depth);
+        let stats = Arc::new(EncoderStats::default());
         let (ready_tx, ready_rx) =
             crossbeam_channel::bounded::<Result<(EncoderId, RateControl, Vec<u8>), String>>(1);
         let running = Arc::new(AtomicBool::new(true));
@@ -653,6 +960,7 @@ impl VideoEncoder {
         let thread = {
             let running = running.clone();
             let gpu = gpu.clone();
+            let stats = stats.clone();
             std::thread::Builder::new()
                 .name("clippiboy-encoder".into())
                 .spawn(move || {
@@ -670,7 +978,7 @@ impl VideoEncoder {
                             return;
                         }
                     };
-                    run(transform, settings, jobs_rx, running, on_packet);
+                    run(transform, settings, jobs_rx, running, stats, on_packet);
                 })
                 .map_err(|err| format!("Encoder-Faden: {err}"))?
         };
@@ -683,6 +991,7 @@ impl VideoEncoder {
                 chosen,
                 rate_control,
                 sequence_header,
+                stats,
             }),
             Ok(Err(err)) => {
                 running.store(false, Ordering::Relaxed);
@@ -706,10 +1015,36 @@ impl VideoEncoder {
             texture: SendPtr(texture.clone()),
             pts_100ns,
         };
-        match self.jobs.send_timeout(job, SUBMIT_WAIT) {
+
+        // The normal case first, so the frame that goes straight through pays
+        // for neither a clock reading nor a counter.
+        let job = match self.jobs.try_send(job) {
+            Ok(()) => return true,
+            Err(crossbeam_channel::TrySendError::Full(job)) => job,
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                log::warn!("encoder has stopped — one frame is lost");
+                return false;
+            }
+        };
+
+        // From here the pacer thread is standing still, and that is precisely
+        // the thing worth counting: a lost frame gets a warning line, but time
+        // spent waiting shows up as a stutter long before anything is lost.
+        let since = Instant::now();
+        let sent = self.jobs.send_timeout(job, SUBMIT_WAIT);
+        let waited = since.elapsed();
+        self.stats.submit_waited.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .submit_wait_us
+            .fetch_add(waited.as_micros() as u64, Ordering::Relaxed);
+
+        match sent {
             Ok(()) => true,
             Err(_) => {
-                log::warn!("encoder cannot keep up — one frame is lost");
+                log::warn!(
+                    "encoder cannot keep up — one frame is lost after waiting {} ms",
+                    waited.as_millis()
+                );
                 false
             }
         }
@@ -738,11 +1073,21 @@ fn run<F>(
     settings: EncoderSettings,
     jobs: crossbeam_channel::Receiver<Job>,
     running: Arc<AtomicBool>,
+    stats: Arc<EncoderStats>,
     mut on_packet: F,
 ) where
     F: FnMut(EncodedPacket) + Send + 'static,
 {
     let duration = 10_000_000 / settings.fps.max(1) as i64;
+
+    /// Note down how long the encoder kept one frame.
+    fn took(stats: &EncoderStats, since: Instant, in_flight: usize) {
+        let micros = since.elapsed().as_micros() as u64;
+        stats.encoded.fetch_add(1, Ordering::Relaxed);
+        stats.encode_us.fetch_add(micros, Ordering::Relaxed);
+        stats.encode_worst_us.fetch_max(micros, Ordering::Relaxed);
+        stats.in_flight.store(in_flight as u64, Ordering::Relaxed);
+    }
 
     match transform.events.clone() {
         // Hardware encoder: it says when it wants a frame and when one is
@@ -752,36 +1097,87 @@ fn run<F>(
             // because waiting for the next frame would otherwise swallow a request
             // — the encoder does not send it a second time.
             let mut pending_input = 0u32;
+            // When each frame went in, so the wait for it to come back out can
+            // be measured. Paired first in, first out: with B-frames the
+            // encoder may return pictures in a different order than it took
+            // them, so a single pairing can be a frame or two out. The counts
+            // match regardless, which is what keeps the average honest.
+            let mut sent: VecDeque<Instant> = VecDeque::new();
+            let mut finished = false;
 
-            while running.load(Ordering::Relaxed) {
+            while running.load(Ordering::Relaxed) && !finished {
+                // Did the encoder say anything at all this time round?
+                let mut handled = false;
+
+                // Everything the encoder has to say, right now, without waiting.
+                //
+                // This is what used to be skipped. The old loop read
+                // "if pending_input > 0 { wait for a frame; continue; }" and so
+                // never reached `GetEvent` while a request was outstanding —
+                // finished packets sat in the event queue untouched. An encoder
+                // whose own output queue fills stops asking for input; the job
+                // channel then backs up and `submit` stalls the pacer half a
+                // second at a time. NVENC hides it behind queues deep enough to
+                // absorb the ping-pong. Not every encoder has them.
+                loop {
+                    let event = match unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+                        Ok(event) => event,
+                        Err(err) if err.code() == MF_E_NO_EVENTS_AVAILABLE => break,
+                        Err(err) => {
+                            if err.code() != MF_E_SHUTDOWN {
+                                log::warn!("encoder event queue: {err}");
+                            }
+                            finished = true;
+                            break;
+                        }
+                    };
+                    handled = true;
+
+                    let kind = unsafe { event.GetType() }.unwrap_or(0);
+                    if kind == METransformNeedInput.0 as u32 {
+                        pending_input += 1;
+                    } else if kind == METransformHaveOutput.0 as u32 {
+                        match transform.take_output(duration) {
+                            Ok(Some(packet)) => {
+                                if let Some(since) = sent.pop_front() {
+                                    took(&stats, since, sent.len());
+                                }
+                                on_packet(packet);
+                            }
+                            Ok(None) => {}
+                            Err(err) => log::warn!("{err}"),
+                        }
+                    } else if kind == METransformDrainComplete.0 as u32 {
+                        // Previously ignored, so the loop kept turning over an
+                        // encoder that had already said it was done. This is the
+                        // one an MFT sends; `MEEndOfStream` belongs to media
+                        // sources and never arrives here.
+                        finished = true;
+                        break;
+                    }
+                }
+                if finished {
+                    break;
+                }
+
                 if pending_input > 0 {
-                    match jobs.recv_timeout(Duration::from_millis(100)) {
+                    // A real wait, on the one thing that is missing. Kept short
+                    // so a packet announced meanwhile is not left lying about.
+                    match jobs.recv_timeout(Duration::from_millis(2)) {
                         Ok(job) => {
-                            if let Err(err) = transform.feed(&job, duration) {
-                                log::warn!("{err}");
+                            match transform.feed(&job, duration) {
+                                Ok(()) => sent.push_back(Instant::now()),
+                                Err(err) => log::warn!("{err}"),
                             }
                             pending_input -= 1;
                         }
-                        // Nothing there — the request stands.
-                        Err(_) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                     }
-                    continue;
-                }
-
-                let event = match unsafe { events.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) }
-                {
-                    Ok(event) => event,
-                    Err(_) => break,
-                };
-                let kind = unsafe { event.GetType() }.unwrap_or(0);
-                if kind == METransformNeedInput.0 as u32 {
-                    pending_input += 1;
-                } else if kind == METransformHaveOutput.0 as u32 {
-                    match transform.take_output(duration) {
-                        Ok(Some(packet)) => on_packet(packet),
-                        Ok(None) => {}
-                        Err(err) => log::warn!("{err}"),
-                    }
+                } else if !handled {
+                    // The encoder is chewing and wants nothing. A moment's pause
+                    // beats spinning on an empty event queue.
+                    std::thread::sleep(Duration::from_millis(1));
                 }
             }
         }
@@ -791,13 +1187,17 @@ fn run<F>(
                 let Ok(job) = jobs.recv_timeout(Duration::from_millis(100)) else {
                     continue;
                 };
+                let since = Instant::now();
                 if let Err(err) = transform.feed(&job, duration) {
                     log::warn!("{err}");
                     continue;
                 }
                 loop {
                     match transform.take_output(duration) {
-                        Ok(Some(packet)) => on_packet(packet),
+                        Ok(Some(packet)) => {
+                            took(&stats, since, 0);
+                            on_packet(packet);
+                        }
                         Ok(None) => break,
                         Err(err) => {
                             log::warn!("{err}");
@@ -815,8 +1215,47 @@ fn run<F>(
             .transform
             .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
     }
-    while let Ok(Some(packet)) = transform.take_output(duration) {
-        on_packet(packet);
+    match &transform.events {
+        // An asynchronous transform announces the packets it still holds the
+        // same way it announced all the others, and says when it has finished.
+        // Asking it for output unprompted — which is what used to happen here —
+        // gets "need more input" on the first try, and the tail of the recording
+        // goes with it.
+        Some(events) => {
+            let until = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < until {
+                let event = match unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+                    Ok(event) => event,
+                    // Nothing yet — it is still working on what it has.
+                    Err(err) if err.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    // Anything else means there will be no more events, and
+                    // waiting out the two seconds would only delay the stop.
+                    Err(_) => break,
+                };
+                let kind = unsafe { event.GetType() }.unwrap_or(0);
+                if kind == METransformHaveOutput.0 as u32 {
+                    match transform.take_output(duration) {
+                        Ok(Some(packet)) => on_packet(packet),
+                        Ok(None) => {}
+                        Err(err) => {
+                            log::warn!("{err}");
+                            break;
+                        }
+                    }
+                } else if kind == METransformDrainComplete.0 as u32 {
+                    break;
+                }
+            }
+        }
+        // Synchronous: it hands everything back on the spot.
+        None => {
+            while let Ok(Some(packet)) = transform.take_output(duration) {
+                on_packet(packet);
+            }
+        }
     }
     unsafe {
         let _ = transform

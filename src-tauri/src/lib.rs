@@ -440,6 +440,20 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     overlay::show(&handle, BannerKind::Error, "Recording disrupted", Some(err));
                 }
             }
+            // Every 5 s while something is recording: what the pipeline is
+            // really doing. One line, at info, so a log sent back from a machine
+            // we cannot reach tells us whether the encoder kept up — instead of
+            // us having to take "it lags" as the whole report.
+            if tick % 100 == 0 {
+                let line = state
+                    .shared
+                    .lock()
+                    .as_ref()
+                    .map(|shared| shared.health_line());
+                if let Some(line) = line {
+                    log::info!("{line}");
+                }
+            }
             if tick % 20 == 0 {
                 let status = state.status_snapshot();
                 tray::refresh(&handle, &status);

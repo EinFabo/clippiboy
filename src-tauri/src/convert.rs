@@ -309,6 +309,15 @@ pub struct Latest {
     /// How often the clock had to repeat a frame because WGC delivered nothing
     /// new. A high value means a still picture, not overload.
     pub duplicated: AtomicU64,
+    /// How often a tick was already late when it came round.
+    ///
+    /// This is the other half of the picture next to [`Self::duplicated`]: a
+    /// repeated frame says the screen stood still, an overrun says *we* did.
+    /// The clock catches the time back up on its own — it counts against an
+    /// absolute start — but it catches up in a burst, and a burst is what a
+    /// stutter looks like from the outside. Nothing counted this before, so a
+    /// clock that never kept its beat looked exactly like one that did.
+    pub overruns: AtomicU64,
     running: AtomicBool,
 }
 
@@ -320,6 +329,7 @@ impl Latest {
             slot_qpc: AtomicI64::new(0),
             generation: AtomicU64::new(0),
             duplicated: AtomicU64::new(0),
+            overruns: AtomicU64::new(0),
             running: AtomicBool::new(true),
         })
     }
@@ -359,6 +369,8 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
         let now = Instant::now();
         if due > now {
             std::thread::sleep(due - now);
+        } else if index > 0 {
+            latest.overruns.fetch_add(1, Ordering::Relaxed);
         }
 
         let generation = latest.generation.load(Ordering::Acquire);

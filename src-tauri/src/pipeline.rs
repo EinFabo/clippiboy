@@ -273,6 +273,49 @@ pub struct Shared {
     pub rate_control: Mutex<Option<RateControl>>,
     /// SPS/PPS that belong in front of the elementary stream when saving.
     pub sequence_header: Mutex<Vec<u8>>,
+    /// What the encoder is costing, once one is running.
+    #[cfg(windows)]
+    pub encoder_stats: Mutex<Option<Arc<crate::mft::EncoderStats>>>,
+    /// The clock, so its overrun count can be read from outside.
+    #[cfg(windows)]
+    pub pacer: Mutex<Option<Arc<crate::convert::Latest>>>,
+    /// What [`Self::health`] saw last time. Every number here is a *rate*, and
+    /// a rate needs two readings.
+    health_mark: Mutex<HealthMark>,
+}
+
+#[derive(Clone, Copy)]
+struct HealthMark {
+    at: std::time::Instant,
+    frames: u64,
+    encoded: u64,
+    encode_us: u64,
+}
+
+/// What the pipeline is doing, measured over the interval since the last look.
+///
+/// The interval is the whole point. A cumulative average is the shape of a
+/// number that hides exactly the fault we are hunting: an encoder that starts
+/// out fast and gets slower drags its own average up so gently that ten seconds
+/// of steady decline still read as "a bit above budget". The first report we
+/// got back from AMD hardware had to be differentiated by hand to see it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Health {
+    /// Frames per second over the interval, measured against the wall clock.
+    pub fps: f32,
+    pub frames: u64,
+    pub dropped: u64,
+    pub duplicated: u64,
+    pub overruns: u64,
+    /// Mean time a frame spent inside the encoder **during this interval**.
+    pub encode_us: u64,
+    /// Worst single frame since the recording started.
+    pub encode_worst_us: u64,
+    pub in_flight: u64,
+    pub submit_waited: u64,
+    pub submit_wait_ms: u64,
+    pub ring_seconds: f32,
+    pub ring_bytes: u64,
 }
 
 impl Shared {
@@ -288,6 +331,96 @@ impl Shared {
     pub fn set_sources(&self, sources: Vec<AudioSource>) {
         *self.sources.lock() = sources;
         self.sources_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Measure the interval since the last call. See [`Health`].
+    ///
+    /// The frame rate here is **measured** — frames since the last call divided
+    /// by the time since the last call. `EngineStatus::fps` is something else:
+    /// the configured rate multiplied by the share of frames that were not
+    /// repeats, summed over the whole session. That answers "how still was the
+    /// picture", not "is this machine keeping up", and until now it was the
+    /// only number anybody had.
+    ///
+    /// Call it on a timer; it consumes the interval it measures.
+    pub fn health(&self) -> Health {
+        let now = std::time::Instant::now();
+        let frames = self.frames.load(Ordering::Relaxed);
+
+        let mut out = Health {
+            frames,
+            dropped: self.dropped.load(Ordering::Relaxed),
+            duplicated: self.duplicated.load(Ordering::Relaxed),
+            ring_seconds: self.buffered_seconds(),
+            ring_bytes: self.buffer_bytes(),
+            ..Health::default()
+        };
+
+        let mut encoded = 0u64;
+        let mut encode_us = 0u64;
+
+        #[cfg(windows)]
+        {
+            if let Some(pacer) = self.pacer.lock().as_ref() {
+                out.overruns = pacer.overruns.load(Ordering::Relaxed);
+            }
+            if let Some(stats) = self.encoder_stats.lock().as_ref() {
+                encoded = stats.encoded.load(Ordering::Relaxed);
+                encode_us = stats.encode_us.load(Ordering::Relaxed);
+                out.encode_worst_us = stats.encode_worst_us.load(Ordering::Relaxed);
+                out.in_flight = stats.in_flight.load(Ordering::Relaxed);
+                out.submit_waited = stats.submit_waited.load(Ordering::Relaxed);
+                out.submit_wait_ms = stats.submit_wait_us.load(Ordering::Relaxed) / 1000;
+            }
+        }
+
+        let before = {
+            let mut mark = self.health_mark.lock();
+            let previous = *mark;
+            *mark = HealthMark {
+                at: now,
+                frames,
+                encoded,
+                encode_us,
+            };
+            previous
+        };
+
+        let seconds = now.duration_since(before.at).as_secs_f32();
+        if seconds > 0.0 {
+            out.fps = frames.saturating_sub(before.frames) as f32 / seconds;
+        }
+        // Only the frames that came out during this interval, and only the time
+        // they took. This is the number that moves when an encoder starts to
+        // struggle; the running average is the one that does not.
+        let fresh = encoded.saturating_sub(before.encoded);
+        if fresh > 0 {
+            out.encode_us = encode_us.saturating_sub(before.encode_us) / fresh;
+        }
+        out
+    }
+
+    /// One line for the log, from [`Self::health`].
+    pub fn health_line(&self) -> String {
+        let health = self.health();
+        format!(
+            "pipeline: {:.1} fps measured (of {} configured), frames={} dropped={} \
+             repeated={} clock-overruns={} | encoder {} µs/frame this second, worst {} µs, \
+             in-flight={} submit-waits={} ({} ms lost) | ring {:.1}s {:.1} MB",
+            health.fps,
+            self.fps,
+            health.frames,
+            health.dropped,
+            health.duplicated,
+            health.overruns,
+            health.encode_us,
+            health.encode_worst_us,
+            health.in_flight,
+            health.submit_waited,
+            health.submit_wait_ms,
+            health.ring_seconds,
+            health.ring_bytes as f64 / 1_048_576.0,
+        )
     }
 
     /// Record a problem with the running capture.
@@ -418,6 +551,8 @@ mod win {
         *shared.encoder.lock() = Some(encoder.chosen);
         *shared.rate_control.lock() = Some(encoder.rate_control);
         *shared.sequence_header.lock() = encoder.sequence_header.clone();
+        *shared.encoder_stats.lock() = Some(encoder.stats.clone());
+        *shared.pacer.lock() = Some(latest.clone());
 
         let capture = {
             let latest = latest.clone();
@@ -637,6 +772,16 @@ impl Pipeline {
             encoder: Mutex::new(None),
             rate_control: Mutex::new(None),
             sequence_header: Mutex::new(Vec::new()),
+            #[cfg(windows)]
+            encoder_stats: Mutex::new(None),
+            #[cfg(windows)]
+            pacer: Mutex::new(None),
+            health_mark: Mutex::new(HealthMark {
+                at: std::time::Instant::now(),
+                frames: 0,
+                encoded: 0,
+                encode_us: 0,
+            }),
         });
 
         #[cfg(windows)]
