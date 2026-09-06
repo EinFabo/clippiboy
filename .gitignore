@@ -1,5 +1,8 @@
 node_modules/
 dist/
+
+# Das Diagnose-Paket aus `npm run probe` — enthält eine gebaute Exe.
+probe-package/
 src-tauri/target/
 
 # Wird von `npm run ffmpeg` geholt — zwei Dateien à 100 MB gehören nicht ins Repo.

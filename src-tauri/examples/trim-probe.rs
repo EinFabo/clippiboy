@@ -61,8 +61,11 @@ fn main() {
         thumb_path: None,
         title: None,
         description: None,
+        favorite: false,
         edit: None,
         original: None,
+        original_available: false,
+        screenshot: false,
     };
 
     let mix = mix_for(&clip);

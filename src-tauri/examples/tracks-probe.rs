@@ -34,8 +34,11 @@ fn main() {
         thumb_path: None,
         title: None,
         description: None,
+        favorite: false,
         edit: None,
         original: None,
+        original_available: false,
+        screenshot: false,
     });
 
     // Start from a clean state, otherwise the run only checks the shortcut
