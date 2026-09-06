@@ -146,6 +146,31 @@ The video reaches the hardware encoder as a Direct3D texture and is never copied
 through the CPU. Capture and encoder share one D3D11 device for that, and the
 graphics card's video processor does the BGRA→NV12 conversion.
 
+The lookahead is **off on AMD and Intel, on for NVIDIA**, and that split is
+measured rather than assumed. At its default quality preset AMD's encoder holds
+sixteen frames at once and blocks the capture clock for sixteen seconds out of
+every thirty — without dropping a single frame, because it is a queue and not
+slow encoding. The catch is where that queue is worked on: AMD run the lookahead
+on the shaders, not on the dedicated video block, which is the same part of the
+card the game is being drawn with. On an empty desktop it costs nothing anybody
+can see; in a game it comes straight out of the frame budget. Intel behaves the
+same way and encodes three times faster without it. NVENC's queue stays shallow
+either way, so it keeps its lookahead and the compression that buys.
+
+Switching it off does not make the picture worse. The encoder is aiming at a
+quality, so it simply spends more bits to reach the same one — the clips grow a
+little, and the ring holds slightly less of its length within the same memory
+budget.
+
+That one device is **chosen to match the encoder**, not simply taken. Asking
+Direct3D for a device without naming an adapter gets you whichever card Windows
+happens to enumerate first, which has nothing to do with the encoder that was
+picked: on a machine with an NVIDIA card and an Intel iGPU, choosing Quick Sync
+handed the Intel encoder an NVIDIA device and its textures, and it did not work
+at all. Each hardware encoder now gets a device on its own vendor's adapter —
+and where one vendor has two cards, which is every Ryzen laptop, the one with
+memory of its own, because that is the card the game is drawn on.
+
 <details>
 <summary><b>Why the buffer no longer lives on disk</b></summary>
 
@@ -570,6 +595,61 @@ one, the untrimmed original — none of them are of any use on their own.
 </details>
 
 <details>
+<summary><b>When something is wrong with the encoder</b></summary>
+
+<br>
+
+Every run writes a log: `%APPDATA%\ClippiBoy\logs\clippiboy.log`, reachable
+from the tray under *Open log folder*. One generation back is kept as
+`clippiboy.log.1`, because the answer to "it broke, I restarted, then I wrote to
+you" would otherwise already be gone. Before this the log went to stderr only,
+and the release build is a window without a console — so on every machine but a
+developer's, nothing was written down at all.
+
+When the buffer starts, one block goes in naming what was asked for, what
+actually runs, which transform that is by name, which graphics card it sits on,
+what the driver refused and what it silently changed. Every five seconds after
+that comes one line with the **measured** frame rate, dropped and repeated
+frames, how long a frame spends inside the encoder, and how often the clock had
+to stand and wait for it.
+
+Four variables turn the knobs without a rebuild, for trying things on a machine
+that is not to hand:
+
+| | |
+|---|---|
+| `CLIPPIBOY_ENCODER` | `nvenc`, `amf`, `qsv`, `x264` — forces one, past the availability check |
+| `CLIPPIBOY_LOW_LATENCY` | `1` or `0`; on by default for AMD and Intel, off for NVENC — see above |
+| `CLIPPIBOY_QUALITY_VS_SPEED` | `0`–`100`, normally 70 |
+| `CLIPPIBOY_BFRAMES` | B-frame count; unset means the driver's own choice, which is what ships |
+
+`npm run probe` packs a **clippiboy-probe.zip**: an executable and a note in
+plain words, about a megabyte, small enough to send in a chat message.
+(`npm run probe -- --full` adds ffmpeg and a test clip, at two hundred times the
+size.) Whoever runs it gets a `report.txt`.
+
+It measures **each encoder under each of those settings in turn**, one process
+per run, and ends with a table saying which setting changed what — because
+knowing that an encoder is slow is only half an answer, and comparing six runs
+of prose by eye is the other half nobody should have to do.
+
+Two things guard the table, both learned the hard way. It runs the baseline
+**twice**, first and last: if the two disagree, something else had the graphics
+card and the report says so instead of pretending. And it names any recorder or
+game it finds running, because the first time this was tried OBS was quietly
+holding the encoder at 86 % and made a perfectly healthy card produce 647 ms
+frames.
+
+Each measurement is over the **second before it**, never over the whole run. A
+running average is the shape of a number that hides exactly this fault: an
+encoder that starts fast and slows down drags its own average up so gently that
+ten seconds of steady decline still read as "a bit above budget". The first
+report back from AMD hardware had to be differentiated by hand before it said
+anything at all.
+
+</details>
+
+<details>
 <summary><b>Motion</b></summary>
 
 <br>
@@ -719,18 +799,20 @@ src-tauri/src/
   shot.rs                     one frame from the GPU into a PNG
   thumbs.rs                   thumbnails
   config.rs                   configuration as JSON
+  logging.rs                  the log, to stderr and to a file
   control.rs                  the local port the Stream Deck presses (+ tests)
   commands.rs                 Tauri commands
   updater.rs                  update check and installation
 
 src-tauri/examples/
-  record-probe.rs             run capture → encoder → muxer once by hand
+  record-probe.rs             measure every encoder on this machine, write a report
   tracks-probe.rs             two parallel track requests on the same clip
   trim-probe.rs               trim, measure, undo, measure
 
 scripts/fetch-ffmpeg.mjs      fetch ffmpeg/ffprobe for the package
-scripts/make-icons.py         every icon size from icons/icon.png
-scripts/make-streamdeck-icons.py  the plugin's key pictures
+scripts/make-probe.mjs        pack the encoder test for somebody else's machine
+scripts/make-icons.py         every icon size from icons/icon.png,
+                              and the Stream Deck plugin's key pictures
 
 streamdeck/                   the Stream Deck plugin (TypeScript, Node)
   src/client.ts               one poller for all keys, and where ClippiBoy is
