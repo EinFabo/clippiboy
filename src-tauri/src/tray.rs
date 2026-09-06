@@ -63,6 +63,10 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
     // Always available, unlike "Save clip": a screenshot brings its own capture
     // session and does not care whether the buffer is running.
     let shot = MenuItem::with_id(app, "shot", "Take screenshot", true, None::<&str>)?;
+    // Reachable from the tray on purpose: someone testing a fault for us may
+    // never open the window at all, and "send me the log" has to be one click
+    // rather than a path to dictate.
+    let logs = MenuItem::with_id(app, "logs", "Open log folder", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -73,6 +77,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
             &save,
             &shot,
             &PredefinedMenuItem::separator(app)?,
+            &logs,
             &quit,
         ],
     )?;
@@ -109,6 +114,13 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
                 std::thread::spawn(move || {
                     let _ = crate::take_screenshot_and_notify(&app);
                 });
+            }
+            "logs" => {
+                use tauri_plugin_opener::OpenerExt;
+                let dir = crate::logging::log_dir();
+                if let Err(err) = app.opener().open_path(dir.to_string_lossy(), None::<&str>) {
+                    log::warn!("could not open the log folder: {err}");
+                }
             }
             "quit" => {
                 let state = app.state::<AppState>();
