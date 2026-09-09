@@ -33,7 +33,7 @@ use std::process::Stdio;
 use parking_lot::Mutex;
 
 use crate::config;
-use crate::model::{Clip, ClipOriginal, EncoderId, TrackMix};
+use crate::model::{Clip, ClipEdit, ClipOriginal, EncoderId, TrackMix};
 use crate::muxer::{ffmpeg, probe_duration_ms, replace_file, sanitize};
 use crate::stems;
 
@@ -392,8 +392,16 @@ fn run(
         end_ms: original.start_ms + duration_ms,
         ..original
     });
+    // The note is the signal "this original is alive" — `has_original` reads it
+    // together with the video. So it may only stand where a recording really
+    // lies: after a cut on a clip whose original was thrown away there is none,
+    // and a note left over from back then is stale.
     if let Some(original) = original.as_ref() {
-        write_note(&clip.id, original)?;
+        if video_path(&clip.id).is_file() {
+            write_note(&clip.id, original)?;
+        } else {
+            let _ = std::fs::remove_file(note_path(&clip.id));
+        }
     }
 
     // Otherwise the thumbnail would show a frame that no longer appears in the
@@ -434,6 +442,24 @@ fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
+/// May the file being replaced be filed away as the untouched recording?
+///
+/// Only for the **first** real cut. The missing archive alone does not say that:
+/// a clip whose original was thrown away ([`discard_original`]) keeps its record
+/// in the database on purpose — it carries the offset the individual tracks sit
+/// at — and would otherwise look exactly like an untouched one here. Cutting it
+/// again would then move the *already trimmed* file into the store and label it
+/// the original, with a note claiming the full length. From then on the whole
+/// bookkeeping is a lie: "undo trim" hands back the short file as though it were
+/// the recording, and the next cut seeks to an absolute position in a file that
+/// does not start there. Whatever was cut away the first time is gone for good.
+///
+/// So the record decides, not the disk: whoever is already trimmed never files
+/// anything away again.
+fn archives_the_clip(already_trimmed: bool, keeps_original: bool, archive_exists: bool) -> bool {
+    keeps_original && !archive_exists && !already_trimmed
+}
+
 /// Move the finished file into its place — and, if this is the first real cut,
 /// rescue the untouched recording along the way.
 ///
@@ -442,7 +468,11 @@ fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
 fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result<(), String> {
     let archive = video_path(&clip.id);
     let keep_original = plan.original.is_some();
-    let first_cut = keep_original && !archive.is_file();
+    let first_cut = archives_the_clip(
+        clip.original.is_some(),
+        keep_original,
+        archive.is_file(),
+    );
 
     if first_cut {
         // Note first: if the process dies right away, `repair` finds the file
@@ -706,6 +736,87 @@ fn parse_timestamp_ms(text: &str) -> Option<u64> {
     Some(((hours * 3600.0 + minutes * 60.0 + seconds) * 1000.0) as u64)
 }
 
+/// Is what lies there the whole recording again?
+///
+/// Then an undo got as far as the file and only the record is missing. A remux
+/// shifts the last frame by a hair, so this is "near enough" rather than equal —
+/// the same tolerance a handle at the end stop gets.
+fn is_the_whole_recording(original: Option<&ClipOriginal>, actual_ms: u64) -> bool {
+    original.is_some_and(|original| actual_ms.abs_diff(original.duration_ms) <= EDGE_TOLERANCE_MS)
+}
+
+/// Bring the record back in line with the file when the two halves of a write
+/// came apart.
+///
+/// Replacing the file and writing the database are two steps, and a crash fits
+/// between them. On "undo trim" that is the expensive one: the whole recording
+/// lies there again while the record still says trimmed — and that record is
+/// what the individual tracks are offset by, so from then on the preview plays
+/// the audio seconds ahead of the picture. Worse, `remove` runs before the
+/// database write, so the store is usually gone by then and the editor says the
+/// recording cannot be found — while it is lying right there under the clip's
+/// own name.
+///
+/// The shapes in [`repair`] cannot see that state. On disk it *is* an ordinary
+/// trimmed clip: note, recording and record all agree with one another. Only the
+/// clip file itself disagrees, and nothing was asking it.
+///
+/// So this asks it. The size is the cheap tell — [`crate::clips::Library::set_file_state`]
+/// writes it with every rewrite, so one `stat` per clip settles the usual case,
+/// and only a mismatch is worth an ffprobe.
+fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOriginal>) {
+    let target = Path::new(&clip.path);
+    let Ok(actual_bytes) = std::fs::metadata(target).map(|meta| meta.len()) else {
+        return;
+    };
+    if actual_bytes == clip.size_bytes {
+        return;
+    }
+    let Some(actual_ms) = probe_duration_ms(target) else {
+        return;
+    };
+
+    if is_the_whole_recording(clip.original.as_ref(), actual_ms) {
+        log::info!("undo of '{}' recorded after the fact", clip.id);
+        remove(&clip.id);
+        let _ = library.set_original(&clip.id, None);
+    } else if let Some(note) = note {
+        // A cut whose bookkeeping did not land. The note is the newer truth —
+        // it is written in the same breath as the file — and its end follows
+        // what really came out, exactly as after a normal run.
+        log::info!("cut of '{}' recorded after the fact", clip.id);
+        let corrected = ClipOriginal {
+            end_ms: note.start_ms + actual_ms,
+            ..note
+        };
+        let _ = library.set_original(&clip.id, Some(&corrected));
+    }
+
+    log::info!(
+        "'{}' is {actual_ms} ms and {actual_bytes} bytes, the record said {} ms and {} bytes",
+        clip.id,
+        clip.duration_ms,
+        clip.size_bytes
+    );
+
+    // Either way the file is now the measure. The handles belong on its full
+    // range — a stored trim from before the rewrite would show the clip
+    // pre-shortened to a length it no longer has. A clip that never had a
+    // record keeps it that way: `None` means "untouched", and an empty one in
+    // its place would make the editor count that clip as changed for good.
+    if let Some(edit) = clip.edit.as_ref() {
+        let _ = library.set_edit(
+            &clip.id,
+            Some(&ClipEdit {
+                start_ms: 0,
+                end_ms: actual_ms,
+                tracks: edit.tracks.clone(),
+            }),
+        );
+    }
+    let _ = library.set_file_state(&clip.id, actual_ms, actual_bytes);
+}
+
 /// Clean up at startup whatever a crash in the middle of the swap left behind.
 ///
 /// The note tells the cases apart. The rule underneath is always the same:
@@ -725,16 +836,20 @@ pub fn repair(library: &crate::clips::Library) {
         let video = video_path(&clip.id);
         let target = Path::new(&clip.path);
 
-        match (target.is_file(), note, video.is_file()) {
+        // Did one of the shapes below actually take the clip in hand? Only what
+        // is left over afterwards is worth asking the file about.
+        let handled = match (target.is_file(), note, video.is_file()) {
             // Died between saving and swapping: the clip file is missing, the
             // untouched recording lies in the store. Push it back — an untrimmed
             // clip is infinitely better than none at all.
             (false, Some(_), true) => {
-                if move_across(&video, target).is_ok() {
+                let back = move_across(&video, target).is_ok();
+                if back {
                     log::info!("clip '{}' recovered from the originals store", clip.id);
                     remove(&clip.id);
                     let _ = library.set_original(&clip.id, None);
                 }
+                back
             }
 
             // Note without a recording. Two possibilities, and the clip's length
@@ -751,29 +866,43 @@ pub fn repair(library: &crate::clips::Library) {
                     log::warn!("original of '{}' is gone — the clip stays trimmed", clip.id);
                     let _ = library.set_original(&clip.id, Some(&note));
                 }
+                true
             }
 
             // Swapped, but the database never got its turn.
             (true, Some(note), true) if clip.original.is_none() => {
                 log::info!("original of '{}' recorded after the fact", clip.id);
                 let _ = library.set_original(&clip.id, Some(&note));
+                true
             }
 
             // Recording without a note. If the database still knows where the
             // excerpt sits, the note is reconstructed from it — otherwise this is
             // the remainder of a completed "undo" and may go.
-            (true, None, true) => match clip.original.as_ref() {
-                Some(original) => {
-                    log::info!("note for '{}' reconstructed", clip.id);
-                    let _ = write_note(&clip.id, original);
+            (true, None, true) => {
+                match clip.original.as_ref() {
+                    Some(original) => {
+                        log::info!("note for '{}' reconstructed", clip.id);
+                        let _ = write_note(&clip.id, original);
+                    }
+                    None => {
+                        log::info!(
+                            "original of '{}' with nothing to tie it to — cleared away",
+                            clip.id
+                        );
+                        remove(&clip.id);
+                    }
                 }
-                None => {
-                    log::info!("original of '{}' with nothing to tie it to — cleared away", clip.id);
-                    remove(&clip.id);
-                }
-            },
+                true
+            }
 
-            _ => {}
+            _ => false,
+        };
+
+        // A still has no length to compare and no store beside it — asking
+        // ffprobe about a PNG would only cost a process.
+        if !handled && !clip.screenshot {
+            settle(library, &clip, note);
         }
     }
 }
@@ -1020,6 +1149,129 @@ mod tests {
         assert!(!root().starts_with(stems::root()));
         assert!(!root().starts_with(config::data_dir().join("temp")));
         assert!(!root().starts_with(config::data_dir().join("buffer")));
+    }
+
+    /// The first cut files the clip away — that is where the original comes
+    /// from at all.
+    #[test]
+    fn the_first_cut_files_the_recording_away() {
+        assert!(archives_the_clip(false, true, false));
+    }
+
+    /// A further cut on an already filed clip must leave the store alone,
+    /// otherwise the trimmed file would overwrite the recording.
+    #[test]
+    fn a_further_cut_leaves_the_store_alone() {
+        assert!(!archives_the_clip(true, true, true));
+    }
+
+    /// The one that cost footage: after "throw the original away" the record
+    /// stays on the clip while the file is gone. Cutting again then looked like
+    /// a first cut — and filed the *trimmed* file away as the recording, with a
+    /// note claiming the full length. "Undo trim" afterwards handed back the
+    /// short file as the whole one, and everything cut away the first time was
+    /// gone.
+    #[test]
+    fn a_discarded_original_is_never_filed_again() {
+        assert!(
+            !archives_the_clip(true, true, false),
+            "the trimmed file must not become the original"
+        );
+    }
+
+    /// Nothing trimmed, nothing to keep — then there is nothing to file either.
+    #[test]
+    fn without_a_trim_nothing_is_filed() {
+        assert!(!archives_the_clip(false, false, false));
+        assert!(!archives_the_clip(true, false, true));
+    }
+
+    /// The whole recording lying there again is what tells a completed undo
+    /// from an ordinary trimmed clip — on disk the two look the same.
+    #[test]
+    fn a_file_at_full_length_reads_as_a_completed_undo() {
+        let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
+        assert!(is_the_whole_recording(Some(&base), 60_000));
+        assert!(
+            is_the_whole_recording(Some(&base), 59_900),
+            "a remux shifts the last frame by a hair"
+        );
+        assert!(
+            !is_the_whole_recording(Some(&base), 15_000),
+            "the excerpt is not the recording"
+        );
+        assert!(
+            !is_the_whole_recording(None, 60_000),
+            "without a record there is nothing that was undone"
+        );
+    }
+
+    /// Why the fallback "the audio still sits in the file" stays safe.
+    ///
+    /// Those tracks are read in coordinates of the video and therefore inherit
+    /// its offset (invariant 2), while the individual tracks beside it get the
+    /// absolute one. Mixing the two up would put the sound seconds off the
+    /// picture — and it cannot happen, because a written clip never has more
+    /// than the one mixed track for `stems::tracks` to pull apart again.
+    #[test]
+    fn a_written_clip_keeps_at_most_one_audio_track() {
+        let cases = [
+            plan(None, true, 30_000, Trim::whole(30_000)),
+            plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }),
+            plan(
+                Some(&ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 }),
+                true,
+                15_000,
+                Trim { start_ms: 2_000, end_ms: 8_000 },
+            ),
+            restore_plan(&ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 }),
+        ];
+        let list = vec![track(0, true), track(1, true), track(2, true)];
+        for plan in &cases {
+            let args = arguments(
+                plan,
+                Path::new("C:/data/originals/x/video.mp4"),
+                &list,
+                &[],
+                Path::new("C:/clips/x.neu.mp4"),
+                EncoderId::X264,
+                70,
+            );
+            let audio = args
+                .iter()
+                .enumerate()
+                .filter(|(at, arg)| *arg == "-map" && args[at + 1] != "0:v:0")
+                .count();
+            assert!(audio <= 1, "{plan:?} writes {audio} audio tracks: {args:?}");
+        }
+    }
+
+    /// The counterpart from the other side: a clip that has already been cut
+    /// carries its audio inside the file, and that audio may not be seeked to
+    /// the **original's** offset a second time.
+    #[test]
+    fn audio_inside_a_trimmed_file_ignores_the_tracks_offset() {
+        let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
+        let plan = plan(Some(&base), false, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 });
+        assert_eq!(plan.stems_start_ms, 7_000, "the tracks would sit at 7 s");
+        assert_eq!(plan.video_start_ms, 2_000, "the file itself starts at 5 s");
+
+        let args = arguments(
+            &plan,
+            Path::new("C:/clips/x.mp4"),
+            &[track(0, false)],
+            &[],
+            Path::new("C:/clips/x.neu.mp4"),
+            EncoderId::X264,
+            70,
+        );
+        let seeks: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(at, arg)| *arg == "-ss" && at + 1 < args.len())
+            .map(|(at, _)| &args[at + 1])
+            .collect();
+        assert_eq!(seeks, ["2.000"], "only the picture is seeked: {args:?}");
     }
 
     #[test]
