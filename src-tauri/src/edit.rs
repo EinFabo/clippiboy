@@ -761,7 +761,16 @@ fn is_the_whole_recording(original: Option<&ClipOriginal>, actual_ms: u64) -> bo
 /// trimmed clip: note, recording and record all agree with one another. Only the
 /// clip file itself disagrees, and nothing was asking it.
 ///
-/// So this asks it. The size is the cheap tell — [`crate::clips::Library::set_file_state`]
+/// Nor is the crash the only way in. A found library had six clips whose cut had
+/// gone through on disk while not one of the three database writes had landed —
+/// the file was the excerpt, the row still gave the recording's length and size.
+/// "Swapped, but the database never got its turn" caught half of that and put
+/// the offset back; the length stayed wrong, so the gallery went on showing a
+/// minute and a half for nine seconds and the handles spanned a range the file
+/// did not have. Which is why this runs after every shape, not only where none
+/// of them applied.
+///
+/// So this asks the file. The size is the cheap tell — [`crate::clips::Library::set_file_state`]
 /// writes it with every rewrite, so one `stat` per clip settles the usual case,
 /// and only a mismatch is worth an ffprobe.
 fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOriginal>) {
@@ -836,20 +845,16 @@ pub fn repair(library: &crate::clips::Library) {
         let video = video_path(&clip.id);
         let target = Path::new(&clip.path);
 
-        // Did one of the shapes below actually take the clip in hand? Only what
-        // is left over afterwards is worth asking the file about.
-        let handled = match (target.is_file(), note, video.is_file()) {
+        match (target.is_file(), note, video.is_file()) {
             // Died between saving and swapping: the clip file is missing, the
             // untouched recording lies in the store. Push it back — an untrimmed
             // clip is infinitely better than none at all.
             (false, Some(_), true) => {
-                let back = move_across(&video, target).is_ok();
-                if back {
+                if move_across(&video, target).is_ok() {
                     log::info!("clip '{}' recovered from the originals store", clip.id);
                     remove(&clip.id);
                     let _ = library.set_original(&clip.id, None);
                 }
-                back
             }
 
             // Note without a recording. Two possibilities, and the clip's length
@@ -866,14 +871,12 @@ pub fn repair(library: &crate::clips::Library) {
                     log::warn!("original of '{}' is gone — the clip stays trimmed", clip.id);
                     let _ = library.set_original(&clip.id, Some(&note));
                 }
-                true
             }
 
             // Swapped, but the database never got its turn.
             (true, Some(note), true) if clip.original.is_none() => {
                 log::info!("original of '{}' recorded after the fact", clip.id);
                 let _ = library.set_original(&clip.id, Some(&note));
-                true
             }
 
             // Recording without a note. If the database still knows where the
@@ -893,16 +896,21 @@ pub fn repair(library: &crate::clips::Library) {
                         remove(&clip.id);
                     }
                 }
-                true
             }
 
-            _ => false,
-        };
+            _ => {}
+        }
 
-        // A still has no length to compare and no store beside it — asking
-        // ffprobe about a PNG would only cost a process.
-        if !handled && !clip.screenshot {
-            settle(library, &clip, note);
+        // And then, for every one of them, the question the shapes above cannot
+        // answer: does the record still describe the file? A still has no length
+        // to compare — asking ffprobe about a PNG would only cost a process.
+        //
+        // The row is read again rather than reused: an arm may just have written
+        // to it, and the note along with it.
+        if !clip.screenshot {
+            if let Ok(Some(fresh)) = library.get(&clip.id) {
+                settle(library, &fresh, read_note(&clip.id));
+            }
         }
     }
 }
