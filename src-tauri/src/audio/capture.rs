@@ -419,6 +419,41 @@ mod win {
         }
     }
 
+    /// How a go at a source ended.
+    enum Attempt {
+        /// The engine took the source down. Nothing to do.
+        Stopped,
+        /// It never came up.
+        Unavailable(String),
+        /// It ran and then stopped delivering.
+        ///
+        /// This is the one that used to be invisible. WASAPI does not announce a
+        /// device that has gone; it simply starts failing, and every failure
+        /// looked from here like "nothing right now".
+        Lost(String),
+    }
+
+    /// How long to wait before building a lost source up again, and how long at
+    /// most. A box that has just been unplugged or a driver that is resetting is
+    /// not back a millisecond later, and a source that fails the moment it is
+    /// opened must not spin a core.
+    const FIRST_RETRY: std::time::Duration = std::time::Duration::from_millis(300);
+    const LAST_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Run a source for as long as the engine wants it.
+    ///
+    /// A stream that dies is built up again. Until this existed, the thread went
+    /// on turning its rounds against a dead device and wrote nothing into the
+    /// ring; the pipeline dutifully filled the gap with counted silence, and what
+    /// came out was a clip with a full-length audio track of pure zeros. No error
+    /// anywhere, because both failure paths in the pump below read as "no packet
+    /// waiting". It took a restart of the whole app to get sound back — and the
+    /// recordings made in between are not recoverable, there was never anything
+    /// in them.
+    ///
+    /// A source that never came up in the first place is a different matter: that
+    /// one is reported through `ready` and left to the engine, exactly as before.
+    /// Rebuilding it here would only hide it.
     pub fn run(
         kind: &SourceKind,
         stop: Arc<AtomicBool>,
@@ -430,6 +465,42 @@ mod win {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
+        let mut ready = Some(ready);
+        let mut wait = FIRST_RETRY;
+
+        while !stop.load(Ordering::Relaxed) {
+            let first = ready.is_some();
+            match attempt(kind, &stop, &ring, &fallback_clock, ready.take()) {
+                Attempt::Stopped => return,
+                Attempt::Unavailable(err) => {
+                    if first {
+                        return;
+                    }
+                    log::warn!(
+                        "audio source {kind:?} cannot be opened again ({err}) — next try in {wait:?}"
+                    );
+                    wait = (wait * 2).min(LAST_RETRY);
+                }
+                Attempt::Lost(err) => {
+                    log::warn!(
+                        "audio source {kind:?} stopped delivering ({err}) — building it up again"
+                    );
+                    // It ran once, so the next go is worth making promptly.
+                    wait = FIRST_RETRY;
+                }
+            }
+            std::thread::sleep(wait);
+        }
+    }
+
+    /// One go: open the source, pump it until it stops or breaks.
+    fn attempt(
+        kind: &SourceKind,
+        stop: &Arc<AtomicBool>,
+        ring: &Arc<SampleRing>,
+        fallback_clock: &Arc<AtomicBool>,
+        ready: Option<Sender<Result<(), String>>>,
+    ) -> Attempt {
         let started = match kind {
             SourceKind::InputDevice { device_id } => device_client(device_id, false),
             SourceKind::OutputDevice { device_id, .. } => device_client(device_id, true),
@@ -448,8 +519,10 @@ mod win {
         let (client, format) = match started {
             Ok(pair) => pair,
             Err(err) => {
-                let _ = ready.send(Err(format!("audio source not available: {err}")));
-                return;
+                if let Some(ready) = ready {
+                    let _ = ready.send(Err(format!("audio source not available: {err}")));
+                }
+                return Attempt::Unavailable(err.to_string());
             }
         };
 
@@ -457,14 +530,18 @@ mod win {
             match unsafe { CreateEventW(None, false, false, None) } {
                 Ok(handle) => {
                     if let Err(err) = unsafe { client.SetEventHandle(handle) } {
-                        let _ = ready.send(Err(format!("SetEventHandle: {err}")));
-                        return;
+                        if let Some(ready) = ready {
+                            let _ = ready.send(Err(format!("SetEventHandle: {err}")));
+                        }
+                        return Attempt::Unavailable(err.to_string());
                     }
                     Some(handle)
                 }
                 Err(err) => {
-                    let _ = ready.send(Err(format!("CreateEvent: {err}")));
-                    return;
+                    if let Some(ready) = ready {
+                        let _ = ready.send(Err(format!("CreateEvent: {err}")));
+                    }
+                    return Attempt::Unavailable(err.to_string());
                 }
             }
         } else {
@@ -474,16 +551,22 @@ mod win {
         let capture: IAudioCaptureClient = match unsafe { client.GetService() } {
             Ok(service) => service,
             Err(err) => {
-                let _ = ready.send(Err(format!("GetService: {err}")));
-                return;
+                if let Some(ready) = ready {
+                    let _ = ready.send(Err(format!("GetService: {err}")));
+                }
+                return Attempt::Unavailable(err.to_string());
             }
         };
 
         if let Err(err) = unsafe { client.Start() } {
-            let _ = ready.send(Err(format!("Start: {err}")));
-            return;
+            if let Some(ready) = ready {
+                let _ = ready.send(Err(format!("Start: {err}")));
+            }
+            return Attempt::Unavailable(err.to_string());
         }
-        let _ = ready.send(Ok(()));
+        if let Some(ready) = ready {
+            let _ = ready.send(Ok(()));
+        }
 
         let mut converted: Vec<f32> = Vec::with_capacity(4096);
         let frame_bytes = format.channels * (format.bits as usize / 8);
@@ -491,7 +574,8 @@ mod win {
         // See `usable_stamp` — not every device reports usable times.
         let mut trust_qpc = true;
 
-        while !stop.load(Ordering::Relaxed) {
+        let mut outcome = Attempt::Stopped;
+        'pump: while !stop.load(Ordering::Relaxed) {
             match event {
                 Some(handle) => unsafe {
                     WaitForSingleObject(handle, 200);
@@ -500,9 +584,16 @@ mod win {
             }
 
             loop {
+                // Not "nothing waiting" — this call only fails when the stream
+                // itself is in trouble, and a device that has gone fails it every
+                // time from here on. Reading it as an empty poll is what let a
+                // dead source record ninety seconds of silence.
                 let available = match unsafe { capture.GetNextPacketSize() } {
                     Ok(frames) => frames,
-                    Err(_) => break,
+                    Err(err) => {
+                        outcome = Attempt::Lost(err.to_string());
+                        break 'pump;
+                    }
                 };
                 if available == 0 {
                     break;
@@ -516,7 +607,9 @@ mod win {
                 // `Direct3D11CaptureFrame::SystemRelativeTime` — which is what
                 // makes the whole earlier drift correction unnecessary.
                 let mut qpc_100ns = 0u64;
-                if unsafe {
+                // Same again: an empty buffer comes back as a success code, so
+                // a failure here is the device and not the moment.
+                if let Err(err) = unsafe {
                     capture.GetBuffer(
                         &mut data,
                         &mut frames,
@@ -524,10 +617,9 @@ mod win {
                         None,
                         Some(&mut qpc_100ns),
                     )
-                }
-                .is_err()
-                {
-                    break;
+                } {
+                    outcome = Attempt::Lost(err.to_string());
+                    break 'pump;
                 }
                 // The clock is the same, only read a little later.
                 let now = now_100ns();
@@ -566,6 +658,7 @@ mod win {
         if let Some(handle) = event {
             let _ = unsafe { CloseHandle(handle) };
         }
+        outcome
     }
 }
 
