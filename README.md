@@ -219,6 +219,18 @@ only hands a block over once it is full; mixing closer to now would fetch silenc
 where real audio arrives a moment later, and by then its slot in the track is
 already taken.
 
+One time origin is not enough on its own, though, because **no device runs at
+exactly 48000 Hz**. A ring anchored on its first block and run off the sample
+count from there assumes it does. Fifty to a hundred ppm is an ordinary crystal,
+which is three to six milliseconds a minute: after an hour of buffer a source
+sits a third of a second away from the picture, and two devices on two crystals
+sit that far from each other. The buffer runs as long as the app does, so it had
+all day to add up — a fresh start sounded right and an evening of it did not.
+Each ring therefore pulls its timeline towards the timestamps continuously, by at
+most one frame per block. What that costs is a single sample repeated or skipped
+every few seconds, which nobody hears; what it buys is a source that stays put
+however long ClippiBoy is left running.
+
 ---
 
 ## The audio system
