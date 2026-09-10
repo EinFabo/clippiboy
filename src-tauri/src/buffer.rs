@@ -39,6 +39,9 @@ pub struct ReplayBuffer {
     /// into memory the machine does not have.
     capacity_bytes: u64,
     packets: VecDeque<EncodedPacket>,
+    /// Has the encoder's silence about keyframes already been reported? Once is
+    /// enough — but once is needed, or the buffer looks merely empty.
+    warned_about_keyframes: bool,
     /// Sequence number of the frontmost packet — for stable keyframe positions.
     head_seq: u64,
     next_seq: u64,
@@ -54,6 +57,7 @@ impl ReplayBuffer {
             capacity_us: capacity_seconds as i64 * 1_000_000,
             capacity_bytes,
             packets: VecDeque::new(),
+            warned_about_keyframes: false,
             head_seq: 0,
             next_seq: 0,
             keyframes: VecDeque::new(),
@@ -101,6 +105,46 @@ impl ReplayBuffer {
             }
             self.head_seq = seq;
             self.keyframes.pop_front();
+        }
+
+        self.enforce_budget_without_keyframes();
+    }
+
+    /// The safety valve for a stream that never declares a keyframe.
+    ///
+    /// Everything above cuts *between* keyframes, which is right — a ring that
+    /// starts anywhere else is not decodable, and the last group of pictures is
+    /// deliberately never given up. But it also means both limits hang off the
+    /// keyframe list, and a transform that does not flag its keyframes leaves
+    /// them powerless: the ring then grows past its length and past its memory
+    /// budget until the machine gives out, while the UI shows a buffer that never
+    /// fills, because `buffered_seconds` has nothing to measure from either.
+    ///
+    /// `mft::opens_a_gop` is what should keep this from ever happening. It is the
+    /// second line rather than the first: memory has to win over decodability,
+    /// because a buffer that cannot be saved is a fault, and a buffer that takes
+    /// the app down with it is a worse one.
+    fn enforce_budget_without_keyframes(&mut self) {
+        if !self.keyframes.is_empty() || self.packets.is_empty() {
+            return;
+        }
+        if !self.warned_about_keyframes {
+            self.warned_about_keyframes = true;
+            log::warn!(
+                "the encoder is not flagging any keyframes — clips cannot be cut out of this \
+                 stream, and the buffer is being held to its budget by force"
+            );
+        }
+        while let Some(front) = self.packets.front() {
+            let too_long = self.newest_pts - front.pts_us >= self.capacity_us;
+            let too_big = self.bytes > self.capacity_bytes;
+            if !too_long && !too_big {
+                break;
+            }
+            let bytes = front.data.len() as u64;
+            self.packets.pop_front();
+            self.bytes -= bytes;
+            self.head_seq += 1;
         }
     }
 
@@ -268,6 +312,56 @@ mod tests {
         fill(&mut plain, 60);
         assert_eq!(capped.bytes(), plain.bytes());
         assert_eq!(capped.len(), plain.len());
+    }
+
+    /// The case that used to have no floor at all. Both limits are enforced
+    /// between keyframes, so a transform that never flags one left them powerless:
+    /// the ring grew past its length and past its budget until the machine gave
+    /// out, while the UI showed a buffer that never filled. `mft::opens_a_gop` is
+    /// what should stop this arising; this is the floor under it.
+    #[test]
+    fn a_stream_without_keyframes_still_obeys_the_memory_budget() {
+        let mut buf = ReplayBuffer::new(2, 100_000);
+        for frame in 0..600i64 {
+            buf.push(packet(VIDEO_TRACK, frame * 1000 / 60, false, 1000));
+        }
+        assert!(
+            buf.bytes() <= 100_000,
+            "the ring grew to {} bytes with no keyframe to cut at",
+            buf.bytes()
+        );
+        assert!(!buf.is_empty(), "and it must not have thrown everything away");
+    }
+
+    #[test]
+    fn a_stream_without_keyframes_still_obeys_its_length() {
+        let mut buf = ReplayBuffer::new(2, NO_LIMIT);
+        for frame in 0..600i64 {
+            buf.push(packet(VIDEO_TRACK, frame * 1000 / 60, false, 1000));
+        }
+        // Two seconds at 60 fps, give or take the packet the cut lands on.
+        assert!(
+            buf.len() <= 130,
+            "the ring held {} packets for a two-second buffer",
+            buf.len()
+        );
+    }
+
+    /// The floor must stay out of the way of the normal case: with keyframes
+    /// present the last group of pictures is deliberately kept, however small the
+    /// budget, and nothing here may cut into it.
+    #[test]
+    fn the_floor_does_not_touch_a_ring_that_has_keyframes() {
+        let mut buf = ReplayBuffer::new(30, 1);
+        fill(&mut buf, 30);
+
+        assert!(!buf.is_empty(), "the last group of pictures has to stay");
+        let first = buf.packets.front().unwrap();
+        assert!(first.is_video() && first.keyframe);
+        assert!(
+            buf.bytes() > 1,
+            "the budget was allowed to win over the last group of pictures"
+        );
     }
 
     #[test]

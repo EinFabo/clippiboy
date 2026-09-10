@@ -233,7 +233,27 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // finished file through once more to do it — at 40 Mbit/s and a two-minute
     // buffer, flatly twice the wait after the key press. Playback and trimming do
     // not need it.
-    command.arg(&request.output);
+    //
+    // Written beside the target rather than onto it. ffmpeg fills an MP4 from the
+    // front and writes the `moov` atom last, so a run that dies half way leaves
+    // something that is the right size, carries the right name and opens as a
+    // black nothing — and since the database row is only written on success,
+    // nobody ever comes back to clear it away. The clip only takes its real name
+    // once it is whole.
+    //
+    // Beside it, not in `temp_dir`: the clip folder may sit on another drive, and
+    // a rename across volumes is not a rename.
+    //
+    // Named off the clip id, not off the file name: `with_extension` cuts at the
+    // last dot, so two clips named `a.b.mp4` and `a.c.mp4` would both want to be
+    // `a.part.mp4` — and two saves at once would write through each other, which
+    // is the very thing the temp names above are careful to avoid.
+    let pending = request.output.with_file_name(format!(
+        "{stem}_{}.part.mp4",
+        sanitize(&request.clip_id)
+    ));
+    let _ = std::fs::remove_file(&pending);
+    command.arg(&pending);
 
     // Further outputs: the individual tracks, so the mix can still be changed
     // later. With only one track that would be a copy of the clip's audio track —
@@ -255,13 +275,39 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     for (path, _) in &wavs {
         let _ = std::fs::remove_file(path);
     }
-    if let Err(err) = outcome {
+
+    // Everything from here that says "no" has to leave the half-written file
+    // behind it gone, not lying in the clip folder.
+    let give_up = |err: String| -> Result<ClipResult, String> {
+        let _ = std::fs::remove_file(&pending);
         // Half-written individual tracks would be worse than none at all: the
         // editor would take them for complete and mix from them.
         if keep_stems {
             stems::remove(&request.clip_id);
         }
-        return Err(err);
+        Err(err)
+    };
+
+    if let Err(err) = outcome {
+        return give_up(err);
+    }
+
+    let size_bytes = std::fs::metadata(&pending).map(|meta| meta.len()).unwrap_or(0);
+    if size_bytes == 0 {
+        return give_up("The clip came out empty.".into());
+    }
+
+    // ffprobe as the actual test of whether the file is whole. Its length was
+    // only ever a nicety before, with the failure swallowed by `unwrap_or` — but
+    // a truncated MP4 is hundreds of megabytes of the right shape and the only
+    // thing that notices is the one call whose answer was being thrown away. A
+    // clip that cannot be read here cannot be played later either.
+    let Some(duration_ms) = probe_duration_ms(&pending) else {
+        return give_up("The clip was written but cannot be read back — nothing was kept.".into());
+    };
+
+    if let Err(err) = replace_file(&pending, &request.output) {
+        return give_up(err);
     }
 
     if keep_stems {
@@ -272,15 +318,6 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         }
     }
 
-    let size_bytes = std::fs::metadata(&request.output)
-        .map(|meta| meta.len())
-        .unwrap_or(0);
-    if size_bytes == 0 {
-        return Err("The clip came out empty.".into());
-    }
-
-    let duration_ms = probe_duration_ms(&request.output)
-        .unwrap_or(snapshot.audio_frames as u64 * 1000 / 48_000);
     let thumb_path = crate::thumbs::make(&request.output, &request.clip_id).ok();
 
     Ok(ClipResult {

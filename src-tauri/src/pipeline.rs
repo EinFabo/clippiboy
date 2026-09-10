@@ -533,7 +533,8 @@ mod win {
         let latest = Latest::new(converter);
 
         let encoder = {
-            let shared = shared.clone();
+            let for_packets = shared.clone();
+            let for_header = shared.clone();
             Arc::new(VideoEncoder::start(
                 gpu.clone(),
                 EncoderSettings {
@@ -545,7 +546,12 @@ mod win {
                     keyframe_seconds: recording.keyframe_seconds,
                     requested: wanted,
                 },
-                move |packet| shared.packets.lock().push(packet),
+                move |packet| for_packets.packets.lock().push(packet),
+                // The preamble arrives late — see `mft::catch_up_on_header`. The
+                // one read during setup is usually empty, and a clip saved with
+                // an empty one relies entirely on the encoder writing SPS/PPS
+                // into the stream itself.
+                move |header| *for_header.sequence_header.lock() = header,
             )?)
         };
         *shared.encoder.lock() = Some(encoder.chosen);
@@ -553,6 +559,10 @@ mod win {
         *shared.sequence_header.lock() = encoder.sequence_header.clone();
         *shared.encoder_stats.lock() = Some(encoder.stats.clone());
         *shared.pacer.lock() = Some(latest.clone());
+        // The rotation of NV12 slots has to know how many frames the encoder is
+        // holding on to, or it writes over one it is still reading — see
+        // `convert::SLOTS`.
+        latest.watch_encoder(encoder.stats.clone(), encoder.queue_depth);
 
         let capture = {
             let latest = latest.clone();
@@ -564,7 +574,11 @@ mod win {
                 recording.target_id.as_deref(),
                 recording.fps,
                 move |frame| {
-                    if let Err(err) = latest.submit(frame.texture, frame.qpc_100ns) {
+                    if let Err(err) = latest.submit(
+                        frame.texture,
+                        (frame.width, frame.height),
+                        frame.qpc_100ns,
+                    ) {
                         shared.dropped.fetch_add(1, Ordering::Relaxed);
                         shared.report(err);
                     }
@@ -822,9 +836,20 @@ impl Pipeline {
         }
 
         let first_pts = packets.first().map(|p| p.pts_us).unwrap_or(0);
-        let last = packets.last().map(|p| p.pts_us).unwrap_or(first_pts);
-        let frame_us = 1_000_000 / self.shared.fps as i64;
-        let span_us = (last - first_pts + frame_us).max(0);
+
+        // How long the audio has to be is decided by how many pictures there are,
+        // not by how much time they span.
+        //
+        // The two are the same right up until a frame is lost. `mft::submit`
+        // gives up after `SUBMIT_WAIT` and says so, and the packet is then gone
+        // for good — but its neighbours keep their timestamps, so a span measured
+        // from first to last still counts it. The video does not: it is muxed as
+        // a raw elementary stream whose whole timeline comes from `-r fps`
+        // (`muxer.rs`), which makes it exactly as long as it has frames. Every
+        // dropped frame therefore used to leave the audio a frame longer than the
+        // picture, and everything after the drop running ahead of the sound.
+        let audio_frames =
+            packets.len() as i64 * SAMPLE_RATE as i64 / self.shared.fps.max(1) as i64;
 
         // The assignment as it stands **now**, not as it stood while recording:
         // every source has a ring of its own, so a ⧉ flipped a minute ago still
@@ -843,7 +868,7 @@ impl Pipeline {
             main_mix,
             sequence_header: self.shared.sequence_header.lock().clone(),
             start_100ns: self.shared.qpc_of(first_pts),
-            audio_frames: (span_us * SAMPLE_RATE as i64 / 1_000_000) as usize,
+            audio_frames: audio_frames.max(0) as usize,
             fps: self.shared.fps,
             packets,
         })

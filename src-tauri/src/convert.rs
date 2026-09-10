@@ -39,10 +39,29 @@ use crate::gpu::{GpuDevice, SendPtr};
 
 /// How many NV12 textures are used in rotation.
 ///
-/// The encoder MFT only releases a submitted texture once it is done with it. At
-/// 60 fps a slot is not up again for a good 130 ms after 8 frames — considerably
-/// more than a hardware encoder ever holds on to.
-const SLOTS: usize = 8;
+/// The encoder reads the texture where it lies — `mft::Transform::feed` wraps it
+/// with `MFCreateDXGISurfaceBuffer` and copies nothing — so a slot may not be
+/// written again until every sample referring to it has been let go.
+///
+/// This used to be a flat 8, on the reasoning that eight frames are 130 ms at
+/// 60 fps and "considerably more than a hardware encoder ever holds on to". That
+/// was wrong, and provably so out of this codebase's own measurements:
+/// [`mft::ENCODER_HOLD_MAX`] records sixteen frames held at once on an RX 7600
+/// XT, and [`mft::QUEUE_DEPTH`] frames wait in the job channel on top. Twenty
+/// references over eight textures means the rotation laps the encoder and
+/// overwrites frames it is still reading — torn or wrong pictures in the clip,
+/// with every counter in the app reporting a clean run.
+///
+/// So the figure is derived rather than guessed. `low_latency_default` keeps the
+/// real queue near zero on AMD and Intel today, and NVENC's is shallow, so the
+/// headroom mostly goes unused — but it is bought for what was actually measured,
+/// not for what the queue is assumed to be. At 1080p an NV12 slot is 3.1 MB.
+pub const SLOTS: usize = crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX + 2;
+
+/// The rotation only holds if there are more textures than there can be frames
+/// referring to them. Stated here so that lowering either figure it is built from
+/// has to be a deliberate act rather than a quiet one.
+const _: () = assert!(SLOTS > crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX);
 
 /// Colour space bitfield from `d3d11.h`:
 /// bit 0 `Usage`, bit 1 `RGB_Range`, bit 2 `YCbCr_Matrix`, bit 3 `YCbCr_Xvycc`,
@@ -76,6 +95,11 @@ pub struct Converter {
     /// only two textures, so the table stays tiny — and calling
     /// `CreateVideoProcessorInputView` afresh for every frame would be waste.
     input_views: Vec<(isize, ID3D11VideoProcessorInputView)>,
+    /// The size the cached views were made for. `wgc` recreates its frame pool
+    /// whenever the source changes size, and the old textures are then dead —
+    /// each one still pinned by the view that refers to it. Keyed on a raw
+    /// pointer, the table has no way of noticing that by itself.
+    source_size: (u32, u32),
     width: u32,
     height: u32,
 }
@@ -143,6 +167,7 @@ impl Converter {
             slots,
             next_slot: 0,
             input_views: Vec::new(),
+            source_size: (0, 0),
             width,
             height,
         })
@@ -244,7 +269,22 @@ impl Converter {
     /// Runs **synchronously in the capture callback**, while the source texture is
     /// still valid — that is the difference from the old route, which only passed
     /// the pointer along and read from it later.
-    pub fn convert(&mut self, source: &ID3D11Texture2D) -> Result<usize, String> {
+    pub fn convert(
+        &mut self,
+        source: &ID3D11Texture2D,
+        source_size: (u32, u32),
+    ) -> Result<usize, String> {
+        // A new size means `wgc` has recreated the frame pool and every texture
+        // the table refers to is gone. The views keep those textures alive, which
+        // is what stops a fresh one from ever landing on a cached address — but
+        // it also means a window resize leaves the old pool pinned in memory
+        // until four unrelated pointers have wandered past. Cheaper and clearer
+        // to let go at the moment it happens.
+        if self.source_size != source_size {
+            self.source_size = source_size;
+            self.input_views.clear();
+        }
+
         let input = self.input_view(source)?;
         let slot = self.next_slot;
         self.next_slot = (self.next_slot + 1) % self.slots.len();
@@ -309,6 +349,14 @@ pub struct Latest {
     /// How often the clock had to repeat a frame because WGC delivered nothing
     /// new. A high value means a still picture, not overload.
     pub duplicated: AtomicU64,
+    /// Captured frames let go because no NV12 slot was free — see
+    /// [`Self::submit`]. Anything above zero means the encoder is holding more
+    /// frames than [`SLOTS`] was sized for, and the picture is being thinned to
+    /// keep it from being corrupted.
+    pub starved: AtomicU64,
+    /// The encoder's counters and the depth of its job channel, once it runs.
+    /// Both are needed to tell how many frames are still holding a slot.
+    encoder: Mutex<Option<(Arc<crate::mft::EncoderStats>, usize)>>,
     /// How often a tick was already late when it came round.
     ///
     /// This is the other half of the picture next to [`Self::duplicated`]: a
@@ -329,14 +377,61 @@ impl Latest {
             slot_qpc: AtomicI64::new(0),
             generation: AtomicU64::new(0),
             duplicated: AtomicU64::new(0),
+            starved: AtomicU64::new(0),
+            encoder: Mutex::new(None),
             overruns: AtomicU64::new(0),
             running: AtomicBool::new(true),
         })
     }
 
+    /// Hand the encoder's counters over, once there is an encoder to ask.
+    ///
+    /// Separate from `new` because the converter is built before the encoder is —
+    /// the encoder needs the graphics device the converter sets up.
+    pub fn watch_encoder(&self, stats: Arc<crate::mft::EncoderStats>, queue_depth: usize) {
+        *self.encoder.lock() = Some((stats, queue_depth));
+    }
+
+    /// Is the slot the rotation is about to take still being read?
+    ///
+    /// Conservative on purpose: it counts frames, and a still picture has the
+    /// clock sending the same slot over and over, so several of the frames
+    /// counted here may be the same texture. Overstating costs a repeated
+    /// picture; understating costs a torn one.
+    fn slot_would_be_snatched(&self) -> bool {
+        match self.encoder.lock().as_ref() {
+            Some((stats, depth)) => {
+                *depth as u64 + stats.in_flight.load(Ordering::Relaxed) >= SLOTS as u64
+            }
+            None => false,
+        }
+    }
+
     /// Called from the capture callback.
-    pub fn submit(&self, source: &ID3D11Texture2D, qpc_100ns: i64) -> Result<(), String> {
-        let slot = self.converter.lock().convert(source)?;
+    ///
+    /// A frame is let go rather than converted when no slot is free. That is the
+    /// whole point of counting: the alternative is not a better picture, it is
+    /// the same picture written over one the encoder has not finished reading.
+    /// Nothing is lost from the stream — the clock repeats the previous frame, as
+    /// it does for a still picture, so the clip keeps its frame count and its
+    /// length.
+    pub fn submit(
+        &self,
+        source: &ID3D11Texture2D,
+        source_size: (u32, u32),
+        qpc_100ns: i64,
+    ) -> Result<(), String> {
+        if self.slot_would_be_snatched() {
+            if self.starved.fetch_add(1, Ordering::Relaxed) == 0 {
+                log::warn!(
+                    "the encoder is holding more frames than there are texture slots — \
+                     captured frames are being let go to keep it from reading one twice over"
+                );
+            }
+            return Ok(());
+        }
+
+        let slot = self.converter.lock().convert(source, source_size)?;
         self.slot_qpc.store(qpc_100ns, Ordering::Relaxed);
         self.slot.store(slot as u64, Ordering::Release);
         self.generation.fetch_add(1, Ordering::Release);

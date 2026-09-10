@@ -34,7 +34,16 @@ fn vendor_tag(id: u32) -> String {
 
 /// How many frames may wait to be submitted. At 60 fps four slots are a good
 /// 66 ms of headroom for a brief stall of the encoder.
-const QUEUE_DEPTH: usize = 4;
+pub const QUEUE_DEPTH: usize = 4;
+
+/// The deepest queue a transform has been caught holding, in frames.
+///
+/// Measured on a Radeon RX 7600 XT at the default quality preset — see
+/// [`low_latency_default`], which exists because of it. It is quoted here for a
+/// second reason: every one of those frames is still holding one of
+/// [`crate::convert::SLOTS`] NV12 textures, and the encoder reads them where they
+/// lie. The rotation must not come round again before the encoder has let go.
+pub const ENCODER_HOLD_MAX: usize = 16;
 
 /// A knob the environment may turn.
 ///
@@ -816,18 +825,12 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
         bframes,
     );
 
-    let sequence_header = unsafe {
-        transform
-            .GetOutputCurrentType(0)
-            .ok()
-            .and_then(|media| {
-                let size = media.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER).ok()?;
-                let mut blob = vec![0u8; size as usize];
-                media.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob, None).ok()?;
-                Some(blob)
-            })
-            .unwrap_or_default()
-    };
+    // Asked for here and asked for again later. At this point the transform has
+    // been configured but never told to stream, and most hardware H.264 MFTs do
+    // not fill `MF_MT_MPEG_SEQUENCE_HEADER` in until they have run — so this
+    // usually comes back empty, and used to stay that way for the life of the
+    // recording. See `catch_up_on_header`.
+    let sequence_header = read_sequence_header(&transform);
 
     unsafe {
         let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
@@ -851,6 +854,94 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
 struct Job {
     texture: SendPtr<ID3D11Texture2D>,
     pts_100ns: i64,
+}
+
+/// SPS/PPS out of the encoder's current output type, empty when it will not say.
+fn read_sequence_header(transform: &IMFTransform) -> Vec<u8> {
+    unsafe {
+        transform
+            .GetOutputCurrentType(0)
+            .ok()
+            .and_then(|media| {
+                let size = media.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER).ok()?;
+                let mut blob = vec![0u8; size as usize];
+                media.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob, None).ok()?;
+                Some(blob)
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// How many packets to keep asking over before giving the header up as absent.
+/// Two seconds at 60 fps — an encoder that has not produced it by then never
+/// will.
+const HEADER_TRIES: u32 = 120;
+
+/// Ask again for the sequence header, now that the encoder has really run.
+///
+/// The preamble is read once during setup, between `SetInputType` and
+/// `MFT_MESSAGE_NOTIFY_BEGIN_STREAMING`. That is too early for most hardware
+/// transforms: the blob is not filled in until the encoder has been started, so
+/// what setup got was an empty vector — and `muxer::build` then prepended
+/// nothing to the elementary stream. Where the encoder writes SPS/PPS in front of
+/// every IDR itself, which most do, that goes unnoticed. Where it does not, the
+/// clip is a file full of slices no decoder can start on: black, all the way
+/// through, with nothing anywhere saying why.
+fn catch_up_on_header<H: FnMut(Vec<u8>)>(
+    transform: &Transform,
+    pending: &mut bool,
+    tries: &mut u32,
+    on_header: &mut H,
+) {
+    if !*pending {
+        return;
+    }
+    *tries += 1;
+    let header = read_sequence_header(&transform.transform);
+    if !header.is_empty() {
+        *pending = false;
+        log::debug!("encoder handed over {} bytes of SPS/PPS", header.len());
+        on_header(header);
+    } else if *tries >= HEADER_TRIES {
+        *pending = false;
+        log::warn!(
+            "the encoder will not hand over its SPS/PPS — saved clips depend on the \
+             stream carrying them in front of every keyframe itself"
+        );
+    }
+}
+
+/// Does this packet open a group of pictures?
+///
+/// `MFSampleExtension_CleanPoint` is the encoder's own word for it, and where it
+/// is set that is the answer. Not every transform sets it, though, and the
+/// `unwrap_or(0)` that reads it turns a missing attribute into "not a keyframe"
+/// — for every packet there will ever be. The consequences are out of all
+/// proportion to the omission: [`crate::buffer::ReplayBuffer::trim`] cuts only
+/// between keyframes and so stops cutting at all, the ring grows past its budget,
+/// `buffered_seconds` reports 0.0 for a buffer that is filling, and every save is
+/// refused for want of a starting point. All of it silent.
+///
+/// So where the attribute says nothing, the stream is asked. In Annex-B a NAL
+/// begins after `00 00 01`, and the low five bits of the byte after that are its
+/// type: 5 is an IDR slice, 7 an SPS — which only ever stands in front of one.
+fn opens_a_gop(data: &[u8]) -> bool {
+    let mut zeros = 0usize;
+    for (index, byte) in data.iter().enumerate() {
+        match byte {
+            0 => zeros += 1,
+            1 if zeros >= 2 => {
+                if let Some(header) = data.get(index + 1) {
+                    if matches!(header & 0x1f, 5 | 7) {
+                        return true;
+                    }
+                }
+                zeros = 0;
+            }
+            _ => zeros = 0,
+        }
+    }
+    false
 }
 
 impl Transform {
@@ -937,7 +1028,7 @@ impl Transform {
                 return Ok(None);
             };
 
-            let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+            let flagged = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
             let pts_100ns = sample.GetSampleTime().unwrap_or(0);
 
             let buffer = sample
@@ -950,6 +1041,12 @@ impl Transform {
                 .map_err(|err| format!("Paket lesen: {err}"))?;
             let bytes: Arc<[u8]> = std::slice::from_raw_parts(ptr, len as usize).into();
             let _ = buffer.Unlock();
+
+            // The attribute first, the bitstream where it is missing — see
+            // `opens_a_gop`. Asking the stream costs a scan of a packet that has
+            // just been copied anyway, and it is the difference between a buffer
+            // that can be cut and one that cannot.
+            let keyframe = flagged || opens_a_gop(&bytes);
 
             Ok(Some(EncodedPacket {
                 track: VIDEO_TRACK,
@@ -975,19 +1072,30 @@ pub struct VideoEncoder {
     pub rate_control: RateControl,
     /// SPS/PPS that belong in front of the stream when saving.
     pub sequence_header: Vec<u8>,
+    /// How deep the job channel really is — `CLIPPIBOY_QUEUE_DEPTH` may have
+    /// moved it. Frames sitting in there hold NV12 slots just as the ones inside
+    /// the transform do, so the rotation has to count them.
+    pub queue_depth: usize,
     /// What it is costing while it runs — see [`EncoderStats`].
     pub stats: Arc<EncoderStats>,
 }
 
 impl VideoEncoder {
     /// `on_packet` runs on the encoder thread and has to be short.
-    pub fn start<F>(
+    ///
+    /// `on_header` runs there too, at most once, as soon as the encoder will part
+    /// with its SPS/PPS — which is generally not before it has produced its first
+    /// packet. Whatever [`Self::sequence_header`] held from setup is superseded
+    /// by it; see `catch_up_on_header`.
+    pub fn start<F, H>(
         gpu: Arc<GpuDevice>,
         settings: EncoderSettings,
         on_packet: F,
+        on_header: H,
     ) -> Result<Self, String>
     where
         F: FnMut(EncodedPacket) + Send + 'static,
+        H: FnMut(Vec<u8>) + Send + 'static,
     {
         let depth = env_u32("CLIPPIBOY_QUEUE_DEPTH", QUEUE_DEPTH as u32).max(1) as usize;
         let (jobs_tx, jobs_rx) = crossbeam_channel::bounded::<Job>(depth);
@@ -1019,7 +1127,7 @@ impl VideoEncoder {
                             return;
                         }
                     };
-                    run(transform, settings, jobs_rx, running, stats, on_packet);
+                    run(transform, settings, jobs_rx, running, stats, on_packet, on_header);
                 })
                 .map_err(|err| format!("Encoder-Faden: {err}"))?
         };
@@ -1032,6 +1140,7 @@ impl VideoEncoder {
                 chosen,
                 rate_control,
                 sequence_header,
+                queue_depth: depth,
                 stats,
             }),
             Ok(Err(err)) => {
@@ -1109,17 +1218,25 @@ impl Drop for VideoEncoder {
 }
 
 /// The loop on the encoder thread.
-fn run<F>(
+fn run<F, H>(
     transform: Transform,
     settings: EncoderSettings,
     jobs: crossbeam_channel::Receiver<Job>,
     running: Arc<AtomicBool>,
     stats: Arc<EncoderStats>,
     mut on_packet: F,
+    mut on_header: H,
 ) where
     F: FnMut(EncodedPacket) + Send + 'static,
+    H: FnMut(Vec<u8>) + Send + 'static,
 {
     let duration = 10_000_000 / settings.fps.max(1) as i64;
+
+    // Empty from setup means the encoder had not started yet and there is still
+    // one to fetch. Non-empty means this encoder is one of the few that answers
+    // straight away, and there is nothing to chase.
+    let mut header_pending = transform.sequence_header.is_empty();
+    let mut header_tries = 0u32;
 
     /// Note down how long the encoder kept one frame.
     fn took(stats: &EncoderStats, since: Instant, in_flight: usize) {
@@ -1184,6 +1301,12 @@ fn run<F>(
                                     took(&stats, since, sent.len());
                                 }
                                 on_packet(packet);
+                                catch_up_on_header(
+                                    &transform,
+                                    &mut header_pending,
+                                    &mut header_tries,
+                                    &mut on_header,
+                                );
                             }
                             Ok(None) => {}
                             Err(err) => log::warn!("{err}"),
@@ -1207,7 +1330,17 @@ fn run<F>(
                     match jobs.recv_timeout(Duration::from_millis(2)) {
                         Ok(job) => {
                             match transform.feed(&job, duration) {
-                                Ok(()) => sent.push_back(Instant::now()),
+                                Ok(()) => {
+                                    sent.push_back(Instant::now());
+                                    // Written on the way in as well as on the way
+                                    // out. Only `took` used to touch it, so while
+                                    // the queue was growing — the one time the
+                                    // number matters — it stood still at whatever
+                                    // the last packet left behind.
+                                    stats
+                                        .in_flight
+                                        .store(sent.len() as u64, Ordering::Relaxed);
+                                }
                                 Err(err) => log::warn!("{err}"),
                             }
                             pending_input -= 1;
@@ -1238,6 +1371,12 @@ fn run<F>(
                         Ok(Some(packet)) => {
                             took(&stats, since, 0);
                             on_packet(packet);
+                            catch_up_on_header(
+                                &transform,
+                                &mut header_pending,
+                                &mut header_tries,
+                                &mut on_header,
+                            );
                         }
                         Ok(None) => break,
                         Err(err) => {
@@ -1302,5 +1441,70 @@ fn run<F>(
         let _ = transform
             .transform
             .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One NAL with an Annex-B start code in front of it.
+    fn nal(kind: u8, long_start_code: bool) -> Vec<u8> {
+        let mut out = if long_start_code {
+            vec![0, 0, 0, 1]
+        } else {
+            vec![0, 0, 1]
+        };
+        // The two high bits are `forbidden_zero` and `nal_ref_idc`; only the low
+        // five are the type, so a realistic byte has them set.
+        out.push(0x60 | kind);
+        out.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        out
+    }
+
+    #[test]
+    fn an_idr_opens_a_gop() {
+        assert!(opens_a_gop(&nal(5, true)));
+        assert!(opens_a_gop(&nal(5, false)), "three-byte start codes count too");
+    }
+
+    /// An SPS never stands anywhere but in front of a keyframe, and encoders that
+    /// write one inline put it before the IDR — so finding it is enough.
+    #[test]
+    fn a_parameter_set_opens_a_gop() {
+        assert!(opens_a_gop(&nal(7, true)));
+    }
+
+    #[test]
+    fn an_ordinary_slice_does_not() {
+        // Type 1: a non-IDR slice, which is every frame between keyframes.
+        assert!(!opens_a_gop(&nal(1, true)));
+    }
+
+    /// The real shape of a keyframe packet: parameter sets, then the picture.
+    #[test]
+    fn a_keyframe_packet_is_found_past_its_leading_nals() {
+        let mut packet = nal(9, true); // access unit delimiter
+        packet.extend(nal(8, true)); // PPS
+        packet.extend(nal(5, true)); // the IDR itself
+        assert!(opens_a_gop(&packet));
+    }
+
+    /// A run of zeros before the start code is legal padding and must not throw
+    /// the scan off.
+    #[test]
+    fn leading_padding_does_not_hide_the_start_code() {
+        let mut packet = vec![0u8; 8];
+        packet.extend(nal(5, false));
+        assert!(opens_a_gop(&packet));
+    }
+
+    #[test]
+    fn nothing_to_read_is_not_a_keyframe() {
+        assert!(!opens_a_gop(&[]));
+        // A start code with the packet ending right after it: no type byte to
+        // look at, and no panic for looking.
+        assert!(!opens_a_gop(&[0, 0, 0, 1]));
+        assert!(!opens_a_gop(&[0, 0, 1]));
     }
 }
