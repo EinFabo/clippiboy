@@ -556,6 +556,13 @@ optionally it follows the foreground window. The fade-in is an outline that draw
 itself once around the card and then fades out — pure compositor animation, so it
 does not stutter when the game needs the GPU.
 
+Its window is hidden between banners and, over a game, covered — and Chromium
+stops drawing such a window and backgrounds its renderer. The banner then
+appeared only sometimes, because waking up took longer than it was on screen.
+The webview is therefore started with `CalculateNativeWinOcclusion` and both
+backgrounding switches off, and the banner goes out to the window a moment after
+it has appeared — a moment in which the window is transparent and still empty.
+
 Over a game in **exclusive** fullscreen it cannot appear: that would need a
 present hook inside the game process, and that is exactly what ClippiBoy
 deliberately does not do. In borderless fullscreen and windowed mode — so in

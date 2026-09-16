@@ -26,6 +26,32 @@ const WIDTH: f64 = 416.0;
 const HEIGHT: f64 = 128.0;
 const MARGIN: f64 = 24.0;
 
+/// What the webview is started with.
+///
+/// Chromium — and with it WebView2 — stops drawing a window that is hidden or
+/// completely covered by another one, and backgrounds its renderer. That is
+/// exactly this window's life: hidden between banners, and over a fullscreen
+/// game covered as well. Waking up costs frames, and a banner that runs for two
+/// seconds can be over before the first one arrives; that is why it used to
+/// appear only sometimes. The three switches keep the drawing going. wry's
+/// default list has to be carried along, otherwise the mini menu and SmartScreen
+/// come back with it.
+///
+/// The main window gets the same string in `tauri.conf.json`: two webviews with
+/// different arguments would need separate data directories, and the second one
+/// does not start without them.
+const BROWSER_ARGS: &str = concat!(
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion",
+    " --disable-backgrounding-occluded-windows",
+    " --disable-renderer-backgrounding",
+);
+
+/// How long the webview gets between the window appearing and the banner being
+/// sent, when it was hidden until then. The window is transparent and still
+/// empty during it, so nothing is to be seen — the pause only means the first
+/// frame falls inside the banner's lifetime instead of after it.
+const WAKE_MS: u64 = 150;
+
 /// Which kind of message — decides the banner's colour and which switch in the
 /// settings turns it off.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -68,6 +94,8 @@ pub fn create(app: &tauri::AppHandle) {
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
+        // Keeps the banner from being drawn only sometimes — see `BROWSER_ARGS`.
+        .additional_browser_args(BROWSER_ARGS)
         // The banner belongs on the screen, not in the clip. Windows excludes a
         // window with this display affinity from every screen capture — including
         // Windows.Graphics.Capture, which is what records here. As a result it is
@@ -152,6 +180,9 @@ pub fn show_with_thumb(
             log::warn!("could not position the overlay: {err}");
         }
     }
+    // A banner that follows one already standing — "Saving clip…" and then "Clip
+    // saved" — finds the webview awake and can go out right away.
+    let awake = window.is_visible().unwrap_or(false);
     let _ = window.show();
     // Bring it to the top again after showing: games like to grab the z-order
     // when they switch modes.
@@ -164,19 +195,29 @@ pub fn show_with_thumb(
         thumb_path,
         duration_ms,
     };
-    let _ = window.emit("overlay-banner", banner);
 
-    // Hide once the banner has faded out (plus time for the animation).
+    // Sending, and hiding again afterwards, happen off the caller's thread: the
+    // window needs its moment to draw first, and a save must not wait for it.
     let ticket = SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
     let handle = app.clone();
     std::thread::spawn(move || {
+        if !awake {
+            std::thread::sleep(std::time::Duration::from_millis(WAKE_MS));
+            if SEQUENCE.load(Ordering::SeqCst) != ticket {
+                return; // A newer banner is on its way; this one is stale.
+            }
+        }
+        let Some(window) = handle.get_webview_window(LABEL) else {
+            return;
+        };
+        let _ = window.emit("overlay-banner", banner);
+
+        // Hide once the banner has faded out (plus time for the animation).
         std::thread::sleep(std::time::Duration::from_millis(duration_ms as u64 + 600));
         if SEQUENCE.load(Ordering::SeqCst) != ticket {
             return; // A new banner has arrived in the meantime.
         }
-        if let Some(window) = handle.get_webview_window(LABEL) {
-            let _ = window.hide();
-        }
+        let _ = window.hide();
     });
 }
 
