@@ -11,7 +11,7 @@
     "app": "tauri dev",
     "ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "probe": "node scripts/make-probe.mjs",
-    "app:build": "npm run ffmpeg && tauri build"
+    "app:build": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

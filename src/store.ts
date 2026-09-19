@@ -15,6 +15,8 @@ import type {
   ShotStep,
   TrackMix,
   UpdateInfo,
+  UpdateProgress,
+  FfmpegStatus,
 } from "./lib/types";
 
 interface EngineState {
@@ -43,10 +45,19 @@ interface EngineState {
   detectedGame: string | null;
   /** A newer version the core has found and not yet installed. */
   update: UpdateInfo | null;
+  /** The running download of `update`; `null` while none runs. */
+  updateProgress: UpdateProgress | null;
+  /** ffmpeg is fetched on first start; clips wait for it. */
+  ffmpeg: FfmpegStatus;
   lastError: string | null;
 
   init: () => Promise<void>;
   setUpdate: (update: UpdateInfo | null) => void;
+  /**
+   * Download and install `update`. Only comes back if that failed — on
+   * success Windows quits the app and starts the installer.
+   */
+  installUpdate: () => Promise<void>;
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
@@ -127,10 +138,24 @@ export const useEngine = create<EngineState>((set, get) => ({
   rateControl: null,
   detectedGame: null,
   update: null,
+  updateProgress: null,
+  ffmpeg: { state: "checking" },
   lastError: null,
 
   setUpdate(update) {
     set({ update });
+  },
+
+  async installUpdate() {
+    // Shows at once, before the first chunk: finding the package can take a
+    // moment by itself.
+    set({ updateProgress: { downloaded: 0, total: null, finished: false } });
+    try {
+      await api.installUpdate();
+    } catch (err) {
+      set({ updateProgress: null });
+      throw err;
+    }
   },
 
   async init() {
@@ -211,7 +236,23 @@ export const useEngine = create<EngineState>((set, get) => ({
       await events.onAudioTaps((taps) => set({ taps }));
       // The core checks every hour and says so by event; a find from before
       // this window existed is asked for once.
+      await events.onFfmpegStatus((ffmpeg) => set({ ffmpeg }));
+      api
+        .ffmpegStatus()
+        .then((ffmpeg) => set({ ffmpeg }))
+        .catch(() => {});
       await events.onUpdateAvailable((update) => set({ update }));
+      await events.onUpdateProgress((progress) =>
+        set({ updateProgress: { ...progress, finished: false } }),
+      );
+      await events.onUpdateDownloaded(() =>
+        set((st) => ({
+          updateProgress: st.updateProgress && {
+            ...st.updateProgress,
+            finished: true,
+          },
+        })),
+      );
       api
         .pendingUpdate()
         .then((update) => update && set({ update }))

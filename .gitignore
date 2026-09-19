@@ -6,6 +6,8 @@ probe-package/
 src-tauri/target/
 
 # Wird von `npm run ffmpeg` geholt — zwei Dateien à 100 MB gehören nicht ins Repo.
+# `src-tauri/resources/` stammt noch aus der Zeit, als ffmpeg im Installer lag.
+dist-ffmpeg/
 src-tauri/resources/
 
 # Signierschlüssel für Updates. Gehört nie ins Repo, sondern in ein

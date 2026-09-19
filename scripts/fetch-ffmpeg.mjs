@@ -1,8 +1,14 @@
-// Fetches ffmpeg.exe and ffprobe.exe into `src-tauri/resources/`.
+// Fetches ffmpeg.exe and ffprobe.exe into `dist-ffmpeg/`.
 //
-// Both programs go into the installer package so ClippiBoy can write clips on
-// someone else's machine without ffmpeg being on their PATH. Runs before
-// `tauri build` (see `npm run app:build`) and in CI.
+// They no longer go into the installer: the app downloads them once on first
+// start from a release of their own (`ffmpeg-<version>`, see
+// `.github/workflows/ffmpeg.yml` and `src-tauri/src/tools.rs`), so an update
+// does not ship 200 MB of unchanged ffmpeg every time. This script is what that
+// workflow runs to put the release together.
+//
+// The package is pinned to one version and its checksum — the programs'
+// hashes are written into the app, so whatever comes out here has to be
+// exactly what was tested.
 //
 // Deliberately dependency-free: `zlib` gives Node everything needed to read a
 // ZIP archive, and an extra package just for unpacking would be more ballast in
@@ -16,9 +22,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const OUT = join(ROOT, "src-tauri", "resources");
-const CACHE = join(ROOT, "node_modules", ".cache", "ffmpeg-release-essentials.zip");
-const URL_ZIP = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+const VERSION = "9.0.1";
+const OUT = join(ROOT, "dist-ffmpeg");
+const CACHE = join(ROOT, "node_modules", ".cache", `ffmpeg-${VERSION}-essentials_build.zip`);
+const URL_ZIP = `https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-${VERSION}-essentials_build.zip`;
+/** From gyan.dev's `.sha256` next to the package. */
+const SHA256_ZIP = "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9";
 const WANTED = ["ffmpeg.exe", "ffprobe.exe"];
 const TRIES = 4;
 
@@ -72,6 +81,8 @@ function extract(buf, entry) {
  * survive this: the central directory sits at the very end of a ZIP.
  */
 function programs(buf) {
+  const hash = createHash("sha256").update(buf).digest("hex");
+  if (hash !== SHA256_ZIP) throw new Error(`archive checksum ${hash} is not the pinned one`);
   const list = entries(buf);
   return WANTED.map((name) => {
     // The path inside the archive carries the version number, hence going by the file name.
@@ -199,7 +210,7 @@ async function exists(path) {
 async function main() {
   const force = process.argv.includes("--force");
   if (!force && (await Promise.all(WANTED.map((n) => exists(join(OUT, n))))).every(Boolean)) {
-    console.log("ffmpeg is already in src-tauri/resources — nothing to do (--force overrides).");
+    console.log("ffmpeg is already in dist-ffmpeg — nothing to do (--force overrides).");
     return;
   }
 

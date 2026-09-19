@@ -44,8 +44,10 @@ afterwards. In ClippiBoy itself, without an editor.
 ## Installing
 
 Grab the installer from the [Releases](../../releases) page and run it. It
-installs per user, so no administrator is needed, and brings its own ffmpeg
-along.
+installs per user, so no administrator is needed. On first start it fetches
+its own ffmpeg once (about 80 MB, checked against a fixed checksum) and keeps
+it — updates after that are only a few megabytes. The buffer already runs
+while that happens; clips can be saved as soon as it is in.
 
 Requirements: Windows 10 or 11 and WebView2, which ships with Windows 11 and
 arrives through Windows Update on 10. Nothing else.
@@ -701,15 +703,19 @@ Foundation and WASAPI directly, so there is no cross-compile.
 git clone https://github.com/EinFabo/clippiboy.git
 cd clippiboy
 npm install
-npm run ffmpeg       # fetches ffmpeg.exe/ffprobe.exe into src-tauri\resources
 npm run app          # dev mode with hot reload
 npm run app:build    # NSIS installer into src-tauri\target\release\bundle
 ```
 
 You need Node 20+, Rust with the MSVC toolchain, the Visual Studio 2022 Build
 Tools with the C++ workload, and WebView2. ffmpeg does **not** have to be
-installed: `npm run ffmpeg` puts a tested build next to the app, and that one
-takes precedence over anything on the `PATH`.
+installed: the app fetches the tested build on first start into
+`%LOCALAPPDATA%\gg.clippiboy.app\ffmpeg\<version>`, and that one takes
+precedence over anything on the `PATH`. It comes from a release of its own,
+`ffmpeg-<version>`, put together by `.github/workflows/ffmpeg.yml` from a tag
+of that name. For a new ffmpeg: raise the version in `scripts/fetch-ffmpeg.mjs`
+and `src-tauri/src/tools.rs`, push the tag, and write the new hashes the
+workflow prints into `tools.rs`.
 
 The UI alone runs anywhere, with mock data instead of a core:
 
@@ -822,13 +828,14 @@ src-tauri/src/
   control.rs                  the local port the Stream Deck presses (+ tests)
   commands.rs                 Tauri commands
   updater.rs                  update check and installation
+  tools.rs                    fetch ffmpeg/ffprobe once, check and keep them
 
 src-tauri/examples/
   record-probe.rs             measure every encoder on this machine, write a report
   tracks-probe.rs             two parallel track requests on the same clip
   trim-probe.rs               trim, measure, undo, measure
 
-scripts/fetch-ffmpeg.mjs      fetch ffmpeg/ffprobe for the package
+scripts/fetch-ffmpeg.mjs      fetch the pinned ffmpeg/ffprobe for their release
 scripts/make-probe.mjs        pack the encoder test for somebody else's machine
 scripts/make-icons.py         every icon size from icons/icon.png,
                               and the Stream Deck plugin's key pictures

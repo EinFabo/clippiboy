@@ -41,6 +41,13 @@ tiny_http = "0.12"
 # Screenshots. Small, pure Rust — the picture does not have to take a detour
 # through ffmpeg and a raw file of thirty megabytes.
 png = "0.17"
+# Fetching ffmpeg on first start (see `tools.rs`). All four already come in
+# with the updater plugin; the versions and TLS setup follow it, so nothing
+# new is built — reqwest gets its rustls from there as well.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+sha2 = "0.10"
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

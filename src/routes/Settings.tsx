@@ -9,6 +9,7 @@ import { api, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/format";
 import type { OverlayCorner, StorageUsage } from "@/lib/types";
+import { UpdateProgressBar, updateProgressText } from "@/components/UpdateProgress";
 
 /**
  * The four corners in reading order: value, what it is called, and where the
@@ -844,7 +845,9 @@ function Updates() {
   const [state, setState] = useState<"idle" | "checking" | "current" | "failed">(
     "idle",
   );
-  const [installing, setInstalling] = useState(false);
+  const progress = useEngine((s) => s.updateProgress);
+  const installUpdate = useEngine((s) => s.installUpdate);
+  const installing = progress !== null;
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -866,13 +869,11 @@ function Updates() {
   };
 
   const install = async () => {
-    setInstalling(true);
     setError(null);
     try {
       // Does not come back: Windows quits the app and starts the installer.
-      await api.installUpdate();
+      await installUpdate();
     } catch (err) {
-      setInstalling(false);
       setError(String(err));
     }
   };
@@ -883,13 +884,15 @@ function Updates() {
         <Row
           label={`ClippiBoy ${version}`}
           hint={
-            update
-              ? `Version ${update.version} is available`
-              : state === "current"
-                ? "Up to date"
-                : state === "failed"
-                  ? "The update check failed"
-                  : "Updates come from GitHub Releases and are signed"
+            progress
+              ? updateProgressText(progress)
+              : update
+                ? `Version ${update.version} is available`
+                : state === "current"
+                  ? "Up to date"
+                  : state === "failed"
+                    ? "The update check failed"
+                    : "Updates come from GitHub Releases and are signed"
           }
         >
           <div className="flex gap-2">
@@ -908,6 +911,11 @@ function Updates() {
             )}
           </div>
         </Row>
+        {progress && (
+          <div className="px-5 pb-4">
+            <UpdateProgressBar progress={progress} />
+          </div>
+        )}
         {update?.notes && (
           <div className="p-5">
             <p className="text-xs whitespace-pre-line text-ink-muted">

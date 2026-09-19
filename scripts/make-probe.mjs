@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TAURI = join(ROOT, "src-tauri");
-const RESOURCES = join(TAURI, "resources");
+const RESOURCES = join(ROOT, "dist-ffmpeg");
 const TARGET = process.env.CARGO_TARGET_DIR ?? join(TAURI, "target");
 // Not under `dist/`: that is Vite's output directory, and it gets emptied on
 // every `npm run build`. A package that quietly disappears the next time the

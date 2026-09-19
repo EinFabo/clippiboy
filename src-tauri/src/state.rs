@@ -363,7 +363,9 @@ impl AppState {
         if self.pipeline.lock().is_some() {
             return Ok(());
         }
-        if !crate::muxer::available() {
+        // While ffmpeg is still being fetched the buffer may already run —
+        // it is only needed once a clip is written.
+        if !crate::muxer::available() && crate::tools::is_ready() {
             return Err(
                 "ffmpeg was not found. Without ffmpeg no clips can be written."
                     .into(),
@@ -507,6 +509,10 @@ impl AppState {
         let seconds = seconds
             .unwrap_or_else(|| config::effective_clip_seconds(&config.buffer))
             .max(1);
+        // The buffer keeps what it has; the same press works once ffmpeg is in.
+        if !crate::tools::is_ready() && !crate::muxer::available() {
+            return Err(crate::tools::not_ready_reason());
+        }
 
         // Grab everything under a short lock and release it again right away:
         // muxing and the thumbnail take seconds, and "Quit" from the tray, say,

@@ -336,3 +336,18 @@ export interface UpdateInfo {
   notes: string | null;
   date: string | null;
 }
+
+/** Where ffmpeg stands — fetched once on first start. */
+export type FfmpegStatus =
+  | { state: "checking" | "unpacking" | "ready" }
+  | { state: "downloading"; downloaded: number; total: number | null }
+  | { state: "failed"; error: string; retryInSecs: number };
+
+/** How far the download of an update has come. */
+export interface UpdateProgress {
+  downloaded: number;
+  /** `null` when the server does not say how large the package is. */
+  total: number | null;
+  /** The package is in; the installer is being started. */
+  finished: boolean;
+}

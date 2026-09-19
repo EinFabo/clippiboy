@@ -24,6 +24,7 @@ pub mod shot;
 pub mod state;
 pub mod stems;
 pub mod thumbs;
+pub mod tools;
 pub mod tray;
 pub mod updater;
 pub mod wgc;
@@ -708,11 +709,9 @@ pub fn run() {
                 // last time moves there now.
                 filing::tidy(library, &config.clip_dir);
             }
-            // Make the bundled ffmpeg/ffprobe known before anything wants to
-            // write a clip.
-            if let Ok(dir) = handle.path().resource_dir() {
-                muxer::set_tool_dir(dir.join("resources"));
-            }
+            // ffmpeg/ffprobe: at once when they are there, otherwise fetched
+            // in the background — the buffer does not wait for them.
+            tools::setup(handle);
             apply_autostart(handle, config.auto_start_with_windows);
             if started_by_autostart() {
                 if let Some(window) = handle.get_webview_window("main") {
@@ -789,6 +788,8 @@ pub fn run() {
             commands::check_update,
             commands::pending_update,
             commands::install_update,
+            commands::ffmpeg_status,
+            commands::retry_ffmpeg,
             commands::regenerate_control_token,
         ])
         .build(tauri::generate_context!())

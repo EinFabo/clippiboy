@@ -4,6 +4,7 @@ import { TitleBar } from "./components/TitleBar";
 import { NavBar, type Route } from "./components/NavBar";
 import { Toasts } from "./components/Toasts";
 import { UpdateNotice } from "./components/UpdateNotice";
+import { FfmpegNotice } from "./components/FfmpegNotice";
 import { TextMenu } from "./components/TextMenu";
 import { MenuProvider } from "./components/ui/Menu";
 import { Dashboard } from "./routes/Dashboard";
@@ -35,6 +36,7 @@ export default function App() {
           {/* Outside the keyed wrapper: it belongs to no page and should not
               replay its entrance on every tab switch. */}
           <div className="mx-auto w-full max-w-[1180px] px-8">
+            <FfmpegNotice />
             <UpdateNotice />
           </div>
           {/* Keyed on the route so the rise plays again on every change — the

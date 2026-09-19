@@ -15,6 +15,8 @@ import type {
   StorageUsage,
   TrackMix,
   UpdateInfo,
+  UpdateProgress,
+  FfmpegStatus,
   ShotEdit,
   ShotRect,
   ShotStep,
@@ -69,6 +71,8 @@ export const api = {
    *  have gone out while the window was hidden. */
   pendingUpdate: () => invoke<UpdateInfo | null>("pending_update"),
   installUpdate: () => invoke<void>("install_update"),
+  ffmpegStatus: () => invoke<FfmpegStatus>("ffmpeg_status"),
+  retryFfmpeg: () => invoke<void>("retry_ffmpeg"),
 
   listClips: () => invoke<Clip[]>("list_clips"),
   deleteClip: (id: string) => invoke<void>("delete_clip", { id }),
@@ -166,6 +170,16 @@ export const events = {
     listen<ClipProgress>("clip-progress", (e) => cb(e.payload)),
   onUpdateAvailable: (cb: (info: UpdateInfo) => void): Promise<UnlistenFn> =>
     listen<UpdateInfo>("update-available", (e) => cb(e.payload)),
+  onUpdateProgress: (
+    cb: (progress: Omit<UpdateProgress, "finished">) => void,
+  ): Promise<UnlistenFn> =>
+    listen<Omit<UpdateProgress, "finished">>("update-progress", (e) =>
+      cb(e.payload),
+    ),
+  onUpdateDownloaded: (cb: () => void): Promise<UnlistenFn> =>
+    listen("update-downloaded", () => cb()),
+  onFfmpegStatus: (cb: (status: FfmpegStatus) => void): Promise<UnlistenFn> =>
+    listen<FfmpegStatus>("ffmpeg-status", (e) => cb(e.payload)),
   onAudioErrors: (
     cb: (errors: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>

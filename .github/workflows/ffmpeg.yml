@@ -1,0 +1,53 @@
+# Publishes ffmpeg.exe and ffprobe.exe as a release of their own.
+#
+# The app fetches them from there once on first start (see
+# `src-tauri/src/tools.rs`) instead of carrying them in every installer.
+# Triggered by a tag like `ffmpeg-9.0.1`; the version has to match `VERSION` in
+# `scripts/fetch-ffmpeg.mjs` and in `tools.rs`, and the programs' hashes in
+# `tools.rs` have to match what comes out — the app rejects anything else.
+name: ffmpeg
+
+on:
+  push:
+    tags: ["ffmpeg-*"]
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Pinned package, checked against its checksum.
+      - run: node scripts/fetch-ffmpeg.mjs
+
+      - name: Check the version and pack
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^ffmpeg-', ''
+          $line = (& dist-ffmpeg/ffmpeg.exe -version | Select-Object -First 1)
+          if ($line -notmatch "ffmpeg version $([regex]::Escape($version))-") {
+            throw "tag says $version, the program says: $line"
+          }
+          Compress-Archive -Path dist-ffmpeg/ffmpeg.exe, dist-ffmpeg/ffprobe.exe `
+            -DestinationPath "ffmpeg-$version.zip" -CompressionLevel Optimal
+          Get-FileHash dist-ffmpeg/*.exe -Algorithm SHA256 | Format-Table -AutoSize
+
+      # `--latest=false` is essential: the updater asks
+      # `releases/latest/download/latest.json`, and this release has none.
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^ffmpeg-', ''
+          gh release create "${{ github.ref_name }}" "ffmpeg-$version.zip" `
+            --title "ffmpeg $version" `
+            --notes "ffmpeg.exe and ffprobe.exe (gyan.dev essentials build $version). ClippiBoy downloads this by itself on first start — nothing to do here." `
+            --latest=false

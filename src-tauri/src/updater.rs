@@ -40,6 +40,18 @@ impl UpdateInfo {
     }
 }
 
+/// How far the download of an update has come.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProgress {
+    pub downloaded: u64,
+    /// `None` when the server does not say how large the package is.
+    pub total: Option<u64>,
+}
+
+/// How often the download reports its progress to the UI at most.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// How often to look again after the first check.
 ///
 /// ClippiBoy starts with Windows and then runs for days. Looking only at startup
@@ -98,8 +110,29 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
         return Err("No verified update is ready.".into());
     };
 
+    // The package is some tens of megabytes; without word on how far along it
+    // is, the button just sat on "Installing …" for a minute. Chunks come in a
+    // few kilobytes at a time, so the UI hears about it only now and then.
+    let mut downloaded: u64 = 0;
+    let mut last_emit: Option<std::time::Instant> = None;
     update
-        .download_and_install(|_chunk, _total| {}, || {})
+        .download_and_install(
+            |chunk, total| {
+                downloaded += chunk as u64;
+                let done = total.is_some_and(|total| downloaded >= total);
+                if done || last_emit.map_or(true, |at| at.elapsed() >= PROGRESS_EVERY) {
+                    last_emit = Some(std::time::Instant::now());
+                    let _ = tauri::Emitter::emit(
+                        app,
+                        "update-progress",
+                        UpdateProgress { downloaded, total },
+                    );
+                }
+            },
+            || {
+                let _ = tauri::Emitter::emit(app, "update-downloaded", ());
+            },
+        )
         .await
         .map_err(|err| format!("could not install the update: {err}"))?;
     Ok(())

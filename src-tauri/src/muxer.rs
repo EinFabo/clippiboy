@@ -21,8 +21,8 @@ use crate::stems;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Folder holding the bundled programs — in the installed package that is the
-/// app's resource folder. Set once at startup.
+/// Folder holding the programs ClippiBoy fetched for itself (see `tools.rs`).
+/// Set once they are in place.
 static TOOL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where to find ffmpeg and ffprobe. Without a call only PATH is searched.
@@ -30,10 +30,10 @@ pub fn set_tool_dir(dir: PathBuf) {
     let _ = TOOL_DIR.set(dir);
 }
 
-/// The bundled program, otherwise the name for the PATH search.
+/// ClippiBoy's own program, otherwise the name for the PATH search.
 ///
-/// Bundled deliberately beats PATH: some ffmpeg version that happens to be
-/// installed may have different defaults, and the one shipped alongside is the
+/// Its own deliberately beats PATH: some ffmpeg version that happens to be
+/// installed may have different defaults, and the one pinned in `tools.rs` is the
 /// one that was tested.
 fn tool(name: &str) -> PathBuf {
     let file = if cfg!(windows) {

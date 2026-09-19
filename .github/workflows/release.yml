@@ -39,9 +39,8 @@ jobs:
 
       - run: npm ci
 
-      # ffmpeg and ffprobe go into the package so the app can write clips on
-      # someone else's machine with nothing pre-installed.
-      - run: npm run ffmpeg
+      # ffmpeg is not part of the package: the app fetches it once on first
+      # start from its own release (see ffmpeg.yml).
 
       # Deliberately before the installer: if the plugin does not build, no
       # release has been created yet that would then be missing it.

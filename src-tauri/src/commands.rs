@@ -1073,3 +1073,16 @@ pub async fn check_update(app: tauri::AppHandle) -> Result<Option<crate::updater
 pub async fn install_update(app: tauri::AppHandle) -> Result<()> {
     crate::updater::install(&app).await
 }
+
+/// Where ffmpeg stands — asked for when the window starts, the changes come
+/// as `ffmpeg-status`.
+#[tauri::command]
+pub fn ffmpeg_status() -> crate::tools::Status {
+    crate::tools::status()
+}
+
+/// Try the ffmpeg download again right away instead of after the wait.
+#[tauri::command]
+pub fn retry_ffmpeg() {
+    crate::tools::retry()
+}
