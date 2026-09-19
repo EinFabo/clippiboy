@@ -35,13 +35,24 @@ export function Settings() {
   const patchOverlay = (patch: Partial<typeof config.overlay>) =>
     patchConfig({ overlay: { ...config.overlay, ...patch } });
 
+  // Matched the way the core matches it: the panel's identity first, the
+  // device name second. `\\.\DISPLAYn` can name a different screen after a
+  // reboot, and then the dropdown showed nothing that was actually in use.
+  const savedScreen =
+    monitors.find(
+      (m) =>
+        config.overlay.monitorStableId !== null &&
+        m.stableId === config.overlay.monitorStableId,
+    ) ??
+    monitors.find((m) => config.overlay.monitor === m.id) ??
+    (config.overlay.monitor === null && config.overlay.monitorStableId === null
+      ? monitors.find((m) => m.isPrimary)
+      : undefined) ??
+    null;
+
   const screen = config.overlay.followActiveScreen
     ? FOLLOW
-    : (monitors.find(
-        (m) =>
-          config.overlay.monitor === m.id ||
-          (config.overlay.monitor === null && m.isPrimary),
-      )?.id ?? null);
+    : (savedScreen?.id ?? null);
 
   // The configured screen is not among the ones plugged in. Worth saying out
   // loud: a dropdown would otherwise quietly show its first entry, and the core
@@ -173,7 +184,14 @@ export function Settings() {
                 patchOverlay(
                   value === FOLLOW
                     ? { followActiveScreen: true }
-                    : { monitor: value, followActiveScreen: false },
+                    : {
+                        monitor: value,
+                        // Both halves, so the banner still finds this screen
+                        // after the device names have been reshuffled.
+                        monitorStableId:
+                          monitors.find((m) => m.id === value)?.stableId ?? null,
+                        followActiveScreen: false,
+                      },
                 );
               }}
             />

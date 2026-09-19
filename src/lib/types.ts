@@ -21,7 +21,16 @@ export type SourceKind =
   | { type: "game" }
   | { type: "outputDevice"; deviceId: string }
   | { type: "inputDevice"; deviceId: string }
-  | { type: "process"; pid: number; mode: "include" | "exclude" };
+  | {
+      type: "process";
+      pid: number;
+      /**
+       * The exe behind that pid. A pid dies with the application; this is what
+       * lets the backend find the source again after a restart.
+       */
+      exe: string | null;
+      mode: "include" | "exclude";
+    };
 
 export interface AudioSource {
   id: string;
@@ -55,6 +64,13 @@ export type TargetKind = "monitor" | "window";
 export interface CaptureTarget {
   kind: TargetKind;
   id: string;
+  /**
+   * A monitor's identity that survives a reboot — the panel's device interface
+   * path. `id` is the name Windows hands out by enumeration order
+   * (`\\.\DISPLAY2`), and that can point at a different screen after the next
+   * boot. `null` for windows, and for a monitor Windows will not describe.
+   */
+  stableId: string | null;
   title: string;
   width: number;
   height: number;
@@ -69,6 +85,8 @@ export interface CaptureTarget {
 export interface RecordingConfig {
   targetKind: TargetKind;
   targetId: string | null;
+  /** The chosen monitor's stable identity; wins over `targetId`. */
+  targetStableId: string | null;
   width: number;
   height: number;
   fps: number;
@@ -118,6 +136,8 @@ export interface OverlayConfig {
   durationMs: number;
   /** Device name of the screen (`\\.\DISPLAY1`); null = primary. */
   monitor: string | null;
+  /** That screen's stable identity; wins over `monitor`. */
+  monitorStableId: string | null;
   /** Follow the foreground window instead of a fixed screen. */
   followActiveScreen: boolean;
 }

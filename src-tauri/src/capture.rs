@@ -22,6 +22,115 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
     };
+    use windows::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+    };
+    use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
+    use std::collections::HashMap;
+
+    /// What Windows knows about the panel behind a `\\.\DISPLAYn`.
+    pub struct Identity {
+        /// The name on the box — "E2212F" rather than "Generic PnP Monitor".
+        pub friendly: String,
+        /// The device interface path, tied to the panel and the connector it
+        /// hangs on. This is what survives a reboot.
+        pub path: String,
+    }
+
+    /// Fixed-length wide field → String, stopping at the first NUL.
+    fn wide_to_string(field: &[u16]) -> String {
+        let len = field.iter().position(|c| *c == 0).unwrap_or(field.len());
+        String::from_utf16_lossy(&field[..len])
+    }
+
+    /// Everything Windows will say about the monitors, keyed by GDI device name.
+    ///
+    /// `QueryDisplayConfig` is the one call that hands back both halves at once:
+    /// the source side carries the `\\.\DISPLAYn` that `MONITORINFOEXW` also
+    /// reports, and the target side carries the panel's own name and its device
+    /// path. That pairing is the whole point — without it there is no way to say
+    /// which of three identical 1920×1080 screens the saved one was.
+    ///
+    /// Anything unexpected gives an empty map and every caller carries on with
+    /// the device name alone, exactly as before. A screen that Windows will not
+    /// describe must not become a screen that cannot be recorded.
+    pub fn identities() -> HashMap<String, Identity> {
+        let mut out = HashMap::new();
+        unsafe {
+            let mut path_count = 0u32;
+            let mut mode_count = 0u32;
+            if GetDisplayConfigBufferSizes(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut path_count,
+                &mut mode_count,
+            ) != ERROR_SUCCESS
+            {
+                return out;
+            }
+            let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+            let result: WIN32_ERROR = QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut path_count,
+                paths.as_mut_ptr(),
+                &mut mode_count,
+                modes.as_mut_ptr(),
+                None,
+            );
+            if result != ERROR_SUCCESS {
+                return out;
+            }
+            // The counts may come back smaller than the buffers asked for.
+            paths.truncate(path_count as usize);
+
+            for path in &paths {
+                let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+                    header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                        r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                        size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                        adapterId: path.sourceInfo.adapterId,
+                        id: path.sourceInfo.id,
+                    },
+                    ..Default::default()
+                };
+                if DisplayConfigGetDeviceInfo(&mut source.header) != ERROR_SUCCESS.0 as i32 {
+                    continue;
+                }
+                let device = wide_to_string(&source.viewGdiDeviceName);
+                if device.is_empty() {
+                    continue;
+                }
+
+                let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+                    header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                        r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                        size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                        adapterId: path.targetInfo.adapterId,
+                        id: path.targetInfo.id,
+                    },
+                    ..Default::default()
+                };
+                if DisplayConfigGetDeviceInfo(&mut target.header) != ERROR_SUCCESS.0 as i32 {
+                    continue;
+                }
+                let path_id = wide_to_string(&target.monitorDevicePath);
+                if path_id.is_empty() {
+                    continue;
+                }
+                out.insert(
+                    device,
+                    Identity {
+                        friendly: wide_to_string(&target.monitorFriendlyDeviceName),
+                        path: path_id,
+                    },
+                );
+            }
+        }
+        out
+    }
 
     /// A screen's refresh rate in hertz.
     ///
@@ -65,13 +174,21 @@ mod win {
         refresh_of_device(&info.szDevice)
     }
 
+    /// What `monitor_proc` writes into and reads from.
+    struct Enumeration<'a> {
+        out: &'a mut Vec<CaptureTarget>,
+        /// Looked up once for the whole run rather than per monitor —
+        /// `QueryDisplayConfig` describes every screen in one go.
+        identities: &'a HashMap<String, Identity>,
+    }
+
     unsafe extern "system" fn monitor_proc(
         monitor: HMONITOR,
         _dc: HDC,
         _rect: *mut RECT,
         data: LPARAM,
     ) -> BOOL {
-        let out = &mut *(data.0 as *mut Vec<CaptureTarget>);
+        let state = &mut *(data.0 as *mut Enumeration);
         let mut info = MONITORINFOEXW::default();
         info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
 
@@ -84,12 +201,23 @@ mod win {
                 .to_string();
             let is_primary = info.monitorInfo.dwFlags & PRIMARY_FLAG != 0;
             let refresh_hz = refresh_of_device(&info.szDevice);
-            let index = out.len() + 1;
+            let index = state.out.len() + 1;
+            let identity = state.identities.get(&device);
 
-            out.push(CaptureTarget {
+            // The panel's own name if Windows gives one. Three screens of the
+            // same size are "Monitor 1/2/3" otherwise, and that number comes
+            // from enumeration order — it can mean a different screen tomorrow.
+            let label = identity
+                .map(|id| id.friendly.trim())
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| format!("Monitor {index}"));
+
+            state.out.push(CaptureTarget {
                 kind: TargetKind::Monitor,
                 id: device,
-                title: format!("Monitor {index} — {width}×{height}"),
+                stable_id: identity.map(|id| id.path.clone()),
+                title: format!("{label} \u{2014} {width}\u{d7}{height}"),
                 width,
                 height,
                 is_primary,
@@ -130,6 +258,9 @@ mod win {
         out.push(CaptureTarget {
             kind: TargetKind::Window,
             id: format!("0x{:X}", hwnd.0 as usize),
+            // A window has no panel behind it, and its handle is new with every
+            // run of the program anyway.
+            stable_id: None,
             title,
             width,
             height,
@@ -142,13 +273,21 @@ mod win {
     pub fn list_targets() -> Vec<CaptureTarget> {
         let mut monitors: Vec<CaptureTarget> = Vec::new();
         let mut windows: Vec<CaptureTarget> = Vec::new();
+        let identities = identities();
         unsafe {
-            let _ = EnumDisplayMonitors(
-                None,
-                None,
-                Some(monitor_proc),
-                LPARAM(&mut monitors as *mut _ as isize),
-            );
+            // Scoped, so the borrow of `monitors` ends before they are joined.
+            {
+                let mut state = Enumeration {
+                    out: &mut monitors,
+                    identities: &identities,
+                };
+                let _ = EnumDisplayMonitors(
+                    None,
+                    None,
+                    Some(monitor_proc),
+                    LPARAM(&mut state as *mut _ as isize),
+                );
+            }
             let _ = EnumWindows(
                 Some(window_proc),
                 LPARAM(&mut windows as *mut _ as isize),
@@ -208,18 +347,186 @@ pub fn list_targets() -> Vec<CaptureTarget> {
     Vec::new()
 }
 
-/// Find the configured target in the current list. With no selection the
-/// primary monitor applies — exactly as in the pipeline.
-fn find_target(kind: TargetKind, id: Option<&str>) -> Option<CaptureTarget> {
-    let targets = list_targets();
-    let hit = match id {
-        Some(id) => targets.iter().find(|t| t.kind == kind && t.id == id),
-        None => targets
+/// How a saved selection was matched against the screens actually present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Match {
+    /// Found by the panel's own identity — right even if the device name moved.
+    Stable,
+    /// Found by the device name.
+    Device,
+    /// Nothing was ever chosen; the primary screen is simply the default.
+    Default,
+    /// Something *was* chosen and it is not here. The primary screen stands in.
+    Fallback,
+}
+
+/// The chosen target and how it was arrived at.
+#[derive(Debug, Clone)]
+pub struct Choice {
+    pub target: CaptureTarget,
+    pub how: Match,
+}
+
+/// Work out which of these targets the saved selection means.
+///
+/// The order is the whole fix for "after a reboot it records the wrong screen":
+/// the panel's identity outranks the device name, because `\\.\DISPLAY2` is
+/// handed out by enumeration order at boot and can land on a different screen
+/// tomorrow, while the device path stays with the panel.
+///
+/// A pure function over a list, so the rules are testable without Windows —
+/// the same reason `game::resolve_name` is one.
+pub fn pick(
+    targets: &[CaptureTarget],
+    kind: TargetKind,
+    id: Option<&str>,
+    stable: Option<&str>,
+) -> Option<Choice> {
+    let primary = || {
+        targets
             .iter()
             .find(|t| t.kind == TargetKind::Monitor && t.is_primary)
-            .or_else(|| targets.iter().find(|t| t.kind == TargetKind::Monitor)),
-    }?;
-    Some(hit.clone())
+            .or_else(|| targets.iter().find(|t| t.kind == TargetKind::Monitor))
+    };
+
+    // A window is only ever its handle, and a handle is new with every run of
+    // the program that owns it. There is nothing stable to fall back on, and
+    // standing in with a whole screen would be a surprise, not a rescue.
+    if kind == TargetKind::Window {
+        return targets
+            .iter()
+            .find(|t| t.kind == TargetKind::Window && Some(t.id.as_str()) == id)
+            .map(|target| Choice { target: target.clone(), how: Match::Device });
+    }
+
+    if let Some(stable) = stable.filter(|s| !s.is_empty()) {
+        if let Some(target) = targets
+            .iter()
+            .find(|t| t.kind == TargetKind::Monitor && t.stable_id.as_deref() == Some(stable))
+        {
+            return Some(Choice { target: target.clone(), how: Match::Stable });
+        }
+    }
+    if let Some(id) = id.filter(|s| !s.is_empty()) {
+        if let Some(target) = targets
+            .iter()
+            .find(|t| t.kind == TargetKind::Monitor && t.id == id)
+        {
+            return Some(Choice { target: target.clone(), how: Match::Device });
+        }
+    }
+
+    let chosen = primary()?.clone();
+    let how = if id.is_some() || stable.is_some() {
+        Match::Fallback
+    } else {
+        Match::Default
+    };
+    Some(Choice { target: chosen, how })
+}
+
+/// Resolve the saved selection against the screens that are here right now.
+///
+/// Says out loud when the saved screen could not be found. That line went
+/// missing when capture moved to `wgc.rs`, and without it the app quietly
+/// recorded the primary screen for as long as it took somebody to notice.
+pub fn resolve(
+    kind: TargetKind,
+    id: Option<&str>,
+    stable: Option<&str>,
+) -> Option<Choice> {
+    let choice = pick(&list_targets(), kind, id, stable)?;
+    match choice.how {
+        Match::Fallback => log::warn!(
+            "the chosen {} is not here (device {:?}, panel {:?}) \u{2014} recording '{}' instead",
+            match kind {
+                TargetKind::Monitor => "screen",
+                TargetKind::Window => "window",
+            },
+            id.unwrap_or("-"),
+            stable.unwrap_or("-"),
+            choice.target.title
+        ),
+        Match::Stable if Some(choice.target.id.as_str()) != id => log::info!(
+            "'{}' is {} now, was {:?} \u{2014} found by its panel",
+            choice.target.title,
+            choice.target.id,
+            id.unwrap_or("-")
+        ),
+        _ => {}
+    }
+    Some(choice)
+}
+
+/// Bring a saved selection back in line with reality.
+///
+/// Two repairs, both quiet and both one-way: a monitor found by its panel under
+/// a new device name has that name written back, and one found by device name
+/// gains the panel identity it did not have yet. The second is how a
+/// configuration written before any of this existed acquires one — on the first
+/// start where the screen is present.
+///
+/// Returns whether anything changed, so the caller knows to save.
+pub fn repair_monitor_choice(
+    id: &mut Option<String>,
+    stable: &mut Option<String>,
+) -> bool {
+    // Nothing chosen at all is a valid state: the primary screen, by default.
+    if id.is_none() && stable.is_none() {
+        return false;
+    }
+    let Some(choice) = resolve(TargetKind::Monitor, id.as_deref(), stable.as_deref()) else {
+        return false;
+    };
+    // A screen that is merely absent keeps its saved identity — it will be back
+    // when it is plugged in again, and overwriting it now would lose the choice.
+    if choice.how == Match::Fallback {
+        return false;
+    }
+
+    let mut changed = false;
+    if id.as_deref() != Some(choice.target.id.as_str()) {
+        *id = Some(choice.target.id.clone());
+        changed = true;
+    }
+    if choice.target.stable_id.is_some() && *stable != choice.target.stable_id {
+        *stable = choice.target.stable_id.clone();
+        changed = true;
+    }
+    changed
+}
+
+/// The recording source, repaired. A window keeps its handle — see [`pick`].
+pub fn repair(recording: &mut crate::model::RecordingConfig) -> bool {
+    if recording.target_kind != TargetKind::Monitor {
+        return false;
+    }
+    let mut id = recording.target_id.take();
+    let mut stable = recording.target_stable_id.take();
+    let changed = repair_monitor_choice(&mut id, &mut stable);
+    recording.target_id = id;
+    recording.target_stable_id = stable;
+    changed
+}
+
+/// The screen the banner is pinned to, repaired the same way.
+pub fn repair_overlay(overlay: &mut crate::model::OverlayConfig) -> bool {
+    let mut id = overlay.monitor.take();
+    let mut stable = overlay.monitor_stable_id.take();
+    let changed = repair_monitor_choice(&mut id, &mut stable);
+    overlay.monitor = id;
+    overlay.monitor_stable_id = stable;
+    changed
+}
+
+/// Find the configured target in the current list. With no selection the
+/// primary monitor applies — exactly as in the pipeline.
+fn find_target(
+    kind: TargetKind,
+    id: Option<&str>,
+    stable: Option<&str>,
+) -> Option<CaptureTarget> {
+    pick(&list_targets(), kind, id, stable).map(|choice| choice.target)
 }
 
 /// The frame rates that suit a screen with this refresh rate.
@@ -264,7 +571,11 @@ fn snap_fps(fps: u32, choices: &[u32]) -> u32 {
 /// offered steps — the UI shows a fixed set of choices, and a value beside them
 /// would have no entry there.
 pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
-    let Some(target) = find_target(recording.target_kind, recording.target_id.as_deref()) else {
+    let Some(target) = find_target(
+        recording.target_kind,
+        recording.target_id.as_deref(),
+        recording.target_stable_id.as_deref(),
+    ) else {
         return;
     };
     recording.fps = snap_fps(recording.fps, &fps_choices(target.refresh_hz));
@@ -288,6 +599,145 @@ pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Three screens of identical size, as on the machine this was found on:
+    /// telling them apart by anything but their identity is impossible.
+    fn three_screens() -> Vec<CaptureTarget> {
+        let screen = |device: &str, panel: &str, primary: bool| CaptureTarget {
+            kind: TargetKind::Monitor,
+            id: device.into(),
+            stable_id: Some(format!("\\\\?\\DISPLAY#{panel}#5&1ba8a7fa&0#{{guid}}")),
+            title: format!("{panel} — 1920×1080"),
+            width: 1920,
+            height: 1080,
+            is_primary: primary,
+            refresh_hz: Some(60),
+        };
+        vec![
+            screen("\\\\.\\DISPLAY1", "E2212F", false),
+            screen("\\\\.\\DISPLAY2", "CR270E", true),
+            screen("\\\\.\\DISPLAY3", "CR270H", false),
+        ]
+    }
+
+    fn panel(name: &str) -> String {
+        format!("\\\\?\\DISPLAY#{name}#5&1ba8a7fa&0#{{guid}}")
+    }
+
+    #[test]
+    fn the_saved_screen_is_found_by_its_device_name() {
+        let choice = pick(
+            &three_screens(),
+            TargetKind::Monitor,
+            Some("\\\\.\\DISPLAY3"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(choice.how, Match::Device);
+        assert_eq!(choice.target.title, "CR270H — 1920×1080");
+    }
+
+    /// The reason the whole thing exists: after a reboot Windows handed the
+    /// panel a different `\\.\DISPLAYn`. Going by the device name alone lands
+    /// on the wrong screen — silently, because all three are 1920×1080.
+    #[test]
+    fn a_renumbered_screen_is_still_the_same_screen() {
+        let choice = pick(
+            &three_screens(),
+            TargetKind::Monitor,
+            // Saved yesterday, when this panel was DISPLAY1.
+            Some("\\\\.\\DISPLAY1"),
+            Some(&panel("CR270H")),
+        )
+        .unwrap();
+        assert_eq!(choice.how, Match::Stable);
+        assert_eq!(choice.target.id, "\\\\.\\DISPLAY3");
+        assert_eq!(choice.target.title, "CR270H — 1920×1080");
+    }
+
+    #[test]
+    fn the_panel_outranks_the_device_name() {
+        // Both match something, and they disagree. The panel wins.
+        let choice = pick(
+            &three_screens(),
+            TargetKind::Monitor,
+            Some("\\\\.\\DISPLAY1"),
+            Some(&panel("CR270E")),
+        )
+        .unwrap();
+        assert_eq!(choice.how, Match::Stable);
+        assert_eq!(choice.target.id, "\\\\.\\DISPLAY2");
+    }
+
+    #[test]
+    fn an_unplugged_screen_falls_back_to_the_primary_and_says_so() {
+        let choice = pick(
+            &three_screens(),
+            TargetKind::Monitor,
+            Some("\\\\.\\DISPLAY9"),
+            Some(&panel("GONE123")),
+        )
+        .unwrap();
+        assert_eq!(choice.how, Match::Fallback, "the fallback has to be visible");
+        assert!(choice.target.is_primary);
+    }
+
+    /// Never having chosen is not the same as having chosen something that is
+    /// gone — only the second one is worth a warning.
+    #[test]
+    fn no_choice_at_all_is_not_a_fallback() {
+        let choice = pick(&three_screens(), TargetKind::Monitor, None, None).unwrap();
+        assert_eq!(choice.how, Match::Default);
+        assert!(choice.target.is_primary);
+    }
+
+    /// A screen Windows will not describe still has to be selectable.
+    #[test]
+    fn a_screen_without_an_identity_still_works() {
+        let mut screens = three_screens();
+        for screen in &mut screens {
+            screen.stable_id = None;
+        }
+        let choice = pick(&screens, TargetKind::Monitor, Some("\\\\.\\DISPLAY2"), None).unwrap();
+        assert_eq!(choice.how, Match::Device);
+        assert_eq!(choice.target.id, "\\\\.\\DISPLAY2");
+    }
+
+    /// A window is its handle and nothing else — no screen stands in for one
+    /// that has been closed.
+    #[test]
+    fn a_closed_window_does_not_become_a_screen() {
+        let mut targets = three_screens();
+        targets.push(CaptureTarget {
+            kind: TargetKind::Window,
+            id: "0xABC".into(),
+            stable_id: None,
+            title: "A Game".into(),
+            width: 1280,
+            height: 720,
+            is_primary: false,
+            refresh_hz: None,
+        });
+        assert!(pick(&targets, TargetKind::Window, Some("0xDEAD"), None).is_none());
+        let open = pick(&targets, TargetKind::Window, Some("0xABC"), None).unwrap();
+        assert_eq!(open.target.title, "A Game");
+    }
+
+    #[test]
+    fn repair_writes_back_the_new_device_name() {
+        // `repair` goes through the live screen list, so only the pure decision
+        // underneath it is exercised here — that the two do agree is what
+        // `a_renumbered_screen_is_still_the_same_screen` covers.
+        let choice = pick(
+            &three_screens(),
+            TargetKind::Monitor,
+            Some("\\\\.\\DISPLAY1"),
+            Some(&panel("CR270H")),
+        )
+        .unwrap();
+        assert_ne!(choice.target.id, "\\\\.\\DISPLAY1");
+        assert_eq!(choice.target.stable_id.as_deref(), Some(panel("CR270H").as_str()));
+    }
 
     /// With no known refresh rate the usual steps stand — better to offer 120
     /// than to cap at 60 on a 240 Hz panel.

@@ -30,6 +30,16 @@ pub struct AppState {
     /// audio stream down. The exe is kept for the liveness check — Windows
     /// reuses PIDs.
     game_pid: Mutex<Option<(u32, String)>>,
+    /// The game name the log last mentioned. Detection runs every two seconds;
+    /// without this the same line would go into the log thirty times a minute.
+    logged_game: Mutex<Option<String>>,
+    /// What is wrong with the sources as configured, recomputed on the
+    /// two-second tick and read out on the one-second one.
+    ///
+    /// Kept here rather than worked out per emit because it needs the list of
+    /// endpoints, and enumerating those is a COM round trip — not something to
+    /// do once a second for a line that changes about once an hour.
+    pub source_notes: Mutex<std::collections::HashMap<String, String>>,
     /// The game that was running when the buffer last ran — the name on the
     /// clip.
     ///
@@ -249,6 +259,8 @@ impl AppState {
             shared: Mutex::new(None),
             current_game: Mutex::new(None),
             game_pid: Mutex::new(None),
+            logged_game: Mutex::new(None),
+            source_notes: Mutex::new(std::collections::HashMap::new()),
             buffering_game: Mutex::new(None),
             quitting: std::sync::atomic::AtomicBool::new(false),
             auto: AutoBuffer::default(),
@@ -416,6 +428,28 @@ impl AppState {
     pub fn track_game(&self) -> (Option<String>, bool) {
         let detected = crate::game::detect_detailed();
         let name = detected.as_ref().map(|game| game.name.clone());
+        {
+            // Say once, when it changes, which game was recognised and how. A
+            // name off the window title is the fragile kind — this is the line
+            // that names the exe to put into `games.json` so the title stops
+            // mattering for it.
+            let mut previous = self.logged_game.lock();
+            if *previous != name {
+                if let Some(game) = detected.as_ref() {
+                    if crate::game::is_known_exe(&game.exe) {
+                        log::info!("game '{}' from the list ({})", game.name, game.exe);
+                    } else {
+                        log::info!(
+                            "game '{}' from the window title of {} — put it in games.json \
+                             to pin the name",
+                            game.name,
+                            game.exe
+                        );
+                    }
+                }
+                *previous = name.clone();
+            }
+        }
         *self.current_game.lock() = name.clone();
         if name.is_some() && self.status.lock().buffer_active {
             *self.buffering_game.lock() = name.clone();
@@ -554,7 +588,11 @@ impl AppState {
             .clone()
             .unwrap_or_else(|| config.recording.clone());
 
-        let shot = crate::shot::grab(recording.target_kind, recording.target_id.as_deref())?;
+        let shot = crate::shot::grab(
+            recording.target_kind,
+            recording.target_id.as_deref(),
+            recording.target_stable_id.as_deref(),
+        )?;
 
         let buffering_game = self.buffering_game.lock().clone();
         let game = buffering_game.or_else(|| self.current_game.lock().clone());

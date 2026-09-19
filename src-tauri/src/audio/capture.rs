@@ -150,7 +150,8 @@ mod win {
     use windows::core::{implement, IUnknown, Interface, PCWSTR};
     use windows::Win32::Foundation::{CloseHandle, E_INVALIDARG, HANDLE, S_OK, WAIT_OBJECT_0};
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
+        eCapture, eMultimedia, eRender, ActivateAudioInterfaceAsync,
+        IActivateAudioInterfaceAsyncOperation,
         IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
         IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
         AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -317,7 +318,12 @@ mod win {
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
             let id_wide = wide(device_id);
             let device = if device_id.is_empty() {
-                enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?
+                // The default device of the right *direction*. Taken as eRender
+                // regardless, a microphone with no id opened the default
+                // speakers and recorded nothing — not reachable from the UI
+                // today, but a trap laid for whoever adds a way.
+                let flow = if loopback { eRender } else { eCapture };
+                enumerator.GetDefaultAudioEndpoint(flow, eMultimedia)?
             } else {
                 enumerator.GetDevice(PCWSTR(id_wide.as_ptr()))?
             };
@@ -504,7 +510,7 @@ mod win {
         let started = match kind {
             SourceKind::InputDevice { device_id } => device_client(device_id, false),
             SourceKind::OutputDevice { device_id, .. } => device_client(device_id, true),
-            SourceKind::Process { pid, mode } => process_client(
+            SourceKind::Process { pid, mode, .. } => process_client(
                 *pid,
                 matches!(mode, crate::model::ProcessMode::Include),
             ),

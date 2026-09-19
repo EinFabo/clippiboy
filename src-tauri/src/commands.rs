@@ -72,7 +72,8 @@ pub fn set_config(
     // bitrate are dragged on a slider, and a restart per mouse move would be
     // fatal there.
     let target_changed = next.recording.target_kind != previous.recording.target_kind
-        || next.recording.target_id != previous.recording.target_id;
+        || next.recording.target_id != previous.recording.target_id
+        || next.recording.target_stable_id != previous.recording.target_stable_id;
     if target_changed && state.is_buffering() {
         log::info!("capture source changed — restarting the buffer");
         state.stop_pipeline();

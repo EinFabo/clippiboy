@@ -171,12 +171,78 @@ pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
                     None => format!("Keeping the last {seconds} s"),
                 }),
             );
+            report_audio_trouble(app);
         }
         Err(err) => {
             notify(app, "error", err.clone());
             overlay::show(app, BannerKind::Error, "Buffer will not start", Some(err));
         }
     }
+}
+
+/// Say what is wrong with the sound, at the moment recording starts.
+///
+/// The inline banner in the window covers somebody who is looking at the
+/// window. Whoever starts the buffer by hotkey over a game never sees it — and
+/// that is precisely the person who finds out hours later that a track was
+/// silent. So the same finding goes out as a toast and over the banner, which
+/// is the one surface visible during play.
+///
+/// Only at the start, and only in one line: the source list is already in the
+/// mixer, and a banner per source over a game would be worse than the problem.
+fn report_audio_trouble(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let sources = state.config_snapshot().sources;
+    let label = |id: &String| {
+        sources
+            .iter()
+            .find(|s| &s.id == id)
+            .map(|s| s.label.clone())
+            .unwrap_or_else(|| id.clone())
+    };
+
+    let errors = state.audio.errors();
+    // Everything but "no game yet": the buffer has just started, and more often
+    // than not the game is launched a minute later. That one is for the banner
+    // in the window, not for a toast at every start.
+    //
+    // Worked out fresh rather than read from the two-second cache: after a boot
+    // the buffer starts before that tick has run even once, and a boot is
+    // exactly when a device has gone missing.
+    let notes: std::collections::HashMap<String, String> = audio::configuration_warnings(
+        &sources,
+        &audio::devices::list_devices(),
+        state.current_game.lock().is_some(),
+        true,
+    )
+    .into_iter()
+    .filter(|(id, _)| {
+        !sources
+            .iter()
+            .any(|s| &s.id == id && matches!(s.kind, model::SourceKind::Game))
+    })
+    .collect();
+    // A source that cannot start at all outranks one that merely runs
+    // differently than it says.
+    let (names, headline) = if !errors.is_empty() {
+        (
+            errors.keys().map(label).collect::<Vec<_>>(),
+            "Audio source not recording",
+        )
+    } else if !notes.is_empty() {
+        (
+            notes.keys().map(label).collect::<Vec<_>>(),
+            "Check the audio sources",
+        )
+    } else {
+        return;
+    };
+
+    let mut names = names;
+    names.sort();
+    let detail = format!("{} — see the mixer", names.join(", "));
+    notify(app, "error", format!("{headline}: {detail}"));
+    overlay::show(app, BannerKind::Error, headline, Some(detail));
 }
 
 /// Stop the buffer and report the result.
@@ -424,6 +490,20 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 state
                     .audio
                     .refresh_async(state.config_snapshot().sources, state.game_pid());
+                // What is wrong with the sources as configured — a device that
+                // is gone, or one whose label promises a channel it does not
+                // actually record. Worked out here rather than on the emit,
+                // because it has to enumerate the endpoints.
+                {
+                    let sources = state.config_snapshot().sources;
+                    let notes = audio::configuration_warnings(
+                        &sources,
+                        &audio::devices::list_devices(),
+                        game.is_some(),
+                        state.is_buffering(),
+                    );
+                    *state.source_notes.lock() = notes;
+                }
                 apply_auto_buffer(&handle, game.as_ref());
             }
             // If the recording reports a problem, somebody has to hear about it.
@@ -459,7 +539,18 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 tray::refresh(&handle, &status);
                 let _ = handle.emit("engine-status", status);
                 let _ = handle.emit("audio-errors", state.audio.errors());
-                let _ = handle.emit("audio-warnings", state.audio.warnings(&sources));
+                // The engine's own notices and the ones about how the sources
+                // are set up, in one map — `SourceTrouble` reads a single
+                // channel and should not have to learn about a second.
+                let mut warnings = state.audio.warnings(&sources);
+                warnings.extend(
+                    state
+                        .source_notes
+                        .lock()
+                        .iter()
+                        .map(|(id, note)| (id.clone(), note.clone())),
+                );
+                let _ = handle.emit("audio-warnings", warnings);
                 let _ = handle.emit("audio-taps", state.audio.taps());
             }
         }
@@ -557,6 +648,32 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             let handle = app.handle();
+            // Before anything reads the recording settings: put the saved screen
+            // back together. `\\.\DISPLAY2` is handed out by enumeration order
+            // at boot, so after a restart it can name a different panel than it
+            // did yesterday — the identity saved beside it says which one was
+            // meant, and the device name is corrected from it here, once.
+            {
+                let state = app.state::<AppState>();
+                let mut config = state.config.lock();
+                let fixed_source = capture::repair(&mut config.recording);
+                let fixed_banner = capture::repair_overlay(&mut config.overlay);
+                if fixed_source {
+                    log::info!(
+                        "the chosen screen is {:?} now \u{2014} corrected",
+                        config.recording.target_id
+                    );
+                }
+                if fixed_banner {
+                    log::info!(
+                        "the banner's screen is {:?} now \u{2014} corrected",
+                        config.overlay.monitor
+                    );
+                }
+                if (fixed_source || fixed_banner) && config::save(&config).is_err() {
+                    log::warn!("the corrected screen was not saved");
+                }
+            }
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);
@@ -582,6 +699,11 @@ pub fn run() {
                 edit::repair(library);
                 // Pictures from older versions still sit next to the videos.
                 thumbs::migrate(library);
+                // Game names first, folders second: a name that differs only in
+                // characters nobody can see has to become the one name before
+                // `tidy` works out where its clips belong — otherwise it would
+                // dutifully file them into the four folders they came from.
+                filing::normalize_games(library);
                 // And whatever has not found its way into its game folder since
                 // last time moves there now.
                 filing::tidy(library, &config.clip_dir);

@@ -229,11 +229,27 @@ fn place(window: &tauri::WebviewWindow, config: &OverlayConfig) -> tauri::Result
             Some((x, y)) => window.monitor_from_point(x, y)?,
             None => None,
         }
-    } else if let Some(wanted) = &config.monitor {
-        window
-            .available_monitors()?
-            .into_iter()
-            .find(|m| m.name().map(|n| n == wanted).unwrap_or(false))
+    } else if config.monitor.is_some() || config.monitor_stable_id.is_some() {
+        // Ask which screen is meant before looking for it: Tauri knows monitors
+        // only by their device name, and that name can have moved to another
+        // panel since this was saved. The panel identity resolves back to
+        // whatever the name is today.
+        let wanted = crate::capture::pick(
+            &crate::capture::list_targets(),
+            crate::model::TargetKind::Monitor,
+            config.monitor.as_deref(),
+            config.monitor_stable_id.as_deref(),
+        )
+        .filter(|choice| choice.how != crate::capture::Match::Fallback)
+        .map(|choice| choice.target.id)
+        .or_else(|| config.monitor.clone());
+        match wanted {
+            Some(wanted) => window
+                .available_monitors()?
+                .into_iter()
+                .find(|m| m.name().map(|n| *n == wanted).unwrap_or(false)),
+            None => None,
+        }
     } else {
         None
     };

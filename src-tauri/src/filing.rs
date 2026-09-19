@@ -38,7 +38,12 @@ const MAX_LEN: usize = 60;
 /// `None` means nothing usable is left of the name — the clip then goes into
 /// the clip folder itself, like one with no game at all.
 pub fn folder_name(game: &str) -> Option<String> {
-    let cleaned: String = game
+    // Invisible characters come out entirely rather than becoming a space: a
+    // zero width space sits *inside* a word ("Raid<ZWSP>ers"), and turning it
+    // into a space would split the word instead of closing it up. Names reach
+    // this point from the window title but also straight from the game field,
+    // typed by hand — so the guard belongs here as well.
+    let cleaned: String = crate::game::strip_invisibles(game)
         .chars()
         .map(|c| if FORBIDDEN.contains(&c) || (c as u32) < 0x20 { ' ' } else { c })
         .collect();
@@ -131,6 +136,59 @@ pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
         prune(parent, clip_dir);
     }
     Ok(Some(target))
+}
+
+/// Bring every stored game name to the one spelling.
+///
+/// Runs at startup, right before [`tidy`], and only ever changes names that are
+/// not already normal. A game whose window title carried invisible characters
+/// built a category per sprinkling — four folders called "ARC Raiders", each
+/// holding a few clips, none of them findable under the others. Putting the
+/// names right is all this does: `tidy` then sees clips whose game no longer
+/// matches their folder and moves the files together, and `place` prunes the
+/// folders that empties.
+///
+/// Returns how many clips were rewritten.
+pub fn normalize_games(library: &Library) -> usize {
+    let clips = match library.list() {
+        Ok(clips) => clips,
+        Err(err) => {
+            log::warn!("game names not normalised: {err}");
+            return 0;
+        }
+    };
+
+    let mut before: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut after: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut changed = 0usize;
+
+    for clip in clips {
+        let Some(game) = clip.game.as_deref() else {
+            continue;
+        };
+        let clean = crate::game::normalize_name(game);
+        before.insert(game.to_string());
+        // Nothing left but invisibles: the clip has no game rather than one
+        // with an empty name.
+        let target = (!clean.is_empty()).then_some(clean);
+        after.extend(target.clone());
+        if target.as_deref() == Some(game) {
+            continue;
+        }
+        match library.set_game(&clip.id, target.as_deref()) {
+            Ok(()) => changed += 1,
+            Err(err) => log::warn!("game of '{}' not corrected: {err}", clip.id),
+        }
+    }
+
+    if changed > 0 {
+        log::info!(
+            "normalised the game of {changed} clip(s): {} name(s) became {}",
+            before.len(),
+            after.len()
+        );
+    }
+    changed
 }
 
 /// Collect every clip that is not in its folder.
@@ -236,6 +294,107 @@ mod tests {
         // Forbidden characters turn into whitespace, and that collapses.
         assert_eq!(folder_name("Tom: The / Movie").as_deref(), Some("Tom The Movie"));
         assert_eq!(folder_name("  Bodycam  ").as_deref(), Some("Bodycam"));
+    }
+
+    /// The real strings ARC Raiders wrote into the clip database. Identical to
+    /// the eye, four different folders on disk.
+    const ARC_RAIDERS: [&str; 4] = [
+        "A\u{200b}\u{200b}\u{200b}\u{200b}R\u{feff}C\u{200b}\u{200b}\u{2005}\u{feff}\u{200b}\u{200b}\u{feff}\u{200b}\u{200b}\u{feff}\u{feff}Raid\u{feff}\u{200b}\u{200b}e\u{200b}\u{200b}rs",
+        "A\u{200b}\u{200b}\u{feff}R\u{200b}\u{200b}C\u{2005}\u{200b}\u{200b}\u{200b}R\u{200b}\u{200b}ai\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}de\u{200b}\u{200b}rs",
+        "A\u{feff}RC\u{2005}\u{200b}\u{200b}\u{200b}\u{200b}\u{feff}Ra\u{feff}\u{feff}\u{feff}\u{200b}\u{200b}i\u{200b}d\u{200b}\u{200b}e\u{200b}r\u{200b}\u{feff}\u{200b}\u{200b}s",
+        "\u{200b}A\u{200b}\u{200b}\u{feff}\u{feff}\u{200b}RC\u{200b}\u{200b} \u{200b}R\u{200b}a\u{200b}\u{200b}i\u{200b}d\u{feff}er\u{200b}\u{200b}\u{200b}\u{200b}\u{feff}s",
+    ];
+
+    #[test]
+    fn invisible_characters_do_not_make_a_second_folder() {
+        for game in ARC_RAIDERS {
+            assert_eq!(folder_name(game).as_deref(), Some("ARC Raiders"), "from {game:?}");
+        }
+    }
+
+    /// A zero width space sits inside a word. Replacing it with a space the way
+    /// a forbidden character is replaced would give "Raid ers".
+    #[test]
+    fn an_invisible_closes_up_instead_of_splitting_the_word() {
+        assert_eq!(folder_name("Raid\u{200b}ers").as_deref(), Some("Raiders"));
+        // A forbidden character still becomes a space, as before.
+        assert_eq!(folder_name("Raid/ers").as_deref(), Some("Raid ers"));
+    }
+
+    #[test]
+    fn a_name_of_nothing_but_invisibles_is_no_name() {
+        assert_eq!(folder_name("\u{200b}\u{feff}\u{200b}"), None);
+    }
+
+    fn clip_with_game(id: &str, game: Option<&str>) -> Clip {
+        Clip {
+            id: id.into(),
+            path: format!("C:/clips/{id}.mp4"),
+            created_at: 1,
+            duration_ms: 30_000,
+            game: game.map(str::to_string),
+            width: 1920,
+            height: 1080,
+            size_bytes: 1,
+            thumb_path: None,
+            title: None,
+            description: None,
+            edit: None,
+            original: None,
+            original_available: false,
+            favorite: false,
+            screenshot: false,
+        }
+    }
+
+    /// The whole point of the migration: twenty-four clips spread over four
+    /// categories that were always the same game end up under one name.
+    #[test]
+    fn the_four_categories_become_one() {
+        let lib = Library::in_memory().unwrap();
+        for (n, game) in ARC_RAIDERS.iter().enumerate() {
+            lib.insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
+        }
+        // One that was never broken must not be touched.
+        lib.insert(&clip_with_game("plain", Some("Bodycam"))).unwrap();
+
+        assert_eq!(normalize_games(&lib), 4);
+
+        let names: std::collections::HashSet<Option<String>> =
+            lib.list().unwrap().into_iter().map(|c| c.game).collect();
+        assert_eq!(
+            names,
+            ["ARC Raiders", "Bodycam"]
+                .iter()
+                .map(|s| Some(s.to_string()))
+                .collect()
+        );
+    }
+
+    #[test]
+    fn a_second_run_changes_nothing() {
+        let lib = Library::in_memory().unwrap();
+        for (n, game) in ARC_RAIDERS.iter().enumerate() {
+            lib.insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
+        }
+        assert_eq!(normalize_games(&lib), 4);
+        assert_eq!(normalize_games(&lib), 0, "the pass is not idempotent");
+    }
+
+    #[test]
+    fn a_game_of_nothing_but_invisibles_becomes_no_game() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip_with_game("ghost", Some("\u{200b}\u{feff}"))).unwrap();
+        assert_eq!(normalize_games(&lib), 1);
+        assert_eq!(lib.list().unwrap()[0].game, None);
+    }
+
+    #[test]
+    fn a_clip_without_a_game_is_left_alone() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip_with_game("none", None)).unwrap();
+        assert_eq!(normalize_games(&lib), 0);
+        assert_eq!(lib.list().unwrap()[0].game, None);
     }
 
     /// Windows creates neither a folder ending in a dot nor one named like a

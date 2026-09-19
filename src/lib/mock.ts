@@ -25,9 +25,9 @@ export const mockProcesses: AudioProcess[] = [
 ];
 
 export const mockTargets: CaptureTarget[] = [
-  { kind: "monitor", id: "\\\\.\\DISPLAY1", title: "Monitor 1 — 2560×1440", width: 2560, height: 1440, isPrimary: true, refreshHz: 165 },
-  { kind: "monitor", id: "\\\\.\\DISPLAY2", title: "Monitor 2 — 1920×1080", width: 1920, height: 1080, isPrimary: false, refreshHz: 60 },
-  { kind: "window", id: "0x00120A", title: "Counter-Strike 2", width: 2560, height: 1440, isPrimary: false, refreshHz: 165 },
+  { kind: "monitor", id: "\\\\.\\DISPLAY1", stableId: "\\\\?\\DISPLAY#ACME1234#1#{guid}", title: "E2212F — 2560×1440", width: 2560, height: 1440, isPrimary: true, refreshHz: 165 },
+  { kind: "monitor", id: "\\\\.\\DISPLAY2", stableId: "\\\\?\\DISPLAY#ACME5678#1#{guid}", title: "CR270E — 1920×1080", width: 1920, height: 1080, isPrimary: false, refreshHz: 60 },
+  { kind: "window", id: "0x00120A", stableId: null, title: "Counter-Strike 2", width: 2560, height: 1440, isPrimary: false, refreshHz: 165 },
 ];
 
 export const mockEncoders: EncoderInfo[] = [
@@ -41,6 +41,7 @@ export const mockConfig: AppConfig = {
   recording: {
     targetKind: "monitor",
     targetId: "\\\\.\\DISPLAY1",
+    targetStableId: "\\\\?\\DISPLAY#ACME1234#1#{guid}",
     width: 1920,
     height: 1080,
     fps: 60,
@@ -54,7 +55,7 @@ export const mockConfig: AppConfig = {
     {
       id: "src-game",
       label: "Game",
-      kind: { type: "process", pid: 8899, mode: "include" },
+      kind: { type: "process", pid: 8899, exe: "cs2.exe", mode: "include" },
       enabled: true,
       gainDb: 0,
       muted: false,
@@ -64,7 +65,7 @@ export const mockConfig: AppConfig = {
     {
       id: "src-discord",
       label: "Discord",
-      kind: { type: "process", pid: 4321, mode: "include" },
+      kind: { type: "process", pid: 4321, exe: "Discord.exe", mode: "include" },
       enabled: true,
       gainDb: -3,
       muted: false,
@@ -97,6 +98,7 @@ export const mockConfig: AppConfig = {
     corner: "bottomRight",
     durationMs: 3500,
     monitor: null,
+    monitorStableId: null,
     followActiveScreen: false,
   },
   trayHintShown: false,

@@ -420,7 +420,7 @@ pub fn read_png(path: &Path) -> Result<Shot, String> {
 /// Runs whether or not the replay buffer is going. Two capture sessions on the
 /// same monitor are allowed — WGC keeps them apart.
 #[cfg(windows)]
-pub fn grab(kind: TargetKind, id: Option<&str>) -> Result<Shot, String> {
+pub fn grab(kind: TargetKind, id: Option<&str>, stable: Option<&str>) -> Result<Shot, String> {
     use std::sync::Arc;
 
     let gpu = Arc::new(crate::gpu::GpuDevice::new(None)?);
@@ -432,6 +432,7 @@ pub fn grab(kind: TargetKind, id: Option<&str>) -> Result<Shot, String> {
         &gpu,
         kind,
         id,
+        stable,
         // No frame rate limit — we want the next frame, not a paced one.
         0,
         {
@@ -459,7 +460,7 @@ pub fn grab(kind: TargetKind, id: Option<&str>) -> Result<Shot, String> {
 }
 
 #[cfg(not(windows))]
-pub fn grab(_kind: TargetKind, _id: Option<&str>) -> Result<Shot, String> {
+pub fn grab(_kind: TargetKind, _id: Option<&str>, _stable: Option<&str>) -> Result<Shot, String> {
     Err("Screenshots only work on Windows.".into())
 }
 

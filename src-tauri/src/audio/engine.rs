@@ -40,7 +40,9 @@ fn fingerprint(kind: &SourceKind) -> String {
     match kind {
         SourceKind::InputDevice { device_id } => format!("in:{device_id}"),
         SourceKind::OutputDevice { device_id, .. } => format!("out:{device_id}"),
-        SourceKind::Process { pid, mode } => format!("proc:{pid}:{mode:?}"),
+        // Deliberately without the exe: it is only the hint used to find the
+        // process again, and a rebinding shows up as a changed pid anyway.
+        SourceKind::Process { pid, mode, .. } => format!("proc:{pid}:{mode:?}"),
         // Never reached after `resolve` — see `capture::start`.
         SourceKind::Game | SourceKind::Leftovers => "unresolved".into(),
     }
@@ -407,6 +409,7 @@ mod tests {
         let include = |pid| {
             fingerprint(&SourceKind::Process {
                 pid,
+                exe: None,
                 mode: ProcessMode::Include,
             })
         };
@@ -415,6 +418,7 @@ mod tests {
             include(100),
             fingerprint(&SourceKind::Process {
                 pid: 100,
+                exe: None,
                 mode: ProcessMode::Exclude,
             })
         );
@@ -440,6 +444,7 @@ mod tests {
             source_id: source_id.into(),
             kind: SourceKind::Process {
                 pid,
+                exe: None,
                 mode: ProcessMode::Include,
             },
         };

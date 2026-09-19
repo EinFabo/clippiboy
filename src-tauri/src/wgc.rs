@@ -124,7 +124,11 @@ fn find_monitor(device_name: Option<&str>) -> Result<HMONITOR, String> {
         .ok_or_else(|| "no screen found".to_string())
 }
 
-fn capture_item(kind: TargetKind, id: Option<&str>) -> Result<GraphicsCaptureItem, String> {
+fn capture_item(
+    kind: TargetKind,
+    id: Option<&str>,
+    stable: Option<&str>,
+) -> Result<GraphicsCaptureItem, String> {
     let interop: IGraphicsCaptureItemInterop = windows::core::factory::<
         GraphicsCaptureItem,
         IGraphicsCaptureItemInterop,
@@ -133,7 +137,13 @@ fn capture_item(kind: TargetKind, id: Option<&str>) -> Result<GraphicsCaptureIte
 
     match kind {
         TargetKind::Monitor => {
-            let monitor = find_monitor(id)?;
+            // Ask which screen the saved selection actually means before going
+            // looking for it: the panel's identity outranks the device name,
+            // and the answer says out loud when neither could be found.
+            let device = crate::capture::resolve(kind, id, stable)
+                .map(|choice| choice.target.id)
+                .or_else(|| id.map(str::to_string));
+            let monitor = find_monitor(device.as_deref())?;
             unsafe { interop.CreateForMonitor(monitor) }
                 .map_err(|err| format!("Bildschirm aufnehmen: {err}"))
         }
@@ -162,6 +172,7 @@ pub fn start<F, C>(
     gpu: &GpuDevice,
     kind: TargetKind,
     id: Option<&str>,
+    stable: Option<&str>,
     fps: u32,
     on_frame: F,
     on_closed: C,
@@ -170,7 +181,7 @@ where
     F: FnMut(CapturedFrame<'_>) + Send + 'static,
     C: Fn() + Send + 'static,
 {
-    let item = capture_item(kind, id)?;
+    let item = capture_item(kind, id, stable)?;
     let size = item.Size().map_err(|err| format!("source size: {err}"))?;
 
     // Two buffers instead of one: WGC may already write the next frame while the

@@ -621,7 +621,16 @@ function AddSourcePanel({
             label: p.name,
             sub: p.exe,
             onPick: () =>
-              onAdd(make(p.name, { type: "process", pid: p.pid, mode: "include" })),
+              onAdd(
+                make(p.name, {
+                  type: "process",
+                  pid: p.pid,
+                  // Stored alongside the pid: the pid is dead the moment the
+                  // application restarts, the exe name is not.
+                  exe: p.exe,
+                  mode: "include",
+                }),
+              ),
           }))}
         />
         <SourceColumn

@@ -27,6 +27,7 @@ pub fn default_config() -> AppConfig {
         recording: RecordingConfig {
             target_kind: TargetKind::Monitor,
             target_id: None,
+            target_stable_id: None,
             width: 1920,
             height: 1080,
             fps: 60,

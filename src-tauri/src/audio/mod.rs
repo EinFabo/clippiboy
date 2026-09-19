@@ -100,6 +100,48 @@ pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<(u32, 
     out
 }
 
+/// The live pid for a source that was pinned to a process.
+///
+/// A pid dies with the application, and the one in the configuration then
+/// points at nothing — or, after Windows has recycled it, at a different
+/// program altogether. So the stored pid counts only while a process with that
+/// pid is still running *under the same exe name*; otherwise the exe name is
+/// looked up afresh.
+///
+/// The same idea `game::still_running` applies to the game source, which has
+/// had it all along — this is it for the applications picked by hand, which
+/// until now stayed dead until somebody deleted and re-added them.
+///
+/// Where several processes share the name, the lowest pid wins: it is the
+/// oldest, and with `INCLUDE_TARGET_PROCESS_TREE` a tap on it covers the
+/// children anyway.
+fn live_pid(pid: u32, exe: Option<&str>, tree: &HashMap<u32, (u32, String)>) -> Option<u32> {
+    let matches_exe = |name: &str| {
+        exe.is_some_and(|want| name.eq_ignore_ascii_case(want))
+    };
+    match tree.get(&pid) {
+        // Still there and still itself.
+        Some((_, name)) if exe.is_none() || matches_exe(name) => return Some(pid),
+        // The pid is taken by something else, or gone. Fall through.
+        _ => {}
+    }
+    let Some(exe) = exe else {
+        // Nothing to search by — a source from before the exe was stored. It
+        // keeps the old behaviour: the pid as it stands, and an error from the
+        // stream if that pid is dead.
+        return Some(pid);
+    };
+    let found = tree
+        .iter()
+        .filter(|(_, (_, name))| name.eq_ignore_ascii_case(exe))
+        .map(|(pid, _)| *pid)
+        .min();
+    if let Some(now) = found {
+        log::info!("'{exe}' is {now} now (was {pid}) — the source follows it");
+    }
+    found
+}
+
 /// Decides which leftovers source each application belongs to.
 ///
 /// The point is that nobody should have to sort this out by hand. Windows says
@@ -245,10 +287,15 @@ pub fn resolve(
     for source in enabled() {
         match &source.kind {
             SourceKind::Game => taken.extend(game_pid),
+            // The live pid, not the stored one — otherwise a rebound source
+            // would be tapped here and recorded by the leftovers as well.
             SourceKind::Process {
                 pid,
+                exe,
                 mode: ProcessMode::Include,
-            } => taken.push(app_root(*pid, tree)),
+            } => taken.extend(
+                live_pid(*pid, exe.as_deref(), tree).map(|pid| app_root(pid, tree)),
+            ),
             _ => {}
         }
     }
@@ -265,6 +312,9 @@ pub fn resolve(
             source_id: source.id.clone(),
             kind: SourceKind::Process {
                 pid,
+                // Worked out fresh on every pass, so there is nothing to
+                // remember it by.
+                exe: None,
                 mode: ProcessMode::Include,
             },
         };
@@ -281,10 +331,97 @@ pub fn resolve(
             // Only ever read from an old configuration; `config::migrate_sources`
             // turns it into a plain output device before it gets here.
             SourceKind::Leftovers => out.extend(leftovers()),
+            // An application picked by hand: the stored pid is only a starting
+            // point. Restarting Discord used to leave this source dead for good.
+            SourceKind::Process { pid, exe, mode } => {
+                if let Some(now) = live_pid(*pid, exe.as_deref(), tree) {
+                    out.push(Stream {
+                        source_id: source.id.clone(),
+                        kind: SourceKind::Process {
+                            pid: now,
+                            exe: exe.clone(),
+                            mode: *mode,
+                        },
+                    });
+                }
+            }
             other => out.push(Stream {
                 source_id: source.id.clone(),
                 kind: other.clone(),
             }),
+        }
+    }
+    out
+}
+
+/// What is wrong with the sources as *configured* — before any stream is built.
+///
+/// The engine already reports a source whose stream refuses to start. This is
+/// the other half, and the half that had no voice at all: a source that comes up
+/// perfectly and records something other than what its label promises. Nothing
+/// here fails, so nothing here was ever noticed — which is the whole complaint.
+///
+/// A pure function over lists, so every rule is testable without a sound card.
+pub fn configuration_warnings(
+    sources: &[AudioSource],
+    devices: &[crate::model::AudioDevice],
+    game_detected: bool,
+    buffering: bool,
+) -> HashMap<String, String> {
+    use crate::model::DeviceKind;
+
+    let mut out = HashMap::new();
+    for source in sources.iter().filter(|s| s.enabled) {
+        let (device_id, kind) = match &source.kind {
+            SourceKind::OutputDevice { device_id } => (device_id.as_str(), DeviceKind::Output),
+            SourceKind::InputDevice { device_id } => (device_id.as_str(), DeviceKind::Input),
+            SourceKind::Game if !game_detected && buffering => {
+                // Not an error: no game running is an ordinary state. But the
+                // track is written regardless and it will be silence, and that
+                // is worth knowing *before* the clip is saved rather than after.
+                // Only while buffering — outside of that, sitting on the desktop
+                // is simply what the machine is doing, and a banner saying so
+                // around the clock would teach everybody to ignore the banner.
+                out.insert(
+                    source.id.clone(),
+                    "no game detected right now — this track stays silent until one is"
+                        .to_string(),
+                );
+                continue;
+            }
+            _ => continue,
+        };
+
+        let here = devices.iter().filter(|d| d.kind == kind);
+        if device_id.is_empty() {
+            // An empty id means the Windows default device. Sources migrated
+            // from the old "leftovers" kind were left this way while keeping a
+            // label naming one particular channel — so the label promised the
+            // GoXLR's System output and the source recorded whatever Windows
+            // had made default. Nothing failed, nothing was said.
+            let default_name = here.clone().find(|d| d.is_default).map(|d| d.name.as_str());
+            match default_name {
+                Some(name) if !source.label.contains(name) => {
+                    out.insert(
+                        source.id.clone(),
+                        format!(
+                            "follows the Windows default device, which is '{name}' right \
+                             now — not what this source is called. Pick the device in the \
+                             mixer to pin it."
+                        ),
+                    );
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if !here.clone().any(|d| d.id == device_id) {
+            out.insert(
+                source.id.clone(),
+                "this device is not connected — the track stays silent until it is back"
+                    .to_string(),
+            );
         }
     }
     out
@@ -336,6 +473,186 @@ mod tests {
             solo,
             separate_track: separate,
         }
+    }
+
+    fn app_source(id: &str, pid: u32, exe: Option<&str>) -> AudioSource {
+        of_kind(
+            id,
+            SourceKind::Process {
+                pid,
+                exe: exe.map(str::to_string),
+                mode: ProcessMode::Include,
+            },
+        )
+    }
+
+    fn pid_of(streams: &[Stream], source_id: &str) -> Option<u32> {
+        streams.iter().find_map(|s| match (&s.source_id, &s.kind) {
+            (id, SourceKind::Process { pid, .. }) if id == source_id => Some(*pid),
+            _ => None,
+        })
+    }
+
+    /// The pid is alive and still the same program: nothing to do.
+    #[test]
+    fn a_living_process_keeps_its_pid() {
+        let sources = vec![app_source("chat", 4321, Some("Discord.exe"))];
+        let tree = tree(&[(4321, 1, "Discord.exe")]);
+        let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(4321));
+    }
+
+    /// The complaint itself: Discord was restarted, so the stored pid is dead.
+    /// The source used to stay dead with it until somebody deleted and re-added
+    /// it; now the exe name finds it again.
+    #[test]
+    fn a_restarted_application_is_found_again_by_its_exe() {
+        let sources = vec![app_source("chat", 4321, Some("Discord.exe"))];
+        let tree = tree(&[(9999, 1, "Discord.exe")]);
+        let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(9999));
+    }
+
+    /// Windows reuses pids. The old number now belongs to something else, and
+    /// taking it would record the wrong program entirely.
+    #[test]
+    fn a_recycled_pid_is_not_mistaken_for_the_old_process() {
+        let sources = vec![app_source("chat", 4321, Some("Discord.exe"))];
+        let tree = tree(&[(4321, 1, "notepad.exe"), (7777, 1, "Discord.exe")]);
+        let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(7777));
+    }
+
+    /// Nothing of that name is running: the source drops out rather than
+    /// tapping a pid that belongs to somebody else.
+    #[test]
+    fn an_application_that_is_gone_taps_nothing() {
+        let sources = vec![app_source("chat", 4321, Some("Discord.exe"))];
+        let tree = tree(&[(4321, 1, "notepad.exe")]);
+        let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), None);
+    }
+
+    /// A source written before the exe was stored behaves exactly as it did.
+    #[test]
+    fn a_source_without_an_exe_keeps_the_old_behaviour() {
+        let sources = vec![app_source("chat", 4321, None)];
+        let streams = resolve(&sources, None, &nothing(), &loose(), &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(4321));
+    }
+
+    /// Several of the same name: the oldest wins, and a tap on it covers the
+    /// children anyway.
+    #[test]
+    fn the_oldest_of_several_namesakes_wins() {
+        let sources = vec![app_source("chat", 1, Some("Discord.exe"))];
+        let tree = tree(&[(700, 1, "Discord.exe"), (300, 1, "Discord.exe")]);
+        let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(300));
+    }
+
+    /// A rebound source must still be excluded from the leftovers, or it lands
+    /// in the clip twice — once on its own track and once inside the device.
+    #[test]
+    fn a_rebound_application_is_not_recorded_twice() {
+        let sources = vec![
+            app_source("chat", 4321, Some("Discord.exe")),
+            of_kind("system", output("dev-1")),
+        ];
+        let tree = tree(&[(9999, 1, "Discord.exe"), (5000, 1, "game.exe")]);
+        let playing: HashMap<String, Vec<(u32, bool)>> =
+            [("dev-1".to_string(), vec![(9999, true), (5000, true)])]
+                .into_iter()
+                .collect();
+        let streams = resolve(&sources, None, &playing, &tree, &ledger("dev-1"));
+        let leftovers: Vec<u32> = streams
+            .iter()
+            .filter_map(|s| match (&s.source_id, &s.kind) {
+                (id, SourceKind::Process { pid, .. }) if id == "system" => Some(*pid),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !leftovers.contains(&9999),
+            "the rebound Discord is in the leftovers as well: {leftovers:?}"
+        );
+        assert!(leftovers.contains(&5000), "the game should be in there");
+    }
+
+    // ---- configuration_warnings ----
+
+    fn device(id: &str, name: &str, default: bool) -> crate::model::AudioDevice {
+        crate::model::AudioDevice {
+            id: id.into(),
+            name: name.into(),
+            kind: crate::model::DeviceKind::Output,
+            is_default: default,
+        }
+    }
+
+    fn labelled(id: &str, label: &str, kind: SourceKind) -> AudioSource {
+        AudioSource {
+            label: label.into(),
+            ..of_kind(id, kind)
+        }
+    }
+
+    /// The case found in the real configuration: an empty device id means "the
+    /// Windows default", while the label still promises one fixed channel.
+    #[test]
+    fn a_label_that_does_not_match_the_default_device_is_flagged() {
+        let sources = vec![labelled(
+            "sys",
+            "System (TC-HELICON GoXLR Mini)",
+            output(""),
+        )];
+        let devices = vec![device("dev-1", "Speakers (Realtek)", true)];
+        let notes = configuration_warnings(&sources, &devices, false, true);
+        assert!(notes.contains_key("sys"), "the mismatch has to be said");
+        assert!(notes["sys"].contains("Speakers (Realtek)"));
+    }
+
+    /// Following the default device is fine when that is plainly what it is.
+    #[test]
+    fn a_label_matching_the_default_device_stays_quiet() {
+        let sources = vec![labelled("sys", "Speakers (Realtek)", output(""))];
+        let devices = vec![device("dev-1", "Speakers (Realtek)", true)];
+        assert!(configuration_warnings(&sources, &devices, false, true).is_empty());
+    }
+
+    #[test]
+    fn a_device_that_is_gone_is_flagged() {
+        let sources = vec![labelled("music", "Music (GoXLR)", output("dev-gone"))];
+        let devices = vec![device("dev-1", "Speakers", true)];
+        let notes = configuration_warnings(&sources, &devices, false, true);
+        assert!(notes["music"].contains("not connected"));
+    }
+
+    #[test]
+    fn a_device_that_is_there_stays_quiet() {
+        let sources = vec![labelled("music", "Music (GoXLR)", output("dev-1"))];
+        let devices = vec![device("dev-1", "Music (GoXLR)", false)];
+        assert!(configuration_warnings(&sources, &devices, false, true).is_empty());
+    }
+
+    /// The game track is written whether a game is detected or not, and without
+    /// one it is silence. Not an error — but not silent about it either.
+    #[test]
+    fn the_game_source_says_when_there_is_no_game() {
+        let sources = vec![of_kind("game", SourceKind::Game)];
+        let notes = configuration_warnings(&sources, &[], false, true);
+        assert!(notes["game"].contains("no game detected"));
+        assert!(configuration_warnings(&sources, &[], true, true).is_empty());
+        // Not buffering: nothing is being recorded, so nothing is silent.
+        assert!(configuration_warnings(&sources, &[], false, false).is_empty());
+    }
+
+    /// A source switched off is not a problem worth a banner.
+    #[test]
+    fn a_disabled_source_is_never_flagged() {
+        let mut source = labelled("music", "Music (GoXLR)", output("dev-gone"));
+        source.enabled = false;
+        assert!(configuration_warnings(&[source], &[], false, true).is_empty());
     }
 
     #[test]
@@ -453,6 +770,7 @@ mod tests {
     fn include(pid: u32) -> SourceKind {
         SourceKind::Process {
             pid,
+            exe: None,
             mode: ProcessMode::Include,
         }
     }

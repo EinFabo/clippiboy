@@ -572,6 +572,7 @@ mod win {
                 &gpu,
                 recording.target_kind,
                 recording.target_id.as_deref(),
+                recording.target_stable_id.as_deref(),
                 recording.fps,
                 move |frame| {
                     if let Err(err) = latest.submit(

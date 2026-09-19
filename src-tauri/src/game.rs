@@ -211,6 +211,15 @@ pub fn is_ignored(exe: &str) -> bool {
     ignored().contains(exe.to_lowercase().as_str())
 }
 
+/// Is this exe in the list, so its name is certain?
+///
+/// A `false` here means the name was read off the window title, and a title can
+/// change from one look to the next. Worth saying out loud in the log: that is
+/// the line that tells somebody which exe to put in `games.json`.
+pub fn is_known_exe(exe: &str) -> bool {
+    games().contains_key(exe.to_lowercase().as_str())
+}
+
 /// Does the window title give away that no game is running here at all?
 pub fn is_foreign_title(title: &str) -> bool {
     let lower = title.trim().to_lowercase();
@@ -226,9 +235,73 @@ pub fn is_foreign_title(title: &str) -> bool {
         || FOREIGN_TITLES.iter().any(|end| lower.ends_with(end))
 }
 
+/// Is this a character that takes up no space and says nothing?
+///
+/// Unicode's format class (`Cf`) — zero-width spaces, joiners, the byte order
+/// mark, bidi controls, soft hyphens. They are invisible, so two titles that
+/// differ only in them look exactly alike to a human and are two different
+/// strings to everything else.
+///
+/// Rust's `char::is_whitespace` does **not** cover them: they are format
+/// characters, not spaces, so `split_whitespace` and `trim` walk straight past.
+/// The unusual *spaces* — NBSP, thin space, ideographic space — are a different
+/// matter and already covered there, which is why they are not listed here.
+fn is_invisible(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD                  // soft hyphen
+        | 0x0600..=0x0605       // Arabic number signs
+        | 0x061C                // Arabic letter mark
+        | 0x06DD | 0x070F | 0x08E2
+        | 0x180E                // Mongolian vowel separator
+        | 0x200B..=0x200F       // zero width space, ZWNJ, ZWJ, LRM, RLM
+        | 0x202A..=0x202E       // bidi embedding and overrides
+        | 0x2060..=0x2064       // word joiner, invisible operators
+        | 0x2066..=0x206F       // bidi isolates, deprecated formatting
+        | 0xFEFF                // zero width no-break space / BOM
+        | 0xFFF9..=0xFFFB       // interlinear annotation
+        | 0xE0001               // language tag
+        | 0xE0020..=0xE007F     // tag characters
+    )
+}
+
+/// Throw away what cannot be seen.
+///
+/// ARC Raiders sprinkles zero-width characters through its window title, and a
+/// different sprinkling each time it is read. Without this every pattern became
+/// a game name of its own — four folders called "ARC Raiders", none of them
+/// equal to another. Nothing about that is particular to one game, so the cure
+/// sits here in the normalisation rather than in the list of known exes.
+pub fn strip_invisibles(text: &str) -> String {
+    if text.chars().any(is_invisible) {
+        text.chars().filter(|c| !is_invisible(*c)).collect()
+    } else {
+        // The overwhelmingly common case: hand back the same string unchanged
+        // rather than rebuilding it character by character.
+        text.to_string()
+    }
+}
+
+/// The one answer to "are these two the same game name?".
+///
+/// Invisible characters out, every run of whitespace down to a single plain
+/// space, ends trimmed. The whitespace half is not cosmetic: the same title
+/// read twice gave `ARC⁠\u{2005}Raiders` once and `ARC Raiders` the next time —
+/// a four-per-em space against an ordinary one. Both are whitespace to Rust, so
+/// they collapse here and stop being two names.
+///
+/// Used wherever a name is derived, filed or compared, so all three agree.
+pub fn normalize_name(text: &str) -> String {
+    strip_invisibles(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Trim a window title down to the bare game name.
 pub fn clean_title(title: &str) -> String {
-    let mut text = title.trim().to_string();
+    // Before anything else measures, trims or compares: a title carrying
+    // invisible characters or odd spacing must not survive as its own name.
+    let mut text = normalize_name(title);
 
     // Unread counter at the front: "(102) …" says nothing about the game.
     if let Some(rest) = text.strip_prefix('(') {
@@ -596,6 +669,68 @@ mod tests {
         assert_eq!(clean_title("(3) My Game"), "My Game");
         // Not a bracketed number but part of the name.
         assert_eq!(clean_title("(Beta) My Game"), "(Beta) My Game");
+    }
+
+    /// The four strings that ARC Raiders actually produced on this machine,
+    /// taken verbatim out of the clip database. They differ only in characters
+    /// nobody can see, and each one had built a folder of its own.
+    const ARC_RAIDERS: [&str; 4] = [
+        "A\u{200b}\u{200b}\u{200b}\u{200b}R\u{feff}C\u{200b}\u{200b}\u{2005}\u{feff}\u{200b}\u{200b}\u{feff}\u{200b}\u{200b}\u{feff}\u{feff}Raid\u{feff}\u{200b}\u{200b}e\u{200b}\u{200b}rs",
+        "A\u{200b}\u{200b}\u{feff}R\u{200b}\u{200b}C\u{2005}\u{200b}\u{200b}\u{200b}R\u{200b}\u{200b}ai\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}\u{200b}de\u{200b}\u{200b}rs",
+        "A\u{feff}RC\u{2005}\u{200b}\u{200b}\u{200b}\u{200b}\u{feff}Ra\u{feff}\u{feff}\u{feff}\u{200b}\u{200b}i\u{200b}d\u{200b}\u{200b}e\u{200b}r\u{200b}\u{feff}\u{200b}\u{200b}s",
+        "\u{200b}A\u{200b}\u{200b}\u{feff}\u{feff}\u{200b}RC\u{200b}\u{200b} \u{200b}R\u{200b}a\u{200b}\u{200b}i\u{200b}d\u{feff}er\u{200b}\u{200b}\u{200b}\u{200b}\u{feff}s",
+    ];
+
+    #[test]
+    fn invisible_characters_do_not_make_a_new_game() {
+        for title in ARC_RAIDERS {
+            assert_eq!(clean_title(title), "ARC Raiders", "from {title:?}");
+        }
+    }
+
+    #[test]
+    fn all_four_real_variants_collapse_into_one_name() {
+        let names: std::collections::HashSet<String> =
+            ARC_RAIDERS.iter().map(|t| clean_title(t)).collect();
+        assert_eq!(names.len(), 1, "still fragmented: {names:?}");
+    }
+
+    #[test]
+    fn a_title_of_nothing_but_invisibles_falls_back_to_the_exe() {
+        // Empty after cleaning must not become an empty game name — the exe
+        // carries it instead.
+        assert_eq!(
+            resolve_name("eldenring.exe", "\u{200b}\u{feff}\u{200b}", true).as_deref(),
+            Some("Elden Ring")
+        );
+        assert_eq!(
+            resolve_name("somegame.exe", "\u{200b}\u{feff}", true).as_deref(),
+            Some("Somegame")
+        );
+    }
+
+    #[test]
+    fn odd_spaces_are_the_same_space() {
+        // A four-per-em space and a plain one are one game, not two.
+        assert_eq!(clean_title("ARC\u{2005}Raiders"), "ARC Raiders");
+        assert_eq!(clean_title("My\u{00a0}Game"), "My Game");
+        assert_eq!(clean_title("My   Game"), "My Game");
+    }
+
+    #[test]
+    fn a_plain_title_comes_back_untouched() {
+        // The guard must not disturb the ordinary case.
+        assert_eq!(clean_title("Counter-Strike 2"), "Counter-Strike 2");
+        assert_eq!(strip_invisibles("Counter-Strike 2"), "Counter-Strike 2");
+        // Nor emoji or symbols, which are visible and part of the name.
+        assert_eq!(clean_title("◑ Some Game"), "◑ Some Game");
+    }
+
+    #[test]
+    fn invisibles_survive_neither_suffix_nor_version_trimming() {
+        // The suffix list matches on the cleaned text, not the raw one.
+        assert_eq!(clean_title("My\u{200b} Game\u{200b} - Steam"), "My Game");
+        assert_eq!(clean_title("Minecraft\u{feff} 1.21.4"), "Minecraft");
     }
 
     #[test]

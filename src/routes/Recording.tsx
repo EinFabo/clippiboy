@@ -111,19 +111,47 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const monitors = targets.filter((t) => t.kind === "monitor");
   const windows = targets.filter((t) => t.kind === "window");
 
+  // The saved screen, matched the way the core matches it: by the panel's own
+  // identity first, and only then by the device name. `\\.\DISPLAY2` is handed
+  // out by enumeration order at boot, so after a restart it can name a
+  // different panel — going by it alone left every tile unselected and made it
+  // look as though the choice had been forgotten.
+  const saved =
+    rec.targetKind === "monitor"
+      ? (targets.find(
+          (t) =>
+            t.kind === "monitor" &&
+            rec.targetStableId !== null &&
+            t.stableId === rec.targetStableId,
+        ) ??
+        targets.find(
+          (t) =>
+            t.kind === "monitor" && rec.targetId !== null && t.id === rec.targetId,
+        ) ??
+        null)
+      : (targets.find(
+          (t) => t.kind === "window" && t.id === rec.targetId,
+        ) ?? null);
+
   // With no saved selection the core takes the primary monitor — the UI should
   // show that too, otherwise nothing looks selected.
   const isPicked = (t: CaptureTarget) =>
-    rec.targetId === null
+    rec.targetId === null && rec.targetStableId === null
       ? rec.targetKind === "monitor" && t.kind === "monitor" && t.isPrimary
-      : rec.targetKind === t.kind && rec.targetId === t.id;
+      : saved !== null && t.kind === saved.kind && t.id === saved.id;
+
+  // Something was chosen and it is not here. The core keeps buffering on the
+  // primary screen rather than stopping — but silently, which is exactly how
+  // you end up with a week of clips of the wrong monitor.
+  const missing =
+    saved === null &&
+    (rec.targetId !== null || rec.targetStableId !== null) &&
+    targets.length > 0;
 
   // With no selection the core takes the primary monitor — then its resolution
   // should be the limit here too.
   const source =
-    targets.find((t) => t.kind === rec.targetKind && t.id === rec.targetId) ??
-    targets.find((t) => t.kind === "monitor" && t.isPrimary) ??
-    null;
+    saved ?? targets.find((t) => t.kind === "monitor" && t.isPrimary) ?? null;
 
   // No higher than the source: upscaled it only costs bitrate and adds no
   // detail. The core caps it anyway — but at least the same number stands here.
@@ -184,6 +212,17 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           restarts on the new source, and the seconds buffered so far are gone.
         </p>
 
+        {missing && (
+          <p
+            className="mb-3 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2
+              text-xs text-ink-muted"
+          >
+            The screen you picked is not connected
+            {rec.targetId ? ` (${rec.targetId})` : ""} — recording runs on the
+            primary one until it is back. Pick another to change that for good.
+          </p>
+        )}
+
         <h3 className="mb-2 text-xs font-medium text-ink-muted">Monitors</h3>
         <div className="grid grid-cols-2 gap-3">
           {monitors.map((t) => (
@@ -191,7 +230,13 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
               key={t.id}
               target={t}
               picked={isPicked(t)}
-              onPick={() => setRec({ targetKind: t.kind, targetId: t.id })}
+              onPick={() =>
+                setRec({
+                  targetKind: t.kind,
+                  targetId: t.id,
+                  targetStableId: t.stableId,
+                })
+              }
             />
           ))}
           {monitors.length === 0 && (
@@ -210,7 +255,13 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
               key={t.id}
               target={t}
               picked={isPicked(t)}
-              onPick={() => setRec({ targetKind: t.kind, targetId: t.id })}
+              onPick={() =>
+                setRec({
+                  targetKind: t.kind,
+                  targetId: t.id,
+                  targetStableId: t.stableId,
+                })
+              }
             />
           ))}
           {windows.length === 0 && (

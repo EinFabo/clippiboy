@@ -162,6 +162,19 @@ impl Library {
         Ok(())
     }
 
+    /// Change only the game, leaving title and description alone.
+    ///
+    /// `update_meta` writes all three at once, which a normalisation pass must
+    /// not do: it would have to carry title and description along just to put
+    /// them back unchanged.
+    pub fn set_game(&self, id: &str, game: Option<&str>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET game = ?2 WHERE id = ?1",
+            params![id, game],
+        )?;
+        Ok(())
+    }
+
     /// Set or take away the heart.
     pub fn set_favorite(&self, id: &str, favorite: bool) -> rusqlite::Result<()> {
         self.conn.execute(

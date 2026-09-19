@@ -49,7 +49,20 @@ pub enum SourceKind {
     #[serde(rename_all = "camelCase")]
     InputDevice { device_id: String },
     #[serde(rename_all = "camelCase")]
-    Process { pid: u32, mode: ProcessMode },
+    Process {
+        pid: u32,
+        /// The exe behind that pid, so the source can be found again.
+        ///
+        /// A pid is dead the moment the application restarts, and the one
+        /// stored here then points at nothing — or, once Windows has recycled
+        /// it, at something else entirely. The exe name is what survives, and
+        /// [`crate::audio::resolve`] rebinds to the live pid by it. `None` for
+        /// sources written before this existed and for the streams that
+        /// leftovers assemble, which are worked out fresh every time anyway.
+        #[serde(default)]
+        exe: Option<String>,
+        mode: ProcessMode,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +128,17 @@ pub enum TargetKind {
 pub struct CaptureTarget {
     pub kind: TargetKind,
     pub id: String,
+    /// A monitor's identity that survives a reboot — the device interface path
+    /// of the panel itself (`\\?\DISPLAY#HKC1292#…#{guid}`).
+    ///
+    /// `id` is the name Windows hands out by enumeration order (`\\.\DISPLAY2`)
+    /// and that order is not promised to be the same after the next boot: a
+    /// monitor waking up more slowly than the others is enough to shuffle it.
+    /// This one is tied to the panel and its connector, so it still points at
+    /// the same screen tomorrow. `None` for windows, and for a monitor Windows
+    /// will not describe.
+    #[serde(default)]
+    pub stable_id: Option<String>,
     pub title: String,
     pub width: u32,
     pub height: u32,
@@ -129,6 +153,14 @@ pub struct CaptureTarget {
 pub struct RecordingConfig {
     pub target_kind: TargetKind,
     pub target_id: Option<String>,
+    /// The chosen monitor's stable identity, see [`CaptureTarget::stable_id`].
+    ///
+    /// Written alongside `target_id` and taking precedence over it when the two
+    /// disagree. `serde(default)` because every configuration written before
+    /// this existed has to keep loading; it fills itself in the first time the
+    /// saved monitor is found.
+    #[serde(default)]
+    pub target_stable_id: Option<String>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -209,6 +241,11 @@ pub struct OverlayConfig {
     /// `None` means the primary screen.
     #[serde(default)]
     pub monitor: Option<String>,
+    /// That screen's stable identity, see [`CaptureTarget::stable_id`]. The
+    /// device name above moves between panels across a reboot; this does not,
+    /// and it is what the banner is really pinned to.
+    #[serde(default)]
+    pub monitor_stable_id: Option<String>,
     /// Follow the foreground window instead of a fixed screen. Handy when
     /// playing across changing monitors, but the banner jumps around then.
     #[serde(default)]
@@ -226,6 +263,7 @@ impl Default for OverlayConfig {
             corner: OverlayCorner::BottomRight,
             duration_ms: 3500,
             monitor: None,
+            monitor_stable_id: None,
             follow_active_screen: false,
         }
     }
