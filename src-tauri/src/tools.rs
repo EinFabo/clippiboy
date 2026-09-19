@@ -155,6 +155,7 @@ pub fn setup(app: &tauri::AppHandle) {
         }
         crate::muxer::set_tool_dir(target.clone());
         set(&app, Status::Ready);
+        crate::recover_recordings(&app);
         tidy(&root, &target);
     });
 }

@@ -16,6 +16,9 @@ export type Status = {
 	fps: number;
 	droppedFrames: number;
 	saving: boolean;
+	/** Missing on ClippiBoy versions from before recordings. */
+	recording?: boolean;
+	recordingSeconds?: number;
 };
 
 /** Manually entered in the property inspector, for the rare case the handshake file cannot be found. */

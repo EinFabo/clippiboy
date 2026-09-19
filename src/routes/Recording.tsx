@@ -192,7 +192,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   return (
     <div className="space-y-8 pb-12">
       <header className="pt-10">
-        <h1 className="display text-4xl">Recording</h1>
+        <h1 className="display text-4xl">Video</h1>
       </header>
 
       <SourceTrouble onOpenMixer={() => onNavigate("audio")} />

@@ -2,9 +2,12 @@ import type { Clip } from "./types";
 
 export function formatDuration(ms: number): string {
   const total = Math.round(ms / 1000);
-  const m = Math.floor(total / 60);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor(total / 60) % 60;
   const s = total % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
+  // Recordings run past the hour; a clip never does.
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${Math.floor(total / 60)}:${String(s).padStart(2, "0")}`;
 }
 
 export function formatSize(bytes: number): string {

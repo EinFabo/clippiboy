@@ -36,6 +36,15 @@ interface EngineState {
    *  showing what is actually in the track. */
   taps: Record<string, number[]>;
   bufferActive: boolean;
+  /** A recording started by hand is running. */
+  recording: boolean;
+  recordingSeconds: number;
+  recordingBytes: number;
+  /** Stopping writes the file out — seconds for a long one. */
+  recordingSaving: boolean;
+  /** How far that has got, 0 to 1; `null` while nothing is being written.
+      Comes from the core, so a stop by hotkey shows as well. */
+  recordingProgress: number | null;
   bufferedSeconds: number;
   /** Bytes the packet ring currently holds — against the memory budget. */
   bufferBytes: number;
@@ -61,11 +70,12 @@ interface EngineState {
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  /** All three hotkeys at once — the core only accepts them together. */
+  /** All four hotkeys at once — the core only accepts them together. */
   setHotkeys: (
     saveClip: string,
     toggleBuffer: string,
     screenshot: string,
+    record: string,
   ) => Promise<void>;
   setClipDir: (dir: string) => Promise<void>;
   /** New token for the Stream Deck port; the old one stops working at once. */
@@ -75,6 +85,7 @@ interface EngineState {
   toggleBuffer: () => Promise<void>;
   saveClip: () => Promise<void>;
   takeScreenshot: () => Promise<void>;
+  toggleRecording: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
   /** Set or take away the heart. */
@@ -133,6 +144,11 @@ export const useEngine = create<EngineState>((set, get) => ({
   sourceWarnings: {},
   taps: {},
   bufferActive: false,
+  recording: false,
+  recordingSeconds: 0,
+  recordingBytes: 0,
+  recordingSaving: false,
+  recordingProgress: null,
   bufferedSeconds: 0,
   bufferBytes: 0,
   rateControl: null,
@@ -218,6 +234,9 @@ export const useEngine = create<EngineState>((set, get) => ({
       await events.onStatus((s) =>
         set({
           bufferActive: s.bufferActive,
+          recording: s.recording,
+          recordingSeconds: s.recordingSeconds,
+          recordingBytes: s.recordingBytes,
           bufferedSeconds: s.bufferedSeconds,
           bufferBytes: s.bufferBytes,
           rateControl: s.rateControl,
@@ -226,6 +245,9 @@ export const useEngine = create<EngineState>((set, get) => ({
       );
       // Hotkey, tray and button all run through the same path in the core and
       // report back here — which is why the clip is only added at this one spot.
+      await events.onRecordingProgress((share) =>
+        set({ recordingProgress: share >= 1 ? null : share }),
+      );
       await events.onClipSaved((clip) =>
         set((st) => ({
           clips: [clip, ...st.clips.filter((c) => c.id !== clip.id)],
@@ -295,7 +317,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
   },
 
-  async setHotkeys(saveClip, toggleBuffer, screenshot) {
+  async setHotkeys(saveClip, toggleBuffer, screenshot, record) {
     if (!inTauri) {
       set((st) => ({
         config: {
@@ -303,13 +325,14 @@ export const useEngine = create<EngineState>((set, get) => ({
           saveClipHotkey: saveClip,
           toggleBufferHotkey: toggleBuffer,
           screenshotHotkey: screenshot,
+          recordHotkey: record,
         },
       }));
       return;
     }
     // Deliberately without an optimistic update: if registering fails, the old
     // assignment should stand, and the error belongs on that row.
-    set({ config: await api.setHotkeys(saveClip, toggleBuffer, screenshot) });
+    set({ config: await api.setHotkeys(saveClip, toggleBuffer, screenshot, record) });
   },
 
   async regenerateControlToken() {
@@ -367,6 +390,25 @@ export const useEngine = create<EngineState>((set, get) => ({
       await api.saveClip();
     } catch (err) {
       set({ lastError: String(err) });
+    }
+  },
+
+  async toggleRecording() {
+    if (!inTauri) {
+      set((st) => ({ recording: !st.recording, recordingSeconds: 0 }));
+      return;
+    }
+    const was = get().recording;
+    // Stopping waits for the file, and that can take a while — the button has
+    // to show it is working instead of looking stuck.
+    if (was) set({ recordingSaving: true });
+    try {
+      // The finished recording comes back through `clip-saved`.
+      set({ recording: await api.toggleRecording() });
+    } catch (err) {
+      set({ lastError: String(err) });
+    } finally {
+      set({ recordingSaving: false });
     }
   },
 

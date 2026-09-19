@@ -3,13 +3,20 @@ import { useEngine } from "@/store";
 import { Card, Pill, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
-import { IconArrowUpRight, IconCamera, IconScissors } from "@/components/icons";
-import { clipName, formatAgo, formatBufferSeconds, formatDuration } from "@/lib/format";
+import { IconArrowUpRight, IconCamera, IconRecord, IconScissors } from "@/components/icons";
+import {
+  clipName,
+  formatAgo,
+  formatBufferSeconds,
+  formatDuration,
+  formatSize,
+} from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
 import { SourceTrouble } from "@/components/SourceTrouble";
 import { cn } from "@/lib/cn";
 import { LiveDot } from "@/components/ui/LiveDot";
+import { ProgressBar } from "@/components/ui/ProgressBar";
 import { useCountUp } from "@/lib/useCountUp";
 
 /**
@@ -36,12 +43,19 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     saveClip,
     takeScreenshot,
     deleteClip,
+    recording,
+    recordingSeconds,
+    recordingBytes,
+    recordingSaving,
+    recordingProgress,
+    toggleRecording,
   } = useEngine();
+  const saving = recordingSaving || recordingProgress !== null;
   const [playing, setPlaying] = useState<number | null>(null);
   // Recordings only. The player below is the video one, and "Latest clips" says
   // what it shows — screenshots have their own place in the gallery.
   const recent = useMemo(
-    () => clips.filter((clip) => !clip.screenshot).slice(0, 3),
+    () => clips.filter((clip) => !clip.screenshot && !clip.recording).slice(0, 3),
     [clips],
   );
 
@@ -77,7 +91,32 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           >
             Screenshot
           </Button>
+          {/* Works without the buffer too: it brings the capture up itself. */}
+          <Button
+            variant="secondary"
+            icon={<IconRecord className={cn("h-4 w-4", recording && "text-live")} />}
+            onClick={toggleRecording}
+            disabled={saving}
+          >
+            {saving
+              ? `Saving recording… ${Math.round((recordingProgress ?? 0) * 100)} %`
+              : recording
+                ? `Stop · ${formatDuration(recordingSeconds * 1000)}`
+                : "Record"}
+          </Button>
         </div>
+        {saving && (
+          <ProgressBar share={recordingProgress ?? 0} className="mx-auto mt-4 w-72" />
+        )}
+        {recording && (
+          <p className="mt-3 text-xs text-ink-muted tabular-nums">
+            ~{formatSize(recordingBytes)} ·{" "}
+            <kbd className="rounded-inner border border-line bg-elevated px-1.5 py-0.5">
+              {config.recordHotkey}
+            </kbd>{" "}
+            stops it
+          </p>
+        )}
       </header>
 
       <section className="grid grid-cols-4 gap-4">
@@ -98,7 +137,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           }
         />
         <Stat
-          label="Recording"
+          label="Video"
           value={`${config.recording.height}p${config.recording.fps}`}
           hint={`${qualityLabel(config.recording.quality)} · ${config.recording.encoder.toUpperCase()}${
             rateControl && rateControl !== "quality" ? " · fixed bitrate" : ""

@@ -132,6 +132,7 @@ export interface OverlayConfig {
   onBufferToggle: boolean;
   onError: boolean;
   onScreenshot: boolean;
+  onRecording: boolean;
   corner: OverlayCorner;
   durationMs: number;
   /** Device name of the screen (`\\.\DISPLAY1`); null = primary. */
@@ -160,6 +161,8 @@ export interface AppConfig {
   saveClipHotkey: string;
   toggleBufferHotkey: string;
   screenshotHotkey: string;
+  /** Start and stop a recording. */
+  recordHotkey: string;
   autoStartWithWindows: boolean;
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;
@@ -205,6 +208,11 @@ export interface Clip {
    * the core turns those requests away.
    */
   screenshot: boolean;
+  /**
+   * Started and stopped by hand instead of cut out of the buffer. Has a chip
+   * and a folder of its own, and can run for an hour.
+   */
+  recording: boolean;
 }
 
 /**
@@ -285,6 +293,12 @@ export interface EngineStatus {
   fps: number;
   /** Game last detected in the foreground. */
   game: string | null;
+  /** A recording started by hand is running. */
+  recording: boolean;
+  /** How long it runs so far. */
+  recordingSeconds: number;
+  /** What it has written to disk so far. */
+  recordingBytes: number;
 }
 
 /** A rectangle in pixels of a screenshot's original. */
@@ -320,7 +334,7 @@ export interface ShotEdit {
 
 /** Payload of the `overlay-banner` event (overlay window only). */
 export interface OverlayBanner {
-  kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot";
+  kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot" | "recording";
   title: string;
   detail: string | null;
   thumbPath: string | null;

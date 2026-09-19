@@ -31,6 +31,7 @@ use crate::audio::engine::AudioEngine;
 use crate::audio::recorded;
 use crate::buffer::{EncodedPacket, ReplayBuffer};
 use crate::model::{AudioSource, EncoderId, RateControl, RecordingConfig};
+use crate::recorder::{self, Recorder};
 
 /// How far behind the present the mixer stays.
 ///
@@ -65,7 +66,7 @@ struct TrackInner {
 }
 
 impl TrackRing {
-    fn new(source_id: String, label: String, seconds: u32) -> Self {
+    pub(crate) fn new(source_id: String, label: String, seconds: u32) -> Self {
         Self {
             source_id,
             label: Mutex::new(label),
@@ -101,7 +102,7 @@ impl TrackRing {
     /// Silence longer than the whole ring means everything stored is older than
     /// the buffer anyway. Then the ring is emptied and hands its memory back —
     /// a device nobody has played on for two minutes costs nothing at all.
-    fn push(&self, block: &[i16], at_100ns: i64) {
+    pub(crate) fn push(&self, block: &[i16], at_100ns: i64) {
         let mut inner = self.inner.lock();
 
         if block.iter().all(|sample| *sample == 0) {
@@ -152,7 +153,7 @@ impl TrackRing {
     ///
     /// Missing stretches become silence — that keeps the track exactly as long as
     /// the video, even when a source only joined later.
-    fn window(&self, from_100ns: i64, frames: usize) -> Vec<i16> {
+    pub(crate) fn window(&self, from_100ns: i64, frames: usize) -> Vec<i16> {
         let wanted = frames * CHANNELS;
         let mut data = vec![0i16; wanted];
         {
@@ -273,6 +274,13 @@ pub struct Shared {
     pub rate_control: Mutex<Option<RateControl>>,
     /// SPS/PPS that belong in front of the elementary stream when saving.
     pub sequence_header: Mutex<Vec<u8>>,
+    /// A recording started by hand, if one runs. It takes every packet and
+    /// every audio block alongside the buffer — see `recorder.rs`.
+    ///
+    /// Locked only while `packets` is held, on both sides: that is what lets a
+    /// recording begin exactly at the buffer's newest keyframe with no packet
+    /// missed or written twice.
+    pub recorder: Mutex<Option<Arc<Recorder>>>,
     /// What the encoder is costing, once one is running.
     #[cfg(windows)]
     pub encoder_stats: Mutex<Option<Arc<crate::mft::EncoderStats>>>,
@@ -546,7 +554,13 @@ mod win {
                     keyframe_seconds: recording.keyframe_seconds,
                     requested: wanted,
                 },
-                move |packet| for_packets.packets.lock().push(packet),
+                move |packet| {
+                    let mut ring = for_packets.packets.lock();
+                    if let Some(recorder) = for_packets.recorder.lock().as_ref() {
+                        recorder.video(&packet);
+                    }
+                    ring.push(packet)
+                },
                 // The preamble arrives late — see `mft::catch_up_on_header`. The
                 // one read during setup is usually empty, and a clip saved with
                 // an empty one relies entirely on the encoder writing SPS/PPS
@@ -692,6 +706,10 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         // the same sources and agree, but a mismatch would put one source's
         // audio onto another's track, and that is not worth risking.
         let rings = shared.tracks.lock();
+        // Cloned out rather than held: `recorder` is otherwise only ever taken
+        // under `packets`, and the mixer has no business with that one.
+        let recording = shared.recorder.lock().clone();
+        let recording = recording.filter(|recorder| recorder.begin_window(&rings, from));
         for ring in rings.iter() {
             let slot = recorded(&sources).position(|s| s.id == ring.source_id);
             scratch.clear();
@@ -700,8 +718,14 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
                 None => scratch.resize(frames * CHANNELS, 0),
             }
             ring.push(&scratch, from);
+            if let Some(recorder) = &recording {
+                recorder.audio(ring, &scratch);
+            }
         }
         drop(rings);
+        if let Some(recorder) = &recording {
+            recorder.end_window(frames);
+        }
 
         next_100ns = Some(from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64);
     }
@@ -787,6 +811,7 @@ impl Pipeline {
             encoder: Mutex::new(None),
             rate_control: Mutex::new(None),
             sequence_header: Mutex::new(Vec::new()),
+            recorder: Mutex::new(None),
             #[cfg(windows)]
             encoder_stats: Mutex::new(None),
             #[cfg(windows)]
@@ -822,6 +847,36 @@ impl Pipeline {
             win::stop(inner);
         }
         self.shared.packets.lock().clear();
+    }
+
+    /// Begin a recording at the buffer's newest keyframe.
+    pub fn start_recording(
+        &self,
+        clip_dir: &std::path::Path,
+        mut meta: recorder::Meta,
+    ) -> Result<Arc<Recorder>, String> {
+        meta.fps = self.shared.fps;
+        let ring = self.shared.packets.lock();
+        if self.shared.recorder.lock().is_some() {
+            return Err("A recording is already running.".into());
+        }
+        let backlog = ring.from_last_keyframe();
+        let Some(first) = backlog.first() else {
+            return Err("The encoder has not delivered a picture yet — try again in a moment.".into());
+        };
+        let start_100ns = self.shared.qpc_of(first.pts_us);
+        let header = self.shared.sequence_header.lock().clone();
+        let recorder = Recorder::start(clip_dir, meta, &header, backlog, start_100ns)?;
+        *self.shared.recorder.lock() = Some(recorder.clone());
+        drop(ring);
+        Ok(recorder)
+    }
+
+    /// Unhook the running recording. Writing it out is the caller's —
+    /// `Recorder::finish` and `recorder::finalize`.
+    pub fn take_recording(&self) -> Option<Arc<Recorder>> {
+        let _ring = self.shared.packets.lock();
+        self.shared.recorder.lock().take()
     }
 
     /// Grab the last `seconds` seconds.

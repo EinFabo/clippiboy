@@ -27,6 +27,10 @@ LIGHT = (196, 181, 253, 255)
 GREY = (95, 89, 112, 255)
 # What a lens looks through.
 DARK = (26, 21, 35, 255)
+# The one colour that is not the brand: a recording is the red light, the same
+# red the app uses for it.
+RED = (239, 68, 68, 255)
+DIM_RED = (127, 45, 50, 255)
 
 # Everything is drawn this many times too large and scaled down afterwards — PIL
 # draws no anti-aliased edges of its own.
@@ -72,6 +76,19 @@ def draw_buffer(art: ImageDraw.ImageDraw, n: float, running: bool) -> None:
     art.ellipse((0.5 * n - dot, 0.5 * n - dot, 0.5 * n + dot, 0.5 * n + dot), fill=LIGHT)
 
 
+def draw_record(art: ImageDraw.ImageDraw, n: float, running: bool) -> None:
+    """A solid dot — lit red while recording, dim when not.
+
+    No ring on purpose: the ring is the buffer's key, and the two sit next to
+    each other on the same page.
+    """
+    dot = 0.30 * n if running else 0.26 * n
+    art.ellipse(
+        (0.5 * n - dot, 0.5 * n - dot, 0.5 * n + dot, 0.5 * n + dot),
+        fill=RED if running else DIM_RED,
+    )
+
+
 # Which glyph goes in which file, and whether the bottom of the picture has to
 # stay clear. It does on the keys themselves: the buffer level is written across
 # the lower quarter, and a glyph drawn into it would show through the digits. The
@@ -87,6 +104,9 @@ KEYS = [
     ("actions/buffer/on", 72, lambda art, n: draw_buffer(art, n, True), True),
     ("actions/buffer/off", 72, lambda art, n: draw_buffer(art, n, False), True),
     ("actions/buffer/icon", 20, lambda art, n: draw_buffer(art, n, True), False),
+    ("actions/record/on", 72, lambda art, n: draw_record(art, n, True), True),
+    ("actions/record/off", 72, lambda art, n: draw_record(art, n, False), True),
+    ("actions/record/icon", 20, lambda art, n: draw_record(art, n, True), False),
 ]
 
 

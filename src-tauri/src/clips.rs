@@ -66,6 +66,9 @@ impl Library {
         // A still instead of a recording. Everything already in the database is
         // a clip, so the default answers the question for them.
         self.add_column("screenshot", "INTEGER NOT NULL DEFAULT 0")?;
+        // Started and stopped by hand. Likewise: whatever is already there was
+        // cut out of the buffer.
+        self.add_column("recording", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(())
     }
 
@@ -87,8 +90,9 @@ impl Library {
         self.conn.execute(
             "INSERT OR REPLACE INTO clips
              (id, path, created_at, duration_ms, game, width, height, size_bytes,
-              thumb_path, title, description, edit, original, favorite, screenshot)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+              thumb_path, title, description, edit, original, favorite, screenshot,
+              recording)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 clip.id,
                 clip.path,
@@ -105,6 +109,7 @@ impl Library {
                 encode_original(clip.original.as_ref()),
                 clip.favorite,
                 clip.screenshot,
+                clip.recording,
             ],
         )?;
         Ok(())
@@ -113,7 +118,8 @@ impl Library {
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,
-                    thumb_path, title, description, edit, original, favorite, screenshot
+                    thumb_path, title, description, edit, original, favorite, screenshot,
+                    recording
              FROM clips ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -137,6 +143,7 @@ impl Library {
                 original: decode_original(row.get::<_, Option<String>>(12)?),
                 favorite: row.get(13)?,
                 screenshot: row.get(14)?,
+                recording: row.get(15)?,
             })
         })?;
         rows.collect()
@@ -329,6 +336,7 @@ mod tests {
             original_available: false,
             favorite: false,
             screenshot: false,
+            recording: false,
         }
     }
 
@@ -423,6 +431,19 @@ mod tests {
         let stored = lib.get("a").unwrap().unwrap();
         assert_eq!(stored.duration_ms, 12_000);
         assert_eq!(stored.size_bytes, 4_711);
+    }
+
+    /// A recording has to come back as one, or it would be filed with the clips.
+    #[test]
+    fn the_recording_flag_survives_the_roundtrip() {
+        let lib = Library::in_memory().unwrap();
+        let mut long = clip("a", 1);
+        long.recording = true;
+        lib.insert(&long).unwrap();
+        lib.insert(&clip("b", 2)).unwrap();
+
+        assert!(lib.get("a").unwrap().unwrap().recording);
+        assert!(!lib.get("b").unwrap().unwrap().recording);
     }
 
     /// Unreadable JSON must not take the whole gallery down with it.

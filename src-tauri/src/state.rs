@@ -8,7 +8,12 @@ use crate::audio::engine::AudioEngine;
 use crate::clips::Library;
 use crate::config;
 use crate::pipeline::{Pipeline, Shared};
-use crate::model::{AppConfig, AudioSource, Clip, EngineStatus, RecordingConfig};
+use crate::model::{AppConfig, AudioSource, Clip, ClipKind, EngineStatus, RecordingConfig};
+use crate::recorder::{self, Recorder};
+
+/// How much the ring keeps while only a recording holds the pipeline. Enough
+/// for a keyframe to begin on — the ring always keeps its last one anyway.
+const IDLE_RING_SECONDS: u32 = 2;
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
@@ -66,6 +71,12 @@ pub struct AppState {
     /// screen occupied. A stop in the middle of a start would likewise have
     /// grabbed at nothing.
     lifecycle: Mutex<()>,
+    /// The recording started by hand, if one runs.
+    recorder: Mutex<Option<Arc<Recorder>>>,
+    /// Does anybody want the replay buffer? The pipeline can run without it:
+    /// a recording keeps it alive when the buffer is switched off, by hand or
+    /// by the automation, and then only this goes false.
+    buffer_wanted: std::sync::atomic::AtomicBool,
 }
 
 /// Lives for as long as a clip is being written and releases the slot when
@@ -231,6 +242,9 @@ impl AppState {
             rate_control: None,
             fps: 0.0,
             game: None,
+            recording: false,
+            recording_seconds: 0.0,
+            recording_bytes: 0,
         };
 
         // The sources run from startup — that is the only way the mixer shows
@@ -267,6 +281,8 @@ impl AppState {
             lifecycle: Mutex::new(()),
             active_recording: Mutex::new(None),
             saving: std::sync::atomic::AtomicBool::new(false),
+            recorder: Mutex::new(None),
+            buffer_wanted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -337,7 +353,16 @@ impl AppState {
 
     /// Is a recording into the buffer running right now?
     pub fn is_buffering(&self) -> bool {
-        self.pipeline.lock().is_some()
+        self.pipeline.lock().is_some() && self.buffer_wanted()
+    }
+
+    fn buffer_wanted(&self) -> bool {
+        self.buffer_wanted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Is a recording started by hand running right now?
+    pub fn is_recording(&self) -> bool {
+        self.recorder.lock().is_some()
     }
 
     pub fn upsert_source(&self, source: AudioSource) -> AppConfig {
@@ -361,8 +386,28 @@ impl AppState {
     pub fn start_pipeline(&self) -> Result<(), String> {
         let _lifecycle = self.lifecycle.lock();
         if self.pipeline.lock().is_some() {
+            // Running for a recording only: the buffer just gets its length
+            // back, and fills from here.
+            if !self.buffer_wanted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let config = self.config_snapshot();
+                if let Some(shared) = self.shared.lock().as_ref() {
+                    shared.packets.lock().set_capacity(
+                        config.buffer.seconds,
+                        config::effective_memory_bytes(&config.recording, &config.buffer),
+                    );
+                }
+                let game = self.current_game.lock().clone();
+                *self.buffering_game.lock() = game;
+                self.status.lock().buffer_active = true;
+            }
             return Ok(());
         }
+        self.launch_pipeline(true)
+    }
+
+    /// Bring the capture stack up. `for_buffer` false means a recording is the
+    /// only reason, and the ring stays small. The caller holds `lifecycle`.
+    fn launch_pipeline(&self, for_buffer: bool) -> Result<(), String> {
         // While ffmpeg is still being fetched the buffer may already run —
         // it is only needed once a clip is written.
         if !crate::muxer::available() && crate::tools::is_ready() {
@@ -383,6 +428,11 @@ impl AppState {
             config.sources.clone(),
             self.audio.clone(),
         )?;
+        if !for_buffer {
+            pipeline.shared.packets.lock().set_capacity(IDLE_RING_SECONDS, u64::MAX);
+        }
+        self.buffer_wanted
+            .store(for_buffer, std::sync::atomic::Ordering::SeqCst);
         *self.shared.lock() = Some(pipeline.shared.clone());
         *self.pipeline.lock() = Some(pipeline);
         *self.active_recording.lock() = Some(config.recording.clone());
@@ -393,7 +443,7 @@ impl AppState {
         *self.buffering_game.lock() = game;
 
         let mut status = self.status.lock();
-        status.buffer_active = true;
+        status.buffer_active = for_buffer;
         // The encoder actually chosen, not the requested one: if the wanted MFT
         // is not registered, the display would otherwise permanently show
         // something other than what is running.
@@ -405,8 +455,32 @@ impl AppState {
         Ok(())
     }
 
+    /// Switch the replay buffer off. A running recording keeps the pipeline:
+    /// only the ring shrinks, and the buffer counts as off.
     pub fn stop_pipeline(&self) {
         let _lifecycle = self.lifecycle.lock();
+        if self.is_recording() {
+            self.buffer_wanted
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            if let Some(shared) = self.shared.lock().as_ref() {
+                shared
+                    .packets
+                    .lock()
+                    .set_capacity(IDLE_RING_SECONDS, u64::MAX);
+            }
+            let mut status = self.status.lock();
+            status.buffer_active = false;
+            status.buffered_seconds = 0.0;
+            status.buffer_bytes = 0;
+            return;
+        }
+        self.halt_pipeline();
+    }
+
+    /// Take the capture stack down. The caller holds `lifecycle`.
+    fn halt_pipeline(&self) {
+        self.buffer_wanted
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.shared.lock().take();
         self.active_recording.lock().take();
         if let Some(mut pipeline) = self.pipeline.lock().take() {
@@ -453,7 +527,7 @@ impl AppState {
             }
         }
         *self.current_game.lock() = name.clone();
-        if name.is_some() && self.status.lock().buffer_active {
+        if name.is_some() && (self.status.lock().buffer_active || self.is_recording()) {
             *self.buffering_game.lock() = name.clone();
         }
 
@@ -483,7 +557,13 @@ impl AppState {
     /// Carry the running recording's current metrics into the status.
     pub fn status_snapshot(&self) -> EngineStatus {
         let mut status = self.status.lock().clone();
-        if let Some(shared) = self.shared.lock().as_ref() {
+        if let Some(recorder) = self.recorder.lock().as_ref() {
+            status.recording = true;
+            let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);
+            status.recording_bytes = recorder.estimated_size(fps);
+            status.recording_seconds = recorder.frames() as f32 / fps as f32;
+        }
+        if let Some(shared) = self.shared.lock().as_ref().filter(|_| self.buffer_wanted()) {
             status.buffered_seconds = shared.buffered_seconds();
             status.buffer_bytes = shared.buffer_bytes();
             status.dropped_frames = shared.dropped.load(std::sync::atomic::Ordering::Relaxed);
@@ -523,8 +603,11 @@ impl AppState {
         // for and nothing that could be lost along the way.
         let snapshot = {
             let guard = self.pipeline.lock();
+            // A pipeline kept alive by a recording alone holds a ring of two
+            // seconds — not a buffer anybody asked for.
             let pipeline = guard
                 .as_ref()
+                .filter(|_| self.buffer_wanted())
                 .ok_or_else(|| "The replay buffer is not running.".to_string())?;
             pipeline.snapshot(seconds)?
         };
@@ -541,7 +624,7 @@ impl AppState {
         // via the button, ClippiBoy is in the foreground.
         let buffering_game = self.buffering_game.lock().clone();
         let game = buffering_game.or_else(|| self.current_game.lock().clone());
-        let output = destination(&config.clip_dir, game.as_deref(), false)?;
+        let output = destination(&config.clip_dir, game.as_deref(), ClipKind::Clip)?;
 
         // The id already here: the muxer files the individual tracks under it,
         // and those come out of the same ffmpeg run as the clip.
@@ -573,6 +656,7 @@ impl AppState {
             original: None,
             original_available: false,
             screenshot: false,
+            recording: false,
         })
     }
 
@@ -602,7 +686,7 @@ impl AppState {
 
         let buffering_game = self.buffering_game.lock().clone();
         let game = buffering_game.or_else(|| self.current_game.lock().clone());
-        let path = destination(&config.clip_dir, game.as_deref(), true)?;
+        let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)?;
         shot.write_png(&path)?;
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -637,8 +721,215 @@ impl AppState {
             original: None,
             original_available: false,
             screenshot: true,
+            recording: false,
         })
     }
+}
+
+impl AppState {
+    /// Start a recording by hand. Brings the pipeline up if the buffer is not
+    /// running; it goes down again with the recording.
+    pub fn start_recording(&self) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock();
+        if self.is_recording() {
+            return Err("A recording is already running.".into());
+        }
+        if !crate::tools::is_ready() && !crate::muxer::available() {
+            return Err(crate::tools::not_ready_reason());
+        }
+        let started_here = self.pipeline.lock().is_none();
+        if started_here {
+            self.launch_pipeline(false)?;
+        }
+
+        let outcome = self.attach_recorder();
+        if outcome.is_err() && started_here {
+            self.halt_pipeline();
+        }
+        let recorder = outcome?;
+        *self.recorder.lock() = Some(recorder);
+        self.status.lock().recording = true;
+        Ok(())
+    }
+
+    fn attach_recorder(&self) -> Result<Arc<Recorder>, String> {
+        let config = self.config_snapshot();
+        let shared = self
+            .shared
+            .lock()
+            .clone()
+            .ok_or_else(|| "The capture is not running.".to_string())?;
+        // A pipeline that has just come up has no keyframe yet. The first one
+        // follows within a moment; there is nothing to begin on before it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !shared.packets.lock().has_keyframe() {
+            if std::time::Instant::now() > deadline {
+                return Err("The encoder has not delivered a picture — nothing to record.".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let recording = self
+            .active_recording
+            .lock()
+            .clone()
+            .unwrap_or_else(|| config.recording.clone());
+        let game = self
+            .buffering_game
+            .lock()
+            .clone()
+            .or_else(|| self.current_game.lock().clone());
+        let meta = recorder::Meta {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: now_ms(),
+            width: recording.width,
+            height: recording.height,
+            game,
+            // Written now, not only at stop: after a crash the folder is all
+            // there is, and without it every track ends up in the main mix.
+            separate: separate_tracks(&config.sources),
+            ..recorder::Meta::default()
+        };
+        let guard = self.pipeline.lock();
+        let pipeline = guard
+            .as_ref()
+            .ok_or_else(|| "The capture is not running.".to_string())?;
+        pipeline.start_recording(std::path::Path::new(&config.clip_dir), meta)
+    }
+
+    /// Stop writing and settle the folder, without muxing it. Fast — what
+    /// quitting and the updater want: the next start finishes the recording
+    /// (see [`Self::recover_recordings`]).
+    ///
+    /// Returns the folder and its description, for a caller that does mux.
+    fn close_recording(&self) -> Option<(Arc<Recorder>, recorder::Meta)> {
+        let recorder = self.recorder.lock().take()?;
+        if let Some(pipeline) = self.pipeline.lock().as_ref() {
+            pipeline.take_recording();
+        }
+        // The assignment as it stands now, like a clip's: every source was
+        // written on its own, so a ⧉ flipped half way applies to the whole.
+        let separate = separate_tracks(&self.config_snapshot().sources);
+        let game = self
+            .buffering_game
+            .lock()
+            .clone()
+            .or_else(|| self.current_game.lock().clone());
+        let meta = match recorder.finish(separate, game) {
+            Ok(meta) => meta,
+            Err(err) => {
+                log::error!("recording not closed cleanly: {err}");
+                return None;
+            }
+        };
+        if !self.buffer_wanted() {
+            self.halt_pipeline();
+        }
+        self.status.lock().recording = false;
+        Some((recorder, meta))
+    }
+
+    /// Stop the recording and write it out. Takes as long as the audio of the
+    /// whole recording takes to encode — off the hotkey thread.
+    pub fn stop_recording(&self, on_progress: &dyn Fn(f32)) -> Result<Clip, String> {
+        let (recorder, meta) = {
+            let _lifecycle = self.lifecycle.lock();
+            if !self.is_recording() {
+                return Err("No recording is running.".into());
+            }
+            self.close_recording()
+                .ok_or_else(|| "The recording could not be closed — it is finished on the next start.".to_string())?
+        };
+        self.finish_recording(&recorder.dir, &meta, on_progress)
+    }
+
+    /// Quitting or updating: close the files, leave the muxing to the next
+    /// start. An hour of audio to encode is not something to hold the exit on.
+    pub fn abandon_recording(&self) {
+        let _lifecycle = self.lifecycle.lock();
+        if self.close_recording().is_some() {
+            log::info!("recording closed on exit — it is finished on the next start");
+        }
+    }
+
+    /// The first write error of the running recording, if there was one.
+    pub fn recording_failure(&self) -> Option<String> {
+        self.recorder.lock().as_ref().and_then(|r| r.failure())
+    }
+
+    fn finish_recording(
+        &self,
+        dir: &std::path::Path,
+        meta: &recorder::Meta,
+        on_progress: &dyn Fn(f32),
+    ) -> Result<Clip, String> {
+        let config = self.config_snapshot();
+        let output = destination(&config.clip_dir, meta.game.as_deref(), ClipKind::Recording)?;
+        let result = recorder::finalize(dir, meta, output, on_progress)?;
+        Ok(Clip {
+            id: meta.id.clone(),
+            path: result.path.to_string_lossy().to_string(),
+            created_at: meta.created_at,
+            duration_ms: result.duration_ms,
+            game: meta.game.clone(),
+            width: meta.width,
+            height: meta.height,
+            size_bytes: result.size_bytes,
+            thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
+            title: None,
+            description: None,
+            favorite: false,
+            edit: None,
+            original: None,
+            original_available: false,
+            screenshot: false,
+            recording: true,
+        })
+    }
+
+    /// Finish what a crash, or a quit mid-recording, left behind. Needs
+    /// ffmpeg, so it runs once that is in place.
+    pub fn recover_recordings(&self, on_progress: &dyn Fn(f32)) -> Vec<Clip> {
+        let clip_dir = self.config_snapshot().clip_dir;
+        let live = self.recorder.lock().as_ref().map(|r| r.dir.clone());
+        let mut done = Vec::new();
+        for dir in recorder::leftovers(std::path::Path::new(&clip_dir)) {
+            if live.as_ref() == Some(&dir) {
+                continue;
+            }
+            let meta = match recorder::read_meta(&dir) {
+                Ok(meta) => meta,
+                Err(err) => {
+                    log::warn!("recording in '{}' left alone: {err}", dir.display());
+                    continue;
+                }
+            };
+            match self.finish_recording(&dir, &meta, on_progress) {
+                Ok(clip) => {
+                    log::info!("recording '{}' finished after the fact", meta.id);
+                    done.push(clip);
+                }
+                Err(err) => log::warn!("recording in '{}' not finished: {err}", dir.display()),
+            }
+        }
+        done
+    }
+}
+
+/// The sources that get a track of their own rather than the main mix.
+fn separate_tracks(sources: &[AudioSource]) -> Vec<String> {
+    sources
+        .iter()
+        .filter(|s| s.enabled && s.separate_track)
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Where a new file goes and what it is called.
@@ -653,7 +944,7 @@ impl AppState {
 fn destination(
     clip_dir: &str,
     game: Option<&str>,
-    screenshot: bool,
+    kind: ClipKind,
 ) -> Result<std::path::PathBuf, String> {
     let now = jiff::Zoned::now();
     let stamp = format!(
@@ -661,19 +952,18 @@ fn destination(
         now.strftime("%Y-%m-%d_%H-%M-%S"),
         now.subsec_nanosecond() / 1_000_000
     );
-    let extension = if screenshot { "png" } else { "mp4" };
-    let name = match game {
-        Some(app) => format!("{}_{stamp}.{extension}", sanitize_name(app)),
-        None if screenshot => format!("shot_{stamp}.{extension}"),
-        None => format!("clip_{stamp}.{extension}"),
+    let extension = if kind == ClipKind::Screenshot { "png" } else { "mp4" };
+    let name = match (game, kind) {
+        (Some(app), ClipKind::Recording) => {
+            format!("{}_rec_{stamp}.{extension}", sanitize_name(app))
+        }
+        (Some(app), _) => format!("{}_{stamp}.{extension}", sanitize_name(app)),
+        (None, ClipKind::Screenshot) => format!("shot_{stamp}.{extension}"),
+        (None, ClipKind::Recording) => format!("rec_{stamp}.{extension}"),
+        (None, ClipKind::Clip) => format!("clip_{stamp}.{extension}"),
     };
 
-    let dir = crate::filing::dir_for(
-        std::path::Path::new(clip_dir),
-        game,
-        false,
-        screenshot,
-    );
+    let dir = crate::filing::dir_for(std::path::Path::new(clip_dir), game, false, kind);
     std::fs::create_dir_all(&dir)
         .map_err(|err| format!("could not create folder '{}': {err}", dir.display()))?;
     Ok(dir.join(name))

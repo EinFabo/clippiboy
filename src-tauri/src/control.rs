@@ -222,6 +222,44 @@ fn handle(app: &tauri::AppHandle, mut request: Request, token: &str) {
                 ),
             }
         }
+        (Method::Post, "/v1/recording") => {
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                return respond(request, 400, json!({ "ok": false, "error": "unreadable body" }));
+            }
+            let action = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|value| value.get("action")?.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "toggle".into());
+            match action.as_str() {
+                // Answered once the work is done — for "stop" that is when the
+                // file is written, so the key can show the check mark.
+                "toggle" | "start" | "stop" => reply_later(app, request, move |app| {
+                    let running = app.state::<AppState>().is_recording();
+                    let outcome = match (action.as_str(), running) {
+                        ("start", true) | ("stop", false) => Ok(()),
+                        (_, true) => crate::stop_recording_and_notify(app).map(|_| ()),
+                        (_, false) => {
+                            crate::start_recording_and_notify(app);
+                            Ok(())
+                        }
+                    };
+                    let recording = app.state::<AppState>().is_recording();
+                    match outcome {
+                        Ok(()) => (200, json!({ "ok": true, "recording": recording })),
+                        Err(error) => (
+                            409,
+                            json!({ "ok": false, "error": error, "recording": recording }),
+                        ),
+                    }
+                }),
+                other => respond(
+                    request,
+                    400,
+                    json!({ "ok": false, "error": format!("unknown action '{other}'") }),
+                ),
+            }
+        }
         _ => respond(request, 404, json!({ "ok": false, "error": "no such route" })),
     }
 }
@@ -249,6 +287,8 @@ fn status(app: &tauri::AppHandle) -> Value {
         "fps": status.fps,
         "droppedFrames": status.dropped_frames,
         "saving": state.is_saving(),
+        "recording": status.recording,
+        "recordingSeconds": status.recording_seconds,
     })
 }
 

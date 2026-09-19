@@ -47,6 +47,7 @@ pub fn default_config() -> AppConfig {
         save_clip_hotkey: "Ctrl+Shift+S".into(),
         toggle_buffer_hotkey: "Ctrl+Shift+B".into(),
         screenshot_hotkey: crate::model::default_screenshot_hotkey(),
+        record_hotkey: crate::model::default_record_hotkey(),
         auto_start_with_windows: false,
         only_buffer_in_game: true,
         overlay: OverlayConfig::default(),

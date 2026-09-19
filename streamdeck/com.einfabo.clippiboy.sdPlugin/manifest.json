@@ -5,7 +5,7 @@
   "Version": "0.4.0.0",
   "Author": "EinFabo",
   "URL": "https://github.com/EinFabo/clippiboy",
-  "Description": "Save a clip, take a screenshot and switch the replay buffer — with the buffer level and the detected game on the key.",
+  "Description": "Save a clip, take a screenshot, switch the replay buffer and start a recording — with the buffer level and the recording time on the key.",
   "Icon": "imgs/plugin/marketplace",
   "Category": "ClippiBoy",
   "CategoryIcon": "imgs/plugin/category",
@@ -73,6 +73,27 @@
         {
           "Image": "imgs/actions/buffer/on",
           "Name": "On",
+          "TitleAlignment": "bottom"
+        }
+      ]
+    },
+    {
+      "Name": "Recording",
+      "UUID": "com.einfabo.clippiboy.record",
+      "Icon": "imgs/actions/record/icon",
+      "Tooltip": "Starts and stops a recording. The key shows how long it has been running.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/record/off",
+          "Name": "Off",
+          "TitleAlignment": "bottom"
+        },
+        {
+          "Image": "imgs/actions/record/on",
+          "Name": "Recording",
           "TitleAlignment": "bottom"
         }
       ]

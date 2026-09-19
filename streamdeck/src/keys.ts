@@ -81,3 +81,20 @@ export function bufferLabel(status: Status | null): string {
 	}
 	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
+
+/** How long the recording runs — `12:34` or `1:02:03` — or nothing to say. */
+export function recordingLabel(status: Status | null): string {
+	if (status === null) {
+		return "—";
+	}
+	if (!status.recording) {
+		return "";
+	}
+	const total = Math.floor(status.recordingSeconds ?? 0);
+	const hours = Math.floor(total / 3600);
+	const minutes = Math.floor(total / 60) % 60;
+	const seconds = String(total % 60).padStart(2, "0");
+	return hours > 0
+		? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`
+		: `${Math.floor(total / 60)}:${seconds}`;
+}

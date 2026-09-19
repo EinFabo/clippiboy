@@ -76,7 +76,11 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
         // segment files are left behind.
         .on_before_exit({
             let app = app.clone();
-            move || app.state::<AppState>().stop_pipeline()
+            move || {
+                let state = app.state::<AppState>();
+                state.abandon_recording();
+                state.stop_pipeline();
+            }
         })
         .build()
         .map_err(|err| format!("update check not possible: {err}"))?;

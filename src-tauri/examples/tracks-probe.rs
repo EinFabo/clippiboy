@@ -39,6 +39,7 @@ fn main() {
         original: None,
         original_available: false,
         screenshot: false,
+        recording: false,
     });
 
     // Start from a clean state, otherwise the run only checks the shortcut

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
+use crate::audio::capture::{CHANNELS, SAMPLE_RATE};
 use crate::pipeline::{self, ClipSnapshot};
 use crate::stems;
 
@@ -94,6 +95,15 @@ pub struct ClipRequest {
     pub temp_dir: PathBuf,
 }
 
+/// One audio input for [`encode`].
+pub struct AudioInput {
+    pub path: PathBuf,
+    pub label: String,
+    /// Headerless 16-bit PCM instead of WAV — what a recording writes, since
+    /// its length is not known up front and WAV stops at 4 GB.
+    pub raw: bool,
+}
+
 pub struct ClipResult {
     pub path: PathBuf,
     pub duration_ms: u64,
@@ -137,7 +147,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // the main mix, and that sum is drawn at this moment rather than while
     // recording — so a ⧉ flipped during the recording applies to the whole clip
     // and not just to the seconds after it.
-    let mut wavs: Vec<(PathBuf, String)> = Vec::new();
+    let mut wavs: Vec<AudioInput> = Vec::new();
     let wav_path = |name: &str| {
         request
             .temp_dir
@@ -165,7 +175,11 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
             snapshot.start_100ns,
             snapshot.audio_frames,
         ) {
-            Ok(()) => wavs.push((path, "Main mix".into())),
+            Ok(()) => wavs.push(AudioInput {
+                path,
+                label: "Main mix".into(),
+                raw: false,
+            }),
             Err(err) => log::warn!("could not write the main mix: {err}"),
         }
     }
@@ -174,12 +188,53 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         // Silently dropping a track would be the worst outcome: the clip would
         // simply be mute with nothing anywhere saying why.
         match track.write_wav_window(&path, snapshot.start_100ns, snapshot.audio_frames) {
-            Ok(()) => wavs.push((path, track.label())),
+            Ok(()) => wavs.push(AudioInput {
+                path,
+                label: track.label(),
+                raw: false,
+            }),
             Err(err) => log::warn!(
                 "could not write audio track '{}': {err}",
                 track.label()
             ),
         }
+    }
+
+    // A clip is written in a second or two — nobody watches a bar for that.
+    let outcome = encode(
+        &video_path,
+        snapshot.fps,
+        &wavs,
+        &request.clip_id,
+        request.output,
+        None,
+        &|_| {},
+    );
+    let _ = std::fs::remove_file(&video_path);
+    for input in &wavs {
+        let _ = std::fs::remove_file(&input.path);
+    }
+    outcome
+}
+
+/// Mux a raw H.264 stream and its audio into the finished clip: one mixed
+/// audio track in the file, the inputs themselves kept as individual tracks
+/// when there is more than one. Written beside the target and only renamed
+/// onto it once ffprobe can read it.
+///
+/// The inputs are left where they are — clearing them away is the caller's.
+pub fn encode(
+    video_path: &Path,
+    fps: u32,
+    wavs: &[AudioInput],
+    clip_id: &str,
+    output: PathBuf,
+    length_ms: Option<u64>,
+    on_progress: &dyn Fn(f32),
+) -> Result<ClipResult, String> {
+    let stem = sanitize(&output.file_stem().unwrap_or_default().to_string_lossy());
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
     // The clip gets **one** audio track with everything in it. Discord, browsers
@@ -196,12 +251,22 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
 
     let mut command = ffmpeg();
     command.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
+    command.arg("-progress").arg("pipe:1").arg("-nostats");
     // The elementary stream carries no timestamps — the frame rate supplies them.
     // It is exact because the clock generates true CFR.
-    command.arg("-f").arg("h264").arg("-r").arg(snapshot.fps.to_string());
-    command.arg("-i").arg(&video_path);
-    for (path, _) in &wavs {
-        command.arg("-i").arg(path);
+    command.arg("-f").arg("h264").arg("-r").arg(fps.to_string());
+    command.arg("-i").arg(video_path);
+    for input in wavs {
+        if input.raw {
+            command
+                .arg("-f")
+                .arg("s16le")
+                .arg("-ar")
+                .arg(SAMPLE_RATE.to_string())
+                .arg("-ac")
+                .arg(CHANNELS.to_string());
+        }
+        command.arg("-i").arg(&input.path);
     }
     if let Some(filter) = &filter {
         command.arg("-filter_complex").arg(filter);
@@ -248,10 +313,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // last dot, so two clips named `a.b.mp4` and `a.c.mp4` would both want to be
     // `a.part.mp4` — and two saves at once would write through each other, which
     // is the very thing the temp names above are careful to avoid.
-    let pending = request.output.with_file_name(format!(
-        "{stem}_{}.part.mp4",
-        sanitize(&request.clip_id)
-    ));
+    let pending = output.with_file_name(format!("{stem}_{}.part.mp4", sanitize(clip_id)));
     let _ = std::fs::remove_file(&pending);
     command.arg(&pending);
 
@@ -259,22 +321,18 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // later. With only one track that would be a copy of the clip's audio track —
     // and that one will do.
     let keep_stems = wavs.len() > 1;
-    let stems_dir = stems::dir(&request.clip_id);
+    let stems_dir = stems::dir(clip_id);
     if keep_stems {
         std::fs::create_dir_all(&stems_dir).map_err(|e| e.to_string())?;
         for index in 1..=wavs.len() {
             command.arg("-map").arg(format!("{index}:a"));
             command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
             command.arg("-movflags").arg("+faststart");
-            command.arg(stems::track_path(&request.clip_id, index as u32 - 1));
+            command.arg(stems::track_path(clip_id, index as u32 - 1));
         }
     }
 
-    let outcome = run(&mut command, "Clip schreiben");
-    let _ = std::fs::remove_file(&video_path);
-    for (path, _) in &wavs {
-        let _ = std::fs::remove_file(path);
-    }
+    let outcome = run_reporting(&mut command, "Clip schreiben", length_ms, on_progress);
 
     // Everything from here that says "no" has to leave the half-written file
     // behind it gone, not lying in the clip folder.
@@ -283,7 +341,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         // Half-written individual tracks would be worse than none at all: the
         // editor would take them for complete and mix from them.
         if keep_stems {
-            stems::remove(&request.clip_id);
+            stems::remove(clip_id);
         }
         Err(err)
     };
@@ -306,22 +364,22 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         return give_up("The clip was written but cannot be read back — nothing was kept.".into());
     };
 
-    if let Err(err) = replace_file(&pending, &request.output) {
+    if let Err(err) = replace_file(&pending, &output) {
         return give_up(err);
     }
 
     if keep_stems {
-        let labels: Vec<String> = wavs.iter().map(|(_, label)| label.clone()).collect();
-        if let Err(err) = stems::write_index(&request.clip_id, &labels) {
+        let labels: Vec<String> = wavs.iter().map(|input| input.label.clone()).collect();
+        if let Err(err) = stems::write_index(clip_id, &labels) {
             log::warn!("track index not written: {err}");
-            stems::remove(&request.clip_id);
+            stems::remove(clip_id);
         }
     }
 
-    let thumb_path = crate::thumbs::make(&request.output, &request.clip_id).ok();
+    let thumb_path = crate::thumbs::make(&output, clip_id).ok();
 
     Ok(ClipResult {
-        path: request.output,
+        path: output,
         duration_ms,
         size_bytes,
         thumb_path,
@@ -347,6 +405,57 @@ pub fn replace_file(temp: &Path, target: &Path) -> Result<(), String> {
     Err(format!(
         "Could not replace the clip ({}). Is it open somewhere right now?",
         last.map(|err| err.to_string()).unwrap_or_default()
+    ))
+}
+
+/// [`run`], reading `-progress` along the way when the length is known.
+///
+/// Stdout carries the progress, stderr the error; both are drained on their
+/// own, or a full pipe would stall ffmpeg.
+fn run_reporting(
+    command: &mut Command,
+    what: &str,
+    length_ms: Option<u64>,
+    on_progress: &dyn Fn(f32),
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("could not start ffmpeg ({what}): {err}"))?;
+    let stderr = child.stderr.take();
+    let collector = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(stderr) = stderr {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
+        text
+    });
+    if let Some(stdout) = child.stdout.take() {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let (Some(length), Some(us)) = (length_ms, line.strip_prefix("out_time_us=")) else {
+                continue;
+            };
+            if let Ok(us) = us.trim().parse::<u64>() {
+                on_progress((us as f32 / 1000.0 / length.max(1) as f32).clamp(0.0, 0.99));
+            }
+        }
+    }
+    let status = child.wait().map_err(|err| err.to_string())?;
+    let stderr = collector.join().unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+    Err(format!(
+        "ffmpeg failed at '{what}': {}",
+        tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
     ))
 }
 

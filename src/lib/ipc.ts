@@ -40,9 +40,13 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   setConfig: (config: AppConfig) => invoke<void>("set_config", { config }),
   /** Throws when a combination is invalid or already taken. */
-  /** All three at once — the core only accepts them together. */
-  setHotkeys: (saveClip: string, toggleBuffer: string, screenshot: string) =>
-    invoke<AppConfig>("set_hotkeys", { saveClip, toggleBuffer, screenshot }),
+  /** All four at once — the core only accepts them together. */
+  setHotkeys: (
+    saveClip: string,
+    toggleBuffer: string,
+    screenshot: string,
+    record: string,
+  ) => invoke<AppConfig>("set_hotkeys", { saveClip, toggleBuffer, screenshot, record }),
   /** Throws when the folder cannot be created or written to. */
   setClipDir: (dir: string) => invoke<AppConfig>("set_clip_dir", { dir }),
   defaultClipDir: () => invoke<string>("default_clip_dir"),
@@ -61,6 +65,9 @@ export const api = {
   stopBuffer: () => invoke<void>("stop_buffer"),
   saveClip: (seconds?: number) => invoke<Clip>("save_clip", { seconds }),
   takeScreenshot: () => invoke<Clip>("take_screenshot"),
+  /** Start or stop a recording; says whether one runs afterwards. Stopping
+      only comes back once the file is written. */
+  toggleRecording: () => invoke<boolean>("toggle_recording"),
   status: () => invoke<EngineStatus>("engine_status"),
 
   appVersion: () => invoke<string>("app_version"),
@@ -168,6 +175,9 @@ export const events = {
     listen<Clip>("clip-saved", (e) => cb(e.payload)),
   onClipProgress: (cb: (p: ClipProgress) => void): Promise<UnlistenFn> =>
     listen<ClipProgress>("clip-progress", (e) => cb(e.payload)),
+  /** Writing a stopped recording out, 0 to 1; 1 means done, either way. */
+  onRecordingProgress: (cb: (share: number) => void): Promise<UnlistenFn> =>
+    listen<number>("recording-progress", (e) => cb(e.payload)),
   onUpdateAvailable: (cb: (info: UpdateInfo) => void): Promise<UnlistenFn> =>
     listen<UpdateInfo>("update-available", (e) => cb(e.payload)),
   onUpdateProgress: (

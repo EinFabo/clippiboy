@@ -2,7 +2,7 @@
 //!
 //! One folder per game, favorites in their own, anything without a game stays
 //! directly in the clip folder — and in each of those, the kind splits the
-//! files once more: `Videos` and `Screenshots`. The database remains the truth
+//! files once more: `Videos`, `Screenshots` and `Recordings`. The database remains the truth
 //! about a clip: the folder is only the order you see in Explorer — inside the
 //! app a favorite is still found under its game.
 //!
@@ -13,15 +13,16 @@
 use std::path::{Path, PathBuf};
 
 use crate::clips::Library;
-use crate::model::Clip;
+use crate::model::{Clip, ClipKind};
 
 /// Folder for the clips marked with a heart.
 pub const FAVORITES: &str = "Favorites";
 
 /// The bottom level is always the kind, so that a game folder does not mix
-/// recordings and stills.
+/// clips, stills and hour-long recordings.
 pub const VIDEOS: &str = "Videos";
 pub const SCREENSHOTS: &str = "Screenshots";
+pub const RECORDINGS: &str = "Recordings";
 
 /// Characters Windows does not allow in a folder name.
 const FORBIDDEN: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
@@ -71,12 +72,7 @@ pub fn folder_name(game: &str) -> Option<String> {
 }
 
 /// The folder a clip with this game, this heart and this kind belongs in.
-pub fn dir_for(
-    clip_dir: &Path,
-    game: Option<&str>,
-    favorite: bool,
-    screenshot: bool,
-) -> PathBuf {
+pub fn dir_for(clip_dir: &Path, game: Option<&str>, favorite: bool, kind: ClipKind) -> PathBuf {
     let base = if favorite {
         clip_dir.join(FAVORITES)
     } else {
@@ -85,7 +81,11 @@ pub fn dir_for(
             None => clip_dir.to_path_buf(),
         }
     };
-    base.join(if screenshot { SCREENSHOTS } else { VIDEOS })
+    base.join(match kind {
+        ClipKind::Clip => VIDEOS,
+        ClipKind::Screenshot => SCREENSHOTS,
+        ClipKind::Recording => RECORDINGS,
+    })
 }
 
 /// Is the file in the clip folder — in it, or up to two levels down?
@@ -117,7 +117,7 @@ pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
     if !file.is_file() || !inside(clip_dir, &file) {
         return Ok(None);
     }
-    let dir = dir_for(clip_dir, clip.game.as_deref(), clip.favorite, clip.screenshot);
+    let dir = dir_for(clip_dir, clip.game.as_deref(), clip.favorite, clip.kind());
     if file.parent() == Some(dir.as_path()) {
         return Ok(None);
     }
@@ -344,6 +344,7 @@ mod tests {
             original_available: false,
             favorite: false,
             screenshot: false,
+            recording: false,
         }
     }
 
@@ -412,29 +413,47 @@ mod tests {
     fn the_favourite_folder_wins_over_the_game() {
         let root = Path::new("C:/clips");
         assert_eq!(
-            dir_for(root, Some("Bodycam"), false, false),
+            dir_for(root, Some("Bodycam"), false, ClipKind::Clip),
             root.join("Bodycam").join(VIDEOS),
         );
         assert_eq!(
-            dir_for(root, Some("Bodycam"), true, false),
+            dir_for(root, Some("Bodycam"), true, ClipKind::Clip),
             root.join(FAVORITES).join(VIDEOS),
         );
         // With no game only the kind is left.
-        assert_eq!(dir_for(root, None, false, false), root.join(VIDEOS));
+        assert_eq!(dir_for(root, None, false, ClipKind::Clip), root.join(VIDEOS));
     }
 
-    /// A still and a recording of the same game are never in the same folder.
+    /// A clip, a still and a recording of the same game are never in the
+    /// same folder.
     #[test]
     fn the_kind_splits_the_game_folder() {
         let root = Path::new("C:/clips");
         assert_eq!(
-            dir_for(root, Some("Bodycam"), false, true),
+            dir_for(root, Some("Bodycam"), false, ClipKind::Screenshot),
             root.join("Bodycam").join(SCREENSHOTS),
         );
         assert_eq!(
-            dir_for(root, None, true, true),
+            dir_for(root, None, true, ClipKind::Screenshot),
             root.join(FAVORITES).join(SCREENSHOTS),
         );
+        assert_eq!(
+            dir_for(root, Some("Bodycam"), false, ClipKind::Recording),
+            root.join("Bodycam").join(RECORDINGS),
+        );
+        assert_eq!(
+            dir_for(root, Some("Bodycam"), true, ClipKind::Recording),
+            root.join(FAVORITES).join(RECORDINGS),
+        );
+    }
+
+    /// The flag on the clip is what picks the folder.
+    #[test]
+    fn a_recording_is_filed_as_one() {
+        let mut clip = clip_with_game("r", Some("Bodycam"));
+        assert_eq!(clip.kind(), ClipKind::Clip);
+        clip.recording = true;
+        assert_eq!(clip.kind(), ClipKind::Recording);
     }
 
     /// Only our own folder and one level below get rearranged — otherwise

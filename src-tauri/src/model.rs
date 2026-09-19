@@ -235,6 +235,8 @@ pub struct OverlayConfig {
     pub on_error: bool,
     #[serde(default = "yes")]
     pub on_screenshot: bool,
+    #[serde(default = "yes")]
+    pub on_recording: bool,
     pub corner: OverlayCorner,
     pub duration_ms: u32,
     /// The screen the banner sticks to (device name like `\\.\DISPLAY1`).
@@ -260,6 +262,7 @@ impl Default for OverlayConfig {
             on_buffer_toggle: true,
             on_error: true,
             on_screenshot: true,
+            on_recording: true,
             corner: OverlayCorner::BottomRight,
             duration_ms: 3500,
             monitor: None,
@@ -305,6 +308,10 @@ pub fn default_screenshot_hotkey() -> String {
     "Ctrl+Shift+P".into()
 }
 
+pub fn default_record_hotkey() -> String {
+    "Ctrl+Shift+R".into()
+}
+
 /// Serde needs a function even for a plain `true`.
 fn yes() -> bool {
     true
@@ -323,6 +330,9 @@ pub struct AppConfig {
     /// note below on why a missing default costs the whole config.
     #[serde(default = "default_screenshot_hotkey")]
     pub screenshot_hotkey: String,
+    /// Start and stop a recording. Later still, so the same applies.
+    #[serde(default = "default_record_hotkey")]
+    pub record_hotkey: String,
     pub auto_start_with_windows: bool,
     pub only_buffer_in_game: bool,
     // Newly added fields need `default` — otherwise `config::load()` throws away
@@ -385,6 +395,31 @@ pub struct Clip {
     /// the tracks, the waveform — does not apply to it.
     #[serde(default)]
     pub screenshot: bool,
+    /// Started and stopped by hand rather than cut out of the buffer. It can
+    /// run for an hour, so it lives in a folder of its own and keeps no
+    /// untouched copy when trimmed.
+    #[serde(default)]
+    pub recording: bool,
+}
+
+/// What a library entry is — decides the bottom folder level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipKind {
+    Clip,
+    Screenshot,
+    Recording,
+}
+
+impl Clip {
+    pub fn kind(&self) -> ClipKind {
+        if self.screenshot {
+            ClipKind::Screenshot
+        } else if self.recording {
+            ClipKind::Recording
+        } else {
+            ClipKind::Clip
+        }
+    }
 }
 
 /// What was set in the editor.
@@ -485,6 +520,15 @@ pub struct EngineStatus {
     pub fps: f32,
     /// Game last detected in the foreground, `None` when none is running.
     pub game: Option<String>,
+    /// A recording started by hand is running.
+    #[serde(default)]
+    pub recording: bool,
+    /// How long it runs so far, by its frames.
+    #[serde(default)]
+    pub recording_seconds: f32,
+    /// What it has written to disk so far.
+    #[serde(default)]
+    pub recording_bytes: u64,
 }
 
 #[cfg(test)]

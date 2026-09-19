@@ -66,6 +66,7 @@ fn main() {
         original: None,
         original_available: false,
         screenshot: false,
+        recording: false,
     };
 
     let mix = mix_for(&clip);

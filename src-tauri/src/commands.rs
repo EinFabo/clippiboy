@@ -59,6 +59,19 @@ pub fn set_config(
     if config.control.token.is_empty() {
         config.control.token = previous.control.token.clone();
     }
+    // A recording is one stream from one source. Switching the source would
+    // restart the capture and cut it in two — so the source stays until it
+    // stops.
+    if state.is_recording()
+        && (config.recording.target_kind != previous.recording.target_kind
+            || config.recording.target_id != previous.recording.target_id
+            || config.recording.target_stable_id != previous.recording.target_stable_id)
+    {
+        config.recording.target_kind = previous.recording.target_kind;
+        config.recording.target_id = previous.recording.target_id.clone();
+        config.recording.target_stable_id = previous.recording.target_stable_id.clone();
+        crate::notify(&app, "error", "Stop the recording before changing the source.");
+    }
     let next = state.replace_config(config);
     // Otherwise the player cannot reach clips outside the Videos folder.
     crate::allow_clip_dir(&app, &next.clip_dir);
@@ -85,6 +98,7 @@ pub fn set_config(
     if previous.save_clip_hotkey != next.save_clip_hotkey
         || previous.toggle_buffer_hotkey != next.toggle_buffer_hotkey
         || previous.screenshot_hotkey != next.screenshot_hotkey
+        || previous.record_hotkey != next.record_hotkey
     {
         if let Err(err) = crate::register_hotkeys(&app) {
             crate::notify(&app, "error", err);
@@ -114,8 +128,9 @@ pub fn set_hotkeys(
     save_clip: String,
     toggle_buffer: String,
     screenshot: String,
+    record: String,
 ) -> Result<AppConfig> {
-    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer, screenshot);
+    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer, screenshot, record);
     if result.is_err() {
         // Even after rejected input the previous hotkeys have to take hold
         // again — the settings suspend them while recording a new one.
@@ -130,16 +145,19 @@ fn apply_hotkeys(
     save_clip: String,
     toggle_buffer: String,
     screenshot: String,
+    record: String,
 ) -> Result<AppConfig> {
     let save_clip = save_clip.trim().to_string();
     let toggle_buffer = toggle_buffer.trim().to_string();
     let screenshot = screenshot.trim().to_string();
+    let record = record.trim().to_string();
     crate::parse_hotkey(&save_clip)?;
     crate::parse_hotkey(&toggle_buffer)?;
     crate::parse_hotkey(&screenshot)?;
-    // Every pair, not just the first two — with three assignments the clash can
+    crate::parse_hotkey(&record)?;
+    // Every pair, not just the first two — with four assignments the clash can
     // sit anywhere among them.
-    let taken = [&save_clip, &toggle_buffer, &screenshot];
+    let taken = [&save_clip, &toggle_buffer, &screenshot, &record];
     for (at, one) in taken.iter().enumerate() {
         if taken[at + 1..]
             .iter()
@@ -154,6 +172,7 @@ fn apply_hotkeys(
     config.save_clip_hotkey = save_clip;
     config.toggle_buffer_hotkey = toggle_buffer;
     config.screenshot_hotkey = screenshot;
+    config.record_hotkey = record;
     let next = state.replace_config(config);
 
     match crate::register_hotkeys(app) {
@@ -163,6 +182,7 @@ fn apply_hotkeys(
             rollback.save_clip_hotkey = previous.save_clip_hotkey;
             rollback.toggle_buffer_hotkey = previous.toggle_buffer_hotkey;
             rollback.screenshot_hotkey = previous.screenshot_hotkey;
+            rollback.record_hotkey = previous.record_hotkey;
             state.replace_config(rollback);
             let _ = crate::register_hotkeys(app);
             Err(err)
@@ -276,6 +296,18 @@ pub fn stop_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<
         crate::toggle_buffer_and_notify(&app);
     }
     Ok(())
+}
+
+/// Start or stop a recording, the same way the hotkey does. `async`: stopping
+/// writes the whole recording out.
+#[tauri::command(async)]
+pub fn toggle_recording(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<bool> {
+    if state.is_recording() {
+        crate::stop_recording_and_notify(&app)?;
+    } else {
+        crate::start_recording_and_notify(&app);
+    }
+    Ok(state.is_recording())
 }
 
 /// Saves the buffer. `seconds` is currently only needed by the trim idea; the

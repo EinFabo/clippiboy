@@ -28,6 +28,15 @@ export const IconRecord = ({ className = base }: P) => (
   </svg>
 );
 
+/** The capture settings — a screen, since that is what they are about. The
+    record mark belongs to recordings. */
+export const IconMonitor = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round" strokeLinecap="round">
+    <rect x="3" y="4.5" width="18" height="12" rx="2" />
+    <path d="M9 20h6M12 16.5V20" />
+  </svg>
+);
+
 export const IconSettings = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor">
     <circle cx="12" cy="12" r="3" />

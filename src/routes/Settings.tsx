@@ -140,6 +140,13 @@ export function Settings() {
               onChange={(onScreenshot) => patchOverlay({ onScreenshot })}
             />
           </Row>
+          <Row label="Recording started/saved">
+            <Toggle
+              checked={config.overlay.onRecording}
+              disabled={!config.overlay.enabled}
+              onChange={(onRecording) => patchOverlay({ onRecording })}
+            />
+          </Row>
           <Row label="Errors">
             <Toggle
               checked={config.overlay.onError}
@@ -438,17 +445,19 @@ function Hotkeys() {
   const warn =
     risky(config.saveClipHotkey) ||
     risky(config.toggleBufferHotkey) ||
-    risky(config.screenshotHotkey);
+    risky(config.screenshotHotkey) ||
+    risky(config.recordHotkey);
 
   const apply = async (
     saveClip: string,
     toggleBuffer: string,
     screenshot: string,
+    record: string,
   ) => {
     setSaving(true);
     setError(null);
     try {
-      await setHotkeys(saveClip, toggleBuffer, screenshot);
+      await setHotkeys(saveClip, toggleBuffer, screenshot, record);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -464,7 +473,12 @@ function Hotkeys() {
             value={config.saveClipHotkey}
             busy={saving}
             onChange={(value) =>
-              apply(value, config.toggleBufferHotkey, config.screenshotHotkey)
+              apply(
+                value,
+                config.toggleBufferHotkey,
+                config.screenshotHotkey,
+                config.recordHotkey,
+              )
             }
           />
         </Row>
@@ -473,7 +487,12 @@ function Hotkeys() {
             value={config.toggleBufferHotkey}
             busy={saving}
             onChange={(value) =>
-              apply(config.saveClipHotkey, value, config.screenshotHotkey)
+              apply(
+                config.saveClipHotkey,
+                value,
+                config.screenshotHotkey,
+                config.recordHotkey,
+              )
             }
           />
         </Row>
@@ -482,7 +501,26 @@ function Hotkeys() {
             value={config.screenshotHotkey}
             busy={saving}
             onChange={(value) =>
-              apply(config.saveClipHotkey, config.toggleBufferHotkey, value)
+              apply(
+                config.saveClipHotkey,
+                config.toggleBufferHotkey,
+                value,
+                config.recordHotkey,
+              )
+            }
+          />
+        </Row>
+        <Row label="Recording start/stop" hint="Info: Brings the capture up by itself">
+          <HotkeyInput
+            value={config.recordHotkey}
+            busy={saving}
+            onChange={(value) =>
+              apply(
+                config.saveClipHotkey,
+                config.toggleBufferHotkey,
+                config.screenshotHotkey,
+                value,
+              )
             }
           />
         </Row>

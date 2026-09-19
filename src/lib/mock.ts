@@ -87,6 +87,7 @@ export const mockConfig: AppConfig = {
   saveClipHotkey: "Ctrl+Shift+S",
   toggleBufferHotkey: "Ctrl+Shift+B",
   screenshotHotkey: "Ctrl+Shift+P",
+  recordHotkey: "Ctrl+Shift+R",
   autoStartWithWindows: false,
   onlyBufferInGame: true,
   overlay: {
@@ -95,6 +96,7 @@ export const mockConfig: AppConfig = {
     onBufferToggle: true,
     onError: true,
     onScreenshot: true,
+    onRecording: true,
     corner: "bottomRight",
     durationMs: 3500,
     monitor: null,
@@ -123,6 +125,7 @@ export const mockClips: Clip[] = [
     original: null,
     originalAvailable: false,
     screenshot: false,
+    recording: false,
   },
   {
     id: "c2",
@@ -141,6 +144,7 @@ export const mockClips: Clip[] = [
     original: null,
     originalAvailable: false,
     screenshot: false,
+    recording: false,
   },
   {
     id: "c3",
@@ -159,6 +163,7 @@ export const mockClips: Clip[] = [
     original: null,
     originalAvailable: false,
     screenshot: false,
+    recording: false,
   },
   // The gallery has to survive the bad case too: one clip with no game and three
   // misdetections from before the stricter title check — that is what shows
@@ -181,6 +186,7 @@ export const mockClips: Clip[] = [
     original: null,
     originalAvailable: false,
     screenshot: false,
+    recording: false,
   },
   ...[
     "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
@@ -203,6 +209,7 @@ export const mockClips: Clip[] = [
     original: null,
     originalAvailable: false,
     screenshot: false,
+    recording: false,
   })),
   ...["Counter-Strike 2", null].map((game, i) => ({
     id: `s${1 + i}`,
@@ -222,6 +229,7 @@ export const mockClips: Clip[] = [
     original: null,
     originalAvailable: false,
     screenshot: true,
+    recording: false,
   })),
 ];
 

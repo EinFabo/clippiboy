@@ -19,6 +19,7 @@ pub mod model;
 pub mod muxer;
 pub mod overlay;
 pub mod pipeline;
+pub mod recorder;
 pub mod preview;
 pub mod shot;
 pub mod state;
@@ -137,6 +138,113 @@ pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip,
             notify(app, "error", err.clone());
             overlay::show(app, BannerKind::Error, "Screenshot failed", Some(err.clone()));
             Err(err)
+        }
+    }
+}
+
+/// Start or stop a recording and report the result — hotkey, tray, button and
+/// Stream Deck all come through here.
+pub fn toggle_recording_and_notify(app: &tauri::AppHandle) {
+    if app.state::<AppState>().is_recording() {
+        let _ = stop_recording_and_notify(app);
+    } else {
+        start_recording_and_notify(app);
+    }
+}
+
+pub fn start_recording_and_notify(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    match state.start_recording() {
+        Ok(()) => {
+            notify(app, "ok", "Recording started");
+            overlay::show(
+                app,
+                BannerKind::Recording,
+                "Recording",
+                state.current_game.lock().clone(),
+            );
+            report_audio_trouble(app);
+        }
+        Err(err) => {
+            notify(app, "error", err.clone());
+            overlay::show(app, BannerKind::Error, "Recording will not start", Some(err));
+        }
+    }
+}
+
+/// Stop the recording and write it out. Encoding an hour of audio takes a
+/// while — call it off the hotkey thread.
+pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
+    let state = app.state::<AppState>();
+    overlay::show(app, BannerKind::Recording, "Saving recording…", None);
+    let outcome = state.stop_recording(&|share| recording_progress(app, share));
+    // Always the closing 1, success or not — the window takes it as "done"
+    // and drops the bar.
+    recording_progress(app, 1.0);
+    match outcome {
+        Ok(clip) => {
+            if let Some(library) = state.library.lock().as_ref() {
+                if let Err(err) = library.insert(&clip) {
+                    log::error!("could not index the recording: {err}");
+                }
+            }
+            let _ = app.emit("clip-saved", clip.clone());
+            let length = format::duration(clip.duration_ms);
+            notify(app, "ok", format!("Recording saved · {length}"));
+            overlay::show_with_thumb(
+                app,
+                BannerKind::Recording,
+                clip.game.clone().unwrap_or_else(|| "Recording saved".into()),
+                Some(format!("Recording saved · {length}")),
+                clip.thumb_path.clone(),
+            );
+            Ok(clip)
+        }
+        Err(err) => {
+            notify(app, "error", err.clone());
+            overlay::show(app, BannerKind::Error, "Recording failed", Some(err.clone()));
+            Err(err)
+        }
+    }
+}
+
+/// Finish recordings a crash or a quit left behind. Needs ffmpeg — called once
+/// that is in place.
+pub fn recover_recordings(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let clips = state.recover_recordings(&|share| recording_progress(&app, share));
+        if !clips.is_empty() {
+            recording_progress(&app, 1.0);
+        }
+        for clip in clips {
+            if let Some(library) = state.library.lock().as_ref() {
+                if let Err(err) = library.insert(&clip) {
+                    log::error!("could not index the recovered recording: {err}");
+                }
+            }
+            let _ = app.emit("clip-saved", clip.clone());
+            notify(&app, "ok", "A recording from last time was finished");
+        }
+    });
+}
+
+/// How far writing a recording out has got, 0 to 1 — a stop by hotkey shows
+/// in the window just like one by button.
+fn recording_progress(app: &tauri::AppHandle, share: f32) {
+    let _ = app.emit("recording-progress", share);
+}
+
+mod format {
+    /// `1:02:03` or `2:03`.
+    pub fn duration(ms: u64) -> String {
+        let total = ms / 1000;
+        let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+        if hours > 0 {
+            format!("{hours}:{minutes:02}:{seconds:02}")
+        } else {
+            format!("{minutes}:{seconds:02}")
         }
     }
 }
@@ -386,7 +494,7 @@ pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut
     Shortcut::from_str(text).map_err(|_| format!("\"{text}\" is not a valid key combination."))
 }
 
-/// Register the global hotkeys (save, screenshot, and buffer on/off).
+/// Register the global hotkeys (save, screenshot, recording, buffer on/off).
 ///
 /// Called at startup and after every change. Hence unregistering everything
 /// first: otherwise the old assignment would stay active as well.
@@ -428,6 +536,18 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     }) {
         log::warn!("could not register hotkey '{shot}': {err}");
         failed.push(shot);
+    }
+
+    let record = config.record_hotkey.clone();
+    if let Err(err) = shortcuts.on_shortcut(record.as_str(), move |app, _shortcut, event| {
+        if event.state() == ShortcutState::Pressed {
+            let app = app.clone();
+            // Stopping writes the whole recording out — not on the hotkey thread.
+            std::thread::spawn(move || toggle_recording_and_notify(&app));
+        }
+    }) {
+        log::warn!("could not register hotkey '{record}': {err}");
+        failed.push(record);
     }
 
     let toggle = config.toggle_buffer_hotkey.clone();
@@ -519,6 +639,15 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 if let Some(err) = trouble {
                     notify(&handle, "error", err.clone());
                     overlay::show(&handle, BannerKind::Error, "Recording disrupted", Some(err));
+                }
+                // The recording cannot write any more — a full disk, most
+                // likely. Stop it while what is there is still whole.
+                if let Some(err) = state.recording_failure() {
+                    notify(&handle, "error", format!("Recording stopped: {err}"));
+                    let handle = handle.clone();
+                    std::thread::spawn(move || {
+                        let _ = stop_recording_and_notify(&handle);
+                    });
                 }
             }
             // Every 5 s while something is recording: what the pipeline is
@@ -768,6 +897,7 @@ pub fn run() {
             commands::start_buffer,
             commands::stop_buffer,
             commands::save_clip,
+            commands::toggle_recording,
             commands::take_screenshot,
             commands::copy_clip_image,
             commands::write_screenshot,

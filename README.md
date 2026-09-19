@@ -34,6 +34,7 @@ afterwards. In ClippiBoy itself, without an editor.
 | **Separate tracks** | Sources with their own track are written alongside the clip; the mix stays changeable afterwards |
 | **Zero-copy capture** | The picture goes from Windows.Graphics.Capture into the hardware encoder as a D3D11 texture |
 | **Clip editing** | Name, description, game, track mix and a frame-accurate trim — all inside the app |
+| **Recordings** | Start and stop by hand, as long as the disk allows — streamed to disk while the buffer keeps running, with the same separate tracks as a clip |
 | **Screenshots** | Own hotkey, own folder, own gallery, plus a non-destructive editor: crop, marks, blur |
 | **Banner over the game** | A transparent overlay that reports saved clips without stealing focus or clicks |
 | **Game detection** | By process, not by window title, with a name list you can extend without rebuilding |
@@ -69,8 +70,9 @@ buffer is stopped cleanly first.
 | `Ctrl` + `Shift` + `B` | Buffer on / off |
 | `Ctrl` + `Shift` + `S` | Save clip |
 | `Ctrl` + `Shift` + `P` | Screenshot |
+| `Ctrl` + `Shift` + `R` | Recording start / stop |
 
-All three can be rebound to anything in the settings, including keys with no
+All four can be rebound to anything in the settings, including keys with no
 modifier at all — `F9`, say. A bare letter key then applies everywhere, chat
 included, so pick with care.
 
@@ -93,14 +95,15 @@ There is a plugin, and it hangs with the installer under
 [Releases](../../releases) from 0.4.0 on: download
 `com.einfabo.clippiboy.streamDeckPlugin`, double-click it, the Stream Deck
 software asks once — that is the whole installation, no account and no
-marketplace in between. Three keys come with it: save a clip, take a screenshot,
-switch the replay buffer.
+marketplace in between. Four keys come with it: save a clip, take a screenshot,
+switch the replay buffer, start and stop a recording.
 
 |  | Key shows |
 |---|---|
 | **Save Clip** | how many seconds are in the buffer, `off` when it is not running, a checkmark once the clip is written |
 | **Screenshot** | nothing to report — a screenshot needs no buffer |
 | **Replay Buffer** | on or off, and it follows along when the buffer is switched by hotkey, from the tray or by the app itself |
+| **Recording** | red while a recording runs, with how long it has been going; the checkmark after stopping means the file is written |
 
 That display is the whole point of the plugin. For **only** triggering, nothing
 here is needed: the Stream Deck software brings a *Hotkey* action of its own, and

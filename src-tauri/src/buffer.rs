@@ -198,6 +198,28 @@ impl ReplayBuffer {
             .cloned()
             .collect()
     }
+    /// Is there a keyframe to begin a recording on?
+    pub fn has_keyframe(&self) -> bool {
+        !self.keyframes.is_empty()
+    }
+
+    /// Everything from the newest keyframe on — where a recording begins.
+    ///
+    /// Not the moment of the key press: the stream is only decodable from a
+    /// keyframe, and reaching back to the one before costs at most one
+    /// keyframe interval. Waiting for the next one instead would lose that
+    /// much at the start.
+    pub fn from_last_keyframe(&self) -> Vec<EncodedPacket> {
+        let Some(&(seq, _)) = self.keyframes.back() else {
+            return Vec::new();
+        };
+        self.packets
+            .iter()
+            .skip((seq - self.head_seq) as usize)
+            .filter(|p| p.is_video())
+            .cloned()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +263,20 @@ mod tests {
         // The first packet has to be a video keyframe.
         let first = buf.packets.front().unwrap();
         assert!(first.is_video() && first.keyframe);
+    }
+
+    #[test]
+    fn a_recording_starts_on_the_newest_keyframe() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        assert!(buf.from_last_keyframe().is_empty());
+
+        // Keyframes every 2 s; 5 s in, the newest is at 4 s.
+        fill(&mut buf, 5);
+        let start = buf.from_last_keyframe();
+        assert!(start[0].keyframe);
+        assert_eq!(start[0].pts_us, 4_000_000);
+        assert!(start.iter().all(|p| p.is_video()), "audio packets slipped in");
+        assert_eq!(start.len(), 60, "one second at 60 fps");
     }
 
     #[test]

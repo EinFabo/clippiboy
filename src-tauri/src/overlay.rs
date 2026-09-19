@@ -67,6 +67,8 @@ pub enum BannerKind {
     /// A picture, not a recording — its own kind so the banner can say so
     /// without reading the text.
     Screenshot,
+    /// A recording started by hand began, or was written.
+    Recording,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -155,6 +157,7 @@ pub fn show_with_thumb(
         BannerKind::Buffer | BannerKind::BufferOff => config.on_buffer_toggle,
         BannerKind::Error => config.on_error,
         BannerKind::Screenshot => config.on_screenshot,
+        BannerKind::Recording => config.on_recording,
         BannerKind::Info => true,
     };
     if !wanted {

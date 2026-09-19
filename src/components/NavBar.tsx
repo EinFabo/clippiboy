@@ -4,9 +4,11 @@ import {
   IconAudio,
   IconClips,
   IconHome,
+  IconMonitor,
   IconRecord,
   IconSettings,
 } from "./icons";
+import { formatDuration } from "@/lib/format";
 import { SLIDE, SlidingIndicator } from "./ui/SlidingIndicator";
 import { LiveDot } from "./ui/LiveDot";
 import { animate, EASE_SPRING } from "@/lib/motion";
@@ -18,7 +20,9 @@ const items: Array<{ id: Route; label: string; icon: typeof IconHome }> = [
   { id: "dashboard", label: "Overview", icon: IconHome },
   { id: "clips", label: "Clips", icon: IconClips },
   { id: "audio", label: "Audio", icon: IconAudio },
-  { id: "recording", label: "Recording", icon: IconRecord },
+  // "Video", not "Recording": since recordings exist, the word means the
+  // thing started by hand — this page is about how the picture is captured.
+  { id: "recording", label: "Video", icon: IconMonitor },
   { id: "settings", label: "Settings", icon: IconSettings },
 ];
 
@@ -30,6 +34,9 @@ export function NavBar({
   onNavigate: (r: Route) => void;
 }) {
   const bufferActive = useEngine((s) => s.bufferActive);
+  const recording = useEngine((s) => s.recording);
+  const recordingSeconds = useEngine((s) => s.recordingSeconds);
+  const recordingProgress = useEngine((s) => s.recordingProgress);
 
   return (
     <nav className="absolute inset-x-0 top-12 z-40 flex justify-center px-8">
@@ -61,9 +68,40 @@ export function NavBar({
 
         <span className="mx-1 h-5 w-px bg-white/10" />
 
+        {recording && <RecordingBadge seconds={recordingSeconds} />}
+        {!recording && recordingProgress !== null && (
+          <SavingBadge share={recordingProgress} />
+        )}
         <BufferBadge active={bufferActive} />
       </div>
     </nav>
+  );
+}
+
+/** Only there while a recording runs: the red light and how long it is. */
+function RecordingBadge({ seconds }: { seconds: number }) {
+  return (
+    <span
+      className="relative inline-flex h-9 items-center gap-2 rounded-pill px-4 text-[13px] font-medium text-live tabular-nums"
+      title="Recording"
+    >
+      <IconRecord className="h-4 w-4" />
+      {formatDuration(seconds * 1000)}
+    </span>
+  );
+}
+
+/** Writing a stopped recording out — visible on every page, since it can
+    take a while and the stop may have come from a hotkey. */
+function SavingBadge({ share }: { share: number }) {
+  return (
+    <span
+      className="relative inline-flex h-9 items-center gap-2 rounded-pill px-4 text-[13px] font-medium text-ink-muted tabular-nums"
+      title="Saving the recording"
+    >
+      <IconRecord className="h-4 w-4" />
+      Saving {Math.round(share * 100)} %
+    </span>
   );
 }
 

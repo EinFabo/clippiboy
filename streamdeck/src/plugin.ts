@@ -1,6 +1,7 @@
 import streamDeck from "@elgato/streamdeck";
 
 import { SaveClip } from "./actions/save-clip.js";
+import { Record } from "./actions/record.js";
 import { Screenshot } from "./actions/screenshot.js";
 import { ToggleBuffer } from "./actions/toggle-buffer.js";
 import { clippiboy } from "./client.js";
@@ -29,5 +30,6 @@ streamDeck.ui.onSendToPlugin<{ command?: string }>(async (ev) => {
 streamDeck.actions.registerAction(new SaveClip());
 streamDeck.actions.registerAction(new Screenshot());
 streamDeck.actions.registerAction(new ToggleBuffer());
+streamDeck.actions.registerAction(new Record());
 
 await streamDeck.connect();

@@ -1037,6 +1037,7 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
         original: None,
         original_available: false,
         screenshot: false,
+        recording: false,
     };
 
     let tracks = match stems::tracks(&clip.id, &edit::source_path(&clip)) {

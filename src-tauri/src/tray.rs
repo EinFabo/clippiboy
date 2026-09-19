@@ -17,6 +17,8 @@ pub const ID: &str = "main";
 pub struct TrayHandles {
     toggle: CheckMenuItem<tauri::Wry>,
     save: MenuItem<tauri::Wry>,
+    record: MenuItem<tauri::Wry>,
+    last_recording: std::sync::atomic::AtomicBool,
     active_icon: Image<'static>,
     idle_icon: Image<'static>,
     /// Tooltip last set — saves resetting it once a second.
@@ -63,6 +65,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
     // Always available, unlike "Save clip": a screenshot brings its own capture
     // session and does not care whether the buffer is running.
     let shot = MenuItem::with_id(app, "shot", "Take screenshot", true, None::<&str>)?;
+    let record = MenuItem::with_id(app, "record", "Start recording", true, None::<&str>)?;
     // Reachable from the tray on purpose: someone testing a fault for us may
     // never open the window at all, and "send me the log" has to be one click
     // rather than a path to dictate.
@@ -76,6 +79,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
             &toggle,
             &save,
             &shot,
+            &record,
             &PredefinedMenuItem::separator(app)?,
             &logs,
             &quit,
@@ -107,6 +111,10 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
                 // Muxing takes a moment — do not do it on the menu thread.
                 std::thread::spawn(move || crate::save_clip_and_notify(&app));
             }
+            "record" => {
+                let app = app.clone();
+                std::thread::spawn(move || crate::toggle_recording_and_notify(&app));
+            }
             "shot" => {
                 let app = app.clone();
                 // Reading the picture back takes a moment — not on the menu
@@ -127,6 +135,8 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
                 state
                     .quitting
                     .store(true, std::sync::atomic::Ordering::SeqCst);
+                // Closed, not muxed: the next start finishes the recording.
+                state.abandon_recording();
                 state.stop_pipeline();
                 app.exit(0);
             }
@@ -147,6 +157,8 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
     app.manage(TrayHandles {
         toggle,
         save,
+        record,
+        last_recording: std::sync::atomic::AtomicBool::new(false),
         active_icon,
         idle_icon,
         last_tooltip: parking_lot::Mutex::new(String::new()),
@@ -172,7 +184,15 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
         return;
     };
 
-    let tooltip = if status.buffer_active {
+    let tooltip = if status.recording {
+        let total = status.recording_seconds as u64;
+        format!(
+            "ClippiBoy · recording {}:{:02}:{:02}",
+            total / 3600,
+            total / 60 % 60,
+            total % 60
+        )
+    } else if status.buffer_active {
         let mut text = format!(
             "ClippiBoy · buffer running — {} s",
             status.buffered_seconds.round() as u32
@@ -195,6 +215,17 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
             let _ = tray.set_tooltip(Some(&tooltip));
             *last = tooltip;
         }
+    }
+
+    let was_recording = handles
+        .last_recording
+        .swap(status.recording, std::sync::atomic::Ordering::SeqCst);
+    if was_recording != status.recording {
+        let _ = handles.record.set_text(if status.recording {
+            "Stop recording"
+        } else {
+            "Start recording"
+        });
     }
 
     let was_active = handles

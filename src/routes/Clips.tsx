@@ -11,6 +11,7 @@ import {
   IconClose,
   IconFolder,
   IconHeart,
+  IconRecord,
   IconScissors,
   IconSearch,
   IconTrash,
@@ -37,10 +38,12 @@ import type { Clip } from "@/lib/types";
  * throw the filter off.
  */
 type Filter =
-  /** Recordings. Stills have a chip of their own — see `screenshots`. */
+  /** Clips cut out of the buffer. Stills and recordings have chips of their
+      own — see `screenshots` and `recordings`. */
   | { kind: "all" }
   | { kind: "favorites" }
   | { kind: "screenshots" }
+  | { kind: "recordings" }
   | { kind: "untagged" }
   | { kind: "game"; name: string };
 
@@ -120,7 +123,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const untagged = useMemo(() => clips.filter((c) => !c.game).length, [clips]);
   const favorites = useMemo(() => clips.filter((c) => c.favorite).length, [clips]);
   const shots = useMemo(() => clips.filter((c) => c.screenshot).length, [clips]);
-  const recordings = clips.length - shots;
+  const recordings = useMemo(() => clips.filter((c) => c.recording).length, [clips]);
+  const cut = clips.length - shots - recordings;
 
   // If a clip's game is renamed or removed, its filter disappears — without
   // this the gallery would stay empty and nobody would know why. Not while the
@@ -135,9 +139,11 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
           ? favorites === 0
           : filter.kind === "screenshots"
             ? shots === 0
-            : !games.some((g) => g.name === filter.name);
+            : filter.kind === "recordings"
+              ? recordings === 0
+              : !games.some((g) => g.name === filter.name);
     if (gone) setFilter(ALL);
-  }, [filter, games, untagged, favorites, shots, open]);
+  }, [filter, games, untagged, favorites, shots, recordings, open]);
 
   const visible = clips.filter((c) => {
     const haystack = [
@@ -151,12 +157,14 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
     const matchesQuery = !query || haystack.includes(query.toLowerCase());
     const matchesFilter =
       filter.kind === "all"
-        ? !c.screenshot
+        ? !c.screenshot && !c.recording
         : filter.kind === "favorites"
           ? c.favorite
           : filter.kind === "screenshots"
             ? c.screenshot
-            : filter.kind === "untagged"
+            : filter.kind === "recordings"
+              ? c.recording
+              : filter.kind === "untagged"
               ? !c.game
               : c.game === filter.name;
     return matchesQuery && matchesFilter;
@@ -268,7 +276,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
           untagged={untagged}
           favorites={favorites}
           shots={shots}
-          total={recordings}
+          recordings={recordings}
+          total={cut}
           active={filter}
           onSelect={setFilter}
           onRemove={clearGame}
@@ -318,7 +327,8 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                   }}
                   onClick={() => openAt(index)}
                   aria-label={`${clip.screenshot ? "Open" : "Play"} ${
-                    clip.game ?? (clip.screenshot ? "screenshot" : "clip")
+                    clip.game ??
+                    (clip.screenshot ? "screenshot" : clip.recording ? "recording" : "clip")
                   }`}
                   className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
                 >
@@ -369,6 +379,13 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       {clip.screenshot ? (
                         <Pill title="Screenshot">
                           <IconCamera className="h-3 w-3" />
+                        </Pill>
+                      ) : clip.recording ? (
+                        // The red mark tells a recording from a clip at a
+                        // glance, before the length does.
+                        <Pill title="Recording">
+                          <IconRecord className="h-3 w-3 text-live" />
+                          {formatDuration(clip.durationMs)}
                         </Pill>
                       ) : (
                         <Pill>{formatDuration(clip.durationMs)}</Pill>
@@ -649,6 +666,7 @@ function GameFilters({
   untagged,
   favorites,
   shots,
+  recordings,
   total,
   active,
   onSelect,
@@ -658,6 +676,7 @@ function GameFilters({
   untagged: number;
   favorites: number;
   shots: number;
+  recordings: number;
   total: number;
   active: Filter;
   onSelect: (filter: Filter) => void;
@@ -674,7 +693,7 @@ function GameFilters({
     setFade({ left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 });
   }, []);
 
-  useLayoutEffect(measure, [measure, games, untagged, favorites, shots]);
+  useLayoutEffect(measure, [measure, games, untagged, favorites, shots, recordings]);
 
   // Tip the mouse wheel over: there is nothing in the bar that could scroll
   // vertically, so the wheel should move it horizontally. Only when it really
@@ -713,6 +732,7 @@ function GameFilters({
     [
       "all",
       favorites > 0 && "favorites",
+      recordings > 0 && "recordings",
       shots > 0 && "screenshots",
       ...games.map(({ name }) => (confirming === name ? `${name}?` : name)),
       untagged > 0 && "untagged",
@@ -760,6 +780,25 @@ function GameFilters({
           }
         >
           Favorites
+        </Chip>
+      )}
+
+      {recordings > 0 && (
+        <Chip
+          id="recordings"
+          active={active.kind === "recordings"}
+          count={recordings}
+          onClick={() => onSelect({ kind: "recordings" })}
+          icon={
+            <IconRecord
+              className={cn(
+                "h-3.5 w-3.5",
+                active.kind === "recordings" ? "text-black/70" : "text-live",
+              )}
+            />
+          }
+        >
+          Recordings
         </Chip>
       )}
 

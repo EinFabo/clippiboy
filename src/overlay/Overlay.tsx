@@ -85,6 +85,7 @@ export function Overlay() {
     // The same colour as a clip: both say "kept". What tells them apart is the
     // sign in the picture frame, and that is enough at a glance.
     screenshot: "text-accent-bright",
+    recording: "text-live",
   }[banner.kind];
 
   const stroke = {
@@ -94,6 +95,7 @@ export function Overlay() {
     error: "var(--color-live)",
     info: "var(--color-line-strong)",
     screenshot: "var(--color-accent-bright)",
+    recording: "var(--color-live)",
   }[banner.kind];
 
   // "Buffer off" plays the line backwards and greys it out along the way — the
@@ -170,6 +172,14 @@ function Mark({ kind }: { kind: OverlayBanner["kind"] }) {
       <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
         <path d="M3 8.5A1.5 1.5 0 0 1 4.5 7h2.2l1.3-2h7.9l1.3 2h2.3A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5v-9Z" />
         <circle cx="12" cy="13" r="3.4" />
+      </svg>
+    );
+  }
+  if (kind === "recording") {
+    // Solid, no ring — the buffer's mark is the ring, this is the red light.
+    return (
+      <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />
       </svg>
     );
   }
