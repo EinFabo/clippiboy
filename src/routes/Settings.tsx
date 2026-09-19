@@ -5,10 +5,10 @@ import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Segmented, Select, Toggle } from "@/components/ui/Controls";
-import { api, events, inTauri } from "@/lib/ipc";
+import { api, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/format";
-import type { OverlayCorner, StorageUsage, UpdateInfo } from "@/lib/types";
+import type { OverlayCorner, StorageUsage } from "@/lib/types";
 
 /**
  * The four corners in reading order: value, what it is called, and where the
@@ -836,7 +836,10 @@ function StreamDeck() {
 
 function Updates() {
   const [version, setVersion] = useState("0.1.0");
-  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  // Shared with the notice at the top of every page, so a check here and the
+  // hourly one in the core land in the same place.
+  const update = useEngine((s) => s.update);
+  const setUpdate = useEngine((s) => s.setUpdate);
   // `null` means: not checked yet. Otherwise the text under the row.
   const [state, setState] = useState<"idle" | "checking" | "current" | "failed">(
     "idle",
@@ -847,10 +850,6 @@ function Updates() {
   useEffect(() => {
     if (!inTauri) return;
     api.appVersion().then(setVersion).catch(() => {});
-    // Startup checks by itself; the result arrives as an event.
-    let unlisten: (() => void) | undefined;
-    events.onUpdateAvailable(setUpdate).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
   }, []);
 
   const check = async () => {

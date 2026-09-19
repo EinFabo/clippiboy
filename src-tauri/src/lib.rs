@@ -731,7 +731,7 @@ pub fn run() {
                 log::warn!("{err}");
             }
             start_buffer_if_configured(handle);
-            updater::check_on_startup(handle);
+            updater::watch(handle);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -787,6 +787,7 @@ pub fn run() {
             commands::reveal_path,
             commands::app_version,
             commands::check_update,
+            commands::pending_update,
             commands::install_update,
             commands::regenerate_control_token,
         ])

@@ -14,6 +14,7 @@ import type {
   ShotRect,
   ShotStep,
   TrackMix,
+  UpdateInfo,
 } from "./lib/types";
 
 interface EngineState {
@@ -40,9 +41,12 @@ interface EngineState {
   rateControl: RateControl | null;
   /** Game detected in the foreground, reported by the core. */
   detectedGame: string | null;
+  /** A newer version the core has found and not yet installed. */
+  update: UpdateInfo | null;
   lastError: string | null;
 
   init: () => Promise<void>;
+  setUpdate: (update: UpdateInfo | null) => void;
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
@@ -122,7 +126,12 @@ export const useEngine = create<EngineState>((set, get) => ({
   bufferBytes: 0,
   rateControl: null,
   detectedGame: null,
+  update: null,
   lastError: null,
+
+  setUpdate(update) {
+    set({ update });
+  },
 
   async init() {
     if (!inTauri) {
@@ -200,6 +209,13 @@ export const useEngine = create<EngineState>((set, get) => ({
       await events.onAudioErrors((sourceErrors) => set({ sourceErrors }));
       await events.onAudioWarnings((sourceWarnings) => set({ sourceWarnings }));
       await events.onAudioTaps((taps) => set({ taps }));
+      // The core checks every hour and says so by event; a find from before
+      // this window existed is asked for once.
+      await events.onUpdateAvailable((update) => set({ update }));
+      api
+        .pendingUpdate()
+        .then((update) => update && set({ update }))
+        .catch(() => {});
     } catch (err) {
       set({ ready: true, lastError: String(err) });
     }

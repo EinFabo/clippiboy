@@ -1056,6 +1056,13 @@ pub fn app_version(app: tauri::AppHandle) -> String {
 }
 
 /// Look for an update. `None` means already up to date.
+/// The update found by the hourly check, if any — asked for when the window
+/// starts, because an event sent while it was hidden has nobody listening.
+#[tauri::command]
+pub fn pending_update(app: tauri::AppHandle) -> Option<crate::updater::UpdateInfo> {
+    crate::updater::pending(&app)
+}
+
 #[tauri::command]
 pub async fn check_update(app: tauri::AppHandle) -> Result<Option<crate::updater::UpdateInfo>> {
     crate::updater::check(&app).await

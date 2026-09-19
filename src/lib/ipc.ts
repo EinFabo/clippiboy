@@ -65,6 +65,9 @@ export const api = {
   /** Throw the Stream Deck token away and generate a new one. */
   regenerateControlToken: () => invoke<AppConfig>("regenerate_control_token"),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  /** What the hourly check found — asked for on start, since the event may
+   *  have gone out while the window was hidden. */
+  pendingUpdate: () => invoke<UpdateInfo | null>("pending_update"),
   installUpdate: () => invoke<void>("install_update"),
 
   listClips: () => invoke<Clip[]>("list_clips"),
