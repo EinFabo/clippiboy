@@ -25,7 +25,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "9.0.1";
 const OUT = join(ROOT, "dist-ffmpeg");
 const CACHE = join(ROOT, "node_modules", ".cache", `ffmpeg-${VERSION}-essentials_build.zip`);
-const URL_ZIP = `https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-${VERSION}-essentials_build.zip`;
+// gyan.dev's own GitHub mirror of the package. gyan.dev itself turned the
+// Actions runner away four times in a row; this is byte for byte the same file.
+const URL_ZIP = `https://github.com/GyanD/codexffmpeg/releases/download/${VERSION}/ffmpeg-${VERSION}-essentials_build.zip`;
 /** From gyan.dev's `.sha256` next to the package. */
 const SHA256_ZIP = "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9";
 const WANTED = ["ffmpeg.exe", "ffprobe.exe"];
@@ -147,9 +149,9 @@ function download(url, depth = 0) {
 /**
  * The same, but it does not give up on the first bad day.
  *
- * The mirror is a single host with no CDN behind it, and it throttles and drops
- * connections when several builds ask at once — which is exactly when a release
- * is being cut.
+ * gyan.dev is a single host with no CDN behind it that throttles and drops
+ * connections — the reason the GitHub mirror is used now. The retries stay:
+ * a release asset can have a bad minute too.
  */
 async function downloadWithRetries(url) {
   let last;
