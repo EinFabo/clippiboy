@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Segmented, Select, Toggle } from "@/components/ui/Controls";
+import { Segmented, Select, Slider, Toggle } from "@/components/ui/Controls";
 import { api, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/format";
@@ -108,6 +108,39 @@ export function Settings() {
       </section>
 
       <section>
+        <SectionTitle title="Console over the game" />
+        <Card className="divide-y divide-line">
+          <Row
+            label="Open with the hotkey"
+            hint={`${config.consoleHotkey} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`}
+          >
+            <Toggle
+              checked={config.consoleEnabled}
+              onChange={(consoleEnabled) => patchConfig({ consoleEnabled })}
+            />
+          </Row>
+          <Row
+            label="Size"
+            hint={`${Math.round(config.consoleScale * 100)} % — the console always sits at the bottom, above the task bar`}
+          >
+            <div className="flex w-56 items-center gap-3">
+              <Slider
+                label="Size of the console"
+                value={config.consoleScale}
+                min={0.8}
+                max={1.6}
+                step={0.1}
+                onChange={(consoleScale) => patchConfig({ consoleScale })}
+              />
+              <span className="w-12 shrink-0 text-right text-sm tabular-nums text-ink-muted">
+                {Math.round(config.consoleScale * 100)} %
+              </span>
+            </div>
+          </Row>
+        </Card>
+      </section>
+
+      <section>
         <SectionTitle title="Banner over the game" />
         <Card className="divide-y divide-line">
           <Row
@@ -145,6 +178,16 @@ export function Settings() {
               checked={config.overlay.onRecording}
               disabled={!config.overlay.enabled}
               onChange={(onRecording) => patchOverlay({ onRecording })}
+            />
+          </Row>
+          <Row
+            label="REC badge while recording"
+            hint="Stays in the corner for the whole recording, not just at the start"
+          >
+            <Toggle
+              checked={config.overlay.recBadge}
+              disabled={!config.overlay.enabled}
+              onChange={(recBadge) => patchOverlay({ recBadge })}
             />
           </Row>
           <Row label="Errors">
@@ -446,18 +489,20 @@ function Hotkeys() {
     risky(config.saveClipHotkey) ||
     risky(config.toggleBufferHotkey) ||
     risky(config.screenshotHotkey) ||
-    risky(config.recordHotkey);
+    risky(config.recordHotkey) ||
+    risky(config.consoleHotkey);
 
   const apply = async (
     saveClip: string,
     toggleBuffer: string,
     screenshot: string,
     record: string,
+    consoleKey: string,
   ) => {
     setSaving(true);
     setError(null);
     try {
-      await setHotkeys(saveClip, toggleBuffer, screenshot, record);
+      await setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -478,6 +523,7 @@ function Hotkeys() {
                 config.toggleBufferHotkey,
                 config.screenshotHotkey,
                 config.recordHotkey,
+                config.consoleHotkey,
               )
             }
           />
@@ -492,6 +538,7 @@ function Hotkeys() {
                 value,
                 config.screenshotHotkey,
                 config.recordHotkey,
+                config.consoleHotkey,
               )
             }
           />
@@ -506,6 +553,7 @@ function Hotkeys() {
                 config.toggleBufferHotkey,
                 value,
                 config.recordHotkey,
+                config.consoleHotkey,
               )
             }
           />
@@ -519,6 +567,25 @@ function Hotkeys() {
                 config.saveClipHotkey,
                 config.toggleBufferHotkey,
                 config.screenshotHotkey,
+                value,
+                config.consoleHotkey,
+              )
+            }
+          />
+        </Row>
+        <Row
+          label="Konsole über dem Spiel"
+          hint="Info: Geht nicht über Spielen im exklusiven Vollbild"
+        >
+          <HotkeyInput
+            value={config.consoleHotkey}
+            busy={saving}
+            onChange={(value) =>
+              apply(
+                config.saveClipHotkey,
+                config.toggleBufferHotkey,
+                config.screenshotHotkey,
+                config.recordHotkey,
                 value,
               )
             }

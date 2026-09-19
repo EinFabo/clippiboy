@@ -60,7 +60,17 @@ const LEAVE_MS = 200;
  */
 let greeted = false;
 
-export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
+export function Clips({
+  onNavigate,
+  focus,
+  onFocused,
+}: {
+  onNavigate: (r: Route) => void;
+  /** A clip to open straight away — the console over the game sends one when
+   *  "open in the app" is pressed. */
+  focus?: string | null;
+  onFocused?: () => void;
+}) {
   const { clips, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
     useEngine();
   const [query, setQuery] = useState("");
@@ -226,6 +236,29 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
     touched.current = new Set(visible[index] ? [visible[index].id] : []);
     setOpen(index);
   };
+
+  // A clip handed over from the console. The filter has to go first: the clip
+  // may not be in whatever was on screen, and the player counts in the list it
+  // is given.
+  useEffect(() => {
+    if (!focus) return;
+    const clip = clips.find((c) => c.id === focus);
+    if (!clip) return;
+    setQuery("");
+    setFilter(
+      clip.screenshot
+        ? { kind: "screenshots" }
+        : clip.recording
+          ? { kind: "recordings" }
+          : ALL,
+    );
+    const list = clips.filter((c) =>
+      clip.screenshot ? c.screenshot : clip.recording ? c.recording : !c.screenshot && !c.recording,
+    );
+    setPlaylist(list.map((c) => c.id));
+    setOpen(list.findIndex((c) => c.id === focus));
+    onFocused?.();
+  }, [focus, clips, onFocused]);
 
   /** Page on inside the open viewer. Both of them do it the same way. */
   const openIndex = (next: number) => {

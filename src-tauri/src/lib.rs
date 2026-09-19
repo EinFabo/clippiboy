@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod clips;
 pub mod commands;
 pub mod config;
+pub mod console;
 pub mod control;
 pub mod convert;
 pub mod edit;
@@ -156,6 +157,7 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     match state.start_recording() {
         Ok(()) => {
+            overlay::set_recording(app, true);
             notify(app, "ok", "Recording started");
             overlay::show(
                 app,
@@ -176,6 +178,7 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
 /// while — call it off the hotkey thread.
 pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
+    overlay::set_recording(app, false);
     overlay::show(app, BannerKind::Recording, "Saving recording…", None);
     let outcome = state.stop_recording(&|share| recording_progress(app, share));
     // Always the closing 1, success or not — the window takes it as "done"
@@ -538,6 +541,21 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
         failed.push(shot);
     }
 
+    let console = config.console_hotkey.clone();
+    if config.console_enabled {
+        if let Err(err) = shortcuts.on_shortcut(console.as_str(), move |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                // Showing a window belongs on the main thread; the hotkey
+                // arrives on one of its own.
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || console::toggle(&handle));
+            }
+        }) {
+            log::warn!("could not register hotkey '{console}': {err}");
+            failed.push(console);
+        }
+    }
+
     let record = config.record_hotkey.clone();
     if let Err(err) = shortcuts.on_shortcut(record.as_str(), move |app, _shortcut, event| {
         if event.state() == ShortcutState::Pressed {
@@ -848,6 +866,7 @@ pub fn run() {
                 }
             }
             overlay::create(handle);
+            console::create(handle);
             if let Err(err) = tray::build(handle) {
                 log::error!("could not create the tray icon: {err}");
             }
@@ -898,6 +917,9 @@ pub fn run() {
             commands::stop_buffer,
             commands::save_clip,
             commands::toggle_recording,
+            commands::close_console,
+            commands::show_clip_in_app,
+            commands::export_for_discord,
             commands::take_screenshot,
             commands::copy_clip_image,
             commands::write_screenshot,

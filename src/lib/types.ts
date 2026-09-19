@@ -133,6 +133,8 @@ export interface OverlayConfig {
   onError: boolean;
   onScreenshot: boolean;
   onRecording: boolean;
+  /** The REC badge that stands for the whole recording. */
+  recBadge: boolean;
   corner: OverlayCorner;
   durationMs: number;
   /** Device name of the screen (`\\.\DISPLAY1`); null = primary. */
@@ -163,6 +165,12 @@ export interface AppConfig {
   screenshotHotkey: string;
   /** Start and stop a recording. */
   recordHotkey: string;
+  /** Open the console over the game. */
+  consoleHotkey: string;
+  /** Whether that hotkey does anything at all. */
+  consoleEnabled: boolean;
+  /** How big the console is drawn, 0.8 to 1.6. */
+  consoleScale: number;
   autoStartWithWindows: boolean;
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;

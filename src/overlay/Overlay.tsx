@@ -1,7 +1,8 @@
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { fileUrl, inTauri } from "@/lib/ipc";
-import type { OverlayBanner } from "@/lib/types";
+import type { EngineStatus, OverlayBanner } from "@/lib/types";
+import { formatDuration } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
 /** How long the fade-out animation runs — has to match `cb-card-out`. */
@@ -23,6 +24,9 @@ interface Shown extends OverlayBanner {
 export function Overlay() {
   const [banner, setBanner] = useState<Shown | null>(null);
   const [leaving, setLeaving] = useState(false);
+  /** How long the running recording has been going, or `null` when none is.
+   *  The badge below hangs off this. */
+  const [recording, setRecording] = useState<number | null>(null);
   const timers = useRef<number[]>([]);
   const seq = useRef(0);
 
@@ -66,15 +70,42 @@ export function Overlay() {
       else unlisten = fn;
     });
 
+    // The recording badge follows the engine status, which the core emits once
+    // a second anyway — no channel of its own for a number that is already
+    // travelling.
+    let unstatus: (() => void) | undefined;
+    listen<EngineStatus>("engine-status", (event) => {
+      setRecording(event.payload.recording ? event.payload.recordingSeconds : null);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unstatus = fn;
+    });
+
     const running = timers.current;
     return () => {
       cancelled = true;
       running.forEach(clearTimeout);
       unlisten?.();
+      unstatus?.();
     };
   }, []);
 
-  if (!banner) return null;
+  // While a recording runs the window stays up, and this is what stands in it
+  // between banners: the red light and how long it has been going.
+  if (!banner) {
+    if (recording === null) return null;
+    return (
+      <div className="flex h-full w-full items-start justify-end p-3">
+        <div className="cb-rec flex items-center gap-2 rounded-inner bg-black/65 px-3 py-1.5 backdrop-blur-md">
+          <span className="cb-rec-dot h-2.5 w-2.5 rounded-pill bg-live" />
+          <span className="text-[13px] font-bold tracking-wide text-live">REC</span>
+          <span className="text-[13px] font-semibold text-ink tabular-nums">
+            {formatDuration(recording * 1000)}
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   const accent = {
     clip: "text-accent-bright",
@@ -129,6 +160,18 @@ export function Overlay() {
           <rect className="cb-halo" pathLength={100} />
           <rect className="cb-line" pathLength={100} />
         </svg>
+
+        {/* And then a light keeps circling the frame, so the banner reads as
+            alive rather than as a picture that was pasted on. Not on the way
+            out: "buffer off" runs its line backwards, and a light going round
+            underneath would fight it. */}
+        {!rewind && (
+          <span
+            className="cb-rim"
+            style={{ "--cb-stroke": stroke } as CSSProperties}
+            aria-hidden
+          />
+        )}
 
         <div className="relative aspect-video h-[72px] shrink-0 overflow-hidden rounded-inner bg-gradient-to-br from-accent-deep/50 to-black">
           {thumb ? (

@@ -70,12 +70,13 @@ interface EngineState {
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  /** All four hotkeys at once — the core only accepts them together. */
+  /** All five hotkeys at once — the core only accepts them together. */
   setHotkeys: (
     saveClip: string,
     toggleBuffer: string,
     screenshot: string,
     record: string,
+    consoleKey: string,
   ) => Promise<void>;
   setClipDir: (dir: string) => Promise<void>;
   /** New token for the Stream Deck port; the old one stops working at once. */
@@ -317,7 +318,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
   },
 
-  async setHotkeys(saveClip, toggleBuffer, screenshot, record) {
+  async setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey) {
     if (!inTauri) {
       set((st) => ({
         config: {
@@ -326,13 +327,16 @@ export const useEngine = create<EngineState>((set, get) => ({
           toggleBufferHotkey: toggleBuffer,
           screenshotHotkey: screenshot,
           recordHotkey: record,
+          consoleHotkey: consoleKey,
         },
       }));
       return;
     }
     // Deliberately without an optimistic update: if registering fails, the old
     // assignment should stand, and the error belongs on that row.
-    set({ config: await api.setHotkeys(saveClip, toggleBuffer, screenshot, record) });
+    set({
+      config: await api.setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey),
+    });
   },
 
   async regenerateControlToken() {

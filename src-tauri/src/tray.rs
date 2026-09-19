@@ -136,6 +136,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
                     .quitting
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 // Closed, not muxed: the next start finishes the recording.
+                crate::console::close(app);
                 state.abandon_recording();
                 state.stop_pipeline();
                 app.exit(0);

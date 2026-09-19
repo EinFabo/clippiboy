@@ -149,3 +149,89 @@ body,
     stroke-dashoffset: 100;
   }
 }
+
+/* The light that circles the card, once the line has finished drawing itself.
+   From the overlay lab, variant 15.
+
+   A conic gradient spinning behind the card, masked down to the border: the
+   `exclude` composite punches the inside out, so only the 1.5 px frame shows
+   and the glass behind it stays glass. */
+@keyframes cb-rim-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@keyframes cb-rim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.cb-rim {
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  /* Waits for the drawn line — the two must not run at once. */
+  animation: cb-rim-in 500ms ease-out 760ms both;
+}
+
+.cb-rim::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 150%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0 58%,
+    var(--cb-stroke) 78%,
+    #fff 86%,
+    transparent 94%
+  );
+  animation: cb-rim-spin 2.6s linear infinite;
+}
+
+/* The badge that stands while a recording runs — variant 39 from the lab. It
+   lives in the same window as the banner and steps aside while one is up. */
+.cb-rec {
+  animation: cb-card-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.cb-rec-dot {
+  animation: cb-rec-blink 1.4s ease-in-out infinite;
+}
+
+@keyframes cb-rec-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cb-rim,
+  .cb-rim::before,
+  .cb-rec,
+  .cb-rec-dot {
+    animation: none;
+  }
+  .cb-rim {
+    opacity: 1;
+  }
+}
