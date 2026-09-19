@@ -89,6 +89,38 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// banner instead of hiding — the badge lives in the same window.
 static BADGE: AtomicBool = AtomicBool::new(false);
 
+/// When the banner currently up is finished, as epoch milliseconds. Taking the
+/// badge down must not pull the window out from under a banner still running.
+static BANNER_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// What the page needs for the badge: which corner of the window it belongs in,
+/// and whether it is wanted at all. The banner sits in the middle and does not
+/// care, but the badge is meant to line up with the screen corner — and only
+/// this side knows which one was picked.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Placement {
+    corner: OverlayCorner,
+    rec_badge: bool,
+}
+
+fn announce(window: &tauri::WebviewWindow, config: &OverlayConfig) {
+    let _ = window.emit(
+        "overlay-place",
+        Placement {
+            corner: config.corner,
+            rec_badge: config.rec_badge,
+        },
+    );
+}
+
 /// Create the overlay window. Called once at startup.
 pub fn create(app: &tauri::AppHandle) {
     if app.get_webview_window(LABEL).is_some() {
@@ -140,17 +172,31 @@ pub fn set_recording(app: &tauri::AppHandle, recording: bool) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
+    // Also on the way down, and on every change to the settings: whoever draws
+    // the badge has to know the corner and whether it is switched on at all.
+    announce(&window, &config);
     if wanted {
         if let Err(err) = place(&window, &config) {
             log::warn!("could not position the overlay: {err}");
         }
         let _ = window.show();
         let _ = window.set_always_on_top(true);
-    } else {
-        // Whatever comes next brings the window back up by itself — stopping a
-        // recording is followed by the banner that says it was written.
-        let _ = window.hide();
+        return;
     }
+    // Hiding right away would take a banner with it, and stopping a recording
+    // is reported in the very next breath — a window found awake saves that
+    // banner the wake-up. So wait a moment, then hide only if nothing else has
+    // taken the window in the meantime.
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if BADGE.load(Ordering::SeqCst) || now_ms() < BANNER_UNTIL.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(window) = handle.get_webview_window(LABEL) {
+            let _ = window.hide();
+        }
+    });
 }
 
 /// Put the banner at the configured spot. Called at startup and after every
@@ -163,6 +209,7 @@ pub fn reposition(app: &tauri::AppHandle) {
     if let Err(err) = place(&window, &config) {
         log::warn!("could not position the overlay: {err}");
     }
+    announce(&window, &config);
 }
 
 /// Show the banner, provided it is not switched off in the settings.
@@ -227,6 +274,10 @@ pub fn show_with_thumb(
         thumb_path,
         duration_ms,
     };
+
+    // The badge's hide order asks for this: as long as a banner is up, the
+    // window belongs to it.
+    BANNER_UNTIL.store(now_ms() + duration_ms as u64 + 600, Ordering::SeqCst);
 
     // Sending, and hiding again afterwards, happen off the caller's thread: the
     // window needs its moment to draw first, and a save must not wait for it.

@@ -77,6 +77,12 @@ pub fn set_config(
     crate::allow_clip_dir(&app, &next.clip_dir);
     // The corner or the screen may have changed.
     crate::overlay::reposition(&app);
+    // And so may the badge. Switching it off is a switch you flip while
+    // watching the corner, so it has to clear right then — not only with the
+    // next recording.
+    if state.is_recording() {
+        crate::overlay::set_recording(&app, true);
+    }
     crate::apply_autostart(&app, next.auto_start_with_windows);
 
     // A running capture is bound to its monitor or window. Without a restart
