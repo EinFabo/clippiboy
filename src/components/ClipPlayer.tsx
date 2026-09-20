@@ -9,6 +9,13 @@ import { useClipMenu } from "@/components/clipMenu";
 import { IconTrash } from "@/components/icons";
 import { HeartBurst } from "@/components/ui/HeartBurst";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
+import {
+  PlayButton,
+  Scrubber,
+  Volume,
+  clock,
+  jump,
+} from "@/components/ui/PlayerControls";
 import { EASE_ENTRANCE, EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { useEngine } from "@/store";
 import { api, events, fileUrl, inTauri } from "@/lib/ipc";
@@ -743,28 +750,7 @@ export function ClipPlayer({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-4">
-          <button
-            aria-label={playing ? "Pause" : "Play"}
-            onClick={toggle}
-            disabled={broken}
-            className="relative grid h-11 w-11 shrink-0 place-items-center rounded-pill bg-white
-              text-black transition-transform active:scale-95 disabled:opacity-40"
-          >
-            {/* Both symbols stay in place and hand over to each other. Swapping
-                the elements would make the button blink at the very moment the
-                eye is on it. */}
-            <PlayGlyph shown={playing}>
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
-                <rect x="6.5" y="5" width="3.6" height="14" rx="1.2" />
-                <rect x="13.9" y="5" width="3.6" height="14" rx="1.2" />
-              </svg>
-            </PlayGlyph>
-            <PlayGlyph shown={!playing} turn={-1}>
-              <svg viewBox="0 0 24 24" className="h-4 w-4 translate-x-[1px]" fill="currentColor">
-                <path d="M7.5 5.2 19 12 7.5 18.8V5.2Z" />
-              </svg>
-            </PlayGlyph>
-          </button>
+          <PlayButton playing={playing} disabled={broken} onClick={toggle} />
 
           <Scrubber
             progress={progress}
@@ -893,42 +879,6 @@ export function ClipPlayer({
 }
 
 /**
- * One of the two symbols on the play button. The one going out shrinks and
- * turns away, the one coming in turns in from the other side — 160 ms, so they
- * overlap and it reads as one symbol changing its mind.
- */
-function PlayGlyph({
-  shown,
-  turn = 1,
-  children,
-}: {
-  shown: boolean;
-  turn?: 1 | -1;
-  children: React.ReactNode;
-}) {
-  return (
-    <span
-      aria-hidden={!shown}
-      className={cn(
-        "absolute grid place-items-center",
-        "transition-[opacity,transform,rotate] duration-[160ms] ease-[var(--ease-out-soft)]",
-        shown
-          ? "scale-100 opacity-100"
-          : "pointer-events-none scale-[0.7] opacity-0",
-      )}
-      style={{ rotate: shown ? "0deg" : `${20 * turn}deg` }}
-    >
-      {children}
-    </span>
-  );
-}
-
-/** Seeks, keeping the position within the file's bounds. */
-function jump(element: HTMLVideoElement, seconds: number) {
-  element.currentTime = Math.min(Math.max(seconds, 0), element.duration);
-}
-
-/**
  * The stored trim, clamped to the actual length. With no stored state the whole
  * clip is selected.
  */
@@ -984,217 +934,6 @@ function sameEdit(a: ClipEdit, b: ClipEdit): boolean {
   );
 }
 
-function Scrubber({
-  progress,
-  fillRef,
-  knobRef,
-  duration,
-  trim,
-  waveform,
-  onSeek,
-  onTrim,
-}: {
-  progress: number;
-  /** Bar and handle. While playing, the player's frame loop writes straight
-      into them instead of triggering a render. */
-  fillRef: React.RefObject<HTMLDivElement | null>;
-  knobRef: React.RefObject<HTMLDivElement | null>;
-  duration: number;
-  trim: Trim;
-  /** Picture of the audio track; missing while ffmpeg is still drawing it. */
-  waveform?: string;
-  onSeek: (ratio: number) => void;
-  onTrim: (trim: Trim) => void;
-}) {
-  const bar = useRef<HTMLDivElement>(null);
-  const [dragging, setDragging] = useState<"start" | "end" | null>(null);
-  const percent = (seconds: number) =>
-    duration > 0 ? Math.min(100, Math.max(0, (seconds / duration) * 100)) : 0;
-
-  /** Drag one of the two handles. */
-  const drag = (which: "start" | "end") => (event: React.PointerEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (duration <= 0) return;
-    const box = bar.current?.getBoundingClientRect();
-    if (!box) return;
-    setDragging(which);
-
-    const move = (moved: PointerEvent) => {
-      const ratio = Math.min(
-        Math.max((moved.clientX - box.left) / box.width, 0),
-        1,
-      );
-      const at = ratio * duration;
-      onTrim(
-        which === "start"
-          ? { start: Math.min(at, trim.end - 0.5), end: trim.end }
-          : { start: trim.start, end: Math.max(at, trim.start + 0.5) },
-      );
-    };
-    const up = () => {
-      setDragging(null);
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  return (
-    <div
-      ref={bar}
-      role="slider"
-      aria-label="Position"
-      aria-valuenow={Math.round(progress)}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      tabIndex={0}
-      onClick={(event) => {
-        const box = event.currentTarget.getBoundingClientRect();
-        onSeek(Math.min(Math.max((event.clientX - box.left) / box.width, 0), 1));
-      }}
-      className={cn(
-        "group relative h-9 flex-1 cursor-pointer",
-        duration === 0 && "pointer-events-none opacity-40",
-      )}
-    >
-      {/* The audio track as a picture: you can see where something happens
-          before listening for it. */}
-      {waveform && (
-        <div
-          className="pointer-events-none absolute inset-x-0 inset-y-1 rounded-[3px] opacity-40"
-          style={{
-            backgroundImage: `url(${waveform})`,
-            backgroundSize: "100% 100%",
-            backgroundRepeat: "no-repeat",
-          }}
-        />
-      )}
-
-      <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-pill bg-white/15">
-        {/* No width transition: it would work against the frame loop and make
-            the motion stutter again. */}
-        <div
-          ref={fillRef}
-          className="h-full rounded-pill bg-accent-bright"
-          style={{ width: `${progress}%` }}
-        />
-      </div>
-
-      {/* What falls away lies behind a veil. */}
-      <div
-        className="pointer-events-none absolute inset-y-0 left-0 rounded-l-pill bg-black/55"
-        style={{ width: `${percent(trim.start)}%` }}
-      />
-      <div
-        className="pointer-events-none absolute inset-y-0 right-0 rounded-r-pill bg-black/55"
-        style={{ width: `${100 - percent(trim.end)}%` }}
-      />
-      <TrimHandle
-        at={percent(trim.start)}
-        label="Start"
-        time={dragging === "start" ? clock(trim.start) : null}
-        onDrag={drag("start")}
-      />
-      <TrimHandle
-        at={percent(trim.end)}
-        label="End"
-        time={dragging === "end" ? clock(trim.end) : null}
-        onDrag={drag("end")}
-      />
-
-      <div
-        ref={knobRef}
-        className="pointer-events-none absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2
-          rounded-pill bg-white opacity-0 transition-opacity group-hover:opacity-100"
-        style={{ left: `${progress}%` }}
-      />
-    </div>
-  );
-}
-
-function TrimHandle({
-  at,
-  label,
-  time,
-  onDrag,
-}: {
-  at: number;
-  label: string;
-  /** Show the position while dragging — otherwise you trim by feel. */
-  time: string | null;
-  onDrag: (event: React.PointerEvent) => void;
-}) {
-  return (
-    <button
-      aria-label={`${label} des Ausschnitts`}
-      onPointerDown={onDrag}
-      onClick={(event) => event.stopPropagation()}
-      // The hit area is as tall as the bar; only the handle in the middle is
-      // visible. Nobody hits a 5 pixel target twice.
-      className="group/handle absolute inset-y-0 w-4 -translate-x-1/2 cursor-ew-resize"
-      style={{ left: `${at}%` }}
-    >
-      <span
-        className="absolute top-1/2 left-1/2 h-6 w-[3px] -translate-x-1/2 -translate-y-1/2
-          rounded-pill bg-accent-bright shadow transition-[height] group-hover/handle:h-7"
-      />
-      {time && (
-        <span
-          className="absolute -top-6 left-1/2 -translate-x-1/2 rounded-pill bg-black/80 px-2
-            py-0.5 font-mono text-[11px] text-ink tabular-nums"
-        >
-          {time}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function Volume({
-  value,
-  onChange,
-  onToggleMute,
-}: {
-  value: number;
-  onChange: (value: number) => void;
-  onToggleMute: () => void;
-}) {
-  return (
-    <div className="flex shrink-0 items-center gap-2">
-      <button
-        aria-label={value === 0 ? "Unmute" : "Mute"}
-        onClick={onToggleMute}
-        className="grid h-9 w-9 place-items-center rounded-pill text-ink-muted
-          transition-colors hover:bg-elevated hover:text-ink"
-      >
-        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
-          <path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4v-5Z" />
-          {value === 0 ? (
-            <path d="M16 10l4 4M20 10l-4 4" strokeLinecap="round" />
-          ) : (
-            <path d="M15.5 9.5a4 4 0 0 1 0 5" strokeLinecap="round" />
-          )}
-        </svg>
-      </button>
-      <input
-        type="range"
-        aria-label="Volume"
-        min={0}
-        max={1}
-        step={0.01}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1 w-20 cursor-pointer appearance-none rounded-pill bg-white/15
-          [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3
-          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-pill
-          [&::-webkit-slider-thumb]:bg-white"
-      />
-    </div>
-  );
-}
-
 function Step({
   label,
   disabled,
@@ -1218,11 +957,4 @@ function Step({
       {children}
     </button>
   );
-}
-
-/** Like `formatDuration`, but for running times (seconds instead of milliseconds). */
-function clock(seconds: number): string {
-  if (!Number.isFinite(seconds)) return "0:00";
-  const total = Math.floor(seconds);
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
