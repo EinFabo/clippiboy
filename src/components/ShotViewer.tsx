@@ -540,8 +540,13 @@ export function ShotViewer({
           leaving ? (shrinking ? "cb-chrome-out" : "cb-player-out") : "cb-player-in",
         )}
       >
-        <header className="flex shrink-0 items-center justify-between gap-6 px-8 pt-6 pb-4">
+        {/* Moves the window, as the player's bar does — see there. */}
+        <header
+          data-tauri-drag-region
+          className="flex shrink-0 items-center justify-between gap-6 px-8 pt-6 pb-4"
+        >
           <div
+            data-tauri-drag-region
             className="flex min-w-0 items-center gap-2"
             onClick={(event) => event.stopPropagation()}
           >

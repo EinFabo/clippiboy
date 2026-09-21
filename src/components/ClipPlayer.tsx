@@ -600,9 +600,19 @@ export function ClipPlayer({
         )}
       >
       {/* The clip's name lives in the editing pane and is editable there — up
-          here it would stand a second time, but untouchable. */}
-      <header className="flex shrink-0 items-center justify-between gap-6 px-8 pt-6 pb-4">
-        <div className="flex min-w-0 items-center gap-2" onClick={(e) => e.stopPropagation()}>
+          here it would stand a second time, but untouchable.
+          The bar is also what moves the window: the player covers the title
+          bar, and without this there was nothing left to grab. The button
+          stays out of it, like the ones in `TitleBar`. */}
+      <header
+        data-tauri-drag-region
+        className="flex shrink-0 items-center justify-between gap-6 px-8 pt-6 pb-4"
+      >
+        <div
+          data-tauri-drag-region
+          className="flex min-w-0 items-center gap-2"
+          onClick={(e) => e.stopPropagation()}
+        >
           <p className="truncate text-xs text-ink-muted">
             {clip.game ?? "Unknown game"} · {formatAgo(clip.createdAt)} ·{" "}
             {formatSize(clip.sizeBytes)}

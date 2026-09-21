@@ -125,7 +125,11 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
         className="w-[420px] rounded-card border border-line bg-surface p-6 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <h2 className="text-base font-medium">Export a copy</h2>
+        {/* The dim layer covers the title bar, so the heading takes over
+            moving the window. */}
+        <h2 data-tauri-drag-region className="text-base font-medium">
+          Export a copy
+        </h2>
         <p className="mt-1 text-xs text-ink-muted">
           The clip itself stays as it is — this writes a second file, small
           enough to send.
