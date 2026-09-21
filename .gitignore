@@ -21,3 +21,6 @@ shot.png
 
 # Arbeitsverzeichnisse von Claude Code.
 .claude/
+
+# Lokale Messskripte.
+ram-probe.ps1
