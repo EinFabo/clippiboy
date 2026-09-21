@@ -145,7 +145,7 @@ pub fn set_recording(app: &tauri::AppHandle, recording: bool) {
             log::warn!("could not position the overlay: {err}");
         }
         let _ = window.show();
-        let _ = window.set_always_on_top(true);
+        to_top(&window);
     } else {
         // Whatever comes next brings the window back up by itself — stopping a
         // recording is followed by the banner that says it was written.
@@ -261,8 +261,8 @@ pub fn show_with_thumb(
     let awake = window.is_visible().unwrap_or(false);
     let _ = window.show();
     // Bring it to the top again after showing: games like to grab the z-order
-    // when they switch modes.
-    let _ = window.set_always_on_top(true);
+    // when they switch modes, and the console may have come up since.
+    to_top(&window);
 
     let banner = Banner {
         kind,
@@ -301,6 +301,48 @@ pub fn show_with_thumb(
         let _ = window.hide();
     });
 }
+
+/// Put the banner back above the console, if it is up at all.
+///
+/// Both windows are topmost, and among topmost windows the one shown last
+/// wins — the console, opening over a banner or a REC badge that was already
+/// standing. The banner is click-through, so lying on top takes nothing from
+/// the console.
+pub fn raise(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        to_top(&window);
+    }
+}
+
+/// The very top of the topmost band, without taking the focus.
+///
+/// Not `set_always_on_top(true)`: tao only calls `SetWindowPos` when that flag
+/// changes, so on a window that is topmost already it does nothing at all.
+#[cfg(windows)]
+fn to_top(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let Ok(handle) = window.hwnd() else {
+        return;
+    };
+    // Tauri hands out its own `windows` version's HWND; both are the same
+    // raw pointer underneath.
+    let hwnd = HWND(handle.0);
+    // Asynchronous, like tao's own call: this runs on whatever thread raised
+    // the banner, and must not wait on the window's.
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    if let Err(err) = unsafe { SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags) } {
+        log::warn!("could not raise the overlay: {err}");
+    }
+}
+
+#[cfg(not(windows))]
+fn to_top(_window: &tauri::WebviewWindow) {}
 
 /// Put the window in the desired corner — on the monitor currently being played
 /// on, otherwise on the primary one.

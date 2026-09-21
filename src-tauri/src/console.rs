@@ -141,6 +141,9 @@ pub fn open(app: &tauri::AppHandle) {
     // is still on screen. This is where it starts over — and where the page
     // learns how much room the task bar wants.
     let _ = window.emit("console-opened", layout);
+    // Shown last, the console now lies over a banner or REC badge standing at
+    // the same moment. Those belong on top.
+    overlay::raise(app);
 }
 
 /// Hide it again and hand the focus back to whatever had it.
@@ -183,6 +186,7 @@ pub fn relayout(app: &tauri::AppHandle) {
         }
         Err(err) => log::warn!("could not lay the console out: {err}"),
     }
+    overlay::raise(app);
 }
 
 /// Hold the console out of every screen recording, or let it be seen.
