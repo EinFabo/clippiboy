@@ -572,6 +572,10 @@ pub struct EngineStatus {
     /// What it has written to disk so far.
     #[serde(default)]
     pub recording_bytes: u64,
+    /// The chosen screen is not connected, and the capture runs on this one
+    /// instead — its name. `None` while it runs where it was told to.
+    #[serde(default)]
+    pub screen_fallback: Option<String>,
 }
 
 #[cfg(test)]

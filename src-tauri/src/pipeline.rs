@@ -264,6 +264,13 @@ pub struct Shared {
     /// it, otherwise the app appears to keep buffering and only the key press
     /// brings it to light.
     pub error_seen: AtomicBool,
+    /// The screen this capture runs on, and how the settings arrived at it —
+    /// `Fallback` when the chosen one was missing and the primary stands in.
+    /// `None` for a window, and until capture is up.
+    pub source: Mutex<Option<crate::capture::Choice>>,
+    /// Windows has ended the capture: the screen went away, or the desktop was
+    /// rebuilt under it. No frame arrives after this.
+    pub source_closed: AtomicBool,
     /// Bumped when `sources` changes. The mixer keeps a copy and only re-reads
     /// when the number has moved.
     pub sources_generation: AtomicU64,
@@ -651,6 +658,7 @@ mod win {
                 {
                     let shared = closed_shared.clone();
                     move || {
+                        shared.source_closed.store(true, Ordering::SeqCst);
                         shared.report(
                             "The capture source has gone away — no more frames are arriving."
                                 .into(),
@@ -659,6 +667,7 @@ mod win {
                 },
             )?
         };
+        *shared.source.lock() = capture.choice.clone();
 
         let pacer = {
             let latest = latest.clone();
@@ -877,6 +886,8 @@ impl Pipeline {
                 frames: 0,
                 duplicated: 0,
             }),
+            source: Mutex::new(None),
+            source_closed: AtomicBool::new(false),
         });
 
         #[cfg(windows)]

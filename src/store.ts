@@ -46,6 +46,9 @@ interface EngineState {
       Comes from the core, so a stop by hotkey shows as well. */
   recordingProgress: number | null;
   bufferedSeconds: number;
+  /** The screen standing in for a chosen one that is not connected — see
+      `EngineStatus.screenFallback`. */
+  screenFallback: string | null;
   /** Bytes the packet ring currently holds — against the memory budget. */
   bufferBytes: number;
   /** What the encoder really does about bitrate. `null` while nothing runs. */
@@ -151,6 +154,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   recordingSaving: false,
   recordingProgress: null,
   bufferedSeconds: 0,
+  screenFallback: null,
   bufferBytes: 0,
   rateControl: null,
   detectedGame: null,
@@ -239,6 +243,7 @@ export const useEngine = create<EngineState>((set, get) => ({
           recordingSeconds: s.recordingSeconds,
           recordingBytes: s.recordingBytes,
           bufferedSeconds: s.bufferedSeconds,
+          screenFallback: s.screenFallback,
           bufferBytes: s.bufferBytes,
           rateControl: s.rateControl,
           detectedGame: s.game,

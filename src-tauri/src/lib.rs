@@ -388,6 +388,156 @@ fn start_buffer_if_configured(app: &tauri::AppHandle) {
     std::thread::spawn(move || start_buffer_and_notify(&app));
 }
 
+/// Bring every saved screen choice in line with the screens that are here —
+/// recording source, banner, console — and save if anything moved.
+///
+/// At startup, and again whenever the screen watcher has seen them change.
+fn repair_screens(state: &AppState) {
+    let mut config = state.config.lock();
+    let fixed_source = capture::repair(&mut config.recording);
+    let fixed_banner = capture::repair_overlay(&mut config.overlay);
+    // The console's own screen, the same way. It keeps the pair in `AppConfig`
+    // rather than in a block of its own, so it is repaired by hand instead of
+    // through a wrapper.
+    let fixed_console = {
+        let mut id = config.console_monitor.take();
+        let mut stable = config.console_monitor_stable_id.take();
+        let changed = capture::repair_monitor_choice(&mut id, &mut stable);
+        config.console_monitor = id;
+        config.console_monitor_stable_id = stable;
+        changed
+    };
+    if fixed_source {
+        log::info!(
+            "the chosen screen is {:?} now \u{2014} corrected",
+            config.recording.target_id
+        );
+    }
+    if fixed_banner {
+        log::info!(
+            "the banner's screen is {:?} now \u{2014} corrected",
+            config.overlay.monitor
+        );
+    }
+    if fixed_console {
+        log::info!(
+            "the console's screen is {:?} now \u{2014} corrected",
+            config.console_monitor
+        );
+    }
+    if (fixed_source || fixed_banner || fixed_console) && config::save(&config).is_err() {
+        log::warn!("the corrected screen was not saved");
+    }
+}
+
+/// Put the banner and the console back on their screens when the screens change.
+///
+/// Both are positioned when they are set up, not for every showing — with a
+/// screen picked by hand the spot already stands. Unplugging that screen makes
+/// Windows push the windows onto one that is left, and plugging it back in
+/// brought nothing back: the banner stayed on the primary screen until the next
+/// start. So the set of screens is remembered, and any change to it — one gone,
+/// one back, another resolution — lays both out again.
+fn watch_monitors(app: &tauri::AppHandle) {
+    type Landscape = Vec<(String, Option<String>, u32, u32, bool)>;
+    static LAST: std::sync::Mutex<Option<Landscape>> = std::sync::Mutex::new(None);
+
+    // Behind the lock screen the list is whatever Winlogon's desktop shows;
+    // the change is caught against the one from before, once signed in.
+    if capture::secure_desktop() {
+        return;
+    }
+    let mut now: Landscape = capture::list_monitors()
+        .into_iter()
+        .map(|m| (m.id, m.stable_id, m.width, m.height, m.is_primary))
+        .collect();
+    now.sort();
+    let changed = {
+        let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let changed = last.as_ref().is_some_and(|last| *last != now);
+        *last = Some(now);
+        changed
+    };
+    if !changed {
+        return;
+    }
+    log::info!("the screens have changed \u{2014} laying banner and console out again");
+    repair_screens(&app.state::<AppState>());
+    overlay::reposition(app);
+    console::relayout(app);
+}
+
+/// Keep the buffer on the screen it is meant to be on.
+///
+/// The screen choice used to be settled once, when capture started. Unplugging
+/// a monitor, getting it back, signing in again or switching the resolution
+/// changed nothing after that: the buffer went on recording the primary screen,
+/// a frozen picture or a scaled one until somebody restarted the app. Here,
+/// every two seconds, the running capture is held against what the settings
+/// mean now — see `AppState::screen_drift` for when that calls for a restart.
+///
+/// The restart is the same one a source change in the settings makes, and it
+/// costs the same: what the buffer held so far is gone. Better than keeping
+/// minutes of the wrong screen.
+fn watch_screen(app: &tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RESTARTING: AtomicBool = AtomicBool::new(false);
+
+    // Behind the lock screen nothing can be captured at all, and the buffer
+    // automation deals with that on its own.
+    if capture::secure_desktop() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let Some(drift) = state.screen_drift() else {
+        return;
+    };
+    if RESTARTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    log::info!(
+        "the capture is no longer on the screen it should be ({drift:?}) \u{2014} restarting it"
+    );
+    let app = app.clone();
+    // Stopping waits for a save in progress, and starting brings up the whole
+    // capture stack: neither belongs on the status tick.
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        // The automation may have switched the buffer off in the meantime —
+        // then there is nothing to move.
+        if state.is_buffering() && !state.is_recording() {
+            repair_screens(&state);
+            state.stop_pipeline();
+            match state.start_pipeline() {
+                Ok(()) => {
+                    let screen = state.status_snapshot().screen_fallback;
+                    let title = match drift {
+                        capture::Drift::Resized => "Recording follows the new resolution",
+                        capture::Drift::Closed | capture::Drift::Moved => {
+                            "Recording follows the screen"
+                        }
+                    };
+                    let detail = match (screen, drift) {
+                        (Some(stand_in), _) => format!(
+                            "The chosen screen is not connected \u{2014} on {stand_in} for now"
+                        ),
+                        (None, capture::Drift::Resized) => {
+                            "The buffer starts over at the new size".to_string()
+                        }
+                        (None, _) => "The buffer starts over on the chosen screen".to_string(),
+                    };
+                    overlay::show(&app, BannerKind::Info, title, Some(detail));
+                }
+                Err(err) => {
+                    notify(&app, "error", err.clone());
+                    overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
+                }
+            }
+        }
+        RESTARTING.store(false, Ordering::SeqCst);
+    });
+}
+
 /// The buffer automation, on the cadence of game detection (every two seconds).
 ///
 /// Covers both modes: "only in game" follows the foreground window, otherwise
@@ -666,6 +816,10 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     *state.source_notes.lock() = notes;
                 }
                 apply_auto_buffer(&handle, game.as_ref());
+                // The windows first: the buffer's restart announces itself with
+                // a banner, and that should already stand on the right screen.
+                watch_monitors(&handle);
+                watch_screen(&handle);
             }
             // If the recording reports a problem, somebody has to hear about it.
             // Without this the app appears to keep buffering, and only pressing
@@ -825,46 +979,8 @@ pub fn run() {
             // back together. `\\.\DISPLAY2` is handed out by enumeration order
             // at boot, so after a restart it can name a different panel than it
             // did yesterday — the identity saved beside it says which one was
-            // meant, and the device name is corrected from it here, once.
-            {
-                let state = app.state::<AppState>();
-                let mut config = state.config.lock();
-                let fixed_source = capture::repair(&mut config.recording);
-                let fixed_banner = capture::repair_overlay(&mut config.overlay);
-                // The console's own screen, the same way. It keeps the pair in
-                // `AppConfig` rather than in a block of its own, so it is
-                // repaired by hand instead of through a wrapper.
-                let fixed_console = {
-                    let mut id = config.console_monitor.take();
-                    let mut stable = config.console_monitor_stable_id.take();
-                    let changed = capture::repair_monitor_choice(&mut id, &mut stable);
-                    config.console_monitor = id;
-                    config.console_monitor_stable_id = stable;
-                    changed
-                };
-                if fixed_source {
-                    log::info!(
-                        "the chosen screen is {:?} now \u{2014} corrected",
-                        config.recording.target_id
-                    );
-                }
-                if fixed_banner {
-                    log::info!(
-                        "the banner's screen is {:?} now \u{2014} corrected",
-                        config.overlay.monitor
-                    );
-                }
-                if fixed_console {
-                    log::info!(
-                        "the console's screen is {:?} now \u{2014} corrected",
-                        config.console_monitor
-                    );
-                }
-                if (fixed_source || fixed_banner || fixed_console) && config::save(&config).is_err()
-                {
-                    log::warn!("the corrected screen was not saved");
-                }
-            }
+            // meant, and the device name is corrected from it here.
+            repair_screens(&app.state::<AppState>());
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);

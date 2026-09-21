@@ -53,6 +53,7 @@ const RESTING: EngineStatus = {
   recording: false,
   recordingSeconds: 0,
   recordingBytes: 0,
+  screenFallback: null,
 };
 
 type Panel = "clips" | "perf" | null;

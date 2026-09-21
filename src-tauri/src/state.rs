@@ -77,6 +77,9 @@ pub struct AppState {
     /// a recording keeps it alive when the buffer is switched off, by hand or
     /// by the automation, and then only this goes false.
     buffer_wanted: std::sync::atomic::AtomicBool,
+    /// How many screen checks in a row found the capture on the wrong screen —
+    /// see `screen_drift`.
+    drift_seen: std::sync::atomic::AtomicU8,
 }
 
 /// Lives for as long as a clip is being written and releases the slot when
@@ -245,6 +248,7 @@ impl AppState {
             recording: false,
             recording_seconds: 0.0,
             recording_bytes: 0,
+            screen_fallback: None,
         };
 
         // The sources run from startup — that is the only way the mixer shows
@@ -283,6 +287,7 @@ impl AppState {
             saving: std::sync::atomic::AtomicBool::new(false),
             recorder: Mutex::new(None),
             buffer_wanted: std::sync::atomic::AtomicBool::new(false),
+            drift_seen: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -591,8 +596,65 @@ impl AppState {
             // to be measured over an interval that only one caller may consume.
             // `sample_fps` does that, once a second, from the status tick.
         }
+        // Whether it is the buffer or a recording that holds the capture, the
+        // question is the same: is it where it was told to be?
+        status.screen_fallback = self.shared.lock().as_ref().and_then(|shared| {
+            shared
+                .source
+                .lock()
+                .as_ref()
+                .filter(|choice| choice.how == crate::capture::Match::Fallback)
+                .map(|choice| choice.target.title.clone())
+        });
         status.game = self.current_game.lock().clone();
         status
+    }
+
+    /// Does the running buffer still capture the screen the settings mean?
+    ///
+    /// Asked every two seconds by the screen watcher. Says why a restart is due
+    /// — the screen went away, came back, or changed its resolution — and only
+    /// once the answer has held for two checks in a row: after a sign-in
+    /// Windows puts the screens back one at a time, and a restart on the first
+    /// glimpse would land on whatever happened to be there already.
+    ///
+    /// Never while a recording runs. A restart would cut the file in two, the
+    /// same reason the source cannot be switched then; the check picks it up
+    /// again once the recording has stopped.
+    pub fn screen_drift(&self) -> Option<crate::capture::Drift> {
+        use std::sync::atomic::Ordering;
+        use crate::model::TargetKind;
+
+        let config = self.config_snapshot().recording;
+        let observed = if !self.is_buffering()
+            || self.is_recording()
+            || config.target_kind != TargetKind::Monitor
+        {
+            None
+        } else {
+            let running = self.shared.lock().as_ref().and_then(|shared| {
+                let closed = shared.source_closed.load(Ordering::SeqCst);
+                shared.source.lock().clone().map(|choice| (choice, closed))
+            });
+            running.and_then(|(running, closed)| {
+                let now = crate::capture::pick(
+                    &crate::capture::list_monitors(),
+                    TargetKind::Monitor,
+                    config.target_id.as_deref(),
+                    config.target_stable_id.as_deref(),
+                );
+                crate::capture::drift(&running, now.as_ref(), closed)
+            })
+        };
+        let Some(drift) = observed else {
+            self.drift_seen.store(0, Ordering::SeqCst);
+            return None;
+        };
+        if self.drift_seen.fetch_add(1, Ordering::SeqCst) + 1 < 2 {
+            return None;
+        }
+        self.drift_seen.store(0, Ordering::SeqCst);
+        Some(drift)
     }
 
     /// Writes the last `seconds` seconds as an MP4. `None` takes the clip length

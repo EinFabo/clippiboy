@@ -52,6 +52,10 @@ pub struct Capture {
     /// Has to stay alive, otherwise nobody reports that the source is gone.
     item: GraphicsCaptureItem,
     closed_token: windows::Foundation::EventRegistrationToken,
+    /// Which screen this is, and how the saved selection arrived at it. `None`
+    /// for a window. The screen watcher compares it with what the settings
+    /// mean a moment later.
+    pub choice: Option<crate::capture::Choice>,
 }
 
 // All the WinRT objects involved are agile, and the D3D11 device underneath is
@@ -68,12 +72,17 @@ impl Drop for Capture {
     }
 }
 
-/// HMONITOR for the device name (`\\.\DISPLAY1`), otherwise the primary screen.
-fn find_monitor(device_name: Option<&str>) -> Result<HMONITOR, String> {
+/// HMONITOR for the device name (`\\.\DISPLAY1`).
+///
+/// Deliberately without a fallback of its own. Which screen stands in for a
+/// missing one is decided in exactly one place, `capture::pick`, and said out
+/// loud there. A second quiet fallback here meant that a screen `pick` had just
+/// found — but which `EnumDisplayMonitors` did not list a moment later — was
+/// swapped for the primary one without a word.
+fn find_monitor(device_name: &str) -> Result<HMONITOR, String> {
     struct Search {
-        wanted: Option<String>,
+        wanted: String,
         hit: Option<HMONITOR>,
-        primary: Option<HMONITOR>,
     }
 
     unsafe extern "system" fn proc(
@@ -88,25 +97,18 @@ fn find_monitor(device_name: Option<&str>) -> Result<HMONITOR, String> {
         if !GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _).as_bool() {
             return TRUE;
         }
-        // MONITORINFOF_PRIMARY — not exported by the windows crate 0.58.
-        if info.monitorInfo.dwFlags & 0x0000_0001 != 0 && search.primary.is_none() {
-            search.primary = Some(monitor);
-        }
-        if let Some(wanted) = search.wanted.as_deref() {
-            let name = String::from_utf16_lossy(&info.szDevice)
-                .trim_end_matches('\0')
-                .to_string();
-            if name == wanted {
-                search.hit = Some(monitor);
-            }
+        let name = String::from_utf16_lossy(&info.szDevice)
+            .trim_end_matches('\0')
+            .to_string();
+        if name == search.wanted {
+            search.hit = Some(monitor);
         }
         TRUE
     }
 
     let mut search = Search {
-        wanted: device_name.map(str::to_string),
+        wanted: device_name.to_string(),
         hit: None,
-        primary: None,
     };
     unsafe {
         let _ = EnumDisplayMonitors(
@@ -116,19 +118,16 @@ fn find_monitor(device_name: Option<&str>) -> Result<HMONITOR, String> {
             LPARAM(&mut search as *mut _ as isize),
         );
     }
-    // Unplugged or renamed screen: better to capture the primary one than not to
-    // buffer at all — as before.
     search
         .hit
-        .or(search.primary)
-        .ok_or_else(|| "no screen found".to_string())
+        .ok_or_else(|| format!("the screen {device_name} is gone again"))
 }
 
 fn capture_item(
     kind: TargetKind,
     id: Option<&str>,
     stable: Option<&str>,
-) -> Result<GraphicsCaptureItem, String> {
+) -> Result<(GraphicsCaptureItem, Option<crate::capture::Choice>), String> {
     let interop: IGraphicsCaptureItemInterop = windows::core::factory::<
         GraphicsCaptureItem,
         IGraphicsCaptureItemInterop,
@@ -140,12 +139,12 @@ fn capture_item(
             // Ask which screen the saved selection actually means before going
             // looking for it: the panel's identity outranks the device name,
             // and the answer says out loud when neither could be found.
-            let device = crate::capture::resolve(kind, id, stable)
-                .map(|choice| choice.target.id)
-                .or_else(|| id.map(str::to_string));
-            let monitor = find_monitor(device.as_deref())?;
-            unsafe { interop.CreateForMonitor(monitor) }
-                .map_err(|err| format!("Bildschirm aufnehmen: {err}"))
+            let choice = crate::capture::resolve(kind, id, stable)
+                .ok_or_else(|| "no screen found".to_string())?;
+            let monitor = find_monitor(&choice.target.id)?;
+            let item = unsafe { interop.CreateForMonitor(monitor) }
+                .map_err(|err| format!("Bildschirm aufnehmen: {err}"))?;
+            Ok((item, Some(choice)))
         }
         TargetKind::Window => {
             let id = id.ok_or_else(|| "no window selected".to_string())?;
@@ -157,8 +156,9 @@ fn capture_item(
             if handle == 0 {
                 return Err("The selected window is no longer open.".into());
             }
-            unsafe { interop.CreateForWindow(HWND(handle as *mut _)) }
-                .map_err(|_| "The selected window is no longer open.".to_string())
+            let item = unsafe { interop.CreateForWindow(HWND(handle as *mut _)) }
+                .map_err(|_| "The selected window is no longer open.".to_string())?;
+            Ok((item, None))
         }
     }
 }
@@ -181,7 +181,7 @@ where
     F: FnMut(CapturedFrame<'_>) + Send + 'static,
     C: Fn() + Send + 'static,
 {
-    let item = capture_item(kind, id, stable)?;
+    let (item, choice) = capture_item(kind, id, stable)?;
     let size = item.Size().map_err(|err| format!("source size: {err}"))?;
 
     // Two buffers instead of one: WGC may already write the next frame while the
@@ -282,5 +282,6 @@ where
         token,
         item,
         closed_token,
+        choice,
     })
 }

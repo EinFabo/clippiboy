@@ -324,6 +324,9 @@ export interface EngineStatus {
   recordingSeconds: number;
   /** What it has written to disk so far. */
   recordingBytes: number;
+  /** The chosen screen is not connected and capture runs on this one instead —
+      its name. `null` while it runs where it was told to. */
+  screenFallback: string | null;
 }
 
 /** A rectangle in pixels of a screenshot's original. */

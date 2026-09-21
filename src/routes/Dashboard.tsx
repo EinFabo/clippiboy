@@ -51,6 +51,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     recordingSaving,
     recordingProgress,
     toggleRecording,
+    screenFallback,
   } = useEngine(
     useShallow((s) => ({
       config: s.config,
@@ -69,6 +70,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
       recordingSaving: s.recordingSaving,
       recordingProgress: s.recordingProgress,
       toggleRecording: s.toggleRecording,
+      screenFallback: s.screenFallback,
     })),
   );
   const saving = recordingSaving || recordingProgress !== null;
@@ -173,6 +175,22 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           onClick={() => onNavigate("audio")}
         />
       </section>
+
+      {/* Until now only the recording page said so, and nobody has that open
+          while playing. The core moves the capture back by itself once the
+          screen returns — this is for the minutes in between. */}
+      {screenFallback && (
+        <Card className="flex items-start gap-4 border-warn/40 bg-warn/10 p-4">
+          <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-muted">
+            <span className="font-medium text-warn">The screen you picked is not connected</span>{" "}
+            — recording <span className="text-ink">{screenFallback}</span> for now. It moves
+            back on its own once the screen is there again.
+          </p>
+          <Button size="sm" className="shrink-0" onClick={() => onNavigate("recording")}>
+            Choose screen
+          </Button>
+        </Card>
+      )}
 
       <SourceTrouble onOpenMixer={() => onNavigate("audio")} />
 

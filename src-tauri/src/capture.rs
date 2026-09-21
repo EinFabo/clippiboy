@@ -270,37 +270,48 @@ mod win {
         TRUE
     }
 
-    pub fn list_targets() -> Vec<CaptureTarget> {
+    pub fn list_monitors() -> Vec<CaptureTarget> {
         let mut monitors: Vec<CaptureTarget> = Vec::new();
-        let mut windows: Vec<CaptureTarget> = Vec::new();
         let identities = identities();
+        let mut state = Enumeration {
+            out: &mut monitors,
+            identities: &identities,
+        };
         unsafe {
-            // Scoped, so the borrow of `monitors` ends before they are joined.
-            {
-                let mut state = Enumeration {
-                    out: &mut monitors,
-                    identities: &identities,
-                };
-                let _ = EnumDisplayMonitors(
-                    None,
-                    None,
-                    Some(monitor_proc),
-                    LPARAM(&mut state as *mut _ as isize),
-                );
-            }
+            let _ = EnumDisplayMonitors(
+                None,
+                None,
+                Some(monitor_proc),
+                LPARAM(&mut state as *mut _ as isize),
+            );
+        }
+        monitors
+    }
+
+    pub fn list_targets() -> Vec<CaptureTarget> {
+        let mut targets = list_monitors();
+        let mut windows: Vec<CaptureTarget> = Vec::new();
+        unsafe {
             let _ = EnumWindows(
                 Some(window_proc),
                 LPARAM(&mut windows as *mut _ as isize),
             );
         }
-        monitors.extend(windows);
-        monitors
+        targets.extend(windows);
+        targets
     }
 }
 
 #[cfg(windows)]
 pub fn list_targets() -> Vec<CaptureTarget> {
     win::list_targets()
+}
+
+/// The screens alone. What the screen watcher asks every two seconds — walking
+/// every open window for that as well would be work thrown away.
+#[cfg(windows)]
+pub fn list_monitors() -> Vec<CaptureTarget> {
+    win::list_monitors()
 }
 
 /// Is the secure desktop in front — lock screen, sign-in, UAC prompt?
@@ -344,6 +355,11 @@ pub fn secure_desktop() -> bool {
 #[cfg(not(windows))]
 pub fn list_targets() -> Vec<CaptureTarget> {
     let _ = TargetKind::Monitor;
+    Vec::new()
+}
+
+#[cfg(not(windows))]
+pub fn list_monitors() -> Vec<CaptureTarget> {
     Vec::new()
 }
 
@@ -456,6 +472,50 @@ pub fn resolve(
         _ => {}
     }
     Some(choice)
+}
+
+/// Why a running screen capture no longer matches what the settings mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drift {
+    /// Windows ended the capture — the screen was unplugged, or the desktop was
+    /// rebuilt under it (sign-in, driver reset). No frame comes any more.
+    Closed,
+    /// The settings resolve to another screen now: the chosen one came back
+    /// after the capture had to stand in with the primary, or it went away.
+    Moved,
+    /// The same screen, at another resolution. The encoder's size was worked
+    /// out from the old one, and the picture would only be scaled to fit it.
+    Resized,
+}
+
+/// Compare the screen a capture was started on with the one the settings mean
+/// now, and say whether — and why — the capture has to start over.
+///
+/// `now` is `None` when no screen is there at all: a restart would find
+/// nothing either, so it waits until one is back.
+///
+/// Pure, like [`pick`], so the rules are testable without Windows.
+pub fn drift(running: &Choice, now: Option<&Choice>, closed: bool) -> Option<Drift> {
+    let now = now?;
+    if closed {
+        return Some(Drift::Closed);
+    }
+    if !same_screen(&running.target, &now.target) {
+        return Some(Drift::Moved);
+    }
+    if (running.target.width, running.target.height) != (now.target.width, now.target.height) {
+        return Some(Drift::Resized);
+    }
+    None
+}
+
+/// The panel's identity when both know it; the device name otherwise. A
+/// renumbered `\\.\DISPLAYn` is still the same screen — see [`pick`].
+fn same_screen(a: &CaptureTarget, b: &CaptureTarget) -> bool {
+    match (&a.stable_id, &b.stable_id) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.id == b.id,
+    }
 }
 
 /// Bring a saved selection back in line with reality.
@@ -721,6 +781,79 @@ mod tests {
         assert!(pick(&targets, TargetKind::Window, Some("0xDEAD"), None).is_none());
         let open = pick(&targets, TargetKind::Window, Some("0xABC"), None).unwrap();
         assert_eq!(open.target.title, "A Game");
+    }
+
+    fn chosen(targets: &[CaptureTarget], device: &str, stable: Option<&str>) -> Choice {
+        pick(targets, TargetKind::Monitor, Some(device), stable).unwrap()
+    }
+
+    #[test]
+    fn a_capture_on_the_right_screen_is_left_alone() {
+        let screens = three_screens();
+        let running = chosen(&screens, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        let now = chosen(&screens, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        assert_eq!(drift(&running, Some(&now), false), None);
+    }
+
+    /// Unlocking renumbers the screens. The panel is the same, so is the
+    /// capture — restarting it would only throw the buffer away.
+    #[test]
+    fn a_renumbered_screen_is_no_reason_to_restart() {
+        let screens = three_screens();
+        let running = chosen(&screens, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        let mut later = three_screens();
+        later[0].id = "\\\\.\\DISPLAY3".into();
+        later[2].id = "\\\\.\\DISPLAY1".into();
+        let now = chosen(&later, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        assert_eq!(drift(&running, Some(&now), false), None);
+    }
+
+    /// The core of it: started while the screen was away, the capture stood in
+    /// with the primary. Once the screen is back, it has to move over.
+    #[test]
+    fn a_screen_that_comes_back_takes_the_capture_back() {
+        let without: Vec<_> = three_screens()
+            .into_iter()
+            .filter(|t| !t.title.starts_with("CR270H"))
+            .collect();
+        let running = chosen(&without, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        assert_eq!(running.how, Match::Fallback);
+        let now = chosen(&three_screens(), "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        assert_eq!(drift(&running, Some(&now), false), Some(Drift::Moved));
+    }
+
+    #[test]
+    fn an_unplugged_screen_moves_the_capture_to_the_primary() {
+        let screens = three_screens();
+        let running = chosen(&screens, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        let without: Vec<_> = screens
+            .into_iter()
+            .filter(|t| !t.title.starts_with("CR270H"))
+            .collect();
+        let now = chosen(&without, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        assert_eq!(now.how, Match::Fallback);
+        assert_eq!(drift(&running, Some(&now), true), Some(Drift::Closed));
+        assert_eq!(drift(&running, Some(&now), false), Some(Drift::Moved));
+    }
+
+    #[test]
+    fn a_new_resolution_restarts_the_capture() {
+        let screens = three_screens();
+        let running = chosen(&screens, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        let mut later = three_screens();
+        later[2].width = 2560;
+        later[2].height = 1440;
+        let now = chosen(&later, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        assert_eq!(drift(&running, Some(&now), false), Some(Drift::Resized));
+    }
+
+    /// No screen at all — the moment during sign-in when Windows has not put
+    /// them back yet. A restart now would find nothing and fail.
+    #[test]
+    fn with_no_screen_at_all_the_watcher_waits() {
+        let screens = three_screens();
+        let running = chosen(&screens, "\\\\.\\DISPLAY3", Some(&panel("CR270H")));
+        assert_eq!(drift(&running, None, true), None);
     }
 
     #[test]
