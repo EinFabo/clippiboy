@@ -133,6 +133,8 @@ export interface OverlayConfig {
   onError: boolean;
   onScreenshot: boolean;
   onRecording: boolean;
+  /** The REC badge that stands for the whole recording. */
+  recBadge: boolean;
   corner: OverlayCorner;
   durationMs: number;
   /** Device name of the screen (`\\.\DISPLAY1`); null = primary. */

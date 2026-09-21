@@ -157,6 +157,7 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     match state.start_recording() {
         Ok(()) => {
+            overlay::set_recording(app, true);
             notify(app, "ok", "Recording started");
             overlay::show(
                 app,
@@ -177,6 +178,7 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
 /// while — call it off the hotkey thread.
 pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
+    overlay::set_recording(app, false);
     overlay::show(app, BannerKind::Recording, "Saving recording…", None);
     let outcome = state.stop_recording(&|share| recording_progress(app, share));
     // Always the closing 1, success or not — the window takes it as "done"

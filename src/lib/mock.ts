@@ -104,6 +104,7 @@ export const mockConfig: AppConfig = {
     onError: true,
     onScreenshot: true,
     onRecording: true,
+    recBadge: true,
     corner: "bottomRight",
     durationMs: 3500,
     monitor: null,

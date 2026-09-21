@@ -9,7 +9,7 @@
 //! exactly what ClippiBoy deliberately does not do. In borderless fullscreen and
 //! in windowed mode, so in practically every current game, it works.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tauri::{
     Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
@@ -85,6 +85,10 @@ pub struct Banner {
 /// that has appeared in the meantime.
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Is the recording badge standing? While it is, the window stays up after a
+/// banner instead of hiding — the badge lives in the same window.
+static BADGE: AtomicBool = AtomicBool::new(false);
+
 /// Create the overlay window. Called once at startup.
 pub fn create(app: &tauri::AppHandle) {
     if app.get_webview_window(LABEL).is_some() {
@@ -121,6 +125,31 @@ pub fn create(app: &tauri::AppHandle) {
             reposition(app);
         }
         Err(err) => log::error!("could not create the overlay window: {err}"),
+    }
+}
+
+/// Show or take down the badge that stands for the whole recording.
+///
+/// The window is the banner's; the page decides what it draws in it (see
+/// `Overlay.tsx`). All that is needed here is keeping it up, and out of the
+/// way of the banner's own hide timer.
+pub fn set_recording(app: &tauri::AppHandle, recording: bool) {
+    let config = app.state::<AppState>().config_snapshot().overlay;
+    let wanted = recording && config.enabled && config.rec_badge;
+    BADGE.store(wanted, Ordering::SeqCst);
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    if wanted {
+        if let Err(err) = place(&window, &config) {
+            log::warn!("could not position the overlay: {err}");
+        }
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+    } else {
+        // Whatever comes next brings the window back up by itself — stopping a
+        // recording is followed by the banner that says it was written.
+        let _ = window.hide();
     }
 }
 
@@ -263,6 +292,11 @@ pub fn show_with_thumb(
         std::thread::sleep(std::time::Duration::from_millis(duration_ms as u64 + 600));
         if SEQUENCE.load(Ordering::SeqCst) != ticket {
             return; // A new banner has arrived in the meantime.
+        }
+        // The recording badge lives in this window too, and it stays for the
+        // whole recording — hiding here would take it with the banner.
+        if BADGE.load(Ordering::SeqCst) {
+            return;
         }
         let _ = window.hide();
     });

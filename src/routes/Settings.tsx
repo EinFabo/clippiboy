@@ -225,6 +225,16 @@ export function Settings() {
               onChange={(onRecording) => patchOverlay({ onRecording })}
             />
           </Row>
+          <Row
+            label="REC badge while recording"
+            hint="Stays in the corner for the whole recording, not just at the start"
+          >
+            <Toggle
+              checked={config.overlay.recBadge}
+              disabled={!config.overlay.enabled}
+              onChange={(recBadge) => patchOverlay({ recBadge })}
+            />
+          </Row>
           <Row label="Errors">
             <Toggle
               checked={config.overlay.onError}

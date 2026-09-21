@@ -237,6 +237,10 @@ pub struct OverlayConfig {
     pub on_screenshot: bool,
     #[serde(default = "yes")]
     pub on_recording: bool,
+    /// The small REC badge that stands in the corner for as long as a recording
+    /// runs, rather than only reporting its start.
+    #[serde(default = "yes")]
+    pub rec_badge: bool,
     pub corner: OverlayCorner,
     pub duration_ms: u32,
     /// The screen the banner sticks to (device name like `\\.\DISPLAY1`).
@@ -263,6 +267,7 @@ impl Default for OverlayConfig {
             on_error: true,
             on_screenshot: true,
             on_recording: true,
+            rec_badge: true,
             corner: OverlayCorner::BottomRight,
             duration_ms: 3500,
             monitor: None,

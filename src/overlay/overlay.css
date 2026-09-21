@@ -83,9 +83,36 @@ body,
   }
 }
 
+/* Der Grund der Karte. Stand einmal auf `--glass` plus `backdrop-blur`, und
+   genau das war der graue Kasten: das Fenster ist durchsichtig, hinter ihm
+   steht das Spiel — aber `backdrop-filter` sieht nur, was im Fenster selbst
+   liegt, und das ist nichts. Geblieben ist eine graue Scheibe, die obendrein
+   jedes Bild neu gefiltert werden musste, während das Spiel die GPU braucht.
+   Jetzt trägt die Karte ihren Grund selbst, in denselben Farben wie das Dock. */
 .cb-card {
   animation: cb-card-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
   will-change: transform, opacity;
+  background: linear-gradient(180deg, var(--hud-top) 0%, var(--hud-bottom) 100%);
+  /* Der Schatten muss in den durchsichtigen Rand passen, der um die Karte herum
+     noch im Fenster liegt — 12 px an den Seiten, 16 px oben und unten (Fenster
+     416 x 128 aus `overlay.rs`, Karte `w-full` in `p-3`). Alles, was weiter
+     reicht, schneidet der Fensterrand mitten in der Schwärze ab, und dann steht
+     nicht ein Schatten um die Karte, sondern ein schwarzer Kasten mit Kante.
+     Vorher waren es `0 16px 48px` — die reichten 64 px weit. Die Karte hält sich
+     ohnehin an ihrer gezeichneten Linie fest, nicht am Schatten. */
+  box-shadow:
+    0 3px 8px rgba(0, 0, 0, 0.5),
+    0 1px 2px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 var(--hud-sheen);
+}
+
+/* Ein Fehler färbt den Grund, statt ihn aufzuhellen. */
+.cb-card-error {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--color-live) 22%, var(--hud-top)) 0%,
+    color-mix(in oklab, var(--color-live) 10%, var(--hud-bottom)) 100%
+  );
 }
 
 .cb-card[data-leaving="true"] {
@@ -147,5 +174,99 @@ body,
   .cb-outline-rewind .cb-halo {
     stroke: var(--color-ink-muted);
     stroke-dashoffset: 100;
+  }
+}
+
+/* The light that circles the card, once the line has finished drawing itself.
+   From the overlay lab, variant 15.
+
+   A conic gradient spinning behind the card, masked down to the border: the
+   `exclude` composite punches the inside out, so only the 1.5 px frame shows
+   and the glass behind it stays glass. */
+@keyframes cb-rim-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@keyframes cb-rim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.cb-rim {
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  /* Waits for the drawn line — the two must not run at once. */
+  animation: cb-rim-in 500ms ease-out 760ms both;
+}
+
+.cb-rim::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 150%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0 58%,
+    var(--cb-stroke) 78%,
+    #fff 86%,
+    transparent 94%
+  );
+  animation: cb-rim-spin 2.6s linear infinite;
+}
+
+/* The badge that stands while a recording runs — variant 39 from the lab. It
+   lives in the same window as the banner and steps aside while one is up. */
+.cb-rec {
+  animation: cb-card-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  /* Derselbe Grund wie bei der Karte, nur dichter: die Plakette steht dauerhaft
+     im Bild und soll auch über einer hellen Stelle zu lesen sein. */
+  background: var(--hud-bottom);
+  /* Auch hier nur so weit, wie der Rand hergibt: die Plakette steht 12 px vom
+     oberen und rechten Fensterrand entfernt — siehe `.cb-card`. */
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px var(--hud-line);
+}
+
+.cb-rec-dot {
+  animation: cb-rec-blink 1.4s ease-in-out infinite;
+}
+
+@keyframes cb-rec-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cb-rim,
+  .cb-rim::before,
+  .cb-rec,
+  .cb-rec-dot {
+    animation: none;
+  }
+  .cb-rim {
+    opacity: 1;
   }
 }
