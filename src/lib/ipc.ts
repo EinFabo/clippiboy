@@ -46,7 +46,15 @@ export const api = {
     toggleBuffer: string,
     screenshot: string,
     record: string,
-  ) => invoke<AppConfig>("set_hotkeys", { saveClip, toggleBuffer, screenshot, record }),
+    console: string,
+  ) =>
+    invoke<AppConfig>("set_hotkeys", {
+      saveClip,
+      toggleBuffer,
+      screenshot,
+      record,
+      console,
+    }),
   /** Throws when the folder cannot be created or written to. */
   setClipDir: (dir: string) => invoke<AppConfig>("set_clip_dir", { dir }),
   defaultClipDir: () => invoke<string>("default_clip_dir"),
@@ -68,6 +76,16 @@ export const api = {
   /** Start or stop a recording; says whether one runs afterwards. Stopping
       only comes back once the file is written. */
   toggleRecording: () => invoke<boolean>("toggle_recording"),
+  /** Close the console over the game and give the focus back to it. */
+  closeConsole: () => invoke<void>("close_console"),
+  /** Bring the app window up on this clip and close the console. `at` is the
+      second the console stood at, so the app carries on there. */
+  showClipInApp: (id: string, at: number) =>
+    invoke<void>("show_clip_in_app", { id, at }),
+  /** Shrink a clip under `megabytes` and put the file on the clipboard. The
+      result is the path of that second file, which lies beside the clip. */
+  exportForDiscord: (id: string, megabytes: number) =>
+    invoke<string>("export_for_discord", { id, megabytes }),
   status: () => invoke<EngineStatus>("engine_status"),
 
   appVersion: () => invoke<string>("app_version"),

@@ -99,10 +99,23 @@ pub fn set_config(
         || previous.toggle_buffer_hotkey != next.toggle_buffer_hotkey
         || previous.screenshot_hotkey != next.screenshot_hotkey
         || previous.record_hotkey != next.record_hotkey
+        || previous.console_hotkey != next.console_hotkey
+        || previous.console_enabled != next.console_enabled
     {
         if let Err(err) = crate::register_hotkeys(&app) {
             crate::notify(&app, "error", err);
         }
+    }
+
+    // Size, screen or visibility of the console changed in the settings while it
+    // happens to be open: it should not wait for the next opening.
+    if previous.console_scale != next.console_scale
+        || previous.console_monitor != next.console_monitor
+        || previous.console_monitor_stable_id != next.console_monitor_stable_id
+        || previous.console_follow_active_screen != next.console_follow_active_screen
+        || previous.console_in_capture != next.console_in_capture
+    {
+        crate::console::relayout(&app);
     }
 
     // Switched off, or moved to another port: the listener has to follow, and
@@ -129,8 +142,9 @@ pub fn set_hotkeys(
     toggle_buffer: String,
     screenshot: String,
     record: String,
+    console: String,
 ) -> Result<AppConfig> {
-    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer, screenshot, record);
+    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer, screenshot, record, console);
     if result.is_err() {
         // Even after rejected input the previous hotkeys have to take hold
         // again — the settings suspend them while recording a new one.
@@ -146,18 +160,21 @@ fn apply_hotkeys(
     toggle_buffer: String,
     screenshot: String,
     record: String,
+    console: String,
 ) -> Result<AppConfig> {
     let save_clip = save_clip.trim().to_string();
     let toggle_buffer = toggle_buffer.trim().to_string();
     let screenshot = screenshot.trim().to_string();
     let record = record.trim().to_string();
+    let console = console.trim().to_string();
     crate::parse_hotkey(&save_clip)?;
     crate::parse_hotkey(&toggle_buffer)?;
     crate::parse_hotkey(&screenshot)?;
     crate::parse_hotkey(&record)?;
-    // Every pair, not just the first two — with four assignments the clash can
+    crate::parse_hotkey(&console)?;
+    // Every pair, not just the first two — with five assignments the clash can
     // sit anywhere among them.
-    let taken = [&save_clip, &toggle_buffer, &screenshot, &record];
+    let taken = [&save_clip, &toggle_buffer, &screenshot, &record, &console];
     for (at, one) in taken.iter().enumerate() {
         if taken[at + 1..]
             .iter()
@@ -173,6 +190,7 @@ fn apply_hotkeys(
     config.toggle_buffer_hotkey = toggle_buffer;
     config.screenshot_hotkey = screenshot;
     config.record_hotkey = record;
+    config.console_hotkey = console;
     let next = state.replace_config(config);
 
     match crate::register_hotkeys(app) {
@@ -183,6 +201,7 @@ fn apply_hotkeys(
             rollback.toggle_buffer_hotkey = previous.toggle_buffer_hotkey;
             rollback.screenshot_hotkey = previous.screenshot_hotkey;
             rollback.record_hotkey = previous.record_hotkey;
+            rollback.console_hotkey = previous.console_hotkey;
             state.replace_config(rollback);
             let _ = crate::register_hotkeys(app);
             Err(err)
@@ -694,6 +713,85 @@ pub fn copy_clip_file(state: State<'_, AppState>, id: String) -> Result<()> {
         return Err("The clip file is no longer there.".into());
     }
     crate::clipboard::copy_files(&[path])
+}
+
+/// Close the console over the game. The window asks for this itself — on
+/// Escape, or a click beside the dock.
+#[tauri::command]
+pub fn close_console(app: tauri::AppHandle) {
+    crate::console::close(&app);
+}
+
+/// What travels with "open in the app": the clip, and the second the console
+/// stood at. Without the second the app would start the clip over, and the spot
+/// that was worth looking at properly is exactly the one you just lost.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusClip {
+    id: String,
+    at: f64,
+}
+
+/// Show a clip in the app itself: window to the front, gallery open, player on
+/// that clip, standing where the console stood. The console closes behind it —
+/// the question was "let me see this properly", and that happens in the window.
+#[tauri::command]
+pub fn show_clip_in_app(app: tauri::AppHandle, id: String, at: f64) -> Result<()> {
+    use tauri::Emitter;
+
+    // The window first, the console second. The console still owns the
+    // foreground at this point, and that is the only state in which Windows
+    // lets us hand it on — see `console::hide`.
+    crate::tray::show_main_window(&app);
+    crate::console::hide(&app);
+    // A screenshot has no position, and a video that never started reports 0 —
+    // both mean "from the top", which is what a negative or unreal number has
+    // to mean as well.
+    let at = if at.is_finite() && at > 0.0 { at } else { 0.0 };
+    app.emit("focus-clip", FocusClip { id, at })
+        .map_err(|e| e.to_string())
+}
+
+/// Shrink a clip under a size limit and put the result on the clipboard.
+///
+/// The console's version of the export dialog: over a game there is no save
+/// dialog to point anywhere, and the next step is always the same — paste it
+/// into Discord. So the file lands beside the clip it came from, carrying the
+/// size in its name, and goes straight onto the clipboard.
+#[tauri::command(async)]
+pub fn export_for_discord(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+    megabytes: u64,
+) -> Result<String> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    refuse_still(&clip)?;
+    let source = std::path::PathBuf::from(&clip.path);
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "clip".into());
+    let output = source.with_file_name(format!("{stem} ({megabytes} MB).mp4"));
+    let target_bytes = megabytes * 1024 * 1024;
+
+    // Already there from an earlier run and small enough: copying it again beats
+    // encoding the same file twice.
+    let ready = std::fs::metadata(&output)
+        .map(|meta| meta.len() > 0 && meta.len() <= target_bytes)
+        .unwrap_or(false);
+    if !ready {
+        export_clip(
+            state,
+            app,
+            id,
+            target_bytes,
+            output.to_string_lossy().to_string(),
+        )?;
+    }
+    crate::clipboard::copy_files(&[output.clone()])?;
+    Ok(output.to_string_lossy().to_string())
 }
 
 /// Open the clip in whichever player Windows has chosen for it.

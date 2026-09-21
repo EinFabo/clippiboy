@@ -38,6 +38,12 @@ interface Props {
    * simply being there. The dashboard passes nothing and gets a plain fade.
    */
   originOf?: (clipId: string) => DOMRect | null;
+  /**
+   * Wo der Clip anfangen soll — die Konsole über dem Spiel reicht die Stelle
+   * mit, an der dort gerade geschaut wurde. Gilt einmal, für den Clip, mit dem
+   * der Player aufgeht.
+   */
+  startAt?: number;
 }
 
 /** The picture on its way between the tile and the stage. */
@@ -73,6 +79,7 @@ export function ClipPlayer({
   onDelete,
   onOpenMixer,
   originOf,
+  startAt,
 }: Props) {
   const clip = clips[index];
   const video = useRef<HTMLVideoElement>(null);
@@ -125,6 +132,11 @@ export function ClipPlayer({
   const [settling, setSettling] = useState(false);
   /** Where to jump back to after reloading. */
   const resumeAt = useRef<{ time: number; playing: boolean } | null>(null);
+  /**
+   * Die übergebene Startzeit, einmal zu verbrauchen. Ohne das Aufbrauchen
+   * spränge auch der nächste Clip beim Weiterblättern auf dieselbe Sekunde.
+   */
+  const startOnce = useRef<number | null>(startAt ?? null);
   /** Failed attempts at loading the current file. */
   const loadFailures = useRef(0);
   /** Holds the last frame while the file underneath is being replaced. */
@@ -678,6 +690,14 @@ export function ClipPlayer({
                   element.currentTime = resume.time;
                   if (resume.playing) void element.play();
                   else element.pause();
+                } else if (startOnce.current !== null) {
+                  // Aus der Konsole über dem Spiel herübergereicht: dort stand
+                  // der Clip an dieser Stelle, und hier steht er weiter.
+                  const at = startOnce.current;
+                  startOnce.current = null;
+                  if (Number.isFinite(length)) {
+                    element.currentTime = Math.min(Math.max(at, 0), length);
+                  }
                 } else if (restored && restored.start > 0.05) {
                   // A trimmed clip starts at its mark, not at zero — otherwise
                   // the first thing you see is what was cut away.

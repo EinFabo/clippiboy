@@ -88,6 +88,13 @@ export const mockConfig: AppConfig = {
   toggleBufferHotkey: "Ctrl+Shift+B",
   screenshotHotkey: "Ctrl+Shift+P",
   recordHotkey: "Ctrl+Shift+R",
+  consoleHotkey: "Alt+C",
+  consoleEnabled: true,
+  consoleScale: 1,
+  consoleMonitor: null,
+  consoleMonitorStableId: null,
+  consoleFollowActiveScreen: true,
+  consoleInCapture: false,
   autoStartWithWindows: false,
   onlyBufferInGame: true,
   overlay: {

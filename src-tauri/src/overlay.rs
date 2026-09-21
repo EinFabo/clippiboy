@@ -40,7 +40,7 @@ const MARGIN: f64 = 24.0;
 /// The main window gets the same string in `tauri.conf.json`: two webviews with
 /// different arguments would need separate data directories, and the second one
 /// does not start without them.
-const BROWSER_ARGS: &str = concat!(
+pub(crate) const BROWSER_ARGS: &str = concat!(
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion",
     " --disable-backgrounding-occluded-windows",
     " --disable-renderer-backgrounding",
@@ -122,6 +122,50 @@ pub fn create(app: &tauri::AppHandle) {
         }
         Err(err) => log::error!("could not create the overlay window: {err}"),
     }
+}
+
+/// Which screen a window over the game belongs on.
+///
+/// Both of them ask the same way: follow whatever has the focus, or a screen
+/// picked by hand — looked up by the panel's own identity first, because
+/// `\\.\DISPLAYn` can have moved to another panel since it was saved. When
+/// neither answers, the primary one.
+pub(crate) fn choose_monitor(
+    window: &tauri::WebviewWindow,
+    follow: bool,
+    monitor: Option<&str>,
+    stable: Option<&str>,
+) -> tauri::Result<Option<tauri::window::Monitor>> {
+    let chosen = if follow {
+        match crate::game::foreground_center() {
+            Some((x, y)) => window.monitor_from_point(x, y)?,
+            None => None,
+        }
+    } else if monitor.is_some() || stable.is_some() {
+        // Ask which screen is meant before looking for it: Tauri knows monitors
+        // only by their device name, and that name can have moved to another
+        // panel since this was saved. The panel identity resolves back to
+        // whatever the name is today.
+        let wanted = crate::capture::pick(
+            &crate::capture::list_targets(),
+            crate::model::TargetKind::Monitor,
+            monitor,
+            stable,
+        )
+        .filter(|choice| choice.how != crate::capture::Match::Fallback)
+        .map(|choice| choice.target.id)
+        .or_else(|| monitor.map(str::to_string));
+        match wanted {
+            Some(wanted) => window
+                .available_monitors()?
+                .into_iter()
+                .find(|m| m.name().map(|n| *n == wanted).unwrap_or(false)),
+            None => None,
+        }
+    } else {
+        None
+    };
+    Ok(chosen.or(window.primary_monitor()?))
 }
 
 /// Put the banner at the configured spot. Called at startup and after every
@@ -227,36 +271,13 @@ pub fn show_with_thumb(
 /// Put the window in the desired corner — on the monitor currently being played
 /// on, otherwise on the primary one.
 fn place(window: &tauri::WebviewWindow, config: &OverlayConfig) -> tauri::Result<()> {
-    let chosen = if config.follow_active_screen {
-        match crate::game::foreground_center() {
-            Some((x, y)) => window.monitor_from_point(x, y)?,
-            None => None,
-        }
-    } else if config.monitor.is_some() || config.monitor_stable_id.is_some() {
-        // Ask which screen is meant before looking for it: Tauri knows monitors
-        // only by their device name, and that name can have moved to another
-        // panel since this was saved. The panel identity resolves back to
-        // whatever the name is today.
-        let wanted = crate::capture::pick(
-            &crate::capture::list_targets(),
-            crate::model::TargetKind::Monitor,
-            config.monitor.as_deref(),
-            config.monitor_stable_id.as_deref(),
-        )
-        .filter(|choice| choice.how != crate::capture::Match::Fallback)
-        .map(|choice| choice.target.id)
-        .or_else(|| config.monitor.clone());
-        match wanted {
-            Some(wanted) => window
-                .available_monitors()?
-                .into_iter()
-                .find(|m| m.name().map(|n| *n == wanted).unwrap_or(false)),
-            None => None,
-        }
-    } else {
-        None
-    };
-    let Some(monitor) = chosen.or(window.primary_monitor()?) else {
+    let chosen = choose_monitor(
+        window,
+        config.follow_active_screen,
+        config.monitor.as_deref(),
+        config.monitor_stable_id.as_deref(),
+    )?;
+    let Some(monitor) = chosen else {
         return Ok(());
     };
     let corner = config.corner;

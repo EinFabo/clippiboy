@@ -1,0 +1,347 @@
+/* Das Fenster ist durchsichtig — außerhalb von Dock und Panels steht das Spiel
+   unberührt da. Der undurchsichtige Hintergrund aus index.css muss also weg,
+   wie beim Banner auch. */
+html,
+body,
+#root {
+  background: transparent;
+  overflow: hidden;
+}
+
+/* Die Größeneinstellung zoomt die Konsole, und `zoom` saß einmal auf <html>.
+   Dort darf es nicht stehen: dann liegt die ganze Seite in gezoomten Pixeln,
+   und was die Bildschirmgröße treffen soll, trifft sie um den Faktor daneben.
+   Der Zoom sitzt deshalb allein auf der Bedienfläche, deren Kasten weiterhin
+   exakt der Bildschirm ist — worauf sich jede Prozentangabe darin verlässt
+   (`w-[80%]`, `.cb-cap`), denn Prozente rechnen gegen das Elternteil und sind
+   als Einzige vom Zoom unberührt. Längen und `vw`/`vh` multipliziert er mit.
+
+   Pointer events pass straight through the wrapper so a click on the empty room
+   around the dock still reaches the page's own background — that click is what
+   closes the console. Everything inside that is meant to be operated takes them
+   back (`.cb-ui > *`). */
+.cb-ui {
+  /* `absolute` inside the unzoomed page, not `fixed`: an absolute box resolves
+     its `inset` against its parent, and that parent is already exactly the
+     screen. A fixed one would have to resolve it against the viewport, which is
+     the measurement `zoom` makes slippery. */
+  position: absolute;
+  inset: 0;
+  zoom: var(--cb-scale, 1);
+  pointer-events: none;
+}
+
+/* The `:not()` is what lets a child hand the clicks back — the note and the
+   line of help text below the dock are read, not operated, and a click there
+   means the same as a click beside them. Without it the utility class would
+   lose the tie on specificity. */
+.cb-ui > *:not(.pointer-events-none) {
+  pointer-events: auto;
+}
+
+/* Panels arrive from the dock rather than fading in on the spot: the dock is
+   where the click was, and the movement says the two belong together. */
+@keyframes cb-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* And they go back down the same way instead of blinking out. */
+@keyframes cb-sheet-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+}
+
+/* The animation sits on an inner element on purpose: Tailwind centres the outer
+   one with the `translate` property, and a transform here would have added a
+   second -50% on top of it — the panel then stood half a width to the left. */
+.cb-sheet {
+  animation: cb-sheet-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* CLOSE_MS in Console.tsx has to match this duration. */
+.cb-sheet[data-leaving="true"] {
+  animation: cb-sheet-out 160ms cubic-bezier(0.4, 0, 1, 1) both;
+  pointer-events: none;
+}
+
+/* Die Fläche der Panels. Fast deckend und ohne `backdrop-filter`: das Fenster
+   ist durchsichtig, hinter ihm steht das Spiel — und was dort liegt, bekommt
+   der Filter gar nicht zu sehen. Er hat nur Leistung gekostet und eine graue
+   Scheibe hinterlassen.
+
+   Das Violett steht in der Kante, nicht in der Fläche: über einem Feuergefecht
+   würde eine getönte Scheibe das Bild nur eintrüben, ein angeleuchteter Rand
+   sagt auf einen Blick, wem das hier gehört. */
+.cb-glass {
+  background: color-mix(in oklab, var(--color-surface) 96%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-accent) 18%, var(--color-line));
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.65);
+}
+
+/* So hoch darf ein Panel werden, bevor es in sich scrollt.
+
+   Geteilt durch den Zoom, weil `zoom` jede Länge — auch eine aus `vh` — noch
+   einmal mit sich multipliziert: bei Größe 1,6 wären aus 62vh 99vh geworden und
+   das Panel hätte oben aus dem Bild gestanden. Erst teilen, dann verdoppelt der
+   Zoom zurück auf die gemeinten 62 % der Bildschirmhöhe. */
+.cb-cap {
+  max-height: calc(62vh / var(--cb-scale, 1));
+}
+
+/* Ein- und Ausblenden. Hieß einmal `cb-dim-*`, weil es für den Schleier über
+   dem Spiel gemacht war; den gibt es nicht mehr, die Kurven schon. */
+@keyframes cb-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* --- Leaving ------------------------------------------------------------ */
+
+/* Closing used to be a single frame: the window was hidden and the game was
+   simply back. Now the console gets out of the way first — everything standing
+   above the dock leaves with it rather than one piece at a time — and Rust
+   hides the window once that has played.
+   CLOSE_MS in Console.tsx has to match these durations. */
+.cb-ui[data-leaving="true"] {
+  animation: cb-fade-out 160ms ease-in both;
+  pointer-events: none;
+}
+
+/* Es kommt von unten herein, von dort, wo es auch steht — eine Bewegung, keine
+   zwei: das Maß der Größe bleibt bei 1, sonst wackelt die Schrift darin, und
+   der Weg ist lang genug, dass man ihn als Auffahren liest. */
+@keyframes cb-dock-in {
+  from {
+    opacity: 0;
+    transform: translateY(26px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Hinaus fährt es nur — das Ausblenden macht `.cb-ui` für die ganze Konsole auf
+   einmal. Stand es hier noch einmal, lagen zwei Blenden übereinander und das
+   Dock wurde milchig, bevor es weg war. */
+@keyframes cb-dock-out {
+  from {
+    transform: none;
+  }
+  to {
+    transform: translateY(18px);
+  }
+}
+
+/* The dock is centred by Tailwind's `translate` property, so the animation's
+   own transform is free — same split as `.cb-sheet`. */
+.cb-dock {
+  animation: cb-dock-in 300ms var(--ease-entrance) both;
+  /* Der Compositor soll die Fahrt allein machen können — das Dock steht über
+     einem laufenden Spiel, und ein Neuzeichnen pro Bild sieht man dort. */
+  will-change: transform, opacity;
+  /* Dunkel und fast deckend, wie in der Referenz. Ein violett getönter Verlauf
+     über die ganze Leiste hat das Bild dahinter nur eingefärbt; jetzt trägt das
+     Dock dieselbe Fläche wie das Banner, und das Lila steht in den Kanten: der
+     Strich auf der Oberkante, die Trennlinien, der Puffer-Balken und der Strich
+     unter dem offenen Panel. Das reicht, um zu sagen, wem die Leiste gehört. */
+  background: linear-gradient(180deg, var(--hud-top) 0%, var(--hud-bottom) 100%);
+  border-color: var(--hud-line);
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 var(--hud-sheen);
+}
+
+.cb-dock[data-leaving="true"] {
+  animation: cb-dock-out 160ms var(--ease-exit) both;
+  pointer-events: none;
+}
+
+/* Die Zeile unter dem Dock fährt mit. Stand sie sofort da, während die Leiste
+   noch unterwegs war, sah man zwei Anfänge statt einem. */
+.cb-dock-line {
+  animation: cb-dock-in 300ms var(--ease-entrance) both;
+}
+
+/* --- The dock's buttons -------------------------------------------------- */
+
+/* What the mouse gets back. Three things at once, because one of them alone
+   reads as a page that is merely tinted: the surface lights up, the button
+   lifts a little, and the icon grows. The press then takes all three back in
+   half the time — that snap is what makes a button feel connected to the
+   finger rather than to a timer. */
+.cb-dock-btn {
+  transition:
+    background-color 140ms var(--ease-out-soft),
+    box-shadow 140ms var(--ease-out-soft),
+    transform 140ms var(--ease-out-soft);
+}
+
+.cb-dock-btn:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.14);
+  transform: translateY(-2px);
+}
+
+.cb-dock-btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.95);
+  transition-duration: 70ms;
+}
+
+.cb-dock-btn > :first-child {
+  transition: transform 160ms var(--ease-spring);
+}
+
+.cb-dock-btn:hover:not(:disabled) > :first-child {
+  transform: scale(1.12);
+}
+
+.cb-dock-btn:active:not(:disabled) > :first-child {
+  transform: scale(0.94);
+  transition-duration: 70ms;
+}
+
+/* The panel that is open stays lit, and its button keeps a line under it so the
+   state can be read without hovering. */
+.cb-dock-btn[aria-pressed="true"] {
+  background: rgb(255 255 255 / 0.18);
+}
+
+.cb-dock-btn[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  width: 18px;
+  height: 2px;
+  translate: -50%;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-bright);
+  animation: cb-sheet-in 200ms var(--ease-entrance) both;
+}
+
+/* --- Small round buttons ------------------------------------------------- */
+
+/* The tools under a clip. Same idea, smaller gestures — they sit in a row of
+   seven and must not jostle each other. */
+.cb-tool {
+  transition:
+    background-color 140ms var(--ease-out-soft),
+    border-color 140ms var(--ease-out-soft),
+    color 140ms var(--ease-out-soft),
+    transform 140ms var(--ease-out-soft);
+}
+
+.cb-tool:hover:not(:disabled) {
+  transform: translateY(-1px) scale(1.08);
+}
+
+.cb-tool:active:not(:disabled) {
+  transform: scale(0.9);
+  transition-duration: 70ms;
+}
+
+/* The wide buttons under the player. */
+.cb-btn {
+  transition:
+    background-color 140ms var(--ease-out-soft),
+    border-color 140ms var(--ease-out-soft),
+    transform 140ms var(--ease-out-soft);
+}
+
+.cb-btn:active:not(:disabled) {
+  transform: scale(0.97);
+  transition-duration: 70ms;
+}
+
+/* --- Clip tiles ---------------------------------------------------------- */
+
+/* The picture pushes forward under the mouse and the play mark fades up over
+   it, so a tile reads as something to click rather than as a screenshot of
+   one. The scale is on the image, not on the tile: the frame stays put and
+   nothing in the grid shifts. */
+.cb-tile {
+  transition:
+    box-shadow 160ms var(--ease-out-soft),
+    transform 160ms var(--ease-out-soft);
+}
+
+.cb-tile:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
+}
+
+.cb-tile:active {
+  transform: translateY(0) scale(0.985);
+  transition-duration: 70ms;
+}
+
+.cb-tile img {
+  transition: transform 320ms var(--ease-out-soft);
+}
+
+.cb-tile:hover img {
+  transform: scale(1.06);
+}
+
+/* --- The note ------------------------------------------------------------ */
+
+/* "Clip gespeichert" and the like. It used to appear and vanish on the spot;
+   now it rises out of the dock, which is where the click that caused it was. */
+@keyframes cb-note-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.cb-note {
+  animation: cb-note-in 220ms var(--ease-spring) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cb-sheet,
+  .cb-sheet[data-leaving="true"],
+  .cb-dock,
+  .cb-dock[data-leaving="true"],
+  .cb-dock-line,
+  .cb-ui[data-leaving="true"],
+  .cb-note,
+  .cb-dock-btn[aria-pressed="true"]::after {
+    animation: none;
+  }
+  /* Hover and press stay — they are the answer to something the user just did,
+     not decoration — but they arrive at once instead of travelling. */
+  .cb-dock-btn,
+  .cb-dock-btn > :first-child,
+  .cb-tool,
+  .cb-btn,
+  .cb-tile,
+  .cb-tile img {
+    transition-duration: 1ms;
+  }
+  .cb-dock-btn:hover:not(:disabled),
+  .cb-tile:hover {
+    transform: none;
+  }
+}

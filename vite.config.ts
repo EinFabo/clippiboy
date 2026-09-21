@@ -18,11 +18,13 @@ export default defineConfig({
   build: {
     target: "chrome105",
     sourcemap: false,
-    // Zwei Einstiegspunkte: das Hauptfenster und der Banner über dem Spiel.
+    // Drei Einstiegspunkte: das Hauptfenster, der Banner über dem Spiel und
+    // die Konsole, die der Hotkey darüber aufzieht.
     rollupOptions: {
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         overlay: fileURLToPath(new URL("./overlay.html", import.meta.url)),
+        console: fileURLToPath(new URL("./console.html", import.meta.url)),
       },
     },
   },

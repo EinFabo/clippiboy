@@ -49,4 +49,18 @@
     #08080a 100%
   );
   --glass: rgba(26, 26, 31, 0.72);
+
+  /* Die Fläche, die über dem Spiel steht — Banner wie Konsole. Fast deckend,
+     und das mit Absicht: hinter einem durchsichtigen Fenster hat
+     `backdrop-filter` nichts zu filtern als das Fenster selbst, also kommt von
+     dort keine Unschärfe, sondern nur eine graue Scheibe. Die Fläche trägt ihre
+     Lesbarkeit deshalb selbst. Dunkel wie in der Referenz, mit einem Hauch
+     Violett darin statt einem Grau — das Lila steht in der Kante, nicht in der
+     Fläche. */
+  --hud-top: rgba(23, 20, 32, 0.96);
+  --hud-bottom: rgba(13, 12, 18, 0.97);
+  --hud-line: rgb(255 255 255 / 0.1);
+  /* Der helle Strich auf der Oberkante — das Einzige an Violett, was die Fläche
+     selbst abbekommt. */
+  --hud-sheen: color-mix(in oklab, var(--color-accent-bright) 20%, transparent);
 }

@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useEngine } from "./store";
+import { inTauri } from "./lib/ipc";
+import type { FocusClip } from "./lib/types";
 import { TitleBar } from "./components/TitleBar";
 import { NavBar, type Route } from "./components/NavBar";
 import { Toasts } from "./components/Toasts";
@@ -15,11 +18,33 @@ import { Settings } from "./routes/Settings";
 
 export default function App() {
   const [route, setRoute] = useState<Route>("dashboard");
+  /** A clip the console handed over, with the second it stood at: the gallery
+   *  opens it there on arrival. */
+  const [focusClip, setFocusClip] = useState<FocusClip | null>(null);
   const init = useEngine((s) => s.init);
 
   useEffect(() => {
     void init();
   }, [init]);
+
+  // "Open in the app" from the console over the game: the core brings the
+  // window up and says which clip was meant.
+  useEffect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<FocusClip>("focus-clip", (event) => {
+      setRoute("clips");
+      setFocusClip(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   return (
     <MenuProvider>
@@ -44,7 +69,13 @@ export default function App() {
               routes already unmount on a switch, so nothing is lost by it. */}
           <div key={route} className="cb-rise mx-auto w-full max-w-[1180px] px-8">
             {route === "dashboard" && <Dashboard onNavigate={setRoute} />}
-            {route === "clips" && <Clips onNavigate={setRoute} />}
+            {route === "clips" && (
+              <Clips
+                onNavigate={setRoute}
+                focus={focusClip}
+                onFocused={() => setFocusClip(null)}
+              />
+            )}
             {route === "audio" && <AudioMixer />}
             {route === "recording" && <Recording onNavigate={setRoute} />}
             {route === "settings" && <Settings />}

@@ -312,6 +312,17 @@ pub fn default_record_hotkey() -> String {
     "Ctrl+Shift+R".into()
 }
 
+/// Alt+Z belongs to NVIDIA on most machines, so the console takes the next
+/// letter over.
+pub fn default_console_hotkey() -> String {
+    "Alt+C".into()
+}
+
+pub fn default_console_scale() -> f64 {
+    1.0
+}
+
+
 /// Serde needs a function even for a plain `true`.
 fn yes() -> bool {
     true
@@ -333,6 +344,33 @@ pub struct AppConfig {
     /// Start and stop a recording. Later still, so the same applies.
     #[serde(default = "default_record_hotkey")]
     pub record_hotkey: String,
+    /// Open the console over the game.
+    #[serde(default = "default_console_hotkey")]
+    pub console_hotkey: String,
+    /// Whether that hotkey does anything at all. For whoever wants nothing but
+    /// the banner over their game.
+    #[serde(default = "yes")]
+    pub console_enabled: bool,
+    /// How big the console is drawn, 1.0 being the built size. A 1440p screen
+    /// two metres away wants more than a 1080p one on the desk.
+    #[serde(default = "default_console_scale")]
+    pub console_scale: f64,
+    /// The screen the console opens on (device name like `\\.\DISPLAY1`), and
+    /// the panel's own identity beside it — the device name can have moved to
+    /// another panel since this was saved. Same pair as the banner's.
+    #[serde(default)]
+    pub console_monitor: Option<String>,
+    #[serde(default)]
+    pub console_monitor_stable_id: Option<String>,
+    /// Open on whichever screen has the focus. What the console always did, so
+    /// it stays the default.
+    #[serde(default = "yes")]
+    pub console_follow_active_screen: bool,
+    /// Take the console out of the copy protection, so Discord and every other
+    /// screen recording can see it. The price is that it then also stands in a
+    /// clip saved while it is open — ClippiBoy records the whole screen.
+    #[serde(default)]
+    pub console_in_capture: bool,
     pub auto_start_with_windows: bool,
     pub only_buffer_in_game: bool,
     // Newly added fields need `default` — otherwise `config::load()` throws away

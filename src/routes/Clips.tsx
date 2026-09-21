@@ -28,7 +28,7 @@ import { HeartBurst } from "@/components/ui/HeartBurst";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
 import { ExportDialog } from "@/components/ExportDialog";
 import { animate, EASE_SPRING } from "@/lib/motion";
-import type { Clip } from "@/lib/types";
+import type { Clip, FocusClip } from "@/lib/types";
 
 /**
  * What the gallery is filtering by right now.
@@ -60,13 +60,29 @@ const LEAVE_MS = 200;
  */
 let greeted = false;
 
-export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
+export function Clips({
+  onNavigate,
+  focus,
+  onFocused,
+}: {
+  onNavigate: (r: Route) => void;
+  /** A clip to open straight away — the console over the game sends one when
+   *  "open in the app" is pressed, with the second it stood at. */
+  focus?: FocusClip | null;
+  onFocused?: () => void;
+}) {
+  // `useShallow`, siehe `SourceTrouble`: ohne Selektor rendert die ganze
+  // Galerie — über hundert Kacheln — zwanzigmal die Sekunde neu, weil die
+  // Audiopegel durch denselben Store laufen. Das war der teuerste Posten.
   const { clips, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
     useEngine();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>(ALL);
   /** Which clip is in the player. Editing always happens there. */
   const [open, setOpen] = useState<number | null>(null);
+  /** Sekunde, an der ein aus der Konsole übergebener Clip anfangen soll. Gilt
+   *  nur für dieses eine Öffnen — jedes andere fängt vorne an. */
+  const [startAt, setStartAt] = useState<number | undefined>(undefined);
   /**
    * The playlist as it looked when the player opened — as ids.
    *
@@ -222,10 +238,36 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
   /** Open the player with the list currently shown in the gallery. */
   const openAt = (index: number) => {
+    setStartAt(undefined);
     setPlaylist(visible.map((clip) => clip.id));
     touched.current = new Set(visible[index] ? [visible[index].id] : []);
     setOpen(index);
   };
+
+  // A clip handed over from the console. The filter has to go first: the clip
+  // may not be in whatever was on screen, and the player counts in the list it
+  // is given.
+  useEffect(() => {
+    if (!focus) return;
+    const clip = clips.find((c) => c.id === focus.id);
+    if (!clip) return;
+    setQuery("");
+    setFilter(
+      clip.screenshot
+        ? { kind: "screenshots" }
+        : clip.recording
+          ? { kind: "recordings" }
+          : ALL,
+    );
+    const list = clips.filter((c) =>
+      clip.screenshot ? c.screenshot : clip.recording ? c.recording : !c.screenshot && !c.recording,
+    );
+    setPlaylist(list.map((c) => c.id));
+    // Vor dem Öffnen, damit der Player die Stelle schon beim ersten Bild hat.
+    setStartAt(focus.at);
+    setOpen(list.findIndex((c) => c.id === focus.id));
+    onFocused?.();
+  }, [focus, clips, onFocused]);
 
   /** Page on inside the open viewer. Both of them do it the same way. */
   const openIndex = (next: number) => {
@@ -522,6 +564,7 @@ export function Clips({ onNavigate }: { onNavigate: (r: Route) => void }) {
             onDelete={deleteClip}
             onOpenMixer={() => onNavigate("audio")}
             originOf={originOf}
+            startAt={startAt}
           />
         )
       )}

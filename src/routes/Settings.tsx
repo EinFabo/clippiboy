@@ -4,11 +4,11 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Segmented, Select, Toggle } from "@/components/ui/Controls";
+import { Segmented, Select, Slider, Toggle } from "@/components/ui/Controls";
 import { api, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/format";
-import type { OverlayCorner, StorageUsage } from "@/lib/types";
+import type { CaptureTarget, OverlayCorner, StorageUsage } from "@/lib/types";
 import { UpdateProgressBar, updateProgressText } from "@/components/UpdateProgress";
 
 /**
@@ -36,29 +36,18 @@ export function Settings() {
   const patchOverlay = (patch: Partial<typeof config.overlay>) =>
     patchConfig({ overlay: { ...config.overlay, ...patch } });
 
-  // Matched the way the core matches it: the panel's identity first, the
-  // device name second. `\\.\DISPLAYn` can name a different screen after a
-  // reboot, and then the dropdown showed nothing that was actually in use.
-  const savedScreen =
-    monitors.find(
-      (m) =>
-        config.overlay.monitorStableId !== null &&
-        m.stableId === config.overlay.monitorStableId,
-    ) ??
-    monitors.find((m) => config.overlay.monitor === m.id) ??
-    (config.overlay.monitor === null && config.overlay.monitorStableId === null
-      ? monitors.find((m) => m.isPrimary)
-      : undefined) ??
-    null;
-
-  const screen = config.overlay.followActiveScreen
-    ? FOLLOW
-    : (savedScreen?.id ?? null);
-
-  // The configured screen is not among the ones plugged in. Worth saying out
-  // loud: a dropdown would otherwise quietly show its first entry, and the core
-  // falls back to the primary screen without anyone noticing.
-  const unplugged = screen === null && monitors.length > 0;
+  // Both windows over the game ask the same question, so they resolve it the
+  // same way — see `screenChoice` at the foot of this file.
+  const banner = screenChoice(monitors, {
+    monitor: config.overlay.monitor,
+    stableId: config.overlay.monitorStableId,
+    follow: config.overlay.followActiveScreen,
+  });
+  const consoleScreen = screenChoice(monitors, {
+    monitor: config.consoleMonitor,
+    stableId: config.consoleMonitorStableId,
+    follow: config.consoleFollowActiveScreen,
+  });
 
   return (
     <div className="space-y-8 pb-12">
@@ -102,6 +91,95 @@ export function Settings() {
               onChange={(autoStartWithWindows) =>
                 patchConfig({ autoStartWithWindows })
               }
+            />
+          </Row>
+        </Card>
+      </section>
+
+      <section>
+        <SectionTitle title="Console over the game" />
+        <Card className="divide-y divide-line">
+          <Row
+            label="Open with the hotkey"
+            hint={`${config.consoleHotkey} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`}
+          >
+            <Toggle
+              checked={config.consoleEnabled}
+              onChange={(consoleEnabled) => patchConfig({ consoleEnabled })}
+            />
+          </Row>
+          <Row
+            label="Size"
+            hint={`${Math.round(config.consoleScale * 100)} % — the console always sits at the bottom, above the task bar`}
+          >
+            <div className="flex w-56 items-center gap-3">
+              <Slider
+                label="Size of the console"
+                value={config.consoleScale}
+                min={0.8}
+                max={1.6}
+                step={0.1}
+                onChange={(consoleScale) => patchConfig({ consoleScale })}
+              />
+              <span className="w-12 shrink-0 text-right text-sm tabular-nums text-ink-muted">
+                {Math.round(config.consoleScale * 100)} %
+              </span>
+            </div>
+          </Row>
+          <Row
+            label="Screen"
+            hint={
+              consoleScreen.unplugged
+                ? "That screen is not connected — the console opens on the primary one"
+                : undefined
+            }
+          >
+            <Select
+              label="Screen"
+              disabled={!config.consoleEnabled}
+              value={consoleScreen.value ?? UNKNOWN}
+              options={[
+                ...(consoleScreen.value === null
+                  ? [
+                      {
+                        value: UNKNOWN,
+                        label: consoleScreen.unplugged
+                          ? `${config.consoleMonitor} · not connected`
+                          : "Primary screen",
+                      },
+                    ]
+                  : []),
+                ...monitors.map((monitor) => ({
+                  value: monitor.id,
+                  label: monitor.isPrimary
+                    ? `${monitor.title} · primary`
+                    : monitor.title,
+                })),
+                { value: FOLLOW, label: "Follows the focus" },
+              ]}
+              onChange={(value) => {
+                if (value === UNKNOWN) return;
+                patchConfig(
+                  value === FOLLOW
+                    ? { consoleFollowActiveScreen: true }
+                    : {
+                        consoleMonitor: value,
+                        consoleMonitorStableId:
+                          monitors.find((m) => m.id === value)?.stableId ?? null,
+                        consoleFollowActiveScreen: false,
+                      },
+                );
+              }}
+            />
+          </Row>
+          <Row
+            label="Visible in screen recordings"
+            hint="Then Discord sees the console in a screen share. While it is open it is also inside any clip saved in that time — ClippiBoy records the whole screen."
+          >
+            <Toggle
+              checked={config.consoleInCapture}
+              disabled={!config.consoleEnabled}
+              onChange={(consoleInCapture) => patchConfig({ consoleInCapture })}
             />
           </Row>
         </Card>
@@ -157,7 +235,7 @@ export function Settings() {
           <Row
             label="Screen"
             hint={
-              unplugged
+              banner.unplugged
                 ? "That screen is not connected — the banner goes to the primary one"
                 : undefined
             }
@@ -165,15 +243,15 @@ export function Settings() {
             <Select
               label="Screen"
               disabled={!config.overlay.enabled}
-              value={screen ?? UNKNOWN}
+              value={banner.value ?? UNKNOWN}
               options={[
                 // Only there while nothing matches, so the dropdown never shows
                 // a screen that is not the one actually in use.
-                ...(screen === null
+                ...(banner.value === null
                   ? [
                       {
                         value: UNKNOWN,
-                        label: unplugged
+                        label: banner.unplugged
                           ? `${config.overlay.monitor} · not connected`
                           : "Primary screen",
                       },
@@ -257,6 +335,34 @@ export function Settings() {
 
     </div>
   );
+}
+
+/**
+ * Welcher Eintrag im Bildschirm-Dropdown steht.
+ *
+ * Genauso gesucht, wie der Kern sucht: erst die Identität des Panels, dann der
+ * Gerätename. `\\.\DISPLAYn` kann nach einem Neustart einen anderen Schirm
+ * meinen, und dann zeigte das Dropdown etwas, das gar nicht in Gebrauch war.
+ * `unplugged` heißt: gewählt ist etwas, das nicht angeschlossen ist — ohne den
+ * Hinweis zeigte das Dropdown still seinen ersten Eintrag, während der Kern auf
+ * den primären Schirm zurückfällt.
+ */
+function screenChoice(
+  monitors: CaptureTarget[],
+  saved: { monitor: string | null; stableId: string | null; follow: boolean },
+): { value: string | null; unplugged: boolean } {
+  if (saved.follow) return { value: FOLLOW, unplugged: false };
+  const found =
+    monitors.find((m) => saved.stableId !== null && m.stableId === saved.stableId) ??
+    monitors.find((m) => saved.monitor === m.id) ??
+    (saved.monitor === null && saved.stableId === null
+      ? monitors.find((m) => m.isPrimary)
+      : undefined) ??
+    null;
+  return {
+    value: found?.id ?? null,
+    unplugged: found === null && monitors.length > 0,
+  };
 }
 
 function Row({
@@ -446,18 +552,20 @@ function Hotkeys() {
     risky(config.saveClipHotkey) ||
     risky(config.toggleBufferHotkey) ||
     risky(config.screenshotHotkey) ||
-    risky(config.recordHotkey);
+    risky(config.recordHotkey) ||
+    risky(config.consoleHotkey);
 
   const apply = async (
     saveClip: string,
     toggleBuffer: string,
     screenshot: string,
     record: string,
+    consoleKey: string,
   ) => {
     setSaving(true);
     setError(null);
     try {
-      await setHotkeys(saveClip, toggleBuffer, screenshot, record);
+      await setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -478,6 +586,7 @@ function Hotkeys() {
                 config.toggleBufferHotkey,
                 config.screenshotHotkey,
                 config.recordHotkey,
+                config.consoleHotkey,
               )
             }
           />
@@ -492,6 +601,7 @@ function Hotkeys() {
                 value,
                 config.screenshotHotkey,
                 config.recordHotkey,
+                config.consoleHotkey,
               )
             }
           />
@@ -506,6 +616,7 @@ function Hotkeys() {
                 config.toggleBufferHotkey,
                 value,
                 config.recordHotkey,
+                config.consoleHotkey,
               )
             }
           />
@@ -519,6 +630,25 @@ function Hotkeys() {
                 config.saveClipHotkey,
                 config.toggleBufferHotkey,
                 config.screenshotHotkey,
+                value,
+                config.consoleHotkey,
+              )
+            }
+          />
+        </Row>
+        <Row
+          label="Konsole über dem Spiel"
+          hint="Info: Geht nicht über Spielen im exklusiven Vollbild"
+        >
+          <HotkeyInput
+            value={config.consoleHotkey}
+            busy={saving}
+            onChange={(value) =>
+              apply(
+                config.saveClipHotkey,
+                config.toggleBufferHotkey,
+                config.screenshotHotkey,
+                config.recordHotkey,
                 value,
               )
             }

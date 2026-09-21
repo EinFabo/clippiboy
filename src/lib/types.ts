@@ -153,6 +153,15 @@ export interface ControlConfig {
   token: string;
 }
 
+/**
+ * Was „In der App öffnen" aus der Konsole über dem Spiel mitbringt: der Clip und
+ * die Sekunde, an der dort gerade geschaut wurde.
+ */
+export interface FocusClip {
+  id: string;
+  at: number;
+}
+
 export interface AppConfig {
   recording: RecordingConfig;
   buffer: BufferConfig;
@@ -163,6 +172,20 @@ export interface AppConfig {
   screenshotHotkey: string;
   /** Start and stop a recording. */
   recordHotkey: string;
+  /** Open the console over the game. */
+  consoleHotkey: string;
+  /** Whether that hotkey does anything at all. */
+  consoleEnabled: boolean;
+  /** How big the console is drawn, 0.8 to 1.6. */
+  consoleScale: number;
+  /** Device name of the screen (`\\.\DISPLAY1`); null = primary. */
+  consoleMonitor: string | null;
+  consoleMonitorStableId: string | null;
+  /** Opens on whichever screen has the focus. Beats the two above. */
+  consoleFollowActiveScreen: boolean;
+  /** Visible to Discord and any other screen recording — and then also inside a
+      clip saved while it is open. */
+  consoleInCapture: boolean;
   autoStartWithWindows: boolean;
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;

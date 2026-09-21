@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod clips;
 pub mod commands;
 pub mod config;
+pub mod console;
 pub mod control;
 pub mod convert;
 pub mod edit;
@@ -538,6 +539,21 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
         failed.push(shot);
     }
 
+    let console = config.console_hotkey.clone();
+    if config.console_enabled {
+        if let Err(err) = shortcuts.on_shortcut(console.as_str(), move |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                // Showing a window belongs on the main thread; the hotkey
+                // arrives on one of its own.
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || console::toggle(&handle));
+            }
+        }) {
+            log::warn!("could not register hotkey '{console}': {err}");
+            failed.push(console);
+        }
+    }
+
     let record = config.record_hotkey.clone();
     if let Err(err) = shortcuts.on_shortcut(record.as_str(), move |app, _shortcut, event| {
         if event.state() == ShortcutState::Pressed {
@@ -788,6 +804,17 @@ pub fn run() {
                 let mut config = state.config.lock();
                 let fixed_source = capture::repair(&mut config.recording);
                 let fixed_banner = capture::repair_overlay(&mut config.overlay);
+                // The console's own screen, the same way. It keeps the pair in
+                // `AppConfig` rather than in a block of its own, so it is
+                // repaired by hand instead of through a wrapper.
+                let fixed_console = {
+                    let mut id = config.console_monitor.take();
+                    let mut stable = config.console_monitor_stable_id.take();
+                    let changed = capture::repair_monitor_choice(&mut id, &mut stable);
+                    config.console_monitor = id;
+                    config.console_monitor_stable_id = stable;
+                    changed
+                };
                 if fixed_source {
                     log::info!(
                         "the chosen screen is {:?} now \u{2014} corrected",
@@ -800,7 +827,14 @@ pub fn run() {
                         config.overlay.monitor
                     );
                 }
-                if (fixed_source || fixed_banner) && config::save(&config).is_err() {
+                if fixed_console {
+                    log::info!(
+                        "the console's screen is {:?} now \u{2014} corrected",
+                        config.console_monitor
+                    );
+                }
+                if (fixed_source || fixed_banner || fixed_console) && config::save(&config).is_err()
+                {
                     log::warn!("the corrected screen was not saved");
                 }
             }
@@ -848,6 +882,7 @@ pub fn run() {
                 }
             }
             overlay::create(handle);
+            console::create(handle);
             if let Err(err) = tray::build(handle) {
                 log::error!("could not create the tray icon: {err}");
             }
@@ -898,6 +933,9 @@ pub fn run() {
             commands::stop_buffer,
             commands::save_clip,
             commands::toggle_recording,
+            commands::close_console,
+            commands::show_clip_in_app,
+            commands::export_for_discord,
             commands::take_screenshot,
             commands::copy_clip_image,
             commands::write_screenshot,
