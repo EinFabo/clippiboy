@@ -290,6 +290,8 @@ pub struct Shared {
     /// What [`Self::health`] saw last time. Every number here is a *rate*, and
     /// a rate needs two readings.
     health_mark: Mutex<HealthMark>,
+    /// The same, for the number the display shows.
+    live_mark: Mutex<LiveMark>,
 }
 
 #[derive(Clone, Copy)]
@@ -298,6 +300,16 @@ struct HealthMark {
     frames: u64,
     encoded: u64,
     encode_us: u64,
+}
+
+/// What [`Shared::live_fps`] saw last time. Its own mark, not `health_mark`:
+/// an interval can only be consumed once, and the log and the display ask on
+/// different timers.
+#[derive(Clone, Copy)]
+struct LiveMark {
+    at: std::time::Instant,
+    frames: u64,
+    duplicated: u64,
 }
 
 /// What the pipeline is doing, measured over the interval since the last look.
@@ -406,6 +418,44 @@ impl Shared {
             out.encode_us = encode_us.saturating_sub(before.encode_us) / fresh;
         }
         out
+    }
+
+    /// New pictures per second, over the interval since the last call.
+    ///
+    /// Not the configured rate, and not the encoder's throughput: how often the
+    /// screen actually changed. Windows.Graphics.Capture only hands a frame over
+    /// when something moved, and the pipeline repeats the last one to keep the
+    /// encoder on its clock — so on a still desktop most frames are repeats and
+    /// this number is small, while `dropped` stays at zero. In a game it sits at
+    /// the configured rate.
+    ///
+    /// This replaces a cumulative share of the whole session, which was the
+    /// wrong shape for something read live: sit on the desktop for twenty
+    /// minutes and the stillness stayed in the average long after a game had
+    /// started. Call it on a timer; it consumes the interval it measures.
+    pub fn live_fps(&self) -> f32 {
+        let now = std::time::Instant::now();
+        let frames = self.frames.load(Ordering::Relaxed);
+        let duplicated = self.duplicated.load(Ordering::Relaxed);
+        let before = {
+            let mut mark = self.live_mark.lock();
+            let previous = *mark;
+            *mark = LiveMark {
+                at: now,
+                frames,
+                duplicated,
+            };
+            previous
+        };
+        let seconds = now.duration_since(before.at).as_secs_f32();
+        // A reading taken right after the previous one says nothing: two
+        // callers a millisecond apart would turn one frame into a thousand.
+        if seconds < 0.05 {
+            return 0.0;
+        }
+        let fresh = frames.saturating_sub(before.frames);
+        let repeats = duplicated.saturating_sub(before.duplicated);
+        fresh.saturating_sub(repeats) as f32 / seconds
     }
 
     /// One line for the log, from [`Self::health`].
@@ -821,6 +871,11 @@ impl Pipeline {
                 frames: 0,
                 encoded: 0,
                 encode_us: 0,
+            }),
+            live_mark: Mutex::new(LiveMark {
+                at: std::time::Instant::now(),
+                frames: 0,
+                duplicated: 0,
             }),
         });
 

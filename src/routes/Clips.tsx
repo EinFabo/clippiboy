@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, Pill } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -75,7 +76,16 @@ export function Clips({
   // Galerie — über hundert Kacheln — zwanzigmal die Sekunde neu, weil die
   // Audiopegel durch denselben Store laufen. Das war der teuerste Posten.
   const { clips, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
-    useEngine();
+    useEngine(
+      useShallow((s) => ({
+        clips: s.clips,
+        deleteClip: s.deleteClip,
+        discardClipOriginal: s.discardClipOriginal,
+        clearGame: s.clearGame,
+        setFavorite: s.setFavorite,
+        fileClip: s.fileClip,
+      })),
+    );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>(ALL);
   /** Which clip is in the player. Editing always happens there. */
@@ -382,6 +392,14 @@ export function Clips({
                       // clip at all.
                       src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
                       alt=""
+                      // Die Galerie hält alle Clips auf einmal, und jedes
+                      // dekodierte Bild ist ein halbes Megabyte im Speicher —
+                      // bei über hundert Kacheln war das der größte Posten in
+                      // einem WebView, das Chromium wegen der Overlay-Flags
+                      // ohnehin nie aufräumt. `lazy` dekodiert erst, was in die
+                      // Nähe des Sichtfensters kommt.
+                      loading="lazy"
+                      decoding="async"
                       className="h-full w-full object-cover"
                     />
                   )}

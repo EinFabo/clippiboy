@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -16,7 +17,17 @@ export function SourceTrouble({
 }: {
   onOpenMixer: () => void;
 }) {
-  const { config, sourceErrors, sourceWarnings } = useEngine();
+  // `useShallow`: `useEngine()` ohne Selektor hängt an jedem Feld des Stores,
+  // und die Pegel laufen zwanzigmal die Sekunde durch ihn. Ohne das hier rendert
+  // dieser Baum zwanzigmal die Sekunde neu, ob sich etwas geändert hat oder
+  // nicht — dieselbe Zeile stand in jeder Route.
+  const { config, sourceErrors, sourceWarnings } = useEngine(
+    useShallow((s) => ({
+      config: s.config,
+      sourceErrors: s.sourceErrors,
+      sourceWarnings: s.sourceWarnings,
+    })),
+  );
 
   const broken = config.sources.filter(
     (s) => s.enabled && sourceErrors[s.id],

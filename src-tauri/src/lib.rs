@@ -589,6 +589,19 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     }
 }
 
+/// Is anybody looking at the main window?
+///
+/// While a game runs it is normally closed to the tray, and a hidden window has
+/// no use for twenty level readings a second. It costs more than it sounds: each
+/// one crosses into the webview, is parsed, and puts the mixer's bars through
+/// another round — on the same machine that is meant to be encoding.
+fn main_window_awake(app: &tauri::AppHandle) -> bool {
+    let Some(window) = app.get_webview_window("main") else {
+        return false;
+    };
+    window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false)
+}
+
 /// Sends levels (20 Hz) and status data (1 Hz) to the UI.
 fn spawn_ui_updates(app: &tauri::AppHandle) {
     let handle = app.clone();
@@ -598,16 +611,25 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             std::thread::sleep(Duration::from_millis(50));
             let state = handle.state::<AppState>();
             let sources = state.config_snapshot().sources;
-            let levels = state.audio.levels(&sources);
-            let _ = handle.emit("audio-levels", &levels);
-
-            // Diagnostics: with CLIPPIBOY_LOG_LEVELS=1 the levels get logged.
-            if tick % 20 == 0 && std::env::var("CLIPPIBOY_LOG_LEVELS").is_ok() {
-                let summary: Vec<String> = levels
-                    .iter()
-                    .map(|(id, level)| format!("{id}={level:.3}"))
-                    .collect();
-                log::info!("Pegel: {}", summary.join(" "));
+            // Only worked out when somebody can see them. Reading the levels is
+            // cheap; the trip into the webview twenty times a second is not, and
+            // the two overlays never wanted them at all — hence `emit_to` rather
+            // than the broadcast this used to be.
+            let watched = main_window_awake(&handle);
+            let logging = std::env::var("CLIPPIBOY_LOG_LEVELS").is_ok();
+            if watched || logging {
+                let levels = state.audio.levels(&sources);
+                if watched {
+                    let _ = handle.emit_to("main", "audio-levels", &levels);
+                }
+                // Diagnostics: with CLIPPIBOY_LOG_LEVELS=1 the levels get logged.
+                if tick % 20 == 0 && logging {
+                    let summary: Vec<String> = levels
+                        .iter()
+                        .map(|(id, level)| format!("{id}={level:.3}"))
+                        .collect();
+                    log::info!("Pegel: {}", summary.join(" "));
+                }
             }
 
             tick += 1;
@@ -683,6 +705,9 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 }
             }
             if tick % 20 == 0 {
+                // Erst messen, dann lesen: die Bildrate ist eine Rate, und das
+                // Intervall dafür darf nur dieser eine Aufrufer verbrauchen.
+                state.sample_fps();
                 let status = state.status_snapshot();
                 tray::refresh(&handle, &status);
                 let _ = handle.emit("engine-status", status);

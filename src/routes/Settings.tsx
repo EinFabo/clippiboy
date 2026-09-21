@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
+import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -30,7 +31,15 @@ const FOLLOW = "follow";
 const UNKNOWN = "unknown";
 
 export function Settings() {
-  const { config, targets, patchConfig, lastError } = useEngine();
+  // `useShallow`, siehe `SourceTrouble`.
+  const { config, targets, patchConfig, lastError } = useEngine(
+    useShallow((s) => ({
+      config: s.config,
+      targets: s.targets,
+      patchConfig: s.patchConfig,
+      lastError: s.lastError,
+    })),
+  );
   const monitors = targets.filter((t) => t.kind === "monitor");
 
   const patchOverlay = (patch: Partial<typeof config.overlay>) =>
@@ -555,7 +564,9 @@ function risky(value: string): boolean {
 }
 
 function Hotkeys() {
-  const { config, setHotkeys } = useEngine();
+  const { config, setHotkeys } = useEngine(
+    useShallow((s) => ({ config: s.config, setHotkeys: s.setHotkeys })),
+  );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const warn =
@@ -833,7 +844,9 @@ function Storage() {
 }
 
 function ClipDir() {
-  const { config, setClipDir } = useEngine();
+  const { config, setClipDir } = useEngine(
+    useShallow((s) => ({ config: s.config, setClipDir: s.setClipDir })),
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Only for the "Reset" button: without the comparison the UI would not know
@@ -919,7 +932,13 @@ function ClipDir() {
  * port is already taken, or the token got out and should stop working.
  */
 function StreamDeck() {
-  const { config, patchConfig, regenerateControlToken } = useEngine();
+  const { config, patchConfig, regenerateControlToken } = useEngine(
+    useShallow((s) => ({
+      config: s.config,
+      patchConfig: s.patchConfig,
+      regenerateControlToken: s.regenerateControlToken,
+    })),
+  );
   const control = config.control;
   // Only while it is being typed: an empty field or a half-typed "4" must not
   // travel to the core as a port.

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
@@ -96,7 +97,16 @@ function clipMegabytes(bitrateKbps: number, seconds: number): number {
 }
 
 export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
-  const { config, targets, encoders, patchConfig, refreshTargets } = useEngine();
+  // `useShallow`, siehe `SourceTrouble`.
+  const { config, targets, encoders, patchConfig, refreshTargets } = useEngine(
+    useShallow((s) => ({
+      config: s.config,
+      targets: s.targets,
+      encoders: s.encoders,
+      patchConfig: s.patchConfig,
+      refreshTargets: s.refreshTargets,
+    })),
+  );
   const rec = config.recording;
 
   // Windows come and go: when ClippiBoy started the game usually was not

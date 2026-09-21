@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, Pill, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -32,6 +33,7 @@ function qualityLabel(quality: number): string {
 }
 
 export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
+  // `useShallow`, siehe `SourceTrouble`.
   const {
     config,
     clips,
@@ -49,7 +51,26 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     recordingSaving,
     recordingProgress,
     toggleRecording,
-  } = useEngine();
+  } = useEngine(
+    useShallow((s) => ({
+      config: s.config,
+      clips: s.clips,
+      bufferActive: s.bufferActive,
+      bufferedSeconds: s.bufferedSeconds,
+      rateControl: s.rateControl,
+      detectedGame: s.detectedGame,
+      toggleBuffer: s.toggleBuffer,
+      saveClip: s.saveClip,
+      takeScreenshot: s.takeScreenshot,
+      deleteClip: s.deleteClip,
+      recording: s.recording,
+      recordingSeconds: s.recordingSeconds,
+      recordingBytes: s.recordingBytes,
+      recordingSaving: s.recordingSaving,
+      recordingProgress: s.recordingProgress,
+      toggleRecording: s.toggleRecording,
+    })),
+  );
   const saving = recordingSaving || recordingProgress !== null;
   const [playing, setPlaying] = useState<number | null>(null);
   // Recordings only. The player below is the video one, and "Latest clips" says
@@ -184,6 +205,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
                   {clip.thumbPath && (
                     <img
                       src={fileUrl(clip.thumbPath)}
+                      loading="lazy"
+                      decoding="async"
                       alt=""
                       className="h-full w-full object-cover"
                     />

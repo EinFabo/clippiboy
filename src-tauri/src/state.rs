@@ -493,6 +493,25 @@ impl AppState {
         status.fps = 0.0;
     }
 
+    /// Measure how many real pictures a second the screen is delivering, and
+    /// remember it for the next [`Self::status_snapshot`].
+    ///
+    /// Only the status tick calls this. The measurement consumes the interval
+    /// since the last one, so a second caller — the `engine_status` command, the
+    /// control port — would take the interval away from it and read nonsense.
+    /// They get the sampled value instead, which is at most a second old.
+    pub fn sample_fps(&self) {
+        let measured = self
+            .shared
+            .lock()
+            .as_ref()
+            .filter(|_| self.buffer_wanted())
+            .map(|shared| shared.live_fps());
+        if let Some(fps) = measured {
+            self.status.lock().fps = fps;
+        }
+    }
+
     /// Called by the status tick: keep the foreground game up to date.
     ///
     /// While buffering, only a real detection overwrites the remembered name —
@@ -568,15 +587,9 @@ impl AppState {
             status.buffer_bytes = shared.buffer_bytes();
             status.dropped_frames = shared.dropped.load(std::sync::atomic::Ordering::Relaxed);
             status.rate_control = *shared.rate_control.lock();
-            // The encoder gets a constant `fps` frames — so the number alone
-            // says nothing. What is interesting is how many of them were real:
-            // the rest are repeats because the picture stood still.
-            let frames = shared.frames.load(std::sync::atomic::Ordering::Relaxed);
-            let duplicated = shared.duplicated.load(std::sync::atomic::Ordering::Relaxed);
-            if frames > 0 {
-                let live = frames.saturating_sub(duplicated) as f32 / frames as f32;
-                status.fps = shared.fps as f32 * live;
-            }
+            // `status.fps` is not worked out here: it is a rate, and a rate has
+            // to be measured over an interval that only one caller may consume.
+            // `sample_fps` does that, once a second, from the status tick.
         }
         status.game = self.current_game.lock().clone();
         status

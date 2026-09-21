@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -98,7 +99,6 @@ export function AudioMixer() {
     config,
     devices,
     processes,
-    levels,
     sourceErrors,
     sourceWarnings,
     detectedGame,
@@ -106,7 +106,23 @@ export function AudioMixer() {
     upsertSource,
     removeSource,
     patchConfig,
-  } = useEngine();
+    // `levels` steht mit Absicht nicht hier: die Pegel kommen zwanzigmal die
+    // Sekunde, und über diese Zeile hätte der ganze Mischer sie mitgemacht.
+    // Jeder Balken holt sich seinen eigenen Wert — siehe `SourceMeter`.
+  } = useEngine(
+    useShallow((s) => ({
+      config: s.config,
+      devices: s.devices,
+      processes: s.processes,
+      sourceErrors: s.sourceErrors,
+      sourceWarnings: s.sourceWarnings,
+      detectedGame: s.detectedGame,
+      taps: s.taps,
+      upsertSource: s.upsertSource,
+      removeSource: s.removeSource,
+      patchConfig: s.patchConfig,
+    })),
+  );
   const [adding, setAdding] = useState(false);
   /** The source being carried, and the gap it is hovering over. */
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -216,7 +232,6 @@ export function AudioMixer() {
         <div className="space-y-3" ref={list}>
           {config.sources.map((source) => {
             const dimmed = anySolo && !source.solo;
-            const level = levels[source.id] ?? 0;
             const tapped = (taps[source.id] ?? []).map(processName);
             const carried = drag?.id === source.id;
             const gap = drag?.over?.id === source.id ? drag.over.before : null;
@@ -345,7 +360,7 @@ export function AudioMixer() {
                         )}
                     </p>
                     <div className="mt-2.5 px-1.5">
-                      <Meter level={source.muted ? 0 : level} />
+                      <SourceMeter id={source.id} muted={source.muted} />
                     </div>
                   </div>
 
@@ -435,6 +450,19 @@ export function AudioMixer() {
       <AvailableSources processes={processes} />
     </div>
   );
+}
+
+/**
+ * Der Pegelbalken einer Quelle.
+ *
+ * Eigene Komponente, damit er seinen Wert selbst aus dem Store zieht: die Pegel
+ * kommen zwanzigmal die Sekunde, und stünde `levels` oben im Mischer, baute sich
+ * bei jedem Paket der ganze Baum aus Karten, Reglern und Menüs neu auf. So
+ * rendert zwanzigmal die Sekunde nur dieses eine Element neu.
+ */
+function SourceMeter({ id, muted }: { id: string; muted: boolean }) {
+  const level = useEngine((s) => s.levels[id] ?? 0);
+  return <Meter level={muted ? 0 : level} />;
 }
 
 function MiniToggle({
@@ -567,7 +595,14 @@ function AddSourcePanel({
   onClose: () => void;
   hasGame: boolean;
 }) {
-  const { devices, processes, refreshSources, detectedGame } = useEngine();
+  const { devices, processes, refreshSources, detectedGame } = useEngine(
+    useShallow((s) => ({
+      devices: s.devices,
+      processes: s.processes,
+      refreshSources: s.refreshSources,
+      detectedGame: s.detectedGame,
+    })),
+  );
   const outputs = devices.filter((d) => d.kind === "output");
   const inputs = devices.filter((d) => d.kind === "input");
 
