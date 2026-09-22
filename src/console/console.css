@@ -594,3 +594,276 @@ body,
     transform: none;
   }
 }
+
+/* ========================================================================== */
+/* Die drei Gestalten des Docks                                               */
+/* ========================================================================== */
+
+/* Dieselben Knöpfe, derselbe Inhalt, anders angeordnet. Gewählt in den
+   Einstellungen (`consoleStyle`), durchgereicht vom Kern im Öffnen-Ereignis und
+   hier als `data-style` am `.cb-ui` angekommen.
+
+   Ohne `data-style` — oder mit `dock` — gilt alles oben unverändert: die
+   beschriftete Leiste unten ist der Standard und braucht keine einzige Regel
+   hier. Die beiden anderen bauen nur um, was sie umbauen müssen.
+
+   Die Werte stammen aus dem Konsolen-Labor (v09 und v19), mit einem
+   Unterschied: dort stand alles in einer Bühne fester Größe, hier in einem
+   Fenster, das der Bildschirm ist. Wo im Labor Pixel standen, stehen deshalb
+   Prozente — `zoom` auf `.cb-ui` multipliziert Längen mit der
+   Größeneinstellung, Prozente lässt es in Ruhe. */
+
+/* --- Pille (v09) --------------------------------------------------------- */
+
+/* Rund statt eckig, und die Knöpfe tragen ihre Bedeutung im Bild statt in der
+   Schrift. Das ist der Handel: eine Leiste, die halb so breit ist, gegen
+   Beschriftungen, die man erst lernen muss. */
+.cb-ui[data-style="pill"] .cb-dock {
+  border-radius: 999px;
+  padding: 8px;
+  gap: 4px;
+}
+
+.cb-ui[data-style="pill"] .cb-status {
+  padding: 0 18px 0 20px;
+}
+
+.cb-ui[data-style="pill"] .cb-dock-btn {
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  padding: 0;
+  justify-content: center;
+}
+
+.cb-ui[data-style="pill"] .cb-dock-label {
+  display: none;
+}
+
+/* Der Strich unter dem offenen Panel wird zum Punkt — ein Strich unter einem
+   runden Knopf sieht aus, als wäre er abgerutscht. */
+.cb-ui[data-style="pill"] .cb-dock-btn[aria-pressed="true"]::after {
+  bottom: 7px;
+  width: 5px;
+  height: 5px;
+}
+
+.cb-ui[data-style="pill"] .cb-sep {
+  margin: 12px 4px;
+}
+
+.cb-ui[data-style="pill"] .cb-sheet {
+  border-radius: 30px;
+  padding: 24px;
+}
+
+.cb-ui[data-style="pill"] .cb-tile,
+.cb-ui[data-style="pill"] .cb-stat {
+  border-radius: 18px;
+}
+
+.cb-ui[data-style="pill"] .cb-tool {
+  border-radius: 50%;
+}
+
+/* --- Ring (v19) ---------------------------------------------------------- */
+
+/* Die Aktionen liegen im Kreis um den Puffer-Stand, das Panel steht rechts
+   daneben. Der einzige Stil, der nicht nur anders aussieht, sondern woanders
+   steht — deshalb muss hier auch die Notiz und die Hilfszeile mitziehen.
+
+   Links bei 27 % der Breite, nicht in der Mitte: rechts davon bleibt dann
+   genug für das Panel, ohne dass die beiden sich berühren. */
+.cb-ui[data-style="radial"] .cb-rise {
+  left: 27%;
+  top: 50%;
+  bottom: auto;
+  translate: -50% -50%;
+  animation-name: cb-radial-in;
+  animation-duration: 380ms;
+}
+
+/* Es fährt nicht auf, es dreht sich auf — eine Leiste kommt von unten, ein
+   Kreis kommt aus sich selbst. */
+@keyframes cb-radial-in {
+  from {
+    opacity: 0;
+    transform: scale(0.82) rotate(-20deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.cb-ui[data-style="radial"] .cb-dock {
+  width: 400px;
+  height: 400px;
+  border-radius: 50%;
+  padding: 0;
+  display: block;
+  /* Der dünne Ring um die Mitte trennt den Puffer-Stand von den Aktionen — in
+     einer Leiste täte das der Trennstrich, der hier keinen Platz hat. */
+  background:
+    radial-gradient(
+      circle,
+      transparent 0 102px,
+      rgb(255 255 255 / 0.09) 103px 104px,
+      transparent 105px
+    ),
+    var(--con-dock-glow),
+    linear-gradient(180deg, var(--con-dock-top) 0%, var(--con-dock-bottom) 100%);
+}
+
+/* Und geht auch nicht nach unten weg, sondern zieht sich zusammen. */
+.cb-ui[data-style="radial"] .cb-dock[data-leaving="true"] {
+  animation-name: cb-radial-out;
+}
+
+@keyframes cb-radial-out {
+  from {
+    transform: none;
+  }
+  to {
+    transform: scale(0.92);
+  }
+}
+
+.cb-ui[data-style="radial"] .cb-status {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  min-width: 0;
+  width: 170px;
+  padding: 0;
+  align-items: center;
+  text-align: center;
+}
+
+.cb-ui[data-style="radial"] .cb-status-line {
+  justify-content: center;
+}
+
+.cb-ui[data-style="radial"] .cb-bar {
+  width: 120px;
+}
+
+.cb-ui[data-style="radial"] .cb-sep {
+  display: none;
+}
+
+/* Die fünf Knöpfe auf den Kreis. `nth-of-type` zählt nur die `button` unter
+   den Geschwistern — der Statusblock ist ein `div`, die Trennstriche sind
+   `span`, die stören also nicht. Die Reihenfolge ist die im Markup: Clip,
+   Aufnahme, Screenshot, Clips, Leistung. */
+.cb-ui[data-style="radial"] .cb-dock-btn {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  margin: -40px 0 0 -42px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(1) {
+  translate: 0 -148px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(2) {
+  translate: 141px -46px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(3) {
+  translate: 87px 120px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(4) {
+  translate: -87px 120px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(5) {
+  translate: -141px -46px;
+}
+
+/* Der Hub beim Überfahren geht in `translate`, nicht in `transform` — der
+   trägt hier schon die Position auf dem Kreis, und ein zweiter Wert darin
+   hätte den Knopf in die Mitte zurückgezogen. */
+.cb-ui[data-style="radial"] .cb-dock-btn:hover:not(:disabled),
+.cb-ui[data-style="radial"] .cb-dock-btn:active:not(:disabled) {
+  transform: none;
+}
+
+/* Fabis Anmerkung zu v19: die Icons müssen zum runden Thema passen. Erster
+   Schritt ohne neue Zeichnungen — runde Enden und runde Ecken an den
+   Strichen, die es schon gibt. CSS schlägt dabei die Attribute im SVG. */
+.cb-ui[data-style="radial"] .cb-dock-btn svg {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+/* Das Panel rückt nach rechts und kommt von dort herein, statt von unten. */
+.cb-ui[data-style="radial"] .cb-sheet-pos {
+  left: auto;
+  right: 4%;
+  top: 50%;
+  bottom: auto;
+  width: 46%;
+  max-width: 1100px;
+  translate: 0 -50%;
+  animation-name: cb-from-right;
+}
+
+@keyframes cb-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.cb-ui[data-style="radial"] .cb-sheet[data-leaving="true"] {
+  animation-name: cb-to-right;
+}
+
+@keyframes cb-to-right {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+/* Hilfszeile und Notiz gehören zum Ring, nicht zur Bildschirmmitte. */
+.cb-ui[data-style="radial"] .cb-dock-line {
+  left: 27%;
+  bottom: calc(var(--inset, 0px) + 3rem);
+}
+
+.cb-ui[data-style="radial"] .cb-note-slot {
+  left: 27%;
+}
+
+/* Der Ring steht mitten im Bild, der Player nimmt sich das ganze Fenster —
+   ohne das hier lägen sie übereinander. Die Leiste unten hat das Problem
+   nicht, der Player endet über ihr. */
+.cb-ui[data-style="radial"][data-playing="true"] .cb-rise,
+.cb-ui[data-style="radial"][data-playing="true"] .cb-dock-line {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cb-ui[data-style="radial"] .cb-rise,
+  .cb-ui[data-style="radial"] .cb-dock[data-leaving="true"],
+  .cb-ui[data-style="radial"] .cb-sheet-pos,
+  .cb-ui[data-style="radial"] .cb-sheet[data-leaving="true"] {
+    animation: none;
+  }
+}

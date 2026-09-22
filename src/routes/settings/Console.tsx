@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
-import { Select, Slider, Toggle } from "@/components/ui/Controls";
+import { Segmented, Select, Slider, Toggle } from "@/components/ui/Controls";
 import { FOLLOW, Row, UNKNOWN, screenChoice } from "./shared";
 
 export function ConsoleTab() {
@@ -97,6 +97,27 @@ export function ConsoleTab() {
                     },
               );
             }}
+          />
+        </Row>
+        <Row
+          label="Shape"
+          hint={
+            config.consoleStyle === "radial"
+              ? "The actions sit in a ring around the buffer, the panel beside it"
+              : config.consoleStyle === "pill"
+                ? "A round dock — the icons carry the meaning, without labels"
+                : "A labelled bar along the bottom edge"
+          }
+        >
+          <Segmented
+            value={config.consoleStyle}
+            disabled={!config.consoleEnabled}
+            options={[
+              { key: "dock", label: "Bar" },
+              { key: "pill", label: "Pill" },
+              { key: "radial", label: "Ring" },
+            ]}
+            onChange={(consoleStyle) => patchConfig({ consoleStyle })}
           />
         </Row>
         <Row

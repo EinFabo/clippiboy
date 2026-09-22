@@ -96,6 +96,7 @@ export const mockConfig: AppConfig = {
   consoleFollowActiveScreen: true,
   consoleInCapture: false,
   consoleGlow: true,
+  consoleStyle: "dock",
   autoStartWithWindows: false,
   onlyBufferInGame: true,
   overlay: {

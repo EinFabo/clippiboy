@@ -333,6 +333,25 @@ fn yes() -> bool {
     true
 }
 
+/// Welche Gestalt das Dock über dem Spiel annimmt.
+///
+/// Aus dem Konsolen-Labor, wo Fabi 24 Entwürfe gegeneinander gestellt bekam und
+/// drei davon behalten wollte. Die Wahl ist reine Darstellung: derselbe Inhalt,
+/// dieselben Knöpfe, nur anders angeordnet — deshalb trägt sie das Frontend als
+/// `data-style` und der Kern reicht sie nur durch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConsoleStyle {
+    /// Die Leiste unten, beschriftet — der Stand, den alles andere kennt.
+    #[default]
+    Dock,
+    /// Rundes Dock, runde Knöpfe ohne Beschriftung (v09 im Labor).
+    Pill,
+    /// Die Aktionen im Kreis um den Puffer-Stand, das Panel rechts daneben
+    /// (v19 im Labor).
+    Radial,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -382,6 +401,9 @@ pub struct AppConfig {
     /// kostet, der schaltet ihn hier ab.
     #[serde(default = "yes")]
     pub console_glow: bool,
+    /// Die Gestalt des Docks — siehe [`ConsoleStyle`].
+    #[serde(default)]
+    pub console_style: ConsoleStyle,
     pub auto_start_with_windows: bool,
     pub only_buffer_in_game: bool,
     // Newly added fields need `default` — otherwise `config::load()` throws away

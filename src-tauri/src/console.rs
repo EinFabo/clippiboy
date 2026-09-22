@@ -221,6 +221,10 @@ pub struct Layout {
     /// Brücke käme ein paar Bilder später zurück — und wer ihn abgeschaltet
     /// hat, während die Konsole zu war, sah ihn genau so lange noch einmal.
     pub glow: bool,
+    /// Die Gestalt des Docks. Reist aus demselben Grund mit wie `glow`: das
+    /// Fenster steht schon, wenn die Seite es erfährt, und ein Dock, das sich
+    /// eine Zehntelsekunde nach dem Aufgehen umbaut, hätte man gesehen.
+    pub style: crate::model::ConsoleStyle,
 }
 
 /// Lay the window over the whole screen it was sent to.
@@ -236,9 +240,11 @@ fn place(window: &tauri::WebviewWindow) -> tauri::Result<Layout> {
         config.console_monitor_stable_id.as_deref(),
     )?;
     let glow = config.console_glow;
+    let style = config.console_style;
     let Some(monitor) = monitor else {
         return Ok(Layout {
             glow,
+            style,
             ..Default::default()
         });
     };
@@ -293,6 +299,7 @@ fn place(window: &tauri::WebviewWindow) -> tauri::Result<Layout> {
         bottom_inset: inset / (monitor.scale_factor() * wish),
         scale: wish,
         glow,
+        style,
     })
 }
 

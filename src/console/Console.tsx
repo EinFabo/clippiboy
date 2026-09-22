@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
-import type { Clip, EngineStatus } from "@/lib/types";
+import type { Clip, ConsoleStyle, EngineStatus } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { mockClips } from "@/lib/mock";
 import {
@@ -120,6 +120,10 @@ export function Console() {
    *  andere. Im Browser (`npm run dev`) gibt es keinen Kern, dort ist er an,
    *  damit man ihn beim Bauen sieht. */
   const [glow, setGlow] = useState(!inTauri);
+  /** Die Gestalt des Docks. Kommt denselben Weg wie `glow` und aus demselben
+   *  Grund: das Fenster steht schon, wenn die Seite es erfährt, und ein Dock,
+   *  das sich nach dem Aufgehen noch umbaut, hätte man gesehen. */
+  const [style, setStyle] = useState<ConsoleStyle>("dock");
 
   /** Der laufende Clip, wie er zuletzt aus der Liste kam. Die Liste hält nur
    *  die letzten sechs: wird während des Zusehens einer gespeichert, fällt der
@@ -206,36 +210,40 @@ export function Console() {
         setRenaming(null);
         setConfirming(null);
       }),
-      listen<{ bottomInset: number; scale: number; glow: boolean }>("console-opened", (e) => {
-        closingRef.current = false;
-        setClosing(false);
-        setOpened((n) => n + 1);
-        setPanel(null);
-        setLeavingPanel(null);
-        setPlayingId(null);
-        setRenaming(null);
-        setConfirming(null);
-        setScale(e.payload.scale || 1);
-        setBottomInset(e.payload.bottomInset);
-        // Der Schein kommt mit dem Ereignis, nicht aus dem `getConfig()`
-        // darunter: der ist ein Aufruf über die Brücke und kommt erst ein paar
-        // Bilder später zurück. Wurde er zwischendurch abgeschaltet, während
-        // die Konsole zu war, sah man ihn genau so lange noch einmal
-        // aufleuchten. Hier steht er im selben Rutsch wie `closing` — eine
-        // Zeichnung, kein Nachziehen.
-        setGlow(e.payload.glow);
-        void loadClips();
-        // The buffer length may have been changed in the app in the meantime;
-        // this is the moment it takes hold.
-        void api
-          .getConfig()
-          .then((config) => {
-            setBufferLength(Math.max(1, config.buffer.seconds));
-            setTargetFps(config.recording.fps);
-            setInCapture(config.consoleInCapture);
-          })
-          .catch(() => {});
-      }),
+      listen<{ bottomInset: number; scale: number; glow: boolean; style: ConsoleStyle }>(
+        "console-opened",
+        (e) => {
+          closingRef.current = false;
+          setClosing(false);
+          setOpened((n) => n + 1);
+          setPanel(null);
+          setLeavingPanel(null);
+          setPlayingId(null);
+          setRenaming(null);
+          setConfirming(null);
+          setScale(e.payload.scale || 1);
+          setBottomInset(e.payload.bottomInset);
+          // Der Schein kommt mit dem Ereignis, nicht aus dem `getConfig()`
+          // darunter: der ist ein Aufruf über die Brücke und kommt erst ein paar
+          // Bilder später zurück. Wurde er zwischendurch abgeschaltet, während
+          // die Konsole zu war, sah man ihn genau so lange noch einmal
+          // aufleuchten. Hier steht er im selben Rutsch wie `closing` — eine
+          // Zeichnung, kein Nachziehen.
+          setGlow(e.payload.glow);
+          setStyle(e.payload.style);
+          void loadClips();
+          // The buffer length may have been changed in the app in the meantime;
+          // this is the moment it takes hold.
+          void api
+            .getConfig()
+            .then((config) => {
+              setBufferLength(Math.max(1, config.buffer.seconds));
+              setTargetFps(config.recording.fps);
+              setInCapture(config.consoleInCapture);
+            })
+            .catch(() => {});
+        },
+      ),
     ];
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));
@@ -553,6 +561,12 @@ export function Console() {
           dock keeps clear of the task bar. */}
       <div
         className="cb-ui"
+        data-style={style}
+        // Nur für den Ring: der steht mitten im Bild, und der Player nimmt
+        // sich das ganze Fenster. Die beiden lägen übereinander, also tritt
+        // der Ring zurück, solange ein Clip läuft. Die Leiste unten hat das
+        // Problem nicht, der Player endet über ihr.
+        data-playing={playing ? "true" : "false"}
         data-leaving={closing}
         style={
           {
@@ -609,7 +623,7 @@ export function Console() {
           // beantwortet. Dann oben.
           <div
             className={cn(
-              "pointer-events-none absolute left-1/2 -translate-x-1/2",
+              "cb-note-slot pointer-events-none absolute left-1/2 -translate-x-1/2",
               playing
                 ? "top-8"
                 : "bottom-[calc(var(--inset,0px)+11rem)]",
@@ -636,8 +650,8 @@ export function Console() {
             data-leaving={closing}
             className="cb-dock cb-glass flex items-stretch gap-1.5 rounded-[22px] p-2.5"
           >
-            <div className="flex min-w-[200px] flex-col justify-center gap-1.5 px-3">
-              <div className="flex items-center gap-2 text-[13px] font-semibold">
+            <div className="cb-status flex min-w-[200px] flex-col justify-center gap-1.5 px-3">
+              <div className="cb-status-line flex items-center gap-2 text-[13px] font-semibold">
                 {status.recording ? (
                   <>
                     <span className="h-2 w-2 shrink-0 rounded-pill bg-live" />
@@ -655,7 +669,7 @@ export function Console() {
                   </>
                 )}
               </div>
-              <div className="h-1 overflow-hidden rounded-pill bg-black/35">
+              <div className="cb-bar h-1 overflow-hidden rounded-pill bg-black/35">
                 <div
                   className="h-full rounded-pill bg-accent-bright transition-[width] duration-500"
                   style={{ width: `${share * 100}%` }}
@@ -666,7 +680,7 @@ export function Console() {
               </span>
             </div>
 
-            <span className="my-2 w-px bg-accent-bright/35" />
+            <span className="cb-sep my-2 w-px bg-accent-bright/35" />
 
             <DockButton
               label="Clip"
@@ -690,7 +704,7 @@ export function Console() {
               <IconCamera className="h-6 w-6" />
             </DockButton>
 
-            <span className="my-2 w-px bg-accent-bright/35" />
+            <span className="cb-sep my-2 w-px bg-accent-bright/35" />
 
             <DockButton
               label="Clips"
@@ -1057,7 +1071,7 @@ function DockButton({
       <span className="grid h-6 place-items-center">{children}</span>
       {/* The label keeps its place while a job runs: swapping it for "…" made
           the whole dock jump a line every time something was clicked. */}
-      <span className="relative truncate">
+      <span className="cb-dock-label relative truncate">
         <span className={cn(busy && "invisible")}>{label}</span>
         {busy && <span className="absolute inset-0 grid place-items-center">…</span>}
       </span>
@@ -1111,7 +1125,7 @@ function Stat({
   bad?: boolean;
 }) {
   return (
-    <div className="rounded-inner border border-line bg-black/25 p-3">
+    <div className="cb-stat rounded-inner border border-line bg-black/25 p-3">
       <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-muted">{label}</p>
       <p className={cn("mt-1 text-2xl font-bold tabular-nums", bad && "text-live")}>{value}</p>
       <p className="text-xs text-ink-faint">{hint}</p>

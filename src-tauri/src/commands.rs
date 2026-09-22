@@ -117,6 +117,7 @@ pub fn set_config(
         || previous.console_follow_active_screen != next.console_follow_active_screen
         || previous.console_in_capture != next.console_in_capture
         || previous.console_glow != next.console_glow
+        || previous.console_style != next.console_style
     {
         crate::console::relayout(&app);
     }

@@ -61,6 +61,10 @@ export interface EncoderInfo {
 
 export type TargetKind = "monitor" | "window";
 
+/** Die Gestalt des Docks über dem Spiel. Muss zu `ConsoleStyle` in `model.rs`
+    passen — der Kern reicht den Wert nur durch, gezeichnet wird er hier. */
+export type ConsoleStyle = "dock" | "pill" | "radial";
+
 export interface CaptureTarget {
   kind: TargetKind;
   id: string;
@@ -191,6 +195,10 @@ export interface AppConfig {
   /** The violet wash rising from the lower corners of the screen while the
       console is open. It tints the game underneath, so it can be switched off. */
   consoleGlow: boolean;
+  /** Die Gestalt des Docks — dieselben Knöpfe, anders angeordnet.
+      `dock` ist die beschriftete Leiste unten, `pill` das runde Dock ohne
+      Beschriftung, `radial` die Aktionen im Kreis mit dem Panel rechts. */
+  consoleStyle: ConsoleStyle;
   autoStartWithWindows: boolean;
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;
