@@ -748,6 +748,7 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool) {
     let recording = RecordingConfig {
         target_kind: TargetKind::Monitor,
         target_id: None,
+        target_stable_id: None,
         width: WIDTH,
         height: HEIGHT,
         fps: FPS,
