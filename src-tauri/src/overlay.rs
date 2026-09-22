@@ -112,6 +112,8 @@ pub fn create(app: &tauri::AppHandle) {
         .resizable(false)
         .focused(false)
         .visible(false)
+        // A file dragged over must not become a navigation; see `lockdown.ts`.
+        .disable_drag_drop_handler()
         .build();
 
     match window {
