@@ -258,13 +258,36 @@ body,
   }
 }
 
-/* The dock is centred by Tailwind's `translate` property, so the animation's
-   own transform is free — same split as `.cb-sheet`. */
-.cb-dock {
+/* Die Auffahrt sitzt auf einem eigenen Kasten um das Dock herum, die Abfahrt
+   auf dem Dock selbst. Der Grund ist, dass eine Animation die andere sonst
+   ersetzt: schloss man mitten in der Auffahrt, begann `cb-dock-out` bei
+   `transform: none` — dem Ruhepunkt, den die Auffahrt noch gar nicht erreicht
+   hatte. Das Dock sprang also erst ans Ende seiner Auffahrt und fuhr von dort
+   hinunter.
+
+   Getrennt hält der äußere Kasten einfach an, wo er gerade ist
+   (`animation-play-state: paused`), und der innere fährt von dort aus weiter
+   hinunter. Das ist die Regel für den ganzen Weg hinaus: nichts wird
+   abgebrochen, alles hält an und blendet ab.
+   Zentriert wird der Kasten über Tailwinds `translate`-Eigenschaft, der
+   `transform` der Animation ist davon unberührt. */
+.cb-rise {
   animation: cb-dock-in 300ms var(--ease-entrance) both;
   /* Der Compositor soll die Fahrt allein machen können — das Dock steht über
      einem laufenden Spiel, und ein Neuzeichnen pro Bild sieht man dort. */
   will-change: transform, opacity;
+}
+
+.cb-rise[data-leaving="true"] {
+  animation-play-state: paused;
+}
+
+.cb-dock {
+  /* Der Anker für den Rand darunter: `::before` legt sich mit `inset: -1px`
+     um genau diesen Kasten. Ohne das nähme es den nächsten positionierten
+     Vorfahren — `.cb-rise` —, und das ginge hier zufällig gut, weil der sich
+     eng um das Dock legt. Zufälle dieser Art halten nicht. */
+  position: relative;
   /* Dunkel und fast deckend, wie in der Referenz. Ein violett getönter Verlauf
      über die ganze Leiste hat das Bild dahinter nur eingefärbt; jetzt trägt das
      Dock dieselbe Fläche wie das Banner, und das Lila steht in den Kanten: der
@@ -363,14 +386,25 @@ body,
   pointer-events: none;
 }
 
+/* Dieselbe Regel wie oben: anhalten, nicht abbrechen. `animation: none` stand
+   hier einmal, und das warf den Rand auf seinen Grundzustand zurück — volle
+   Deckkraft bei Winkel 0. Wer mitten in der Runde schloss, bekam das Licht
+   also noch einmal hell aufblitzen. Angehalten steht es einfach still und geht
+   mit allem anderen aus. */
 .cb-dock[data-leaving="true"]::before {
-  animation: none;
+  animation-play-state: paused;
 }
 
 /* Die Zeile unter dem Dock fährt mit. Stand sie sofort da, während die Leiste
    noch unterwegs war, sah man zwei Anfänge statt einem. */
 .cb-dock-line {
   animation: cb-dock-in 300ms var(--ease-entrance) both;
+}
+
+/* Und hält mit an, wenn die Konsole zugeht — sonst führe die Zeile noch
+   herauf, während alles um sie herum schon abblendet. */
+.cb-dock-line[data-leaving="true"] {
+  animation-play-state: paused;
 }
 
 /* --- The dock's buttons -------------------------------------------------- */
@@ -524,7 +558,7 @@ body,
 
   .cb-sheet,
   .cb-sheet[data-leaving="true"],
-  .cb-dock,
+  .cb-rise,
   .cb-dock[data-leaving="true"],
   .cb-dock-line,
   .cb-ui[data-leaving="true"],

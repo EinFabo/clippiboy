@@ -594,85 +594,98 @@ export function Console() {
           </div>
         )}
 
-        {/* The dock. Everything else on screen is a step away from here. */}
+        {/* The dock. Everything else on screen is a step away from here.
+
+            Zwei Kästen, nicht einer: die Auffahrt sitzt auf dem äußeren, die
+            Abfahrt auf dem Dock selbst — warum, steht bei `.cb-rise` in
+            console.css. Der Schlüssel gehört nach außen, damit beide
+            Animationen bei jedem Öffnen von vorn anfangen. */}
         <div
           key={opened}
           data-leaving={closing}
-          className="cb-dock cb-glass absolute bottom-[calc(var(--inset,0px)+2rem)] left-1/2 flex -translate-x-1/2 items-stretch gap-1.5 rounded-[22px] p-2.5"
+          className="cb-rise absolute bottom-[calc(var(--inset,0px)+2rem)] left-1/2 -translate-x-1/2"
         >
-          <div className="flex min-w-[200px] flex-col justify-center gap-1.5 px-3">
-            <div className="flex items-center gap-2 text-[13px] font-semibold">
-              {status.recording ? (
-                <>
-                  <span className="h-2 w-2 shrink-0 rounded-pill bg-live" />
-                  Aufnahme {formatDuration(status.recordingSeconds * 1000)}
-                </>
-              ) : status.bufferActive ? (
-                <>
-                  <LiveDot />
-                  {formatDuration(buffered * 1000)} im Puffer
-                </>
-              ) : (
-                <>
-                  <span className="h-2 w-2 shrink-0 rounded-pill bg-line-strong" />
-                  Puffer aus
-                </>
-              )}
+          <div
+            data-leaving={closing}
+            className="cb-dock cb-glass flex items-stretch gap-1.5 rounded-[22px] p-2.5"
+          >
+            <div className="flex min-w-[200px] flex-col justify-center gap-1.5 px-3">
+              <div className="flex items-center gap-2 text-[13px] font-semibold">
+                {status.recording ? (
+                  <>
+                    <span className="h-2 w-2 shrink-0 rounded-pill bg-live" />
+                    Aufnahme {formatDuration(status.recordingSeconds * 1000)}
+                  </>
+                ) : status.bufferActive ? (
+                  <>
+                    <LiveDot />
+                    {formatDuration(buffered * 1000)} im Puffer
+                  </>
+                ) : (
+                  <>
+                    <span className="h-2 w-2 shrink-0 rounded-pill bg-line-strong" />
+                    Puffer aus
+                  </>
+                )}
+              </div>
+              <div className="h-1 overflow-hidden rounded-pill bg-black/35">
+                <div
+                  className="h-full rounded-pill bg-accent-bright transition-[width] duration-500"
+                  style={{ width: `${share * 100}%` }}
+                />
+              </div>
+              <span className="truncate text-xs text-ink-muted">
+                {status.game ?? "Kein Spiel erkannt"}
+              </span>
             </div>
-            <div className="h-1 overflow-hidden rounded-pill bg-black/35">
-              <div
-                className="h-full rounded-pill bg-accent-bright transition-[width] duration-500"
-                style={{ width: `${share * 100}%` }}
-              />
-            </div>
-            <span className="truncate text-xs text-ink-muted">
-              {status.game ?? "Kein Spiel erkannt"}
-            </span>
+
+            <span className="my-2 w-px bg-accent-bright/35" />
+
+            <DockButton
+              label="Clip"
+              hint={status.bufferActive ? undefined : "Puffer ist aus"}
+              disabled={!status.bufferActive || busy === "clip"}
+              busy={busy === "clip"}
+              onClick={saveClip}
+            >
+              <IconScissors className="h-6 w-6" />
+            </DockButton>
+            <DockButton
+              label={
+                status.recording ? formatDuration(status.recordingSeconds * 1000) : "Aufnahme"
+              }
+              busy={busy === "rec"}
+              onClick={record}
+            >
+              <IconRecord className={cn("h-6 w-6", status.recording && "text-live")} />
+            </DockButton>
+            <DockButton label="Screenshot" busy={busy === "shot"} onClick={shot}>
+              <IconCamera className="h-6 w-6" />
+            </DockButton>
+
+            <span className="my-2 w-px bg-accent-bright/35" />
+
+            <DockButton
+              label="Clips"
+              active={panel === "clips"}
+              onClick={() => (panel === "clips" ? back() : void show("clips"))}
+            >
+              <IconClips className="h-6 w-6" />
+            </DockButton>
+            <DockButton
+              label="Leistung"
+              active={panel === "perf"}
+              onClick={() => (panel === "perf" ? back() : void show("perf"))}
+            >
+              <span className="text-[15px] font-bold tabular-nums">{status.fps.toFixed(0)}</span>
+            </DockButton>
           </div>
-
-          <span className="my-2 w-px bg-accent-bright/35" />
-
-          <DockButton
-            label="Clip"
-            hint={status.bufferActive ? undefined : "Puffer ist aus"}
-            disabled={!status.bufferActive || busy === "clip"}
-            busy={busy === "clip"}
-            onClick={saveClip}
-          >
-            <IconScissors className="h-6 w-6" />
-          </DockButton>
-          <DockButton
-            label={
-              status.recording ? formatDuration(status.recordingSeconds * 1000) : "Aufnahme"
-            }
-            busy={busy === "rec"}
-            onClick={record}
-          >
-            <IconRecord className={cn("h-6 w-6", status.recording && "text-live")} />
-          </DockButton>
-          <DockButton label="Screenshot" busy={busy === "shot"} onClick={shot}>
-            <IconCamera className="h-6 w-6" />
-          </DockButton>
-
-          <span className="my-2 w-px bg-accent-bright/35" />
-
-          <DockButton
-            label="Clips"
-            active={panel === "clips"}
-            onClick={() => (panel === "clips" ? back() : void show("clips"))}
-          >
-            <IconClips className="h-6 w-6" />
-          </DockButton>
-          <DockButton
-            label="Leistung"
-            active={panel === "perf"}
-            onClick={() => (panel === "perf" ? back() : void show("perf"))}
-          >
-            <span className="text-[15px] font-bold tabular-nums">{status.fps.toFixed(0)}</span>
-          </DockButton>
         </div>
 
-        <p className="cb-dock-line pointer-events-none absolute bottom-[calc(var(--inset,0px)+0.5rem)] left-1/2 -translate-x-1/2 text-[11px] text-ink-faint">
+        <p
+          data-leaving={closing}
+          className="cb-dock-line pointer-events-none absolute bottom-[calc(var(--inset,0px)+0.5rem)] left-1/2 -translate-x-1/2 text-[11px] text-ink-faint"
+        >
           Esc schließt · das Spiel läuft weiter ·{" "}
           {inCapture
             ? "in Aufnahmen und im Stream sichtbar"
