@@ -214,6 +214,13 @@ pub struct Layout {
     pub bottom_inset: f64,
     /// What the console is drawn at — the page zooms by it.
     pub scale: f64,
+    /// Ob der violette Schein in den unteren Bildschirmecken mitkommt.
+    ///
+    /// Er reist mit diesem Ereignis und nicht über `get_config`, weil die Seite
+    /// ihn im selben Bild braucht, in dem sie aufgeht. Ein Aufruf über die
+    /// Brücke käme ein paar Bilder später zurück — und wer ihn abgeschaltet
+    /// hat, während die Konsole zu war, sah ihn genau so lange noch einmal.
+    pub glow: bool,
 }
 
 /// Lay the window over the whole screen it was sent to.
@@ -228,8 +235,12 @@ fn place(window: &tauri::WebviewWindow) -> tauri::Result<Layout> {
         config.console_monitor.as_deref(),
         config.console_monitor_stable_id.as_deref(),
     )?;
+    let glow = config.console_glow;
     let Some(monitor) = monitor else {
-        return Ok(Layout::default());
+        return Ok(Layout {
+            glow,
+            ..Default::default()
+        });
     };
     // Physical pixels throughout: with two monitors at different scaling, Tauri
     // converts logical values with the wrong factor — the same trap as in
@@ -256,11 +267,21 @@ fn place(window: &tauri::WebviewWindow) -> tauri::Result<Layout> {
     // will still be told so — widen this to a frame on all four sides if that
     // ever turns out to matter.
     const GAP: u32 = 1;
-    window.set_position(PhysicalPosition::new(origin.x, origin.y + GAP as i32))?;
-    window.set_size(PhysicalSize::new(
-        screen.width,
-        screen.height.saturating_sub(GAP),
-    ))?;
+    let spot = PhysicalPosition::new(origin.x, origin.y + GAP as i32);
+    let size = PhysicalSize::new(screen.width, screen.height.saturating_sub(GAP));
+    // Nur anfassen, was sich wirklich ändert. `open()` platziert zweimal — vor
+    // dem Zeigen und noch einmal danach, weil ein verstecktes Fenster nicht
+    // zwangsläufig auf dem Schirm sitzt, gegen dessen Skalierung gerechnet
+    // wurde. Auf einem Schirm ist das zweite Mal die wortgleiche Wiederholung
+    // des ersten, und jedes `set_position`/`set_size` geht auf ein sichtbares
+    // Fenster als `SetWindowPos` durch: das Fenster zuckt, obwohl sich nichts
+    // bewegt hat.
+    if window.outer_position()? != spot {
+        window.set_position(spot)?;
+    }
+    if window.outer_size()? != size {
+        window.set_size(size)?;
+    }
 
     // Whatever the work area leaves out at the bottom is the task bar. Turned
     // into the page's own pixels: those are physical pixels divided by the
@@ -271,6 +292,7 @@ fn place(window: &tauri::WebviewWindow) -> tauri::Result<Layout> {
     Ok(Layout {
         bottom_inset: inset / (monitor.scale_factor() * wish),
         scale: wish,
+        glow,
     })
 }
 

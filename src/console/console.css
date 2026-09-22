@@ -284,13 +284,15 @@ body,
 
 /* Variante 3 aus dem Konsolen-Labor, mit einem Unterschied: beim Banner kreist
    das Licht dauerhaft, hier läuft es genau einmal, wenn die Konsole aufgeht,
-   und steht danach still. Ein Licht, das über einem Spiel endlos im Kreis
-   fährt, zieht den Blick dauernd von dem ab, was man eigentlich tut.
+   und ist danach weg. Ein Licht, das über einem Spiel endlos im Kreis fährt,
+   zieht den Blick dauernd von dem ab, was man eigentlich tut — und eines, das
+   nach seiner Runde als heller Fleck liegen bleibt, tut dasselbe leiser. Es
+   ist ein Moment beim Aufgehen, kein Schmuck: also blendet es am Ende der
+   Runde mit aus (`cb-dock-rim-in`).
 
    `@property` ist nötig, damit der Winkel überhaupt animierbar ist — ohne die
-   Deklaration ist `--a` für den Browser nur ein Text und springt statt zu
-   laufen. Der Wert bleibt am Ende stehen (`forwards` über `both`), sodass der
-   Rand als ruhiger Strich liegen bleibt. */
+   Deklaration ist `--con-angle` für den Browser nur ein Text und springt statt
+   zu laufen. */
 @property --con-angle {
   syntax: "<angle>";
   inherits: false;
@@ -306,12 +308,23 @@ body,
   }
 }
 
+/* Die Blende zur Runde. Sie deckt dieselbe Dauer ab wie `cb-dock-rim`, damit
+   beide zusammen anfangen und zusammen aufhören: das Licht kommt herauf,
+   fährt seine Runde und ist am Ende weg. Vorher stand es bei `opacity: 1`
+   stehen (`both`), und was als Blitz beim Öffnen gedacht war, lag danach als
+   heller Fleck dauerhaft auf der Leiste. */
 @keyframes cb-dock-rim-in {
-  from {
+  0% {
     opacity: 0;
   }
-  to {
+  12% {
     opacity: 1;
+  }
+  68% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
   }
 }
 
@@ -342,7 +355,7 @@ body,
      gegeneinander. */
   animation:
     cb-dock-rim 2.4s linear 300ms both,
-    cb-dock-rim-in 300ms ease-out 300ms both;
+    cb-dock-rim-in 2.4s linear 300ms both;
 }
 
 .cb-dock[data-leaving="true"] {
@@ -500,9 +513,13 @@ body,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Das Licht ist ein Moment und kein Schmuck — ohne die Runde bleibt nichts
+     übrig, das es zeigen wollte. Vorher stand hier ein fester Winkel, und
+     damit lag der helle Fleck dauerhaft auf der Leiste: genau das, was auch
+     mit Animation nicht gewollt war. */
   .cb-dock::before {
     animation: none;
-    --con-angle: 300deg;
+    opacity: 0;
   }
 
   .cb-sheet,

@@ -86,8 +86,17 @@ export function Console() {
    *  runs. Without it a panel vanished between two frames. */
   const [leavingPanel, setLeavingPanel] = useState<Panel>(null);
   /** The console is on its way out: everything fades, and the core hides the
-   *  window once that has played. */
-  const [closing, setClosing] = useState(false);
+   *  window once that has played.
+   *
+   *  Startet in der App auf `true`, also „nicht auf dem Schirm". Das Fenster
+   *  lebt zwischen den Öffnungen weiter, und was darin gezeichnet steht,
+   *  während es versteckt ist, ist genau das, was beim nächsten `show()` für
+   *  die ersten Bilder zu sehen ist — bevor `console-opened` überhaupt
+   *  ankommt. Stand die Seite dabei fertig gezeichnet da, sah man das alte
+   *  Dock kurz stehen und dann auffahren: das Zucken beim Öffnen. Im Browser
+   *  (`npm run dev`) gibt es kein Fenster, das versteckt würde — dort steht
+   *  die Konsole von Anfang an da. */
+  const [closing, setClosing] = useState(inTauri);
   /** Der Clip im Player, als Id. Als Objekt wäre er nach jedem `loadClips()`
    *  veraltet — ein gerade geänderter Name oder Favorit stünde dann im Player
    *  noch alt da. */
@@ -105,11 +114,11 @@ export function Console() {
   /** Ob die Konsole in Bildschirmaufnahmen zu sehen ist — nur für den Satz
    *  unter dem Dock, der sonst etwas Falsches behauptet. */
   const [inCapture, setInCapture] = useState(false);
-  /** Der violette Schein in den unteren Bildschirmecken. Im Browser
-   *  (`npm run dev`) von Haus aus an, damit man ihn beim Bauen sieht; in der
-   *  App sagt die Einstellung, was gilt, und bis sie da ist bleibt er aus —
-   *  ein Schein, der beim Öffnen kurz aufblitzt und wieder verschwindet, wäre
-   *  schlimmer als gar keiner. */
+  /** Der violette Schein in den unteren Bildschirmecken. Kommt in der App
+   *  ausschließlich aus `console-opened` — der Kern legt ihn dem Ereignis bei,
+   *  mit dem die Konsole aufgeht, damit er im selben Bild steht wie alles
+   *  andere. Im Browser (`npm run dev`) gibt es keinen Kern, dort ist er an,
+   *  damit man ihn beim Bauen sieht. */
   const [glow, setGlow] = useState(!inTauri);
 
   /** Der laufende Clip, wie er zuletzt aus der Liste kam. Die Liste hält nur
@@ -161,7 +170,6 @@ export function Console() {
         setTargetFps(config.recording.fps);
         setScale(config.consoleScale);
         setInCapture(config.consoleInCapture);
-        setGlow(config.consoleGlow);
       })
       .catch(() => {});
     const offs = [
@@ -179,18 +187,26 @@ export function Console() {
           closeTimer.current = null;
         }
         closingRef.current = false;
-        // `closing` bleibt absichtlich stehen. Hier auf `false` zu setzen ließ
-        // die Eingangs-Animation auf einem Fenster wieder anlaufen, das gerade
+        // Auf `true`, nie auf `false`. Auf `false` ließ es die
+        // Eingangs-Animation auf einem Fenster wieder anlaufen, das gerade
         // verschwindet — mitten in der Ausgangs-Animation sprang das Dock
-        // zurück, und genau das war das Zucken beim Raustabben.
-        // `console-opened` räumt es auf, bevor das Fenster wiederkommt.
+        // zurück, und das war das Zucken beim Raustabben.
+        //
+        // Stehenlassen war aber auch falsch: wer weggetabbt ist, hat nie
+        // `closing` gesetzt, und die Seite blieb fertig gezeichnet hinter
+        // einem versteckten Fenster liegen. Beim nächsten Öffnen stand genau
+        // dieses alte Bild ein paar Frames lang da. Hier ist das Fenster schon
+        // weg (der Kern versteckt es, bevor er das hier sendet), die Blende
+        // sieht also niemand — sie hinterlässt nur eine leere Seite für das
+        // nächste Mal.
+        setClosing(true);
         setPanel(null);
         setLeavingPanel(null);
         setPlayingId(null);
         setRenaming(null);
         setConfirming(null);
       }),
-      listen<{ bottomInset: number; scale: number }>("console-opened", (e) => {
+      listen<{ bottomInset: number; scale: number; glow: boolean }>("console-opened", (e) => {
         closingRef.current = false;
         setClosing(false);
         setOpened((n) => n + 1);
@@ -201,6 +217,13 @@ export function Console() {
         setConfirming(null);
         setScale(e.payload.scale || 1);
         setBottomInset(e.payload.bottomInset);
+        // Der Schein kommt mit dem Ereignis, nicht aus dem `getConfig()`
+        // darunter: der ist ein Aufruf über die Brücke und kommt erst ein paar
+        // Bilder später zurück. Wurde er zwischendurch abgeschaltet, während
+        // die Konsole zu war, sah man ihn genau so lange noch einmal
+        // aufleuchten. Hier steht er im selben Rutsch wie `closing` — eine
+        // Zeichnung, kein Nachziehen.
+        setGlow(e.payload.glow);
         void loadClips();
         // The buffer length may have been changed in the app in the meantime;
         // this is the moment it takes hold.
@@ -210,7 +233,6 @@ export function Console() {
             setBufferLength(Math.max(1, config.buffer.seconds));
             setTargetFps(config.recording.fps);
             setInCapture(config.consoleInCapture);
-            setGlow(config.consoleGlow);
           })
           .catch(() => {});
       }),
