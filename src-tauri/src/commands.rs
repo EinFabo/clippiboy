@@ -107,13 +107,16 @@ pub fn set_config(
         }
     }
 
-    // Size, screen or visibility of the console changed in the settings while it
-    // happens to be open: it should not wait for the next opening.
+    // Size, screen, visibility or the glow of the console changed in the settings
+    // while it happens to be open: it should not wait for the next opening.
+    // `relayout` re-emits `console-opened`, and the console re-reads the config
+    // on that — which is how the glow gets switched without a restart.
     if previous.console_scale != next.console_scale
         || previous.console_monitor != next.console_monitor
         || previous.console_monitor_stable_id != next.console_monitor_stable_id
         || previous.console_follow_active_screen != next.console_follow_active_screen
         || previous.console_in_capture != next.console_in_capture
+        || previous.console_glow != next.console_glow
     {
         crate::console::relayout(&app);
     }

@@ -100,6 +100,16 @@ export function ConsoleTab() {
           />
         </Row>
         <Row
+          label="Violet glow"
+          hint="A violet wash rises from the lower corners of the screen while the console is open — the gradient the app's own header sits in. It tints the game underneath, brightest at the bottom."
+        >
+          <Toggle
+            checked={config.consoleGlow}
+            disabled={!config.consoleEnabled}
+            onChange={(consoleGlow) => patchConfig({ consoleGlow })}
+          />
+        </Row>
+        <Row
           label="Visible in screen recordings"
           hint="Then Discord sees the console in a screen share. While it is open it is also inside any clip saved in that time — ClippiBoy records the whole screen."
         >

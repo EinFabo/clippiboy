@@ -105,6 +105,12 @@ export function Console() {
   /** Ob die Konsole in Bildschirmaufnahmen zu sehen ist — nur für den Satz
    *  unter dem Dock, der sonst etwas Falsches behauptet. */
   const [inCapture, setInCapture] = useState(false);
+  /** Der violette Schein in den unteren Bildschirmecken. Im Browser
+   *  (`npm run dev`) von Haus aus an, damit man ihn beim Bauen sieht; in der
+   *  App sagt die Einstellung, was gilt, und bis sie da ist bleibt er aus —
+   *  ein Schein, der beim Öffnen kurz aufblitzt und wieder verschwindet, wäre
+   *  schlimmer als gar keiner. */
+  const [glow, setGlow] = useState(!inTauri);
 
   /** Der laufende Clip, wie er zuletzt aus der Liste kam. Die Liste hält nur
    *  die letzten sechs: wird während des Zusehens einer gespeichert, fällt der
@@ -155,6 +161,7 @@ export function Console() {
         setTargetFps(config.recording.fps);
         setScale(config.consoleScale);
         setInCapture(config.consoleInCapture);
+        setGlow(config.consoleGlow);
       })
       .catch(() => {});
     const offs = [
@@ -203,6 +210,7 @@ export function Console() {
             setBufferLength(Math.max(1, config.buffer.seconds));
             setTargetFps(config.recording.fps);
             setInCapture(config.consoleInCapture);
+            setGlow(config.consoleGlow);
           })
           .catch(() => {});
       }),
@@ -297,6 +305,12 @@ export function Console() {
       }}
       className="fixed inset-0 select-none overflow-hidden text-ink"
     >
+      {/* Der Schein aus den unteren Ecken. Steht mit Absicht vor und außerhalb
+          von `.cb-ui`: dahinter, weil er hinter allem Bedienbaren liegen soll,
+          und außerhalb, weil `.cb-ui` die Größeneinstellung als `zoom` trägt —
+          darin gerechnet wüchse der Verlauf bei Größe 1,6 aus dem Bild heraus,
+          statt in den Ecken des Bildschirms zu sitzen, die er meint. */}
+      {glow && <div className="cb-glow" data-leaving={closing} />}
       {/* Everything that is operated. The size setting zooms this and nothing
           else — see the head of console.css. `--inset` hangs off it too, so the
           dock keeps clear of the task bar. */}

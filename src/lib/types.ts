@@ -188,6 +188,9 @@ export interface AppConfig {
   /** Visible to Discord and any other screen recording — and then also inside a
       clip saved while it is open. */
   consoleInCapture: boolean;
+  /** The violet wash rising from the lower corners of the screen while the
+      console is open. It tints the game underneath, so it can be switched off. */
+  consoleGlow: boolean;
   autoStartWithWindows: boolean;
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;

@@ -55,6 +55,7 @@ pub fn default_config() -> AppConfig {
         console_monitor_stable_id: None,
         console_follow_active_screen: true,
         console_in_capture: false,
+        console_glow: true,
         auto_start_with_windows: false,
         only_buffer_in_game: true,
         overlay: OverlayConfig::default(),

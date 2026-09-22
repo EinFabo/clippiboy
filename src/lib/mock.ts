@@ -95,6 +95,7 @@ export const mockConfig: AppConfig = {
   consoleMonitorStableId: null,
   consoleFollowActiveScreen: true,
   consoleInCapture: false,
+  consoleGlow: true,
   autoStartWithWindows: false,
   onlyBufferInGame: true,
   overlay: {

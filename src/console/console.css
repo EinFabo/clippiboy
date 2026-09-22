@@ -39,6 +39,70 @@ body,
   pointer-events: auto;
 }
 
+/* --- Der Schein aus den unteren Ecken ------------------------------------- */
+
+/* Variante g08 aus dem Verlaufs-Labor, abschaltbar über `consoleGlow`: der
+   Verlauf, in dem der Kopf der App steht, nur umgedreht — er steigt aus den
+   unteren Bildschirmecken auf, statt von oben hereinzufallen. Anders als die
+   Kante am Dock färbt er das Spiel ein, solange die Konsole offen ist; deshalb
+   ist er das einzige Stück Aussehen der Konsole mit einem eigenen Schalter.
+
+   Liegt als Geschwister *vor* `.cb-ui`, nicht darin. Zwei Gründe, beide
+   zwingend:
+
+   - `.cb-ui` trägt die Größeneinstellung als `zoom`. Ein Verlauf darin würde
+     mitmultipliziert und säße bei Größe 1,6 weit außerhalb des Bildes statt in
+     den Ecken, die er meint. Hier misst er gegen das Fenster, und das ist
+     exakt der Bildschirm.
+   - `pointer-events: none` ist keine Kosmetik: der Klick ins Leere schließt
+     die Konsole, und dafür muss er den Wrapper selbst treffen (`event.target
+     === event.currentTarget` in `Console.tsx`). Eine Fläche, die Klicks
+     annimmt, läge dazwischen — und die Konsole ließe sich nicht mehr
+     wegklicken. */
+.cb-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      85% 70% at 0% 108%,
+      rgb(124 58 237 / 0.5),
+      rgb(76 29 149 / 0.2) 45%,
+      transparent 75%
+    ),
+    radial-gradient(
+      85% 70% at 100% 108%,
+      rgb(124 58 237 / 0.5),
+      rgb(76 29 149 / 0.2) 45%,
+      transparent 75%
+    ),
+    linear-gradient(0deg, rgb(42 27 107 / 0.35) 0%, transparent 34%);
+  /* Kommt mit dem Dock herauf, nicht vor ihm: stand der Schein sofort da,
+     während die Leiste noch unterwegs war, färbte sich das Spiel einen
+     Wimpernschlag lang ohne erkennbaren Grund. Dieselbe Dauer wie `cb-dock-in`.
+     Die große Fläche soll der Compositor allein blenden können — sie liegt über
+     einem laufenden Spiel. */
+  animation: cb-glow-in 300ms var(--ease-entrance) both;
+  will-change: opacity;
+}
+
+@keyframes cb-glow-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Und hinaus mit allem anderen. `.cb-ui` blendet sich selbst aus, der Schein
+   steht daneben und braucht dieselbe Blende — sonst bliebe das Spiel violett
+   stehen, nachdem die Konsole schon weg ist.
+   CLOSE_MS in Console.tsx hat auch mit dieser Dauer zu tun. */
+.cb-glow[data-leaving="true"] {
+  animation: cb-fade-out 160ms ease-in both;
+}
+
 /* --- Die Farben der Konsole ---------------------------------------------- */
 
 /* Eine eigene Ebene zwischen den App-Tokens und den Regeln unten. Jeder Wert
@@ -62,6 +126,14 @@ body,
   --con-dock-line: rgb(255 255 255 / 0.07);
   --con-dock-sheen: rgb(255 255 255 / 0.05);
   --con-dock-shadow: 0 24px 60px rgba(0, 0, 0, 0.72);
+
+  /* Der violette Verlauf an der Leiste — Variante g04 aus dem Verlaufs-Labor,
+     gegen sieben andere gewählt. Kein Licht in der Fläche, sondern ein Strich
+     auf der Unterkante, der nach oben hin ausläuft: damit bleibt die Regel
+     stehen, die unten am Dock schon steht — das Lila gehört in die Kante, nicht
+     in die Scheibe. Die Ecken waren die Frage, die Antwort ist die Kante. */
+  --con-dock-edge: rgb(167 139 250 / 0.5);
+  --con-dock-glow: linear-gradient(0deg, rgb(139 92 246 / 0.14) 0%, transparent 26%);
 
   /* Das Licht, das beim Öffnen einmal um das Dock läuft. */
   --con-rim: var(--color-accent);
@@ -198,11 +270,14 @@ body,
      Dock dieselbe Fläche wie das Banner, und das Lila steht in den Kanten: der
      Strich auf der Oberkante, die Trennlinien, der Puffer-Balken und der Strich
      unter dem offenen Panel. Das reicht, um zu sagen, wem die Leiste gehört. */
-  background: linear-gradient(180deg, var(--con-dock-top) 0%, var(--con-dock-bottom) 100%);
+  background:
+    var(--con-dock-glow),
+    linear-gradient(180deg, var(--con-dock-top) 0%, var(--con-dock-bottom) 100%);
   border-color: var(--con-dock-line);
   box-shadow:
     var(--con-dock-shadow),
-    inset 0 1px 0 var(--con-dock-sheen);
+    inset 0 1px 0 var(--con-dock-sheen),
+    inset 0 -1px 0 var(--con-dock-edge);
 }
 
 /* --- Der Rand, der einmal um das Dock läuft ------------------------------- */
@@ -436,6 +511,8 @@ body,
   .cb-dock[data-leaving="true"],
   .cb-dock-line,
   .cb-ui[data-leaving="true"],
+  .cb-glow,
+  .cb-glow[data-leaving="true"],
   .cb-note,
   .cb-dock-btn[aria-pressed="true"]::after {
     animation: none;

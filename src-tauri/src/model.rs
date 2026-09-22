@@ -376,6 +376,12 @@ pub struct AppConfig {
     /// clip saved while it is open — ClippiBoy records the whole screen.
     #[serde(default)]
     pub console_in_capture: bool,
+    /// Der violette Schein, der aus den unteren Bildschirmecken aufsteigt,
+    /// solange die Konsole offen ist — derselbe Verlauf, in dem der Kopf der
+    /// App steht. Er färbt das Spiel dahinter ein, und wem das zu viel Bild
+    /// kostet, der schaltet ihn hier ab.
+    #[serde(default = "yes")]
+    pub console_glow: bool,
     pub auto_start_with_windows: bool,
     pub only_buffer_in_game: bool,
     // Newly added fields need `default` — otherwise `config::load()` throws away
