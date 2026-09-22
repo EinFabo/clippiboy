@@ -904,12 +904,25 @@ body,
 
 /* Der Ring steht mitten im Bild, der Player nimmt sich das ganze Fenster —
    ohne das hier lägen sie übereinander. Die Leiste unten hat das Problem
-   nicht, der Player endet über ihr. */
+   nicht, der Player endet über ihr.
+
+   Hier stand einmal schlicht `opacity: 0`, und es tat nichts: der Ring blieb
+   über dem laufenden Clip stehen. Der Grund ist die Kaskade, nicht die
+   Spezifität. `.cb-rise` trägt `cb-radial-in ... both`, und die Keyframes
+   enden bei `opacity: 1`. **Eine laufende oder nachwirkende Animation schlägt
+   jede normale Deklaration** — egal, wie spezifisch die ist. Gegen eine
+   Animation hilft nur eine Animation (oder `!important`, was hier die falsche
+   Antwort wäre).
+
+   Also wird sie ersetzt statt überstimmt. Das ist die eine Stelle, an der die
+   Hausregel „anhalten statt abbrechen" nicht gilt: die Auffahrt ist längst
+   durch, wenn ein Clip anläuft — dorthin kommt man nur über das Clip-Panel,
+   und das braucht länger als die 380 ms. Beim Zurückkommen greift wieder
+   `cb-radial-in`, der Ring dreht sich also herein, wie er gekommen ist. */
 .cb-ui[data-style="radial"][data-playing="true"] .cb-rise,
 .cb-ui[data-style="radial"][data-playing="true"] .cb-dock-line {
-  opacity: 0;
+  animation: cb-fade-out 160ms ease-in both;
   pointer-events: none;
-  transition: opacity 160ms var(--ease-out-soft);
 }
 
 @media (prefers-reduced-motion: reduce) {
