@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
@@ -244,12 +244,27 @@ export function Console() {
 
   /** Open something above the dock — a panel, or the player. The window is the
    *  screen and never changes size, so this is nothing but state. */
-  const show = useCallback((next: Panel, clipId: string | null = null) => {
-    if (panelTimer.current) window.clearTimeout(panelTimer.current);
-    setLeavingPanel(null);
-    setPanel(next);
-    setPlayingId(clipId);
-  }, []);
+  const show = useCallback(
+    (next: Panel, clipId: string | null = null) => {
+      if (panelTimer.current) window.clearTimeout(panelTimer.current);
+      // Von einem Panel direkt zum anderen: das alte bleibt stehen, solange
+      // sein Weg hinaus läuft, und die beiden überlappen sich dabei. Vorher
+      // wurde es in demselben Bild weggenommen, in dem das neue aufging — ein
+      // harter Tausch, bei dem für einen Moment gar nichts dastand.
+      //
+      // Nicht beim Öffnen eines Clips aus der Clip-Liste heraus: da ist `next`
+      // dasselbe Panel, und stehen bleibt ohnehin nichts, weil der Player an
+      // die Stelle beider tritt.
+      const crossing = panel !== null && next !== null && panel !== next;
+      setLeavingPanel(crossing ? panel : null);
+      if (crossing) {
+        panelTimer.current = window.setTimeout(() => setLeavingPanel(null), CLOSE_MS);
+      }
+      setPanel(next);
+      setPlayingId(clipId);
+    },
+    [panel],
+  );
 
   const back = useCallback(() => {
     if (panelTimer.current) window.clearTimeout(panelTimer.current);
@@ -306,9 +321,209 @@ export function Console() {
   const buffered = status.bufferActive ? status.bufferedSeconds : 0;
   const share = Math.min(1, buffered / bufferLength);
 
-  /** What is on screen above the dock — the open panel, or the one still
-   *  leaving. */
-  const sheet = panel ?? leavingPanel;
+  /** Ein Panel, wie es über dem Dock steht.
+   *
+   *  Als Funktion und nicht als zwei Blöcke im Baum, weil beim Wechsel zwei
+   *  davon gleichzeitig dastehen — das gehende und das kommende. Welches oben
+   *  liegt, entscheidet dann die Reihenfolge im DOM, und die muss dieselbe
+   *  sein, egal in welche Richtung gewechselt wird. Als feste Blöcke hätte
+   *  der Weg von den Clips zur Leistung anders ausgesehen als der Rückweg,
+   *  weil dort mal das eine und mal das andere weiter unten stand. */
+  const sheetFor = (which: Exclude<Panel, null>, leaving: boolean) =>
+    which === "clips" ? (
+      <Sheet title="Letzte Clips" hint="Klick spielt ab · Esc zurück" leaving={leaving}>
+        {clips.length === 0 ? (
+          <p className="px-2 py-8 text-center text-sm text-ink-muted">
+            Noch nichts aufgenommen.
+          </p>
+        ) : (
+          <div className="grid grid-cols-3 gap-3">
+            {clips.map((clip) => (
+              <article key={clip.id} className="relative">
+                <button
+                  onClick={() => void show("clips", clip.id)}
+                  className="cb-tile group relative block aspect-video w-full overflow-hidden rounded-inner bg-gradient-to-br from-accent-deep/40 to-black"
+                  aria-label={`${clip.screenshot ? "Öffnen" : "Abspielen"}: ${clipName(clip)}`}
+                >
+                  {clip.thumbPath && (
+                    <img
+                      src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
+                      alt=""
+                      className="h-full w-full object-cover"
+                    />
+                  )}
+                  {/* What the tile does, said only while the mouse is on it —
+                      standing there permanently it would be six marks over
+                      six pictures. */}
+                  <span className="absolute inset-0 grid place-items-center bg-black/35 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                    <span className="grid h-10 w-10 place-items-center rounded-pill bg-white/15 backdrop-blur-sm">
+                      {clip.screenshot ? (
+                        <IconSearch className="h-5 w-5" />
+                      ) : (
+                        <IconPlay className="h-5 w-5" />
+                      )}
+                    </span>
+                  </span>
+                  <span className="absolute inset-x-2 bottom-2 flex items-center justify-between gap-2 text-[11px] font-semibold">
+                    <span className="rounded-pill bg-black/60 px-2 py-0.5">
+                      {clip.screenshot
+                        ? `${clip.width} × ${clip.height}`
+                        : formatDuration(clip.durationMs)}
+                    </span>
+                    <span className="rounded-pill bg-black/60 px-2 py-0.5">
+                      {formatSize(clip.sizeBytes)}
+                    </span>
+                  </span>
+                  {clip.recording && (
+                    <span className="absolute left-2 top-2 rounded-pill bg-black/60 p-1 text-live">
+                      <IconRecord className="h-3 w-3" />
+                    </span>
+                  )}
+                </button>
+
+                {renaming === clip.id ? (
+                  <input
+                    autoFocus
+                    id={`rename-${clip.id}`}
+                    defaultValue={clipName(clip)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      const title = e.currentTarget.value.trim();
+                      setRenaming(null);
+                      void run("rename", async () => {
+                        await api.updateClip(clip.id, {
+                          title: title || null,
+                          description: clip.description,
+                          game: clip.game,
+                        });
+                        await loadClips();
+                        say("Umbenannt");
+                      });
+                    }}
+                    onBlur={() => setRenaming(null)}
+                    className="mt-2 w-full rounded-inner border border-line bg-base px-2 py-1 text-sm"
+                  />
+                ) : (
+                  <p className="mt-2 truncate text-sm font-medium">{clipName(clip)}</p>
+                )}
+
+                <div className="mt-1 flex items-center gap-1">
+                  {confirming === clip.id ? (
+                    <ConfirmDelete
+                      origin="left"
+                      onConfirm={() => {
+                        setConfirming(null);
+                        void run("delete", async () => {
+                          await api.deleteClip(clip.id);
+                          await loadClips();
+                          say("Gelöscht");
+                        });
+                      }}
+                      onCancel={() => setConfirming(null)}
+                    />
+                  ) : (
+                    <>
+                      <Tool
+                        label="In die Zwischenablage"
+                        onClick={() =>
+                          run("copy", async () => {
+                            await api.copyClipFile(clip.id);
+                            say("In der Zwischenablage — Strg+V in Discord");
+                          })
+                        }
+                      >
+                        <IconCopy className="h-4 w-4" />
+                      </Tool>
+                      {!clip.screenshot &&
+                        DISCORD.map((mb) => (
+                          <Tool
+                            key={mb}
+                            label={`Auf ${mb} MB verkleinern und kopieren`}
+                            busy={busy === `discord-${clip.id}-${mb}`}
+                            onClick={() =>
+                              run(`discord-${clip.id}-${mb}`, async () => {
+                                await api.exportForDiscord(clip.id, mb);
+                                say(`${mb} MB · in der Zwischenablage`);
+                              })
+                            }
+                          >
+                            <span className="text-[11px] font-bold">{mb}</span>
+                          </Tool>
+                        ))}
+                      <Tool
+                        label={clip.favorite ? "Favorit entfernen" : "Favorit"}
+                        onClick={() =>
+                          run("fav", async () => {
+                            await api.setClipFavorite(clip.id, !clip.favorite);
+                            await loadClips();
+                          })
+                        }
+                      >
+                        <IconHeart
+                          filled={clip.favorite}
+                          className={cn("h-4 w-4", clip.favorite && "text-live")}
+                        />
+                      </Tool>
+                      <Tool label="Umbenennen" onClick={() => setRenaming(clip.id)}>
+                        <IconPencil className="h-4 w-4" />
+                      </Tool>
+                      <Tool label="Löschen" onClick={() => setConfirming(clip.id)} danger>
+                        <IconTrash className="h-4 w-4" />
+                      </Tool>
+                    </>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </Sheet>
+    ) : (
+      <Sheet title="Leistung" hint="Was die Aufnahme gerade kostet" leaving={leaving}>
+        <div className="grid grid-cols-4 gap-3">
+          {/* „gemessen" allein stand hier und las sich wie „so schnell
+              läuft deine Aufnahme". Gemeint ist etwas anderes: wie oft sich
+              das Bild wirklich geändert hat. Die Aufnahme läuft immer auf
+              der eingestellten Rate — steht das Bild still, wiederholt die
+              Pipeline das letzte, und genau die fehlen hier. */}
+          <Stat
+            label="Bilder/s"
+            value={status.fps.toFixed(0)}
+            hint={
+              !status.bufferActive
+                ? "Puffer aus"
+                : status.fps >= targetFps - 1
+                  ? `von ${targetFps} · volles Bild`
+                  : `von ${targetFps} · Bild stand still`
+            }
+          />
+          <Stat
+            label="Verworfen"
+            value={String(status.droppedFrames)}
+            hint={status.droppedFrames > 0 ? "Encoder kommt nicht mit" : "alles drin"}
+            bad={status.droppedFrames > 0}
+          />
+          <Stat
+            label="Encoder"
+            value={(status.encoder ?? "—").toUpperCase()}
+            hint={status.rateControl === "quality" ? "feste Qualität" : "feste Bitrate"}
+          />
+          <Stat
+            label="Puffer"
+            value={formatSize(status.bufferBytes)}
+            hint={`${Math.round(buffered)} s im Speicher`}
+          />
+        </div>
+      </Sheet>
+    );
+
+  /** Was über dem Dock steht. Beim Wechsel sind es zwei: das gehende Panel
+   *  zuerst, das kommende danach. */
+  const stack: { which: Exclude<Panel, null>; leaving: boolean }[] = [];
+  if (leavingPanel && leavingPanel !== panel) {
+    stack.push({ which: leavingPanel, leaving: true });
+  }
+  if (panel) stack.push({ which: panel, leaving: false });
 
   return (
     // Kein Schleier über dem Spiel: was nicht die Konsole ist, bleibt
@@ -379,202 +594,14 @@ export function Console() {
           />
         )}
 
-        {sheet === "clips" && !playing && (
-          <Sheet
-            title="Letzte Clips"
-            hint="Klick spielt ab · Esc zurück"
-            leaving={panel === null}
-          >
-            {clips.length === 0 ? (
-              <p className="px-2 py-8 text-center text-sm text-ink-muted">
-                Noch nichts aufgenommen.
-              </p>
-            ) : (
-              <div className="grid grid-cols-3 gap-3">
-                {clips.map((clip) => (
-                  <article key={clip.id} className="relative">
-                    <button
-                      onClick={() => void show("clips", clip.id)}
-                      className="cb-tile group relative block aspect-video w-full overflow-hidden rounded-inner bg-gradient-to-br from-accent-deep/40 to-black"
-                      aria-label={`${clip.screenshot ? "Öffnen" : "Abspielen"}: ${clipName(clip)}`}
-                    >
-                      {clip.thumbPath && (
-                        <img
-                          src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
-                          alt=""
-                          className="h-full w-full object-cover"
-                        />
-                      )}
-                      {/* What the tile does, said only while the mouse is on it —
-                          standing there permanently it would be six marks over
-                          six pictures. */}
-                      <span className="absolute inset-0 grid place-items-center bg-black/35 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-                        <span className="grid h-10 w-10 place-items-center rounded-pill bg-white/15 backdrop-blur-sm">
-                          {clip.screenshot ? (
-                            <IconSearch className="h-5 w-5" />
-                          ) : (
-                            <IconPlay className="h-5 w-5" />
-                          )}
-                        </span>
-                      </span>
-                      <span className="absolute inset-x-2 bottom-2 flex items-center justify-between gap-2 text-[11px] font-semibold">
-                        <span className="rounded-pill bg-black/60 px-2 py-0.5">
-                          {clip.screenshot
-                            ? `${clip.width} × ${clip.height}`
-                            : formatDuration(clip.durationMs)}
-                        </span>
-                        <span className="rounded-pill bg-black/60 px-2 py-0.5">
-                          {formatSize(clip.sizeBytes)}
-                        </span>
-                      </span>
-                      {clip.recording && (
-                        <span className="absolute left-2 top-2 rounded-pill bg-black/60 p-1 text-live">
-                          <IconRecord className="h-3 w-3" />
-                        </span>
-                      )}
-                    </button>
-
-                    {renaming === clip.id ? (
-                      <input
-                        autoFocus
-                        id={`rename-${clip.id}`}
-                        defaultValue={clipName(clip)}
-                        onKeyDown={(e) => {
-                          if (e.key !== "Enter") return;
-                          const title = e.currentTarget.value.trim();
-                          setRenaming(null);
-                          void run("rename", async () => {
-                            await api.updateClip(clip.id, {
-                              title: title || null,
-                              description: clip.description,
-                              game: clip.game,
-                            });
-                            await loadClips();
-                            say("Umbenannt");
-                          });
-                        }}
-                        onBlur={() => setRenaming(null)}
-                        className="mt-2 w-full rounded-inner border border-line bg-base px-2 py-1 text-sm"
-                      />
-                    ) : (
-                      <p className="mt-2 truncate text-sm font-medium">{clipName(clip)}</p>
-                    )}
-
-                    <div className="mt-1 flex items-center gap-1">
-                      {confirming === clip.id ? (
-                        <ConfirmDelete
-                          origin="left"
-                          onConfirm={() => {
-                            setConfirming(null);
-                            void run("delete", async () => {
-                              await api.deleteClip(clip.id);
-                              await loadClips();
-                              say("Gelöscht");
-                            });
-                          }}
-                          onCancel={() => setConfirming(null)}
-                        />
-                      ) : (
-                        <>
-                          <Tool
-                            label="In die Zwischenablage"
-                            onClick={() =>
-                              run("copy", async () => {
-                                await api.copyClipFile(clip.id);
-                                say("In der Zwischenablage — Strg+V in Discord");
-                              })
-                            }
-                          >
-                            <IconCopy className="h-4 w-4" />
-                          </Tool>
-                          {!clip.screenshot &&
-                            DISCORD.map((mb) => (
-                              <Tool
-                                key={mb}
-                                label={`Auf ${mb} MB verkleinern und kopieren`}
-                                busy={busy === `discord-${clip.id}-${mb}`}
-                                onClick={() =>
-                                  run(`discord-${clip.id}-${mb}`, async () => {
-                                    await api.exportForDiscord(clip.id, mb);
-                                    say(`${mb} MB · in der Zwischenablage`);
-                                  })
-                                }
-                              >
-                                <span className="text-[11px] font-bold">{mb}</span>
-                              </Tool>
-                            ))}
-                          <Tool
-                            label={clip.favorite ? "Favorit entfernen" : "Favorit"}
-                            onClick={() =>
-                              run("fav", async () => {
-                                await api.setClipFavorite(clip.id, !clip.favorite);
-                                await loadClips();
-                              })
-                            }
-                          >
-                            <IconHeart
-                              filled={clip.favorite}
-                              className={cn("h-4 w-4", clip.favorite && "text-live")}
-                            />
-                          </Tool>
-                          <Tool label="Umbenennen" onClick={() => setRenaming(clip.id)}>
-                            <IconPencil className="h-4 w-4" />
-                          </Tool>
-                          <Tool label="Löschen" onClick={() => setConfirming(clip.id)} danger>
-                            <IconTrash className="h-4 w-4" />
-                          </Tool>
-                        </>
-                      )}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </Sheet>
-        )}
-
-        {sheet === "perf" && !playing && (
-          <Sheet
-            title="Leistung"
-            hint="Was die Aufnahme gerade kostet"
-            leaving={panel === null}
-          >
-            <div className="grid grid-cols-4 gap-3">
-              {/* „gemessen" allein stand hier und las sich wie „so schnell
-                  läuft deine Aufnahme". Gemeint ist etwas anderes: wie oft sich
-                  das Bild wirklich geändert hat. Die Aufnahme läuft immer auf
-                  der eingestellten Rate — steht das Bild still, wiederholt die
-                  Pipeline das letzte, und genau die fehlen hier. */}
-              <Stat
-                label="Bilder/s"
-                value={status.fps.toFixed(0)}
-                hint={
-                  !status.bufferActive
-                    ? "Puffer aus"
-                    : status.fps >= targetFps - 1
-                      ? `von ${targetFps} · volles Bild`
-                      : `von ${targetFps} · Bild stand still`
-                }
-              />
-              <Stat
-                label="Verworfen"
-                value={String(status.droppedFrames)}
-                hint={status.droppedFrames > 0 ? "Encoder kommt nicht mit" : "alles drin"}
-                bad={status.droppedFrames > 0}
-              />
-              <Stat
-                label="Encoder"
-                value={(status.encoder ?? "—").toUpperCase()}
-                hint={status.rateControl === "quality" ? "feste Qualität" : "feste Bitrate"}
-              />
-              <Stat
-                label="Puffer"
-                value={formatSize(status.bufferBytes)}
-                hint={`${Math.round(buffered)} s im Speicher`}
-              />
-            </div>
-          </Sheet>
-        )}
+        {/* Beim Wechsel stehen beide übereinander: das gehende zuerst, damit
+            das kommende darüber liegt. Der Schlüssel ist das Panel selbst —
+            ohne ihn nähme React denselben Kasten für beide und die
+            Animation liefe gar nicht erst an. */}
+        {!playing &&
+          stack.map(({ which, leaving }) => (
+            <Fragment key={which}>{sheetFor(which, leaving)}</Fragment>
+          ))}
 
         {note && (
           // Über dem Dock, wo der Klick war — außer der Player steht da, denn
@@ -714,7 +741,14 @@ function Sheet({
     // Bildschirmbreite geworden, und die Clips standen neben dem Bild. Ein
     // Prozentsatz misst gegen das Elternteil und ist vom Zoom unberührt; die
     // Obergrenze in Pixeln darf mitwachsen, sie deckelt ja nur.
-    <div className="absolute bottom-[calc(var(--inset,0px)+10rem)] left-1/2 w-[80%] max-w-[1100px] -translate-x-1/2">
+    // Derselbe Schnitt wie beim Dock: die Auffahrt auf dem äußeren Kasten, die
+    // Abfahrt auf dem Panel selbst — siehe `.cb-rise` in console.css. Sonst
+    // ersetzt die eine Animation die andere, und ein Panel, das mitten im
+    // Aufgehen geschlossen wird, springt erst an sein Ende.
+    <div
+      data-leaving={leaving}
+      className="cb-sheet-pos absolute bottom-[calc(var(--inset,0px)+10rem)] left-1/2 w-[80%] max-w-[1100px] -translate-x-1/2"
+    >
       <section
         className="cb-sheet cb-glass cb-cap overflow-y-auto rounded-card p-5"
         data-leaving={leaving}

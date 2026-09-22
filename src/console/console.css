@@ -172,16 +172,27 @@ body,
   }
 }
 
-/* The animation sits on an inner element on purpose: Tailwind centres the outer
-   one with the `translate` property, and a transform here would have added a
-   second -50% on top of it — the panel then stood half a width to the left. */
-.cb-sheet {
-  animation: cb-sheet-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+/* Aufgehen und Zugehen sitzen auf zwei Kästen, genau wie beim Dock (`.cb-rise`):
+   auf einem Kasten ersetzt die zweite Animation die erste, und `cb-sheet-out`
+   beginnt bei `transform: none` — dem Ruhepunkt, den ein Panel, das mitten im
+   Aufgehen geschlossen wird, noch gar nicht erreicht hat. Es sprang also erst
+   ans Ende seiner Auffahrt.
+
+   Der äußere Kasten ist ohnehin da, er trägt die Position. Zentriert wird er
+   über Tailwinds `translate`-Eigenschaft, der `transform` der Animation ist
+   davon unberührt — anders als ein früherer Kommentar hier behauptete, der noch
+   aus Tailwind 3 stammte und vor einem doppelten -50% warnte. */
+.cb-sheet-pos {
+  animation: cb-sheet-in 200ms var(--ease-entrance) both;
+}
+
+.cb-sheet-pos[data-leaving="true"] {
+  animation-play-state: paused;
 }
 
 /* CLOSE_MS in Console.tsx has to match this duration. */
 .cb-sheet[data-leaving="true"] {
-  animation: cb-sheet-out 160ms cubic-bezier(0.4, 0, 1, 1) both;
+  animation: cb-sheet-out 160ms var(--ease-exit) both;
   pointer-events: none;
 }
 
@@ -556,7 +567,7 @@ body,
     opacity: 0;
   }
 
-  .cb-sheet,
+  .cb-sheet-pos,
   .cb-sheet[data-leaving="true"],
   .cb-rise,
   .cb-dock[data-leaving="true"],
