@@ -668,17 +668,37 @@ body,
 
 /* --- Ring (v19) ---------------------------------------------------------- */
 
-/* Die Aktionen liegen im Kreis um den Puffer-Stand, das Panel steht rechts
-   daneben. Der einzige Stil, der nicht nur anders aussieht, sondern woanders
-   steht — deshalb muss hier auch die Notiz und die Hilfszeile mitziehen.
+/* Die Aktionen liegen im Kreis um den Puffer-Stand. Der einzige Stil, der nicht
+   nur anders aussieht, sondern woanders steht — deshalb ziehen hier auch die
+   Notiz und die Hilfszeile mit.
 
-   Links bei 27 % der Breite, nicht in der Mitte: rechts davon bleibt dann
-   genug für das Panel, ohne dass die beiden sich berühren. */
+   Er steht in der Mitte des Bildes, solange nichts offen ist, und rückt zur
+   Seite, sobald ein Panel aufgeht. Das ist eine Bewegung und keine zwei: der
+   Ring bleibt, was er war, er macht nur Platz.
+
+   `--ring-shift` ist der Weg, den er dabei geht, und alle drei Stücke lesen
+   ihn — Ring, Hilfszeile, Notiz —, damit sie zusammenbleiben. In Pixeln und
+   nicht in Prozent: Prozente in `translate` rechnen gegen die eigene Breite,
+   und die ist bei den dreien verschieden. `zoom` multipliziert den Wert mit
+   der Größeneinstellung, also wandert der Ring bei einer großen Konsole auch
+   weiter — was richtig ist, er ist dann ja selbst größer. */
+.cb-ui[data-style="radial"] {
+  --ring-shift: 0px;
+}
+
+.cb-ui[data-style="radial"][data-panel="open"] {
+  --ring-shift: 280px;
+}
+
 .cb-ui[data-style="radial"] .cb-rise {
-  left: 27%;
+  left: 50%;
   top: 50%;
   bottom: auto;
-  translate: -50% -50%;
+  translate: calc(-50% - var(--ring-shift)) -50%;
+  /* Die Variable selbst blendet nicht über, der `translate` daraus schon:
+     sein errechneter Wert ändert sich, und der ist zwischen zwei `calc()`
+     interpolierbar. */
+  transition: translate 320ms var(--ease-entrance);
   animation-name: cb-radial-in;
   animation-duration: 380ms;
 }
@@ -801,6 +821,37 @@ body,
   stroke-width: 1.6;
 }
 
+/* Rund bis in die Ecken. In einem Stil, dessen ganze Form der Kreis ist, darf
+   nichts eckig aufblitzen: nicht die Fläche, die ein Knopf unter dem Zeiger
+   bekommt, nicht die Markierung unter dem offenen Panel, nicht das Panel
+   selbst und nichts darin.
+
+   Die Knöpfe werden zur Pille und nicht zum Kreis, weil sie hier ihre
+   Beschriftung behalten — anders als im Stil „Pille", wo genau die wegfällt. */
+.cb-ui[data-style="radial"] .cb-dock-btn {
+  border-radius: 999px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock-btn[aria-pressed="true"]::after {
+  bottom: 6px;
+  width: 5px;
+  height: 5px;
+}
+
+.cb-ui[data-style="radial"] .cb-sheet {
+  border-radius: 36px;
+  padding: 28px;
+}
+
+.cb-ui[data-style="radial"] .cb-tile,
+.cb-ui[data-style="radial"] .cb-stat {
+  border-radius: 20px;
+}
+
+.cb-ui[data-style="radial"] .cb-tool {
+  border-radius: 50%;
+}
+
 /* Das Panel rückt nach rechts und kommt von dort herein, statt von unten. */
 .cb-ui[data-style="radial"] .cb-sheet-pos {
   left: auto;
@@ -839,14 +890,16 @@ body,
   }
 }
 
-/* Hilfszeile und Notiz gehören zum Ring, nicht zur Bildschirmmitte. */
+/* Hilfszeile und Notiz gehören zum Ring und gehen denselben Weg wie er. */
 .cb-ui[data-style="radial"] .cb-dock-line {
-  left: 27%;
   bottom: calc(var(--inset, 0px) + 3rem);
+  translate: calc(-50% - var(--ring-shift)) 0;
+  transition: translate 320ms var(--ease-entrance);
 }
 
 .cb-ui[data-style="radial"] .cb-note-slot {
-  left: 27%;
+  translate: calc(-50% - var(--ring-shift)) 0;
+  transition: translate 320ms var(--ease-entrance);
 }
 
 /* Der Ring steht mitten im Bild, der Player nimmt sich das ganze Fenster —
@@ -865,5 +918,12 @@ body,
   .cb-ui[data-style="radial"] .cb-sheet-pos,
   .cb-ui[data-style="radial"] .cb-sheet[data-leaving="true"] {
     animation: none;
+  }
+  /* Der Weg zur Seite bleibt — er schafft Platz, das ist keine Zierde —, aber
+     er wird gegangen statt vorgeführt. */
+  .cb-ui[data-style="radial"] .cb-rise,
+  .cb-ui[data-style="radial"] .cb-dock-line,
+  .cb-ui[data-style="radial"] .cb-note-slot {
+    transition-duration: 1ms;
   }
 }

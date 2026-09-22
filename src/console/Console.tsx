@@ -567,6 +567,12 @@ export function Console() {
         // der Ring zurück, solange ein Clip läuft. Die Leiste unten hat das
         // Problem nicht, der Player endet über ihr.
         data-playing={playing ? "true" : "false"}
+        // Ebenfalls nur für den Ring: der steht in der Mitte, bis etwas
+        // aufgeht, und rückt dann zur Seite, um dem Panel Platz zu machen.
+        // `panel` und nicht `panel ?? leavingPanel`: beim Zumachen soll er
+        // gleich zurückwandern, während das Panel noch abblendet — zuerst
+        // Platz schaffen, dann hinlegen, und umgekehrt.
+        data-panel={panel ? "open" : "closed"}
         data-leaving={closing}
         style={
           {
