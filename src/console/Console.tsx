@@ -78,6 +78,10 @@ export function Console() {
   const [bottomInset, setBottomInset] = useState(0);
   const [clips, setClips] = useState<Clip[]>(inTauri ? [] : mockClips.slice(0, RECENT));
   const [panel, setPanel] = useState<Panel>(null);
+  /** Zählt jedes Öffnen. Das Fenster wird nur versteckt, die Seite bleibt
+   *  geladen — ohne diesen Schlüssel liefe das Licht um das Dock (`cb-dock`)
+   *  genau einmal pro Programmstart statt bei jedem Öffnen. */
+  const [opened, setOpened] = useState(0);
   /** The panel that was just closed, kept on screen for as long as its way out
    *  runs. Without it a panel vanished between two frames. */
   const [leavingPanel, setLeavingPanel] = useState<Panel>(null);
@@ -182,6 +186,7 @@ export function Console() {
       listen<{ bottomInset: number; scale: number }>("console-opened", (e) => {
         closingRef.current = false;
         setClosing(false);
+        setOpened((n) => n + 1);
         setPanel(null);
         setLeavingPanel(null);
         setPlayingId(null);
@@ -555,6 +560,7 @@ export function Console() {
 
         {/* The dock. Everything else on screen is a step away from here. */}
         <div
+          key={opened}
           data-leaving={closing}
           className="cb-dock cb-glass absolute bottom-[calc(var(--inset,0px)+2rem)] left-1/2 flex -translate-x-1/2 items-stretch gap-1.5 rounded-[22px] p-2.5"
         >

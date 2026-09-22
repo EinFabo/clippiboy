@@ -50,15 +50,21 @@ body,
    Ein Dock-Stil (siehe Arbeitsplan Punkt 7) setzt später nur diese Handvoll
    Werte neu. */
 :root {
-  --con-glass: color-mix(in oklab, var(--color-surface) 96%, transparent);
-  --con-glass-line: color-mix(in oklab, var(--color-accent) 18%, var(--color-line));
-  --con-glass-shadow: 0 20px 56px rgba(0, 0, 0, 0.65);
+  /* Tiefschwarz — Variante 4 aus dem Konsolen-Labor. Dunkler als die App und
+     dunkler als das Banner: die Konsole steht mitten im Bild und soll sich vom
+     Spiel absetzen, nicht mit ihm verschwimmen. */
+  --con-glass: color-mix(in oklab, #07070a 96%, transparent);
+  --con-glass-line: rgb(255 255 255 / 0.07);
+  --con-glass-shadow: 0 30px 80px rgba(0, 0, 0, 0.85);
 
-  --con-dock-top: var(--hud-top);
-  --con-dock-bottom: var(--hud-bottom);
-  --con-dock-line: var(--hud-line);
-  --con-dock-sheen: var(--hud-sheen);
+  --con-dock-top: rgba(9, 9, 12, 0.97);
+  --con-dock-bottom: rgba(4, 4, 6, 0.98);
+  --con-dock-line: rgb(255 255 255 / 0.07);
+  --con-dock-sheen: rgb(255 255 255 / 0.05);
   --con-dock-shadow: 0 24px 60px rgba(0, 0, 0, 0.72);
+
+  /* Das Licht, das beim Öffnen einmal um das Dock läuft. */
+  --con-rim: var(--color-accent);
 
   /* Was der Mauszeiger auf einem Knopf hinterlässt, und die Markierung unter
      dem offenen Panel. */
@@ -199,9 +205,78 @@ body,
     inset 0 1px 0 var(--con-dock-sheen);
 }
 
+/* --- Der Rand, der einmal um das Dock läuft ------------------------------- */
+
+/* Variante 3 aus dem Konsolen-Labor, mit einem Unterschied: beim Banner kreist
+   das Licht dauerhaft, hier läuft es genau einmal, wenn die Konsole aufgeht,
+   und steht danach still. Ein Licht, das über einem Spiel endlos im Kreis
+   fährt, zieht den Blick dauernd von dem ab, was man eigentlich tut.
+
+   `@property` ist nötig, damit der Winkel überhaupt animierbar ist — ohne die
+   Deklaration ist `--a` für den Browser nur ein Text und springt statt zu
+   laufen. Der Wert bleibt am Ende stehen (`forwards` über `both`), sodass der
+   Rand als ruhiger Strich liegen bleibt. */
+@property --con-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes cb-dock-rim {
+  from {
+    --con-angle: 0deg;
+  }
+  to {
+    --con-angle: 360deg;
+  }
+}
+
+@keyframes cb-dock-rim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.cb-dock::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 2px;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--con-angle),
+    transparent 0 60%,
+    var(--con-rim) 80%,
+    #fff 86%,
+    transparent 92%
+  );
+  /* Nur der Rahmen, nicht die Fläche: die Maske stanzt die Mitte heraus. */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  /* Wartet, bis das Dock selbst oben ist — sonst laufen Fahrt und Licht
+     gegeneinander. */
+  animation:
+    cb-dock-rim 2.4s linear 300ms both,
+    cb-dock-rim-in 300ms ease-out 300ms both;
+}
+
 .cb-dock[data-leaving="true"] {
   animation: cb-dock-out 160ms var(--ease-exit) both;
   pointer-events: none;
+}
+
+.cb-dock[data-leaving="true"]::before {
+  animation: none;
 }
 
 /* Die Zeile unter dem Dock fährt mit. Stand sie sofort da, während die Leiste
@@ -350,6 +425,11 @@ body,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .cb-dock::before {
+    animation: none;
+    --con-angle: 300deg;
+  }
+
   .cb-sheet,
   .cb-sheet[data-leaving="true"],
   .cb-dock,
