@@ -39,6 +39,36 @@ body,
   pointer-events: auto;
 }
 
+/* --- Die Farben der Konsole ---------------------------------------------- */
+
+/* Eine eigene Ebene zwischen den App-Tokens und den Regeln unten. Jeder Wert
+   zeigt per Default genau auf das, was vorher direkt dastand — diese Datei
+   sieht also unverändert aus. Der Gewinn ist, dass die Konsole ab hier
+   umgefärbt werden kann, ohne das Banner und die App mitzuziehen: beide teilen
+   sich `--hud-*` und `--color-*`, und eine Änderung dort traf bisher alle drei.
+
+   Ein Dock-Stil (siehe Arbeitsplan Punkt 7) setzt später nur diese Handvoll
+   Werte neu. */
+:root {
+  --con-glass: color-mix(in oklab, var(--color-surface) 96%, transparent);
+  --con-glass-line: color-mix(in oklab, var(--color-accent) 18%, var(--color-line));
+  --con-glass-shadow: 0 20px 56px rgba(0, 0, 0, 0.65);
+
+  --con-dock-top: var(--hud-top);
+  --con-dock-bottom: var(--hud-bottom);
+  --con-dock-line: var(--hud-line);
+  --con-dock-sheen: var(--hud-sheen);
+  --con-dock-shadow: 0 24px 60px rgba(0, 0, 0, 0.72);
+
+  /* Was der Mauszeiger auf einem Knopf hinterlässt, und die Markierung unter
+     dem offenen Panel. */
+  --con-btn-hover: rgb(255 255 255 / 0.14);
+  --con-btn-open: rgb(255 255 255 / 0.18);
+  --con-mark: var(--color-accent-bright);
+
+  --con-tile-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
+}
+
 /* Panels arrive from the dock rather than fading in on the spot: the dock is
    where the click was, and the movement says the two belong together. */
 @keyframes cb-sheet-in {
@@ -86,9 +116,9 @@ body,
    würde eine getönte Scheibe das Bild nur eintrüben, ein angeleuchteter Rand
    sagt auf einen Blick, wem das hier gehört. */
 .cb-glass {
-  background: color-mix(in oklab, var(--color-surface) 96%, transparent);
-  border: 1px solid color-mix(in oklab, var(--color-accent) 18%, var(--color-line));
-  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.65);
+  background: var(--con-glass);
+  border: 1px solid var(--con-glass-line);
+  box-shadow: var(--con-glass-shadow);
 }
 
 /* So hoch darf ein Panel werden, bevor es in sich scrollt.
@@ -162,11 +192,11 @@ body,
      Dock dieselbe Fläche wie das Banner, und das Lila steht in den Kanten: der
      Strich auf der Oberkante, die Trennlinien, der Puffer-Balken und der Strich
      unter dem offenen Panel. Das reicht, um zu sagen, wem die Leiste gehört. */
-  background: linear-gradient(180deg, var(--hud-top) 0%, var(--hud-bottom) 100%);
-  border-color: var(--hud-line);
+  background: linear-gradient(180deg, var(--con-dock-top) 0%, var(--con-dock-bottom) 100%);
+  border-color: var(--con-dock-line);
   box-shadow:
-    0 24px 60px rgba(0, 0, 0, 0.72),
-    inset 0 1px 0 var(--hud-sheen);
+    var(--con-dock-shadow),
+    inset 0 1px 0 var(--con-dock-sheen);
 }
 
 .cb-dock[data-leaving="true"] {
@@ -195,7 +225,7 @@ body,
 }
 
 .cb-dock-btn:hover:not(:disabled) {
-  background: rgb(255 255 255 / 0.14);
+  background: var(--con-btn-hover);
   transform: translateY(-2px);
 }
 
@@ -220,7 +250,7 @@ body,
 /* The panel that is open stays lit, and its button keeps a line under it so the
    state can be read without hovering. */
 .cb-dock-btn[aria-pressed="true"] {
-  background: rgb(255 255 255 / 0.18);
+  background: var(--con-btn-open);
 }
 
 .cb-dock-btn[aria-pressed="true"]::after {
@@ -232,7 +262,7 @@ body,
   height: 2px;
   translate: -50%;
   border-radius: var(--radius-pill);
-  background: var(--color-accent-bright);
+  background: var(--con-mark);
   animation: cb-sheet-in 200ms var(--ease-entrance) both;
 }
 
@@ -284,7 +314,7 @@ body,
 
 .cb-tile:hover {
   transform: translateY(-3px);
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--con-tile-shadow);
 }
 
 .cb-tile:active {
