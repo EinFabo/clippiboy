@@ -19,6 +19,14 @@ import type {
   FfmpegStatus,
 } from "./lib/types";
 
+export type SettingsTab =
+  | "hotkeys"
+  | "behaviour"
+  | "banner"
+  | "console"
+  | "storage"
+  | "about";
+
 interface EngineState {
   ready: boolean;
   config: AppConfig;
@@ -62,9 +70,13 @@ interface EngineState {
   /** ffmpeg is fetched on first start; clips wait for it. */
   ffmpeg: FfmpegStatus;
   lastError: string | null;
+  /** The open tab in the settings. Here rather than in the page, so it is still
+      standing when you come back from another page. */
+  settingsTab: SettingsTab;
 
   init: () => Promise<void>;
   setUpdate: (update: UpdateInfo | null) => void;
+  setSettingsTab: (tab: SettingsTab) => void;
   /**
    * Download and install `update`. Only comes back if that failed — on
    * success Windows quits the app and starts the installer.
@@ -162,9 +174,14 @@ export const useEngine = create<EngineState>((set, get) => ({
   updateProgress: null,
   ffmpeg: { state: "checking" },
   lastError: null,
+  settingsTab: "hotkeys",
 
   setUpdate(update) {
     set({ update });
+  },
+
+  setSettingsTab(settingsTab) {
+    set({ settingsTab });
   },
 
   async installUpdate() {

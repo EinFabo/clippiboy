@@ -14,7 +14,7 @@ import { Dashboard } from "./routes/Dashboard";
 import { Clips } from "./routes/Clips";
 import { AudioMixer } from "./routes/AudioMixer";
 import { Recording } from "./routes/Recording";
-import { Settings } from "./routes/Settings";
+import { Settings } from "./routes/settings";
 
 export default function App() {
   const [route, setRoute] = useState<Route>("dashboard");
