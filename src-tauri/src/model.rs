@@ -591,6 +591,23 @@ pub struct EngineStatus {
     pub fps: f32,
     /// Game last detected in the foreground, `None` when none is running.
     pub game: Option<String>,
+    /// How long that game has been up, in seconds — `None` when none is
+    /// running.
+    ///
+    /// It counts the **process**, not the foreground: alt-tabbing to the
+    /// browser does not end a session, and coming back does not start a second
+    /// one. That is the same rule the game audio binding follows, and for the
+    /// same reason (`AppState::track_game`).
+    #[serde(default)]
+    pub game_seconds: Option<u32>,
+    /// What is still free on the drive the clips are written to. `None` when
+    /// the system would not say.
+    ///
+    /// Read every ten seconds rather than on every snapshot: the number moves
+    /// slowly, and the call can block on a disconnected network share — which
+    /// `engine_status` would hand straight to the webview.
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
     /// A recording started by hand is running.
     #[serde(default)]
     pub recording: bool,

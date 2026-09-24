@@ -329,6 +329,15 @@ export interface EngineStatus {
   fps: number;
   /** Game last detected in the foreground. */
   game: string | null;
+  /**
+   * How long that game has been up, in seconds; `null` when none is running.
+   *
+   * Counts the process, not the foreground — alt-tabbing to the browser does
+   * not end a session and coming back does not start a second one.
+   */
+  gameSeconds: number | null;
+  /** What is still free on the drive the clips go to; `null` when unknown. */
+  freeBytes: number | null;
   /** A recording started by hand is running. */
   recording: boolean;
   /** How long it runs so far. */

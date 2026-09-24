@@ -8,6 +8,7 @@ pub mod config;
 pub mod console;
 pub mod control;
 pub mod convert;
+pub mod disk;
 pub mod edit;
 pub mod encode;
 pub mod export;
@@ -758,10 +759,26 @@ fn window_awake(app: &tauri::AppHandle, label: &str) -> bool {
     window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false)
 }
 
+/// Wie viel auf dem Clip-Laufwerk frei ist, in den Zustand geschrieben.
+///
+/// Hier und nur hier: der Aufruf kann auf einem getrennten Netzlaufwerk
+/// sekundenlang stehen bleiben, und dieser Faden darf das — der, auf dem
+/// `engine_status` beantwortet wird, nicht (siehe `disk.rs`).
+fn refresh_free_bytes(state: &AppState) {
+    let dir = state.config_snapshot().clip_dir;
+    let free = disk::free_bytes(std::path::Path::new(&dir)).unwrap_or(0);
+    state
+        .free_bytes
+        .store(free, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Sends levels (20 Hz) and status data (1 Hz) to the UI.
 fn spawn_ui_updates(app: &tauri::AppHandle) {
     let handle = app.clone();
     std::thread::spawn(move || {
+        // Einmal vorweg, sonst stünde die Zeile in der Konsole die ersten zehn
+        // Sekunden ohne den freien Platz da.
+        refresh_free_bytes(&handle.state::<AppState>());
         let mut tick: u32 = 0;
         loop {
             std::thread::sleep(Duration::from_millis(50));
@@ -807,6 +824,10 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 state
                     .audio
                     .retry_failed(state.config_snapshot().sources, state.game_pid());
+                // Im selben Takt der freie Platz. Er wandert langsam — ein Clip
+                // alle paar Minuten —, und öfter zu fragen hieße, öfter auf
+                // einem Netzlaufwerk stehen zu bleiben.
+                refresh_free_bytes(&state);
             }
             // Every 2 s, look which game is running in the foreground.
             if tick % 40 == 0 {

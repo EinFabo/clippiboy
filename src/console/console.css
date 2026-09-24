@@ -935,6 +935,15 @@ body,
   width: 120px;
 }
 
+/* In der Mitte des Rings ist die Zeile schmal, aber hoch darf sie sein: hier
+   wird umgebrochen statt abgeschnitten. In der Leiste unten ist es umgekehrt —
+   dort ist Breite da und Höhe knapp. */
+.cb-ui[data-style="radial"] .cb-session {
+  white-space: normal;
+  overflow: visible;
+  text-wrap: balance;
+}
+
 .cb-ui[data-style="radial"] .cb-sep {
   display: none;
 }

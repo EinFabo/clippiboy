@@ -28,6 +28,19 @@ pub struct AppState {
     pub shared: Mutex<Option<Arc<Shared>>>,
     /// Foreground game last detected, updated continuously.
     pub current_game: Mutex<Option<String>>,
+    /// When the running game was first bound — the start of the session the
+    /// console shows under its name.
+    ///
+    /// Hangs off the binding below and not off `current_game`: whoever alt-tabs
+    /// to the browser is still playing, and a clock that restarted every time
+    /// they came back would be worthless.
+    game_since: Mutex<Option<std::time::Instant>>,
+    /// What is free on the clip drive, in bytes; `0` means not known yet.
+    ///
+    /// An atomic and not a `Mutex`, because the status tick reads it and one
+    /// slow thread writes it — see `free_bytes` in `clips.rs` for why it is not
+    /// simply read where it is used.
+    pub free_bytes: std::sync::atomic::AtomicU64,
     /// The process the game audio source is bound to, with its exe name.
     ///
     /// Deliberately stickier than `current_game`: detection looks at the
@@ -245,6 +258,8 @@ impl AppState {
             rate_control: None,
             fps: 0.0,
             game: None,
+            game_seconds: None,
+            free_bytes: None,
             recording: false,
             recording_seconds: 0.0,
             recording_bytes: 0,
@@ -276,6 +291,8 @@ impl AppState {
             pipeline: Mutex::new(None),
             shared: Mutex::new(None),
             current_game: Mutex::new(None),
+            game_since: Mutex::new(None),
+            free_bytes: std::sync::atomic::AtomicU64::new(0),
             game_pid: Mutex::new(None),
             logged_game: Mutex::new(None),
             source_notes: Mutex::new(std::collections::HashMap::new()),
@@ -574,6 +591,12 @@ impl AppState {
         let now = bound.as_ref().map(|(pid, _)| *pid);
         if now != before {
             log::info!("game audio now follows {now:?} (was {before:?})");
+            // Die Sitzungsuhr hängt an genau dieser Bindung: sie beginnt, wenn
+            // ein Spiel gebunden wird, und endet, wenn dessen Prozess weg ist.
+            // Ein Wechsel von einem Spiel zum nächsten ist ebenfalls ein
+            // Wechsel der Pid und setzt die Uhr also zurück — richtig so, das
+            // ist eine neue Sitzung.
+            *self.game_since.lock() = now.map(|_| std::time::Instant::now());
         }
         (name, now != before)
     }
@@ -607,6 +630,22 @@ impl AppState {
                 .map(|choice| choice.target.title.clone())
         });
         status.game = self.current_game.lock().clone();
+        // Die Spielzeit steht nur da, wenn auch ein Spiel dasteht. Die Bindung
+        // hält den Prozess länger als die Erkennung den Namen (wer zum Browser
+        // tabbt, hat keinen erkannten Namen mehr) — eine Zeit ohne Namen
+        // darüber wäre in der Konsole eine Zeile ohne Bezug.
+        status.game_seconds = match (&status.game, *self.game_since.lock()) {
+            (Some(_), Some(since)) => Some(since.elapsed().as_secs() as u32),
+            _ => None,
+        };
+        // Nur abgelesen, nicht gemessen: den Wert holt der Statusfaden alle
+        // zehn Sekunden (`clips::free_bytes`). Hier ist auch der `engine_status`
+        // Befehl unterwegs, und der käme sonst auf einem getrennten Netzlaufwerk
+        // zum Stehen — mitsamt dem Fenster, das ihn gerufen hat.
+        status.free_bytes = match self.free_bytes.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            bytes => Some(bytes),
+        };
         status
     }
 

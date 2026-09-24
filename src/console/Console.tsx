@@ -54,6 +54,8 @@ const RESTING: EngineStatus = {
   rateControl: "quality",
   fps: 60,
   game: "ARC Raiders",
+  gameSeconds: 4320,
+  freeBytes: 44_000_000_000,
   recording: false,
   recordingSeconds: 0,
   recordingBytes: 0,
@@ -61,6 +63,35 @@ const RESTING: EngineStatus = {
 };
 
 type Panel = "clips" | "audio" | "perf" | null;
+
+/**
+ * Die Spielzeit, wie sie unter dem Spielnamen steht.
+ *
+ * Nicht `formatDuration`: das liefert `1:12:34` und liest sich damit wie die
+ * Länge eines Clips. Gefragt ist hier die Größenordnung, nicht die Sekunde —
+ * niemand will beim Spielen wissen, dass es 1:12:34 sind.
+ */
+function sessionTime(seconds: number): string {
+  if (seconds < 60) return "gerade erst";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Wie viele der Clips von heute sind.
+ *
+ * „Heute" heißt Kalendertag und nicht „in den letzten 24 Stunden": wer über
+ * Mitternacht hinaus spielt, sieht die Zählung dabei umspringen. Das ist die
+ * unangenehmere von zwei Antworten, aber die, die zu dem Wort passt — und die
+ * andere hieße, die Sitzung zweimal zu erklären.
+ */
+function clipsToday(clips: Clip[]): number {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const since = midnight.getTime();
+  return clips.filter((clip) => clip.createdAt >= since).length;
+}
 
 /**
  * The console over the game.
@@ -85,6 +116,8 @@ export function Console() {
    *  meldet Fehler und Auffälligkeiten je Quellen-Id, und einen Namen dazu hat
    *  nur die Konfiguration. */
   const [sources, setSources] = useState<AudioSource[]>(inTauri ? [] : mockConfig.sources);
+  /** Clips von heute — die Zahl im Statusblock. */
+  const [today, setToday] = useState(inTauri ? 0 : clipsToday(mockClips));
   const [panel, setPanel] = useState<Panel>(null);
   /** Zählt jedes Öffnen. Das Fenster wird nur versteckt, die Seite bleibt
    *  geladen — ohne diesen Schlüssel liefe das Licht um das Dock (`cb-dock`)
@@ -164,7 +197,11 @@ export function Console() {
   const loadClips = useCallback(async () => {
     if (!inTauri) return;
     try {
-      setClips((await api.listClips()).slice(0, RECENT));
+      // Die ganze Liste kommt ohnehin über die Brücke; die Zählung für den
+      // Statusblock kostet deshalb nichts extra und braucht kein Backend.
+      const all = await api.listClips();
+      setClips(all.slice(0, RECENT));
+      setToday(clipsToday(all));
     } catch (err) {
       say(String(err));
     }
@@ -389,6 +426,17 @@ export function Console() {
 
   const buffered = status.bufferActive ? status.bufferedSeconds : 0;
   const share = Math.min(1, buffered / bufferLength);
+
+  /** Die Sitzungszeile unter dem Spielnamen. Jedes Stück fällt für sich weg,
+   *  wenn es nichts zu sagen hat: kein Spiel keine Spielzeit, kein Clip keine
+   *  Zählung, kein lesbares Laufwerk kein freier Platz. */
+  const session = [
+    status.gameSeconds !== null ? sessionTime(status.gameSeconds) : null,
+    today > 0 ? `${today} ${today === 1 ? "Clip" : "Clips"} heute` : null,
+    status.freeBytes !== null ? `${formatSize(status.freeBytes)} frei` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   /** Was gerade schiefläuft, für den Streifen über dem Dock. */
   const trouble = troubles({
@@ -802,6 +850,14 @@ export function Console() {
               <span className="truncate text-xs text-ink-muted">
                 {status.game ?? "Kein Spiel erkannt"}
               </span>
+              {/* Die Sitzung, direkt unter dem Spielnamen (k04). Sie steht nur
+                  da, wenn es etwas zu sagen gibt — eine Zeile, die „—" oder
+                  „0 Clips" behauptet, nähme dem Statusblock nur Ruhe. */}
+              {session && (
+                <span className="cb-session truncate text-[11px] text-ink-faint">
+                  {session}
+                </span>
+              )}
             </div>
 
             <span className="cb-sep my-2 w-px bg-accent-bright/35" />
