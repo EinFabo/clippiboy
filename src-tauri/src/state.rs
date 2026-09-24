@@ -28,6 +28,13 @@ pub struct AppState {
     pub shared: Mutex<Option<Arc<Shared>>>,
     /// Foreground game last detected, updated continuously.
     pub current_game: Mutex<Option<String>>,
+    /// The name that goes with the bound process, kept while the game is not
+    /// in the foreground.
+    ///
+    /// Detection only ever looks at the foreground window, so the name fell
+    /// away the moment the console over the game opened — and that is precisely
+    /// when somebody wants to read it.
+    bound_game: Mutex<Option<String>>,
     /// When the running game was first bound — the start of the session the
     /// console shows under its name.
     ///
@@ -291,6 +298,7 @@ impl AppState {
             pipeline: Mutex::new(None),
             shared: Mutex::new(None),
             current_game: Mutex::new(None),
+            bound_game: Mutex::new(None),
             game_since: Mutex::new(None),
             free_bytes: std::sync::atomic::AtomicU64::new(0),
             game_pid: Mutex::new(None),
@@ -567,11 +575,6 @@ impl AppState {
                 *previous = name.clone();
             }
         }
-        *self.current_game.lock() = name.clone();
-        if name.is_some() && (self.status.lock().buffer_active || self.is_recording()) {
-            *self.buffering_game.lock() = name.clone();
-        }
-
         // The binding outlives the detection: leaving the game for the browser
         // must not silence the game track. Only the end of the process releases
         // it — and the exe has to still match, because Windows reuses PIDs.
@@ -598,7 +601,34 @@ impl AppState {
             // ist eine neue Sitzung.
             *self.game_since.lock() = now.map(|_| std::time::Instant::now());
         }
-        (name, now != before)
+        // `now` ist kopiert, die Bindung wird ab hier nicht mehr gebraucht. Sie
+        // fährt bewusst herunter, bevor unten `status` genommen wird: zwei
+        // Schlösser in wechselnder Reihenfolge sind die Art von Fehler, die
+        // erst nach Monaten einmal zuschlägt.
+        drop(bound);
+        // Der Name folgt derselben Bindung wie der Ton, und aus demselben
+        // Grund: die Erkennung sieht immer nur das Fenster im Vordergrund.
+        //
+        // Sobald die Konsole aufgeht, ist das die Konsole — der Spielname fiel
+        // also genau in dem Moment weg, in dem man ihn ablesen wollte, und die
+        // Sitzungsuhr mit ihm. Dasselbe beim Blick in den Browser. Solange der
+        // Prozess läuft, wird gespielt; die Erkennung ergänzt den Namen, sie
+        // entzieht ihn nicht.
+        {
+            let mut held = self.bound_game.lock();
+            match (&name, now) {
+                (Some(_), _) => *held = name.clone(),
+                (None, None) => *held = None,
+                // Gebunden, aber gerade nicht im Vordergrund: den Namen behalten.
+                (None, Some(_)) => {}
+            }
+        }
+        let held = self.bound_game.lock().clone();
+        *self.current_game.lock() = held.clone();
+        if held.is_some() && (self.status.lock().buffer_active || self.is_recording()) {
+            *self.buffering_game.lock() = held.clone();
+        }
+        (held, now != before)
     }
 
     /// Carry the running recording's current metrics into the status.

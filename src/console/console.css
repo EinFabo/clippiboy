@@ -844,6 +844,10 @@ body,
    weiter — was richtig ist, er ist dann ja selbst größer. */
 .cb-ui[data-style="radial"] {
   --ring-shift: 0px;
+  /* Wie lange der Ring zum Gehen braucht, wenn ein Clip anläuft — und wie
+     lange der Player darauf wartet. Eine Zahl für beides, siehe `.cb-stage`
+     weiter unten. */
+  --ring-exit: 100ms;
   /* Der Warnstreifen hängt hier über dem Ring in der Bildmitte, die Notiz
      steht nach wie vor unten — die beiden kommen sich also gar nicht in die
      Quere, und der Versatz von oben wäre nur ein grundloser Sprung.
@@ -882,9 +886,14 @@ body,
   }
 }
 
+/* 440 und nicht mehr 400. Ein Knopf ist 84 × 80 und durch `border-radius: 999px`
+   praktisch ein Kreis von 40 Radius; auf einer Bahn von 148 kam seine Innenkante
+   damit auf 108 — und der Trennring liegt bei 102 bis 104. Vier Pixel, das las
+   sich als „die Knöpfe gucken über den Ring". Jetzt liegt die Bahn bei 162: 18
+   Pixel Luft nach innen zum Trennring, 18 nach außen zum Rand des Docks. */
 .cb-ui[data-style="radial"] .cb-dock {
-  width: 400px;
-  height: 400px;
+  width: 440px;
+  height: 440px;
   border-radius: 50%;
   padding: 0;
   display: block;
@@ -956,8 +965,8 @@ body,
    Es waren einmal fünf, gleichmäßig auf 72 Grad verteilt. Mit dem Ton-Panel
    kam ein sechster dazu, und der hätte ohne eigene Stelle in der Mitte
    gelegen, über dem Puffer-Stand — der Kreis muss also mitwachsen, nicht nur
-   die Liste. Wer einen siebten hinzufügt, rechnet hier neu: `x = 148·sin α`,
-   `y = −148·cos α`, α in gleichen Schritten. */
+   die Liste. Wer einen siebten hinzufügt, rechnet hier neu: `x = 162·sin α`,
+   `y = −162·cos α`, α in gleichen Schritten. */
 .cb-ui[data-style="radial"] .cb-dock-btn {
   position: absolute;
   left: 50%;
@@ -966,27 +975,27 @@ body,
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(1) {
-  translate: 0 -148px;
+  translate: 0 -162px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(2) {
-  translate: 128px -74px;
+  translate: 140px -81px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(3) {
-  translate: 128px 74px;
+  translate: 140px 81px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(4) {
-  translate: 0 148px;
+  translate: 0 162px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(5) {
-  translate: -128px 74px;
+  translate: -140px 81px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(6) {
-  translate: -128px -74px;
+  translate: -140px -81px;
 }
 
 /* Der Hub beim Überfahren geht in `translate`, nicht in `transform` — der
@@ -1106,16 +1115,55 @@ body,
    `cb-radial-in`, der Ring dreht sich also herein, wie er gekommen ist. */
 .cb-ui[data-style="radial"][data-playing="true"] .cb-rise,
 .cb-ui[data-style="radial"][data-playing="true"] .cb-dock-line {
-  animation: cb-fade-out 160ms ease-in both;
+  animation: cb-fade-out var(--ring-exit) ease-in both;
   pointer-events: none;
+}
+
+/* Nacheinander, nicht gleichzeitig.
+ *
+ * Der Ring und der Player nehmen dieselbe Mitte. Beide fingen bisher im selben
+ * Bild an — der Player stand sofort da, der Ring brauchte seine Zeit zum Gehen,
+ * und für ein paar Bilder lag er mitten auf dem Video. Von Fabi im Spiel
+ * gefunden: „er ist für ein paar Frames noch da".
+ *
+ * Also erst der eine hinaus, dann der andere herein. Die Wartezeit des Players
+ * ist genau die Gehzeit des Rings, beide aus `--ring-exit` — eine Zahl, zwei
+ * Regeln, damit sie nicht auseinanderlaufen können. Sie steht oben bei
+ * `--ring-shift`, wo die Maße dieses Stils zusammenliegen, und ist kürzer als
+ * die üblichen 160 ms: hier steht sie vor einer Wartezeit, und was man wartet,
+ * merkt man. */
+.cb-ui[data-style="radial"] .cb-stage {
+  animation: cb-stage-in 160ms var(--ease-entrance) var(--ring-exit) both;
+}
+
+/* `both` ist hier das Tragende und nicht die Kür: es hält den Anfangswert
+   während der Wartezeit fest. Ohne das stünde der Player die ersten 100 ms
+   voll sichtbar da — also genau in dem Fenster, das die Wartezeit schließen
+   soll. */
+@keyframes cb-stage-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .cb-ui[data-style="radial"] .cb-rise,
   .cb-ui[data-style="radial"] .cb-dock[data-leaving="true"],
   .cb-ui[data-style="radial"] .cb-sheet-pos,
-  .cb-ui[data-style="radial"] .cb-sheet[data-leaving="true"] {
+  .cb-ui[data-style="radial"] .cb-sheet[data-leaving="true"],
+  .cb-ui[data-style="radial"] .cb-stage {
     animation: none;
+  }
+  /* Ohne Animation geht der Ring sofort, der Player kommt sofort — die
+     Überlappung, gegen die die Staffelung gebaut ist, gibt es dann gar nicht.
+     Die Wartezeit bliebe aber als Loch stehen, also muss sie hier mit weg. */
+  .cb-ui[data-style="radial"] {
+    --ring-exit: 0ms;
   }
   /* Der Weg zur Seite bleibt — er schafft Platz, das ist keine Zierde —, aber
      er wird gegangen statt vorgeführt. */

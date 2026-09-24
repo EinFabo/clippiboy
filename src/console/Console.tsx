@@ -1087,7 +1087,7 @@ function ClipStage({
       // `inset + 2rem` und ist gut fünf Zeilen hoch. Mit den 12rem von früher
       // wurde die Karte in einem Kasten zentriert, dessen untere Kante viel zu
       // hoch lag, und stand entsprechend zu weit oben.
-      className="absolute inset-x-0 top-0 bottom-[calc(var(--inset,0px)+8rem)] grid place-items-center p-6"
+      className="cb-stage absolute inset-x-0 top-0 bottom-[calc(var(--inset,0px)+8rem)] grid place-items-center p-6"
     >
       {/* Die Karte nimmt die ganze Höhe und teilt sie auf: das Bild bekommt,
           was Leiste und Namenszeile übrig lassen. Kein `vh` mehr — `.cb-ui`
