@@ -56,8 +56,19 @@ fn main() {
 }
 
 /// Where the report goes: the desktop, or beside the program if there is none.
+///
+/// Windows is asked rather than `%USERPROFILE%\Desktop` being assumed. With
+/// OneDrive the desktop is redirected — `C:\Users\x\OneDrive\Desktop` —
+/// and the old folder stays behind, empty and never opened. A report written
+/// there is a report nobody finds; that happened on the first machine this ran
+/// on.
 fn destination() -> PathBuf {
     let name = "clippiboy-bericht.txt";
+    let asked = powershell("[Environment]::GetFolderPath('Desktop')");
+    let asked = PathBuf::from(asked.trim());
+    if asked.is_dir() {
+        return asked.join(name);
+    }
     if let Some(desktop) = std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("Desktop"))
     {
         if desktop.is_dir() {
