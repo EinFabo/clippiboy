@@ -739,14 +739,20 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-/// Is anybody looking at the main window?
+/// Is anybody looking at this window?
 ///
-/// While a game runs it is normally closed to the tray, and a hidden window has
-/// no use for twenty level readings a second. It costs more than it sounds: each
-/// one crosses into the webview, is parsed, and puts the mixer's bars through
-/// another round — on the same machine that is meant to be encoding.
-fn main_window_awake(app: &tauri::AppHandle) -> bool {
-    let Some(window) = app.get_webview_window("main") else {
+/// While a game runs the main window is normally closed to the tray, and a
+/// hidden window has no use for twenty level readings a second. It costs more
+/// than it sounds: each one crosses into the webview, is parsed, and puts the
+/// mixer's bars through another round — on the same machine that is meant to be
+/// encoding.
+///
+/// The console over the game is asked the same question, for the same reason
+/// and with one difference that matters: it is never destroyed, only hidden
+/// (`console::close`). Its mere existence therefore says nothing about whether
+/// anybody can see it — only `is_visible` does.
+fn window_awake(app: &tauri::AppHandle, label: &str) -> bool {
+    let Some(window) = app.get_webview_window(label) else {
         return false;
     };
     window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false)
@@ -763,14 +769,25 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             let sources = state.config_snapshot().sources;
             // Only worked out when somebody can see them. Reading the levels is
             // cheap; the trip into the webview twenty times a second is not, and
-            // the two overlays never wanted them at all — hence `emit_to` rather
-            // than the broadcast this used to be.
-            let watched = main_window_awake(&handle);
+            // the banner never wanted them at all — hence `emit_to` rather than
+            // the broadcast this used to be.
+            let watched = window_awake(&handle, "main");
+            // Das Ton-Panel der Konsole zeigt dieselben Pegel. Es ist der eine
+            // Ort, an dem man sie mitten im Spiel braucht — und der einzige
+            // Grund, warum der Strom überhaupt ein zweites Ziel bekommt. Er
+            // hängt an der Sichtbarkeit: steht die Konsole nur versteckt
+            // herum, hört ihr niemand zu, und zwanzig Pakete die Sekunde in
+            // ein unsichtbares Fenster sind genau der Aufwand, den `emit_to`
+            // hier vermeiden soll.
+            let console_watched = window_awake(&handle, console::LABEL);
             let logging = std::env::var("CLIPPIBOY_LOG_LEVELS").is_ok();
-            if watched || logging {
+            if watched || console_watched || logging {
                 let levels = state.audio.levels(&sources);
                 if watched {
                     let _ = handle.emit_to("main", "audio-levels", &levels);
+                }
+                if console_watched {
+                    let _ = handle.emit_to(console::LABEL, "audio-levels", &levels);
                 }
                 // Diagnostics: with CLIPPIBOY_LOG_LEVELS=1 the levels get logged.
                 if tick % 20 == 0 && logging {

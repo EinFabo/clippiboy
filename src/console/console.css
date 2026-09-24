@@ -639,6 +639,20 @@ body,
   transform: scale(1.06);
 }
 
+/* --- Die Pegel im Ton-Panel (k09) ---------------------------------------- */
+
+/* Grün, solange Ton ankommt, und violett, wo es laut wird — derselbe Verlauf
+   wie im Mischer der App, nur schmaler. Die Breite schreibt der Pegelstrom
+   direkt in den DOM (siehe `Audio.tsx`), hier steht nur, wie der Balken
+   aussieht.
+
+   Kein `transition` auf die Breite: der Wert kommt zwanzigmal die Sekunde,
+   eine Überblendung darüber hinkte immer hinterher und machte aus einem
+   Pegel eine Trägheitsanzeige. */
+.cb-level-fill {
+  background: linear-gradient(90deg, #34d399, var(--color-accent-bright));
+}
+
 /* --- Der Verlauf im Leistungs-Panel (k07) -------------------------------- */
 
 /* Eine Kachel zeigt den Moment; ein Einbruch ist vorbei, bevor man hinsieht.
@@ -925,10 +939,16 @@ body,
   display: none;
 }
 
-/* Die fünf Knöpfe auf den Kreis. `nth-of-type` zählt nur die `button` unter
-   den Geschwistern — der Statusblock ist ein `div`, die Trennstriche sind
-   `span`, die stören also nicht. Die Reihenfolge ist die im Markup: Clip,
-   Aufnahme, Screenshot, Clips, Leistung. */
+/* Die sechs Knöpfe auf den Kreis, alle 60 Grad einer. `nth-of-type` zählt nur
+   die `button` unter den Geschwistern — der Statusblock ist ein `div`, die
+   Trennstriche sind `span`, die stören also nicht. Die Reihenfolge ist die im
+   Markup: Clip, Aufnahme, Screenshot, Clips, Ton, Leistung.
+
+   Es waren einmal fünf, gleichmäßig auf 72 Grad verteilt. Mit dem Ton-Panel
+   kam ein sechster dazu, und der hätte ohne eigene Stelle in der Mitte
+   gelegen, über dem Puffer-Stand — der Kreis muss also mitwachsen, nicht nur
+   die Liste. Wer einen siebten hinzufügt, rechnet hier neu: `x = 148·sin α`,
+   `y = −148·cos α`, α in gleichen Schritten. */
 .cb-ui[data-style="radial"] .cb-dock-btn {
   position: absolute;
   left: 50%;
@@ -941,19 +961,23 @@ body,
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(2) {
-  translate: 141px -46px;
+  translate: 128px -74px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(3) {
-  translate: 87px 120px;
+  translate: 128px 74px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(4) {
-  translate: -87px 120px;
+  translate: 0 148px;
 }
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(5) {
-  translate: -141px -46px;
+  translate: -128px 74px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(6) {
+  translate: -128px -74px;
 }
 
 /* Der Hub beim Überfahren geht in `translate`, nicht in `transform` — der

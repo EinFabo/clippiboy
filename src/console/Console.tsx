@@ -7,6 +7,7 @@ import { cn } from "@/lib/cn";
 import { mockClips, mockConfig } from "@/lib/mock";
 import {
   IconArrowUpRight,
+  IconAudio,
   IconCamera,
   IconClips,
   IconCopy,
@@ -27,6 +28,7 @@ import {
   clock,
   jump,
 } from "@/components/ui/PlayerControls";
+import { AudioPanel, useLevelBars } from "./Audio";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
 
@@ -58,7 +60,7 @@ const RESTING: EngineStatus = {
   screenFallback: null,
 };
 
-type Panel = "clips" | "perf" | null;
+type Panel = "clips" | "audio" | "perf" | null;
 
 /**
  * The console over the game.
@@ -139,6 +141,9 @@ export function Console() {
   const trend = useTrend(targetFps);
   const trendPush = trend.push;
   const { errors: sourceErrors, warnings: sourceWarnings } = useAudioTrouble();
+  /** Die Pegelbalken des Ton-Panels. Sie werden an React vorbei gezeichnet —
+   *  warum, steht in `Audio.tsx`. */
+  const levelBars = useLevelBars();
 
   /** Der laufende Clip, wie er zuletzt aus der Liste kam. Die Liste hält nur
    *  die letzten sechs: wird während des Zusehens einer gespeichert, fällt der
@@ -347,6 +352,41 @@ export function Console() {
       say("Screenshot gespeichert");
     });
 
+  /** Eine Tonquelle ändern: lauter, leiser, stumm.
+   *
+   *  Die Anzeige folgt sofort, der Kern mit einer kurzen Bremse. Der Grund
+   *  steht in `state.rs`: `upsert_source` geht über `replace_config`, und das
+   *  richtet die Tonquellen neu aus **und** schreibt die Konfiguration auf die
+   *  Platte. Am Regler gezogen wären das zwanzig Plattenschreiber die Sekunde,
+   *  über einem laufenden Spiel. Das Stummschalten ist ein einzelner Klick und
+   *  geht ohne Bremse durch — dort soll nichts hinterherhinken.
+   *
+   *  Je Quelle eine eigene Bremse, nicht eine gemeinsame: sonst verschluckte
+   *  ein Griff an der zweiten Quelle den noch ausstehenden Stand der ersten.
+   *
+   *  Was der Kern zurückgibt, wird bewusst **nicht** übernommen. Solange die
+   *  Konsole offen ist, kommt jede Änderung von hier, und beim nächsten Öffnen
+   *  liest sie die Konfiguration ohnehin frisch. Das Zurückschreiben hätte nur
+   *  die Chance eröffnet, dass ein verspätetes Ergebnis einen neueren Reglerweg
+   *  wieder einkassiert. */
+  const sourceTimers = useRef(new Map<string, number>());
+  const changeSource = useCallback(
+    (next: AudioSource, now = false) => {
+      setSources((prev) => prev.map((s) => (s.id === next.id ? next : s)));
+      if (!inTauri) return;
+      const timers = sourceTimers.current;
+      const running = timers.get(next.id);
+      if (running) window.clearTimeout(running);
+      const send = () => {
+        timers.delete(next.id);
+        void api.updateAudioSource(next).catch((err) => say(String(err)));
+      };
+      if (now) send();
+      else timers.set(next.id, window.setTimeout(send, 150));
+    },
+    [say],
+  );
+
   const buffered = status.bufferActive ? status.bufferedSeconds : 0;
   const share = Math.min(1, buffered / bufferLength);
 
@@ -530,6 +570,14 @@ export function Console() {
             ))}
           </div>
         )}
+      </Sheet>
+    ) : which === "audio" ? (
+      <Sheet
+        title="Ton"
+        hint="Gilt ab dem nächsten Clip"
+        leaving={leaving}
+      >
+        <AudioPanel sources={sources} bars={levelBars} onChange={changeSource} />
       </Sheet>
     ) : (
       <Sheet
@@ -788,6 +836,13 @@ export function Console() {
               onClick={() => (panel === "clips" ? back() : void show("clips"))}
             >
               <IconClips className="h-6 w-6" />
+            </DockButton>
+            <DockButton
+              label="Ton"
+              active={panel === "audio"}
+              onClick={() => (panel === "audio" ? back() : void show("audio"))}
+            >
+              <IconAudio className="h-6 w-6" />
             </DockButton>
             <DockButton
               label="Leistung"
