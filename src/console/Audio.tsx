@@ -148,8 +148,11 @@ function Row({
         onClick={() => onChange({ ...source, muted: !source.muted }, true)}
         aria-pressed={source.muted}
         title={source.muted ? "Wieder aufnehmen" : "Stumm — kommt nicht in den Clip"}
+        // `cb-btn` und nicht `cb-tool`: die kleinen Werkzeuge werden im
+        // Ring-Stil kreisrund, und aus einer Pille mit Beschriftung würde
+        // dabei eine Ellipse.
         className={cn(
-          "cb-tool h-7 w-10 shrink-0 rounded-pill border text-[11px] font-bold",
+          "cb-btn h-7 w-10 shrink-0 rounded-pill border text-[11px] font-bold",
           source.muted
             ? "border-live/60 bg-live/15 text-live"
             : "border-line bg-elevated text-ink-muted hover:border-accent hover:text-accent-bright",
