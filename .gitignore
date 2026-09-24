@@ -4,6 +4,7 @@ dist/
 # Das Diagnose-Paket aus `npm run probe` — enthält eine gebaute Exe.
 probe-package/
 src-tauri/target/
+tools/report/target/
 
 # Wird von `npm run ffmpeg` geholt — zwei Dateien à 100 MB gehören nicht ins Repo.
 # `src-tauri/resources/` stammt noch aus der Zeit, als ffmpeg im Installer lag.

@@ -11,6 +11,7 @@
     "app": "tauri dev",
     "ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "probe": "node scripts/make-probe.mjs",
+    "report": "cargo build --release --manifest-path tools/report/Cargo.toml",
     "app:build": "tauri build"
   },
   "dependencies": {

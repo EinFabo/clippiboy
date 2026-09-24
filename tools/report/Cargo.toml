@@ -1,0 +1,19 @@
+[package]
+name = "clippiboy-report"
+version = "0.1.0"
+edition = "2021"
+description = "Collects everything needed to diagnose a ClippiBoy problem into one file."
+
+# No dependencies on purpose: this has to build in seconds on any machine, and
+# it must not drag the app's own tree along. What cannot be read from a file is
+# asked of PowerShell.
+[dependencies]
+
+[[bin]]
+name = "clippiboy-report"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
