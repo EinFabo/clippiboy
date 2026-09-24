@@ -1,7 +1,8 @@
 # ClippiBoy for Stream Deck
 
-Three keys — save a clip, take a screenshot, switch the replay buffer — that show
-what ClippiBoy is doing rather than only poking at it.
+Four keys — save a clip, take a screenshot, switch the replay buffer, start and
+stop a recording — that show what ClippiBoy is doing rather than only poking at
+it.
 
 For users there is nothing to build: the finished
 `com.einfabo.clippiboy.streamDeckPlugin` hangs at every

@@ -64,6 +64,6 @@ if ($wasRunning) {
 }
 
 Write-Host ""
-Write-Host "Done. The three keys are under 'ClippiBoy' in the action list."
+Write-Host "Done. The four keys are under 'ClippiBoy' in the action list."
 Write-Host "They show a dash until ClippiBoy itself is running with the control"
 Write-Host "port switched on (Settings -> Stream Deck)."

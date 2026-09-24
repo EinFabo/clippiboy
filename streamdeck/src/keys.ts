@@ -6,10 +6,10 @@ import { clippiboy, type Status } from "./client.js";
 /**
  * A key that keeps itself in step with ClippiBoy.
  *
- * Every one of the three keys does the same two things: watch the status while
+ * Every one of the four keys does the same two things: watch the status while
  * it is visible, and drop the watch when it goes away — a key on a page nobody
  * is looking at must not keep the poller alive. Only [`draw`] and what happens
- * on a press differ, so that is all the three subclasses fill in.
+ * on a press differ, so that is all the four subclasses fill in.
  */
 export abstract class ClippiBoyKey extends SingletonAction {
 	/** One unwatch function per visible key instance. */
