@@ -145,6 +145,22 @@ body,
   --con-mark: var(--color-accent-bright);
 
   --con-tile-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
+
+  /* Der Warnstreifen über dem Dock. Gelb heißt „stimmt nicht", Rot heißt „im
+     Clip wird etwas fehlen". Beide Flächen sind in die Dock-Farbe gemischt und
+     nicht darübergelegt: der Streifen gehört zur Leiste und soll nicht wie ein
+     fremdes Schild über dem Spiel liegen. */
+  --con-warn: color-mix(in oklab, var(--color-warn) 22%, var(--con-dock-bottom));
+  --con-warn-line: color-mix(in oklab, var(--color-warn) 45%, transparent);
+  --con-warn-ink: #ffd79a;
+  --con-bad: color-mix(in oklab, var(--color-live) 22%, var(--con-dock-bottom));
+  --con-bad-line: color-mix(in oklab, var(--color-live) 45%, transparent);
+  --con-bad-ink: #ffc4c4;
+
+  /* Die Kurve im Leistungs-Panel. */
+  --con-trend: var(--color-accent-bright);
+  --con-trend-target: rgb(255 255 255 / 0.14);
+  --con-trend-drop: var(--color-live);
 }
 
 /* Panels arrive from the dock rather than fading in on the spot: the dock is
@@ -418,6 +434,91 @@ body,
   animation-play-state: paused;
 }
 
+/* --- Der Warnstreifen über dem Dock (k02) -------------------------------- */
+
+/* Was schiefläuft, steht da, wo man ohnehin hinsieht: direkt über dem Dock.
+   Im selben Kasten wie das Dock (`.cb-rise`) und über ihm ausgehängt — damit
+   geht er jeden Weg mit, den das Dock geht, ohne dass einer der drei Stile
+   eine eigene Regel dafür braucht. Auch der Ring, der mitten im Bild steht.
+
+   `.cb-rise` schrumpft um sein Kind, ist also genau so breit wie das Dock. Der
+   Streifen ist meistens breiter und wächst deshalb nach beiden Seiten aus ihm
+   heraus — zentriert bleibt er trotzdem, weil er von der Mitte aus gesetzt
+   wird. */
+.cb-warn {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  translate: -50% 0;
+  margin-bottom: 10px;
+  /* Geteilt durch den Zoom, wie bei `.cb-cap`: `zoom` multipliziert jede Länge
+     noch einmal mit sich, und bei Größe 1,6 stünde der Streifen sonst breiter
+     als der Bildschirm. */
+  max-width: calc(64vw / var(--cb-scale, 1));
+  width: max-content;
+  display: grid;
+  gap: 2px;
+  padding: 7px 14px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--con-warn-ink);
+  background: var(--con-warn);
+  box-shadow:
+    inset 0 0 0 1px var(--con-warn-line),
+    var(--con-dock-shadow);
+  /* Er kommt nicht mit dem Dock herein, sondern für sich — meistens taucht er
+     ja auf, während die Konsole längst offen ist. */
+  animation: cb-note-in 220ms var(--ease-spring) both;
+}
+
+.cb-warn[data-severe="true"] {
+  color: var(--con-bad-ink);
+  background: var(--con-bad);
+  box-shadow:
+    inset 0 0 0 1px var(--con-bad-line),
+    var(--con-dock-shadow);
+}
+
+/* Eine lange Meldung des Kerns soll den Streifen nicht zur Wand machen. Zwei
+   Zeilen je Meldung sind die Grenze; wer mehr wissen will, sieht im Fenster
+   nach — dort steht dieselbe Meldung ungekürzt. */
+.cb-warn-line {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.cb-warn-rest {
+  opacity: 0.75;
+}
+
+/* Anhalten, nicht abbrechen — die Hausregel für den Weg hinaus. Der Streifen
+   liegt in `.cb-rise`, der dort schon anhält; seine eigene Animation muss
+   mit, sonst schwebt er weiter, während um ihn herum alles steht. */
+.cb-rise[data-leaving="true"] .cb-warn {
+  animation-play-state: paused;
+}
+
+/* Der Platz, den der Streifen der Notifikation darüber wegnimmt. `Console.tsx`
+   setzt `data-warn` auf die Zahl der Zeilen, und die Notiz („Clip
+   gespeichert") rückt um genau so viel nach oben. Eine gemessene Höhe wäre
+   genauer, kostete aber einen Layout-Durchgang pro Bild über einem laufenden
+   Spiel — die drei Stufen hier reichen, weil es nur drei Zeilen geben kann. */
+.cb-ui[data-warn="1"] {
+  --warn-lift: 2.6rem;
+}
+
+.cb-ui[data-warn="2"] {
+  --warn-lift: 4.2rem;
+}
+
+.cb-ui[data-warn="3"] {
+  --warn-lift: 5.8rem;
+}
+
 /* --- The dock's buttons -------------------------------------------------- */
 
 /* What the mouse gets back. Three things at once, because one of them alone
@@ -538,6 +639,50 @@ body,
   transform: scale(1.06);
 }
 
+/* --- Der Verlauf im Leistungs-Panel (k07) -------------------------------- */
+
+/* Eine Kachel zeigt den Moment; ein Einbruch ist vorbei, bevor man hinsieht.
+   Die Kurve zeigt dieselbe Zahl über eine Minute — mehr Achsen braucht sie
+   nicht, die Zahlen stehen direkt darunter. */
+.cb-trend-box {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-inner);
+  background: rgb(0 0 0 / 0.25);
+  padding: 10px 12px 8px;
+}
+
+/* Voll in die Breite gezogen, denn die Zeit ist hier die einzige Achse, die
+   Platz braucht. Die Höhe ist fest: 56 Pixel reichen, um einen Einbruch zu
+   sehen, und mehr nähme den Kacheln den Platz. */
+.cb-trend {
+  display: block;
+  width: 100%;
+  height: 56px;
+}
+
+/* `preserveAspectRatio="none"` streckt das Koordinatensystem — die Striche
+   dürfen davon nichts mitbekommen, sonst wäre die Linie waagerecht dick und
+   senkrecht dünn. Das erledigt `vector-effect` im Markup; hier steht nur, wie
+   dick und in welcher Farbe. */
+.cb-trend-line {
+  stroke: var(--con-trend);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cb-trend-target {
+  stroke: var(--con-trend-target);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.cb-trend-drop {
+  stroke: var(--con-trend-drop);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
 /* --- The note ------------------------------------------------------------ */
 
 /* "Clip gespeichert" and the like. It used to appear and vanish on the spot;
@@ -576,6 +721,7 @@ body,
   .cb-glow,
   .cb-glow[data-leaving="true"],
   .cb-note,
+  .cb-warn,
   .cb-dock-btn[aria-pressed="true"]::after {
     animation: none;
   }
@@ -684,6 +830,12 @@ body,
    weiter — was richtig ist, er ist dann ja selbst größer. */
 .cb-ui[data-style="radial"] {
   --ring-shift: 0px;
+  /* Der Warnstreifen hängt hier über dem Ring in der Bildmitte, die Notiz
+     steht nach wie vor unten — die beiden kommen sich also gar nicht in die
+     Quere, und der Versatz von oben wäre nur ein grundloser Sprung.
+     Gleich spezifisch wie `.cb-ui[data-warn="…"]`, und weil diese Regel
+     später steht, gewinnt sie. */
+  --warn-lift: 0px;
 }
 
 .cb-ui[data-style="radial"][data-panel="open"] {

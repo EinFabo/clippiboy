@@ -2,9 +2,9 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
-import type { Clip, ConsoleStyle, EngineStatus } from "@/lib/types";
+import type { AudioSource, Clip, ConsoleStyle, EngineStatus } from "@/lib/types";
 import { cn } from "@/lib/cn";
-import { mockClips } from "@/lib/mock";
+import { mockClips, mockConfig } from "@/lib/mock";
 import {
   IconArrowUpRight,
   IconCamera,
@@ -27,6 +27,8 @@ import {
   clock,
   jump,
 } from "@/components/ui/PlayerControls";
+import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
+import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
 
 /** How many clips the strip shows. Beyond that the window in the app is the
  *  better place — this is meant to be read at a glance mid-game. */
@@ -77,6 +79,10 @@ export function Console() {
   const [scale, setScale] = useState(1);
   const [bottomInset, setBottomInset] = useState(0);
   const [clips, setClips] = useState<Clip[]>(inTauri ? [] : mockClips.slice(0, RECENT));
+  /** Die eingestellten Tonquellen — allein für den Warnstreifen. Der Kern
+   *  meldet Fehler und Auffälligkeiten je Quellen-Id, und einen Namen dazu hat
+   *  nur die Konfiguration. */
+  const [sources, setSources] = useState<AudioSource[]>(inTauri ? [] : mockConfig.sources);
   const [panel, setPanel] = useState<Panel>(null);
   /** Zählt jedes Öffnen. Das Fenster wird nur versteckt, die Seite bleibt
    *  geladen — ohne diesen Schlüssel liefe das Licht um das Dock (`cb-dock`)
@@ -124,6 +130,15 @@ export function Console() {
    *  Grund: das Fenster steht schon, wenn die Seite es erfährt, und ein Dock,
    *  das sich nach dem Aufgehen noch umbaut, hätte man gesehen. */
   const [style, setStyle] = useState<ConsoleStyle>("dock");
+
+  /** Der Verlauf der letzten Minute (k07) und was der Kern gerade an Meldungen
+   *  schickt (k02). Beide sammeln auch dann weiter, wenn die Konsole zu ist —
+   *  das Fenster lebt ja, und die Ereignisse gehen an jedes. Genau darauf kommt
+   *  es an: man macht die Konsole auf, *weil* eben etwas geruckelt hat, und
+   *  findet den Einbruch dann noch vor. */
+  const trend = useTrend(targetFps);
+  const trendPush = trend.push;
+  const { errors: sourceErrors, warnings: sourceWarnings } = useAudioTrouble();
 
   /** Der laufende Clip, wie er zuletzt aus der Liste kam. Die Liste hält nur
    *  die letzten sechs: wird während des Zusehens einer gespeichert, fällt der
@@ -174,10 +189,15 @@ export function Console() {
         setTargetFps(config.recording.fps);
         setScale(config.consoleScale);
         setInCapture(config.consoleInCapture);
+        setSources(config.sources);
       })
       .catch(() => {});
     const offs = [
-      listen<EngineStatus>("engine-status", (e) => setStatus(e.payload)),
+      listen<EngineStatus>("engine-status", (e) => {
+        setStatus(e.payload);
+        // Im selben Zuhörer, damit beide Änderungen in einem Rendern landen.
+        trendPush(e.payload);
+      }),
       listen<Clip>("clip-saved", () => void loadClips()),
       // Gone from the screen — alt-tabbed away, or the game took the focus
       // back. It comes back as it opens, so everything standing goes now.
@@ -240,6 +260,7 @@ export function Console() {
               setBufferLength(Math.max(1, config.buffer.seconds));
               setTargetFps(config.recording.fps);
               setInCapture(config.consoleInCapture);
+              setSources(config.sources);
             })
             .catch(() => {});
         },
@@ -248,7 +269,7 @@ export function Console() {
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));
     };
-  }, [loadClips]);
+  }, [loadClips, trendPush]);
 
   /** Open something above the dock — a panel, or the player. The window is the
    *  screen and never changes size, so this is nothing but state. */
@@ -328,6 +349,30 @@ export function Console() {
 
   const buffered = status.bufferActive ? status.bufferedSeconds : 0;
   const share = Math.min(1, buffered / bufferLength);
+
+  /** Was gerade schiefläuft, für den Streifen über dem Dock. */
+  const trouble = troubles({
+    status,
+    sources,
+    errors: sourceErrors,
+    warnings: sourceWarnings,
+    droppedRecently: trend.dropped,
+  });
+
+  /** Die Zeile unter der Bildrate. Sie sagt nicht mehr nur, wie es *jetzt*
+   *  steht, sondern wann es zuletzt nicht so stand — dafür ist der Verlauf da. */
+  const fpsHint = () => {
+    if (!status.bufferActive) return "Puffer aus";
+    if (trend.dipAgo === 0) return `von ${targetFps} · bricht gerade ein`;
+    if (trend.dipAgo !== null) return `von ${targetFps} · Einbruch vor ${trend.dipAgo} s`;
+    // „gemessen" allein stand hier und las sich wie „so schnell läuft deine
+    // Aufnahme". Gemeint ist etwas anderes: wie oft sich das Bild wirklich
+    // geändert hat. Die Aufnahme läuft immer auf der eingestellten Rate — steht
+    // das Bild still, wiederholt die Pipeline das letzte, und genau die fehlen.
+    return status.fps >= targetFps - 1
+      ? `von ${targetFps} · volles Bild`
+      : `von ${targetFps} · Bild stand still`;
+  };
 
   /** Ein Panel, wie es über dem Dock steht.
    *
@@ -487,29 +532,44 @@ export function Console() {
         )}
       </Sheet>
     ) : (
-      <Sheet title="Leistung" hint="Was die Aufnahme gerade kostet" leaving={leaving}>
+      <Sheet
+        title="Leistung"
+        hint={`Die letzten ${TREND_SECONDS} Sekunden`}
+        leaving={leaving}
+      >
+        {/* Der Verlauf steht über den Zahlen, nicht darunter: er beantwortet
+            die Frage, mit der man das Panel aufmacht — war da eben was? Die
+            Kacheln sagen dann, was es war. */}
+        {trend.samples.length > 1 ? (
+          <figure className="cb-trend-box mb-3">
+            <TrendChart samples={trend.samples} targetFps={targetFps} />
+            <figcaption className="mt-1 flex justify-between text-[11px] text-ink-faint">
+              <span>vor {TREND_SECONDS} s</span>
+              <span>{targetFps} Bilder/s · rot: verworfen</span>
+              <span>jetzt</span>
+            </figcaption>
+          </figure>
+        ) : (
+          <p className="mb-3 text-xs text-ink-faint">
+            Der Verlauf füllt sich — eine Messung je Sekunde.
+          </p>
+        )}
         <div className="grid grid-cols-4 gap-3">
-          {/* „gemessen" allein stand hier und las sich wie „so schnell
-              läuft deine Aufnahme". Gemeint ist etwas anderes: wie oft sich
-              das Bild wirklich geändert hat. Die Aufnahme läuft immer auf
-              der eingestellten Rate — steht das Bild still, wiederholt die
-              Pipeline das letzte, und genau die fehlen hier. */}
-          <Stat
-            label="Bilder/s"
-            value={status.fps.toFixed(0)}
-            hint={
-              !status.bufferActive
-                ? "Puffer aus"
-                : status.fps >= targetFps - 1
-                  ? `von ${targetFps} · volles Bild`
-                  : `von ${targetFps} · Bild stand still`
-            }
-          />
+          <Stat label="Bilder/s" value={status.fps.toFixed(0)} hint={fpsHint()} />
           <Stat
             label="Verworfen"
-            value={String(status.droppedFrames)}
-            hint={status.droppedFrames > 0 ? "Encoder kommt nicht mit" : "alles drin"}
-            bad={status.droppedFrames > 0}
+            // Der Zählerstand aus dem Status steht seit dem Start der Pipeline
+            // da und wächst nur. Hier zählt, was gerade fehlt — der Rest steht
+            // in der Zeile darunter.
+            value={String(trend.dropped)}
+            hint={
+              trend.dropped > 0
+                ? `in der letzten Minute · ${status.droppedFrames} gesamt`
+                : status.droppedFrames > 0
+                  ? `nichts zuletzt · ${status.droppedFrames} gesamt`
+                  : "alles drin"
+            }
+            bad={trend.dropped > 0}
           />
           <Stat
             label="Encoder"
@@ -573,6 +633,10 @@ export function Console() {
         // gleich zurückwandern, während das Panel noch abblendet — zuerst
         // Platz schaffen, dann hinlegen, und umgekehrt.
         data-panel={panel ? "open" : "closed"}
+        // Wie viele Zeilen der Warnstreifen über dem Dock gerade belegt. Die
+        // Notiz („Clip gespeichert") steht darüber und rückt um genau so viel
+        // nach oben — siehe `--warn-lift` in console.css.
+        data-warn={Math.min(trouble.length, TROUBLE_LINES)}
         data-leaving={closing}
         style={
           {
@@ -632,7 +696,7 @@ export function Console() {
               "cb-note-slot pointer-events-none absolute left-1/2 -translate-x-1/2",
               playing
                 ? "top-8"
-                : "bottom-[calc(var(--inset,0px)+11rem)]",
+                : "bottom-[calc(var(--inset,0px)+11rem+var(--warn-lift,0px))]",
             )}
           >
             <div className="cb-note rounded-pill bg-elevated/95 px-4 py-2 text-sm font-medium shadow-[0_12px_32px_rgba(0,0,0,.5)]">
@@ -652,6 +716,12 @@ export function Console() {
           data-leaving={closing}
           className="cb-rise absolute bottom-[calc(var(--inset,0px)+2rem)] left-1/2 -translate-x-1/2"
         >
+          {/* Der Warnstreifen sitzt im selben Kasten wie das Dock und liegt
+              über ihm (`bottom: 100%`). Damit geht er jeden Weg mit, den das
+              Dock geht — auch den des Rings, der mitten im Bild steht und zur
+              Seite rückt. Eine eigene Stelle im Fenster hätte für jeden der
+              drei Stile eine eigene Regel gebraucht. */}
+          <TroubleStrip list={trouble} />
           <div
             data-leaving={closing}
             className="cb-dock cb-glass flex items-stretch gap-1.5 rounded-[22px] p-2.5"
