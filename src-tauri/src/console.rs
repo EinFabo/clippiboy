@@ -153,8 +153,16 @@ pub fn close(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
+    // The handle comes out *before* the window goes: on the hotkey path `close`
+    // runs inside `run_on_main_thread`, so tao executes the hide inline, and
+    // `SW_HIDE` on the focused window raises `WM_KILLFOCUS` there and then. The
+    // `Focused(false)` handler above clears `PREVIOUS`, so reading it afterwards
+    // could find a zero and hand the focus nowhere — the desktop would get it
+    // and the game would go deaf, which is the one thing this function exists to
+    // prevent. Taking it first makes the order stop mattering.
+    let previous = take_foreground();
     let _ = window.hide();
-    restore_foreground();
+    restore_foreground(previous);
 }
 
 /// Hide it without handing the focus anywhere.
@@ -310,11 +318,15 @@ fn remember_foreground() {
     PREVIOUS.store(hwnd.0 as isize, Ordering::SeqCst);
 }
 
+/// Take the remembered window out, leaving nothing behind for a second caller.
+fn take_foreground() -> isize {
+    PREVIOUS.swap(0, Ordering::SeqCst)
+}
+
 #[cfg(windows)]
-fn restore_foreground() {
+fn restore_foreground(raw: isize) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-    let raw = PREVIOUS.swap(0, Ordering::SeqCst);
     if raw == 0 {
         return;
     }
@@ -344,8 +356,8 @@ pub fn exclusive_fullscreen() -> bool {
 fn remember_foreground() {}
 
 #[cfg(not(windows))]
-fn restore_foreground() {
-    PREVIOUS.store(0, Ordering::SeqCst);
+fn restore_foreground(raw: isize) {
+    let _ = raw;
 }
 
 #[cfg(not(windows))]

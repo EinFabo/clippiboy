@@ -556,6 +556,21 @@ pub fn still_running(pid: u32, exe: &str) -> bool {
     false
 }
 
+/// Is the window in front one of ours?
+///
+/// "Only buffer in game" asks where the user is looking, and looking at the
+/// console over the game is still playing. Without this the buffer would wind
+/// down after the grace period under the very window that shows its level.
+#[cfg(windows)]
+pub fn foreground_is_ours() -> bool {
+    win::foreground().is_some_and(|(pid, _, _, _)| pid == std::process::id())
+}
+
+#[cfg(not(windows))]
+pub fn foreground_is_ours() -> bool {
+    false
+}
+
 /// Centre of the foreground window — for the overlay's monitor choice.
 #[cfg(windows)]
 pub fn foreground_center() -> Option<(f64, f64)> {

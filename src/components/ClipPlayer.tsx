@@ -137,6 +137,11 @@ export function ClipPlayer({
    * spränge auch der nächste Clip beim Weiterblättern auf dieselbe Sekunde.
    */
   const startOnce = useRef<number | null>(startAt ?? null);
+  // Der Player bleibt zwischen zwei Clips aus der Konsole stehen — beim zweiten
+  // wäre die Stelle sonst schon vom ersten aufgebraucht, und er finge bei 0 an.
+  useEffect(() => {
+    if (startAt !== undefined) startOnce.current = startAt;
+  }, [startAt]);
   /** Failed attempts at loading the current file. */
   const loadFailures = useRef(0);
   /** Holds the last frame while the file underneath is being replaced. */

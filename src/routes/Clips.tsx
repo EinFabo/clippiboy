@@ -273,6 +273,10 @@ export function Clips({
       clip.screenshot ? c.screenshot : clip.recording ? c.recording : !c.screenshot && !c.recording,
     );
     setPlaylist(list.map((c) => c.id));
+    // Wie beim Öffnen aus der Galerie: was angesehen wurde, wird beim Schließen
+    // in seinen Spielordner einsortiert. Ohne diese Zeile wäre der Weg über die
+    // Konsole der einzige, bei dem die Datei liegen bliebe.
+    touched.current = new Set([focus.id]);
     // Vor dem Öffnen, damit der Player die Stelle schon beim ersten Bild hat.
     setStartAt(focus.at);
     setOpen(list.findIndex((c) => c.id === focus.id));

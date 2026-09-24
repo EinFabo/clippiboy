@@ -112,6 +112,25 @@ impl Drop for SavingGuard<'_> {
     }
 }
 
+/// What one turn of the game tick found.
+///
+/// The two names in here are deliberately not one. `held` hangs on the game's
+/// *process* and is what the app shows and files clips under — a look into the
+/// browser must not erase the name or reset the session clock. `playing` is
+/// about where the user is *looking*, and only that may decide whether "only
+/// buffer in game" keeps the buffer alive; hanging it on `held` too would let
+/// the buffer and its encoder run on until the game is closed.
+pub struct GameTick {
+    /// The name to show and to file under, held for the process's life.
+    pub held: Option<String>,
+    /// Is the user at the game right now — its window in front, or one of ours
+    /// over it?
+    pub playing: bool,
+    /// The process the game audio is bound to has changed; the caller has to
+    /// rebuild the streams.
+    pub rebound: bool,
+}
+
 /// State of the "buffer on as soon as a game runs" automation.
 ///
 /// It has to keep two things apart: a buffer the user started themselves it
@@ -548,9 +567,8 @@ impl AppState {
     /// switching from the game to the desktop still leaves the clip assigned to
     /// the game.
     ///
-    /// Returns the detected name and whether the process the game audio is bound
-    /// to has changed — the caller then has to rebuild the streams.
-    pub fn track_game(&self) -> (Option<String>, bool) {
+    /// See `GameTick` for why the two answers it gives are not the same one.
+    pub fn track_game(&self) -> GameTick {
         let detected = crate::game::detect_detailed();
         let name = detected.as_ref().map(|game| game.name.clone());
         {
@@ -628,7 +646,16 @@ impl AppState {
         if held.is_some() && (self.status.lock().buffer_active || self.is_recording()) {
             *self.buffering_game.lock() = held.clone();
         }
-        (held, now != before)
+        // Am Spiel sitzt, wer das Spiel im Vordergrund hat — oder eins unserer
+        // eigenen Fenster, während der Prozess noch läuft. Die Konsole *ist* der
+        // Blick ins Spiel, und wer ein Panel eine halbe Minute offen lässt, hat
+        // deshalb nicht aufgehört zu spielen.
+        let playing = name.is_some() || (held.is_some() && crate::game::foreground_is_ours());
+        GameTick {
+            held,
+            playing,
+            rebound: now != before,
+        }
     }
 
     /// Carry the running recording's current metrics into the status.

@@ -9,7 +9,7 @@
 //! exactly what ClippiBoy deliberately does not do. In borderless fullscreen and
 //! in windowed mode, so in practically every current game, it works.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tauri::{
     Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
@@ -89,6 +89,28 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// banner instead of hiding — the badge lives in the same window.
 static BADGE: AtomicBool = AtomicBool::new(false);
 
+/// How many banners are still standing. The other direction of the same
+/// problem as `BADGE`: while a banner is up it owns the window, and whoever
+/// else would hide it has to leave it alone — the banner's own thread takes it
+/// down when its time is up.
+static STANDING: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts a banner for as long as its thread lives, however that thread ends.
+struct Standing;
+
+impl Standing {
+    fn new() -> Self {
+        STANDING.fetch_add(1, Ordering::SeqCst);
+        Standing
+    }
+}
+
+impl Drop for Standing {
+    fn drop(&mut self) {
+        STANDING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Create the overlay window. Called once at startup.
 pub fn create(app: &tauri::AppHandle) {
     if app.get_webview_window(LABEL).is_some() {
@@ -148,9 +170,14 @@ pub fn set_recording(app: &tauri::AppHandle, recording: bool) {
         }
         let _ = window.show();
         to_top(&window);
-    } else {
+    } else if STANDING.load(Ordering::SeqCst) == 0 {
         // Whatever comes next brings the window back up by itself — stopping a
         // recording is followed by the banner that says it was written.
+        //
+        // Unless a banner is standing at this very moment: a recording that
+        // starts while the badge is switched off would otherwise pull "Clip
+        // saved" off the screen mid-display. Its own thread takes it down when
+        // its time is up, and it now finds `BADGE` false and does so.
         let _ = window.hide();
     }
 }
@@ -278,7 +305,11 @@ pub fn show_with_thumb(
     // window needs its moment to draw first, and a save must not wait for it.
     let ticket = SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
     let handle = app.clone();
+    let standing = Standing::new();
     std::thread::spawn(move || {
+        // Travels along so it is dropped on every way out of this thread, not
+        // just the last one.
+        let _standing = standing;
         if !awake {
             std::thread::sleep(std::time::Duration::from_millis(WAKE_MS));
             if SEQUENCE.load(Ordering::SeqCst) != ticket {

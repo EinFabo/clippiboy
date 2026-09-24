@@ -545,7 +545,12 @@ fn watch_screen(app: &tauri::AppHandle) {
 /// the buffer should simply run. Both belong on the same tick — that way a
 /// changed setting takes hold immediately and not only at the next program
 /// start.
-fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
+///
+/// `playing` is `GameTick::playing` and not the held name on purpose: the name
+/// outlives the foreground so clips keep their game, but the automation has to
+/// follow the foreground or an alt-tab into the browser would leave the buffer
+/// and its encoder running until the game is closed.
+fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     let state = app.state::<AppState>();
     let config = state.config_snapshot();
     let active = state.status.lock().buffer_active;
@@ -562,7 +567,7 @@ fn apply_auto_buffer(app: &tauri::AppHandle, game: Option<&String>) {
                 return;
             }
             if config.only_buffer_in_game {
-                state.auto.poll(game.is_some(), active)
+                state.auto.poll(playing, active)
             } else {
                 state.auto.poll_always(active)
             }
@@ -780,6 +785,14 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
         // Sekunden ohne den freien Platz da.
         refresh_free_bytes(&handle.state::<AppState>());
         let mut tick: u32 = 0;
+        // Wer zuhört, wird zweimal die Sekunde nachgeschlagen, nicht zwanzigmal:
+        // `window_awake` fragt über den Haupt-Faden und wartet dort auf Antwort.
+        // Zwanzigmal die Sekunde hieße achtzig Wartezeiten, und hängt der
+        // Haupt-Faden gerade an einem Dateidialog, stünden Spielerkennung,
+        // Puffer-Automatik und Bildschirm-Wächter mit ihm. Ein Fenster taucht
+        // nicht schneller auf, als eine halbe Sekunde später Pegel zu schicken.
+        let mut watched = false;
+        let mut console_watched = false;
         loop {
             std::thread::sleep(Duration::from_millis(50));
             let state = handle.state::<AppState>();
@@ -788,15 +801,18 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // cheap; the trip into the webview twenty times a second is not, and
             // the banner never wanted them at all — hence `emit_to` rather than
             // the broadcast this used to be.
-            let watched = window_awake(&handle, "main");
+            //
             // Das Ton-Panel der Konsole zeigt dieselben Pegel. Es ist der eine
             // Ort, an dem man sie mitten im Spiel braucht — und der einzige
             // Grund, warum der Strom überhaupt ein zweites Ziel bekommt. Er
-            // hängt an der Sichtbarkeit: steht die Konsole nur versteckt
-            // herum, hört ihr niemand zu, und zwanzig Pakete die Sekunde in
-            // ein unsichtbares Fenster sind genau der Aufwand, den `emit_to`
-            // hier vermeiden soll.
-            let console_watched = window_awake(&handle, console::LABEL);
+            // hängt an der Sichtbarkeit: steht die Konsole nur versteckt herum,
+            // hört ihr niemand zu, und zwanzig Pakete die Sekunde in ein
+            // unsichtbares Fenster sind genau der Aufwand, den `emit_to` hier
+            // vermeiden soll.
+            if tick % 10 == 0 {
+                watched = window_awake(&handle, "main");
+                console_watched = window_awake(&handle, console::LABEL);
+            }
             let logging = std::env::var("CLIPPIBOY_LOG_LEVELS").is_ok();
             if watched || console_watched || logging {
                 let levels = state.audio.levels(&sources);
@@ -831,7 +847,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             }
             // Every 2 s, look which game is running in the foreground.
             if tick % 40 == 0 {
-                let (game, _) = state.track_game();
+                let tick_game = state.track_game();
                 // Whatever moved — the game to a new process, an application
                 // that started playing and now belongs in the leftovers — the
                 // streams follow. The enumerating and rebuilding happens on a
@@ -848,12 +864,12 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     let notes = audio::configuration_warnings(
                         &sources,
                         &audio::devices::list_devices(),
-                        game.is_some(),
+                        tick_game.held.is_some(),
                         state.is_buffering(),
                     );
                     *state.source_notes.lock() = notes;
                 }
-                apply_auto_buffer(&handle, game.as_ref());
+                apply_auto_buffer(&handle, tick_game.playing);
                 // The windows first: the buffer's restart announces itself with
                 // a banner, and that should already stand on the right screen.
                 watch_monitors(&handle);
