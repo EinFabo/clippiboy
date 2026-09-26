@@ -1141,6 +1141,7 @@ pub fn run() {
             commands::delete_clip,
             commands::reveal_clip,
             commands::update_clip,
+            commands::set_clip_tags,
             commands::clip_tracks,
             commands::clip_waveform,
             commands::apply_clip_edit,

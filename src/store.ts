@@ -106,6 +106,8 @@ interface EngineState {
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
   /** Set or take away the heart. */
   setFavorite: (id: string, favorite: boolean) => Promise<void>;
+  /** Replace a clip's tags — the whole list, not one tag. */
+  setClipTags: (id: string, tags: string[]) => Promise<void>;
   /**
    * Move the file into its folder — after a change of game or heart. Kept apart
    * from editing so the player does not lose its file mid-playback: it only calls
@@ -466,6 +468,25 @@ export const useEngine = create<EngineState>((set, get) => ({
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       set({ lastError: String(err) });
+    }
+  },
+
+  async setClipTags(id, tags) {
+    // Like the heart: the chip has to be there on Enter, not once the database
+    // has answered. What comes back replaces it — cleaned up by the core.
+    const before = get().clips.find((c) => c.id === id)?.tags ?? [];
+    set((st) => ({
+      clips: st.clips.map((c) => (c.id === id ? { ...c, tags } : c)),
+    }));
+    if (!inTauri) return;
+    try {
+      const clip = await api.setClipTags(id, tags);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set((st) => ({
+        clips: st.clips.map((c) => (c.id === id ? { ...c, tags: before } : c)),
+        lastError: String(err),
+      }));
     }
   },
 

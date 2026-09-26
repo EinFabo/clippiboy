@@ -40,6 +40,7 @@ fn main() {
         original_available: false,
         screenshot: false,
         recording: false,
+        tags: Vec::new(),
     });
 
     // Start from a clean state, otherwise the run only checks the shortcut

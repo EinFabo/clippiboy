@@ -46,7 +46,9 @@ type Filter =
   | { kind: "screenshots" }
   | { kind: "recordings" }
   | { kind: "untagged" }
-  | { kind: "game"; name: string };
+  | { kind: "game"; name: string }
+  /** Everything carrying this tag — clips, stills and recordings alike. */
+  | { kind: "tag"; name: string };
 
 const ALL: Filter = { kind: "all" };
 
@@ -146,6 +148,17 @@ export function Clips({
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "en"));
   }, [clips]);
 
+  /** Tags by how often they are used, like the games. */
+  const tags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const clip of clips) {
+      for (const tag of clip.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+    return [...counts]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "en"));
+  }, [clips]);
+
   const untagged = useMemo(() => clips.filter((c) => !c.game).length, [clips]);
   const favorites = useMemo(() => clips.filter((c) => c.favorite).length, [clips]);
   const shots = useMemo(() => clips.filter((c) => c.screenshot).length, [clips]);
@@ -167,9 +180,11 @@ export function Clips({
             ? shots === 0
             : filter.kind === "recordings"
               ? recordings === 0
-              : !games.some((g) => g.name === filter.name);
+              : filter.kind === "tag"
+                ? !tags.some((t) => t.name === filter.name)
+                : !games.some((g) => g.name === filter.name);
     if (gone) setFilter(ALL);
-  }, [filter, games, untagged, favorites, shots, recordings, open]);
+  }, [filter, games, tags, untagged, favorites, shots, recordings, open]);
 
   const visible = clips.filter((c) => {
     const haystack = [
@@ -177,6 +192,7 @@ export function Clips({
       c.title ?? "",
       c.description ?? "",
       c.game ?? "",
+      ...c.tags,
     ]
       .join(" ")
       .toLowerCase();
@@ -192,7 +208,9 @@ export function Clips({
               ? c.recording
               : filter.kind === "untagged"
               ? !c.game
-              : c.game === filter.name;
+              : filter.kind === "tag"
+                ? c.tags.includes(filter.name)
+                : c.game === filter.name;
     return matchesQuery && matchesFilter;
   });
 
@@ -329,6 +347,7 @@ export function Clips({
 
         <GameFilters
           games={games}
+          tags={tags}
           untagged={untagged}
           favorites={favorites}
           shots={shots}
@@ -728,6 +747,7 @@ function SearchField({
  */
 function GameFilters({
   games,
+  tags,
   untagged,
   favorites,
   shots,
@@ -738,6 +758,7 @@ function GameFilters({
   onRemove,
 }: {
   games: Array<{ name: string; count: number }>;
+  tags: Array<{ name: string; count: number }>;
   untagged: number;
   favorites: number;
   shots: number;
@@ -758,7 +779,7 @@ function GameFilters({
     setFade({ left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 });
   }, []);
 
-  useLayoutEffect(measure, [measure, games, untagged, favorites, shots, recordings]);
+  useLayoutEffect(measure, [measure, games, tags, untagged, favorites, shots, recordings]);
 
   // Tip the mouse wheel over: there is nothing in the bar that could scroll
   // vertically, so the wheel should move it horizontally. Only when it really
@@ -801,6 +822,7 @@ function GameFilters({
       shots > 0 && "screenshots",
       ...games.map(({ name }) => (confirming === name ? `${name}?` : name)),
       untagged > 0 && "untagged",
+      ...tags.map(({ name }) => `#${name}`),
     ]
       .filter(Boolean)
       .join(),
@@ -922,6 +944,24 @@ function GameFilters({
           No game
         </Chip>
       )}
+
+      {/* Tags come after the games: a game every clip has, a tag only some.
+          The `#` in the id keeps a tag apart from a game of the same name. */}
+      {tags.map(({ name, count }) => {
+        const on = active.kind === "tag" && active.name === name;
+        return (
+          <Chip
+            key={`#${name}`}
+            id={`#${name}`}
+            active={on}
+            count={count}
+            onClick={() => onSelect({ kind: "tag", name })}
+            icon={<span className={on ? "text-black/45" : "text-ink-faint"}>#</span>}
+          >
+            {name}
+          </Chip>
+        );
+      })}
     </div>
   );
 }

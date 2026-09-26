@@ -471,6 +471,11 @@ pub struct Clip {
     /// untouched copy when trimmed.
     #[serde(default)]
     pub recording: bool,
+    /// Free labels, set by hand in the player; the gallery filters by one of
+    /// them. Each spelling once regardless of case, sorted. They live in a table
+    /// of their own (`tags`), not in a column — see `Library::set_tags`.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// What a library entry is — decides the bottom folder level.

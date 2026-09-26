@@ -345,6 +345,7 @@ mod tests {
             favorite: false,
             screenshot: false,
             recording: false,
+            tags: Vec::new(),
         }
     }
 

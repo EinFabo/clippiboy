@@ -1039,6 +1039,7 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
         original_available: false,
         screenshot: false,
         recording: false,
+        tags: Vec::new(),
     };
 
     let tracks = match stems::tracks(&clip.id, &edit::source_path(&clip)) {

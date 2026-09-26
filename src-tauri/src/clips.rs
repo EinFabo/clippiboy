@@ -87,7 +87,16 @@ impl Library {
     }
 
     pub fn insert(&self, clip: &Clip) -> rusqlite::Result<()> {
-        self.conn.execute(
+        // `OR REPLACE` deletes the old row before writing the new one, and the
+        // bundled SQLite runs with foreign keys on — the delete cascades into
+        // `tags`. So whatever the clip carried is taken out first and put back
+        // afterwards, in one transaction.
+        let tx = self.conn.unchecked_transaction()?;
+        let kept: Vec<String> = tx
+            .prepare("SELECT tag FROM tags WHERE clip_id = ?1")?
+            .query_map(params![clip.id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.execute(
             "INSERT OR REPLACE INTO clips
              (id, path, created_at, duration_ms, game, width, height, size_bytes,
               thumb_path, title, description, edit, original, favorite, screenshot,
@@ -112,7 +121,13 @@ impl Library {
                 clip.recording,
             ],
         )?;
-        Ok(())
+        for tag in kept {
+            tx.execute(
+                "INSERT OR IGNORE INTO tags (clip_id, tag) VALUES (?1, ?2)",
+                params![clip.id, tag],
+            )?;
+        }
+        tx.commit()
     }
 
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
@@ -144,9 +159,28 @@ impl Library {
                 favorite: row.get(13)?,
                 screenshot: row.get(14)?,
                 recording: row.get(15)?,
+                // Filled in below, from the table of their own.
+                tags: Vec::new(),
             })
         })?;
-        rows.collect()
+        let mut clips = rows.collect::<rusqlite::Result<Vec<Clip>>>()?;
+
+        // One query for all of them rather than one per clip: the gallery asks
+        // for the whole list at once, and there are hundreds.
+        let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
+        let mut stmt = self.conn.prepare("SELECT clip_id, tag FROM tags")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))?;
+        for row in rows {
+            let (id, tag) = row?;
+            tags.entry(id).or_default().push(tag);
+        }
+        for clip in &mut clips {
+            if let Some(mut own) = tags.remove(&clip.id) {
+                own.sort_by_key(|tag| tag.to_lowercase());
+                clip.tags = own;
+            }
+        }
+        Ok(clips)
     }
 
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<Clip>> {
@@ -180,6 +214,20 @@ impl Library {
             params![id, game],
         )?;
         Ok(())
+    }
+
+    /// Replace a clip's tags with these. Cleaned up first (`clean_tags`), so
+    /// whatever the page sends, the table holds each label once.
+    pub fn set_tags(&self, id: &str, tags: &[String]) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM tags WHERE clip_id = ?1", params![id])?;
+        for tag in clean_tags(tags) {
+            tx.execute(
+                "INSERT INTO tags (clip_id, tag) VALUES (?1, ?2)",
+                params![id, tag],
+            )?;
+        }
+        tx.commit()
     }
 
     /// Set or take away the heart.
@@ -273,8 +321,37 @@ impl Library {
         }
         self.conn
             .execute("DELETE FROM clips WHERE id = ?1", params![id])?;
+        // The cascade on `tags` takes these along already — the bundled SQLite
+        // has foreign keys on by default. Said once more by hand, so the tags
+        // do not hang on a compile flag of someone else's crate.
+        self.conn
+            .execute("DELETE FROM tags WHERE clip_id = ?1", params![id])?;
         Ok(())
     }
+}
+
+/// The longest a tag may be. It stands as a chip in the gallery's filter row,
+/// and a sentence there pushes every game out of sight.
+const TAG_MAX_CHARS: usize = 32;
+
+/// Tags as the table keeps them: trimmed, inner whitespace collapsed, a leading
+/// `#` dropped (people type it out of habit, the chip draws its own), cut to
+/// [`TAG_MAX_CHARS`], and each once regardless of case — the first spelling wins.
+pub fn clean_tags(tags: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in tags {
+        let joined = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        let bare = joined.trim_start_matches('#').trim();
+        let tag: String = bare.chars().take(TAG_MAX_CHARS).collect();
+        let tag = tag.trim_end().to_string();
+        if tag.is_empty() || !seen.insert(tag.to_lowercase()) {
+            continue;
+        }
+        out.push(tag);
+    }
+    out.sort_by_key(|tag| tag.to_lowercase());
+    out
 }
 
 /// The editor state as JSON. If serializing fails, a missing trim is better
@@ -337,6 +414,7 @@ mod tests {
             favorite: false,
             screenshot: false,
             recording: false,
+            tags: Vec::new(),
         }
     }
 
@@ -451,5 +529,52 @@ mod tests {
     fn a_broken_entry_is_dropped_not_fatal() {
         assert!(decode_original(Some("{kaputt".into())).is_none());
         assert!(decode_edit(Some("{kaputt".into())).is_none());
+    }
+
+    fn tags(list: &[&str]) -> Vec<String> {
+        list.iter().map(|tag| tag.to_string()).collect()
+    }
+
+    /// The first spelling wins, and no amount of case or `#` makes a second one.
+    #[test]
+    fn tags_are_cleaned_up_before_they_are_kept() {
+        assert_eq!(
+            clean_tags(&tags(&["  Clutch ", "#clutch", "ace", "", "  ", "ACE", "funny   moment"])),
+            tags(&["ace", "Clutch", "funny moment"]),
+        );
+        let long = "x".repeat(40);
+        assert_eq!(clean_tags(&[long])[0].chars().count(), TAG_MAX_CHARS);
+    }
+
+    /// Setting replaces, the list carries them, and a deleted clip leaves none
+    /// behind.
+    #[test]
+    fn tags_roundtrip_and_go_with_the_clip() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        lib.insert(&clip("b", 2)).unwrap();
+
+        lib.set_tags("a", &tags(&["clutch", "ace"])).unwrap();
+        lib.set_tags("a", &tags(&["ace", "Funny"])).unwrap();
+        assert_eq!(lib.get("a").unwrap().unwrap().tags, tags(&["ace", "Funny"]));
+        assert!(lib.get("b").unwrap().unwrap().tags.is_empty());
+
+        lib.delete("a").unwrap();
+        let left: i64 = lib
+            .conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    /// `insert` is `INSERT OR REPLACE`, and with foreign keys on the replace
+    /// cascades into `tags`. A re-inserted clip must keep them anyway.
+    #[test]
+    fn reinserting_a_clip_keeps_its_tags() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        lib.set_tags("a", &tags(&["ace"])).unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        assert_eq!(lib.get("a").unwrap().unwrap().tags, tags(&["ace"]));
     }
 }

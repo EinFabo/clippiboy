@@ -828,6 +828,7 @@ impl AppState {
             original_available: false,
             screenshot: false,
             recording: false,
+            tags: Vec::new(),
         })
     }
 
@@ -893,6 +894,7 @@ impl AppState {
             original_available: false,
             screenshot: true,
             recording: false,
+            tags: Vec::new(),
         })
     }
 }
@@ -1055,6 +1057,7 @@ impl AppState {
             original_available: false,
             screenshot: false,
             recording: true,
+            tags: Vec::new(),
         })
     }
 

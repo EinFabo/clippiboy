@@ -249,6 +249,11 @@ export interface Clip {
    * and a folder of its own, and can run for an hour.
    */
   recording: boolean;
+  /**
+   * Free labels, set in the player. The core keeps each spelling once
+   * regardless of case and sorts them; the gallery filters by one at a time.
+   */
+  tags: string[];
 }
 
 /**

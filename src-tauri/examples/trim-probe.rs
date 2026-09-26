@@ -67,6 +67,7 @@ fn main() {
         original_available: false,
         screenshot: false,
         recording: false,
+        tags: Vec::new(),
     };
 
     let mix = mix_for(&clip);

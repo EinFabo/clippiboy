@@ -1,12 +1,13 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useEngine } from "@/store";
 import { fileName } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import { IconClose } from "@/components/icons";
 import type { Clip } from "@/lib/types";
 
 /**
- * Name, description and game — the three things every clip has, whether it is a
+ * Name, description, game and tags — what every clip has, whether it is a
  * recording or a still.
  *
  * Sits in a file of its own because both viewers show it: the player has a whole
@@ -61,7 +62,183 @@ export function ClipMeta({ clip }: { clip: Clip }) {
           onSave={(game) => saveMeta({ game })}
         />
       </label>
+      <Tags key={`tags-${clip.id}`} clip={clip} />
     </section>
+  );
+}
+
+/** How many suggestions stand under the field at most. */
+const SUGGEST = 6;
+
+/**
+ * The clip's tags as chips, and a field to add one. Free text — but what has
+ * been used before is offered while typing, and a tag that already exists in
+ * another spelling takes that one, so "Clutch" and "clutch" never stand side by
+ * side in the gallery's filter row.
+ *
+ * Enter or a comma adds, Backspace in the empty field takes the last one back,
+ * Escape leaves. Saved at once: a tag is a click, not a text still being typed.
+ */
+function Tags({ clip }: { clip: Clip }) {
+  const clips = useEngine((state) => state.clips);
+  const setClipTags = useEngine((state) => state.setClipTags);
+  const [draft, setDraft] = useState("");
+  const [focused, setFocused] = useState(false);
+  const [pick, setPick] = useState(-1);
+  const field = useRef<HTMLInputElement>(null);
+  /** Escape means "not this one". The blur it causes runs before the emptied
+   *  draft has rendered, and would otherwise still add what was typed. */
+  const dropping = useRef(false);
+
+  /** Every tag in the library, the most used first. */
+  const known = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of clips) {
+      for (const tag of c.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+    return [...counts]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "en"))
+      .map(([tag]) => tag);
+  }, [clips]);
+
+  const own = new Set(clip.tags.map((tag) => tag.toLowerCase()));
+  const typed = draft.trim().replace(/^#+/, "").trim().toLowerCase();
+  // Beginning with what was typed comes before merely containing it.
+  const suggestions = known
+    .filter((tag) => !own.has(tag.toLowerCase()))
+    .filter((tag) => tag.toLowerCase().includes(typed))
+    .sort(
+      (a, b) =>
+        Number(!a.toLowerCase().startsWith(typed)) -
+        Number(!b.toLowerCase().startsWith(typed)),
+    )
+    .slice(0, SUGGEST);
+  const open = focused && suggestions.length > 0;
+
+  // A new list means the old position points at something else.
+  useEffect(() => setPick(-1), [typed]);
+
+  const add = (raw: string) => {
+    const bare = raw.trim().replace(/^#+/, "").trim();
+    setDraft("");
+    if (!bare) return;
+    const existing = known.find((tag) => tag.toLowerCase() === bare.toLowerCase());
+    const tag = existing ?? bare;
+    if (own.has(tag.toLowerCase())) return;
+    void setClipTags(clip.id, [...clip.tags, tag]);
+  };
+
+  const remove = (tag: string) =>
+    void setClipTags(
+      clip.id,
+      clip.tags.filter((t) => t !== tag),
+    );
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter" || event.key === ",") {
+      event.preventDefault();
+      add(pick >= 0 && open ? suggestions[pick] : draft);
+    } else if (event.key === "ArrowDown" && open) {
+      event.preventDefault();
+      setPick((p) => (p + 1) % suggestions.length);
+    } else if (event.key === "ArrowUp" && open) {
+      event.preventDefault();
+      setPick((p) => (p <= 0 ? suggestions.length - 1 : p - 1));
+    } else if (event.key === "Backspace" && draft === "" && clip.tags.length > 0) {
+      event.preventDefault();
+      remove(clip.tags[clip.tags.length - 1]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      dropping.current = true;
+      setDraft("");
+      field.current?.blur();
+    }
+  };
+
+  return (
+    <div className="mt-2 flex items-start gap-2">
+      <span className="shrink-0 pt-2 text-xs text-ink-faint">Tags</span>
+      <div className="relative min-w-0 flex-1">
+        <div
+          // A click on the empty room beside the chips means the field.
+          onMouseDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            event.preventDefault();
+            field.current?.focus();
+          }}
+          className={cn(
+            "flex min-h-[34px] flex-wrap items-center gap-1.5 rounded-inner border px-2 py-1",
+            "transition-colors",
+            focused
+              ? "border-line-strong bg-elevated"
+              : "border-transparent hover:border-line",
+          )}
+        >
+          {clip.tags.map((tag) => (
+            <span
+              key={tag}
+              className="flex h-6 items-center gap-1 rounded-pill border border-line bg-surface pl-2.5 pr-1 text-xs text-ink-muted"
+            >
+              <span className="text-ink-faint">#</span>
+              <span className="max-w-[160px] truncate">{tag}</span>
+              <button
+                aria-label={`Remove the tag "${tag}"`}
+                title="Remove tag"
+                onClick={() => remove(tag)}
+                className="grid h-4 w-4 place-items-center rounded-pill transition hover:bg-hover hover:text-live"
+              >
+                <IconClose className="h-2.5 w-2.5" />
+              </button>
+            </span>
+          ))}
+          <input
+            ref={field}
+            aria-label="Add a tag"
+            value={draft}
+            maxLength={32}
+            placeholder={clip.tags.length === 0 ? "Add a tag" : ""}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={onKeyDown}
+            onFocus={() => setFocused(true)}
+            // Whatever stands in the field when leaving still counts — the same
+            // promise the other fields make.
+            onBlur={() => {
+              setFocused(false);
+              if (!dropping.current && draft.trim()) add(draft);
+              dropping.current = false;
+            }}
+            className="h-6 min-w-[90px] flex-1 bg-transparent text-sm outline-none placeholder:text-ink-faint"
+          />
+        </div>
+        {open && (
+          <ul
+            role="listbox"
+            className="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-inner border border-line bg-elevated py-1 shadow-lg"
+          >
+            {suggestions.map((tag, i) => (
+              <li key={tag} role="option" aria-selected={i === pick}>
+                <button
+                  // `mousedown`, not `click`: the click would come after the
+                  // field's blur, and that already adds what was typed.
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    add(tag);
+                  }}
+                  onMouseEnter={() => setPick(i)}
+                  className={cn(
+                    "flex w-full items-center gap-1 px-3 py-1.5 text-left text-sm",
+                    i === pick ? "bg-hover text-ink" : "text-ink-muted",
+                  )}
+                >
+                  <span className="text-ink-faint">#</span>
+                  {tag}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }
 

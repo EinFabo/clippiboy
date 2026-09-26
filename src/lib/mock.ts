@@ -136,6 +136,7 @@ export const mockClips: Clip[] = [
     originalAvailable: false,
     screenshot: false,
     recording: false,
+    tags: ["ace", "clutch"],
   },
   {
     id: "c2",
@@ -155,6 +156,7 @@ export const mockClips: Clip[] = [
     originalAvailable: false,
     screenshot: false,
     recording: false,
+    tags: ["clutch"],
   },
   {
     id: "c3",
@@ -174,6 +176,7 @@ export const mockClips: Clip[] = [
     originalAvailable: false,
     screenshot: false,
     recording: false,
+    tags: [],
   },
   // The gallery has to survive the bad case too: one clip with no game and three
   // misdetections from before the stricter title check — that is what shows
@@ -197,6 +200,7 @@ export const mockClips: Clip[] = [
     originalAvailable: false,
     screenshot: false,
     recording: false,
+    tags: [],
   },
   ...[
     "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
@@ -220,6 +224,7 @@ export const mockClips: Clip[] = [
     originalAvailable: false,
     screenshot: false,
     recording: false,
+    tags: [],
   })),
   ...["Counter-Strike 2", null].map((game, i) => ({
     id: `s${1 + i}`,
@@ -240,6 +245,7 @@ export const mockClips: Clip[] = [
     originalAvailable: false,
     screenshot: true,
     recording: false,
+    tags: [],
   })),
 ];
 

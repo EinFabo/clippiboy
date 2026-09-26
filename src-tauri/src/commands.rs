@@ -849,6 +849,18 @@ pub fn update_clip(
     })
 }
 
+/// Replace a clip's tags. The library cleans them up (case, `#`, length), and
+/// the clip comes back as stored — the page then shows exactly what was kept.
+#[tauri::command]
+pub fn set_clip_tags(state: State<'_, AppState>, id: String, tags: Vec<String>) -> Result<Clip> {
+    with_library(&state, |lib| {
+        lib.set_tags(&id, &tags).map_err(|e| e.to_string())?;
+        lib.get(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "clip not found".to_string())
+    })
+}
+
 /// Picture of the audio track for the timeline. Returns the path to the PNG.
 ///
 /// `async` because ffmpeg reads the audio through once from end to end.

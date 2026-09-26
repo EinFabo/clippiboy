@@ -107,6 +107,9 @@ export const api = {
     id: string,
     meta: { title: string | null; description: string | null; game: string | null },
   ) => invoke<Clip>("update_clip", { id, ...meta }),
+  /** Replace a clip's tags; comes back with them as the core kept them. */
+  setClipTags: (id: string, tags: string[]) =>
+    invoke<Clip>("set_clip_tags", { id, tags }),
   /**
    * Put the video file on the clipboard — not the path, the file. In Discord,
    * Ctrl+V then attaches the clip.
