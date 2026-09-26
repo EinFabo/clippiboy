@@ -61,7 +61,15 @@ body,
      wegklicken. */
 .cb-glow {
   position: absolute;
-  inset: 0;
+  /* Ein paar Pixel über den Bildschirm hinaus, nicht bündig (Punkt 14). Solange
+     die Blende läuft, zeichnet Chromium den Schein als eigene Ebene, und deren
+     Kante wird auf ganze Pixel gerundet. Bei krummer Skalierung ist das Fenster
+     in CSS-Pixeln krumm breit (2560 / 1,5 = 1706,67), die Ebene endet dann eine
+     Spalte vor dem Rand — und genau dort ist der Schein am hellsten. Während
+     der Blende stand er also an beiden Seiten sichtbar abgeschnitten, in Ruhe
+     nicht. Mit Überstand beschneidet ihn nur noch das Fenster selbst (`overflow:
+     hidden` am Wurzel-Kasten), und dessen Kante ist exakt der Bildschirm. */
+  inset: -4px;
   pointer-events: none;
   background:
     radial-gradient(
