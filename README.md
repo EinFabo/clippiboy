@@ -854,3 +854,10 @@ streamdeck/                   the Stream Deck plugin (TypeScript, Node)
 
 Everything above is built and running. Upload — sharing a clip straight from the
 app — is the one piece still open.
+
+## License
+
+ClippiBoy is free to use, but it is not open source. The code is published to be
+read, not reused: copying, modifying or redistributing it needs permission.
+Download it only from the [Releases](../../releases) page. The full terms are in
+[LICENSE](LICENSE).

@@ -1,6 +1,7 @@
 {
   "name": "clippiboy-streamdeck",
   "private": true,
+  "license": "UNLICENSED",
   "version": "0.6.0",
   "description": "Stream Deck plugin for ClippiBoy",
   "type": "module",

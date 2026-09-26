@@ -1,0 +1,34 @@
+ClippiBoy
+Copyright (c) 2026 EinFabo. All rights reserved.
+
+This repository and everything in it — source code, the Stream Deck plugin,
+artwork, icons and documentation — belongs to the copyright holder. It is
+published so that it can be read, not so that it can be reused.
+
+You MAY
+  * download the released ClippiBoy installer and Stream Deck plugin from the
+    official releases (https://github.com/EinFabo/clippiboy/releases) and use
+    them free of charge, privately or commercially — recording, keeping and
+    publishing your own clips included;
+  * read the source code, and view and fork this repository on GitHub to the
+    extent GitHub's Terms of Service allow for public repositories.
+
+You MAY NOT, without prior written permission from the copyright holder
+  * copy, modify, merge or translate the source code or artwork, in whole or in
+    part, or use them in another project;
+  * distribute, sublicense, sell or rent ClippiBoy or any modified version of
+    it, including by rehosting the installer somewhere else;
+  * remove or alter this notice or any copyright notice in the software.
+
+Third-party components that ClippiBoy uses or downloads (for example ffmpeg,
+Tauri and the libraries listed in package.json and src-tauri/Cargo.toml) stay
+under their own licenses; this notice does not cover them.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF
+OR IN CONNECTION WITH THE SOFTWARE OR ITS USE, INCLUDING LOST RECORDINGS.
+
+For permission to do anything not allowed above, open an issue at
+https://github.com/EinFabo/clippiboy/issues.
