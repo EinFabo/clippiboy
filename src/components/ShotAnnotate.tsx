@@ -335,12 +335,34 @@ export function bounds(
  *
  * Generous on purpose: a two-pixel arrow is impossible to hit exactly, so
  * everything gets a margin of the stroke it was drawn with.
+ *
+ * Two passes. A box or an ellipse drawn only as an outline is empty inside, and
+ * the first pass lets it answer only on its line: otherwise a frame drawn around
+ * an arrow took every click meant for the arrow, and the arrow could never be
+ * picked again. Only when nothing is hit that way does the inside of a frame
+ * count — so its empty middle still grabs it.
  */
 function hit(
   shapes: Shape[],
   x: number,
   y: number,
   slack: number,
+  measure?: CanvasRenderingContext2D,
+): Shape | null {
+  return hitPass(shapes, x, y, slack, true, measure) ?? hitPass(shapes, x, y, slack, false, measure);
+}
+
+/** An outline with nothing filled in — see [`hit`]. */
+function hollow(shape: Shape): boolean {
+  return (shape.tool === "box" || shape.tool === "ellipse") && !shape.fill;
+}
+
+function hitPass(
+  shapes: Shape[],
+  x: number,
+  y: number,
+  slack: number,
+  precise: boolean,
   measure?: CanvasRenderingContext2D,
 ): Shape | null {
   for (let at = shapes.length - 1; at >= 0; at--) {
@@ -358,6 +380,10 @@ function hit(
       continue;
     }
     const box = bounds(shape, measure);
+    if (precise && hollow(shape)) {
+      if (onRim(shape, box, x, y, margin)) return shape;
+      continue;
+    }
     if (
       x >= box.x - margin &&
       x <= box.x + box.width + margin &&
@@ -368,6 +394,31 @@ function hit(
     }
   }
   return null;
+}
+
+/** Is the point on the line of a box or an ellipse, give or take `margin`? */
+function onRim(
+  shape: Shape,
+  box: { x: number; y: number; width: number; height: number },
+  x: number,
+  y: number,
+  margin: number,
+): boolean {
+  if (shape.tool === "ellipse") {
+    const rx = box.width / 2;
+    const ry = box.height / 2;
+    if (rx <= 0 || ry <= 0) return false;
+    const reach = Math.hypot((x - box.x - rx) / rx, (y - box.y - ry) / ry);
+    // Measured along the shorter radius: good enough for a hit test, and it
+    // errs towards generous on the long side.
+    return Math.abs(reach - 1) * Math.min(rx, ry) <= margin;
+  }
+  const inside = (grow: number) =>
+    x >= box.x - grow &&
+    x <= box.x + box.width + grow &&
+    y >= box.y - grow &&
+    y <= box.y + box.height + grow;
+  return inside(margin) && !inside(-margin);
 }
 
 /** Distance from a point to a line segment. */
@@ -541,7 +592,11 @@ interface Props {
   tool: Tool;
   style: Style;
   shapes: Shape[];
-  onShapes: (shapes: Shape[]) => void;
+  /**
+   * `gesture` names one continuous action — a drag writes the marks on every
+   * pointer move, and all of those together are a single step to undo.
+   */
+  onShapes: (shapes: Shape[], gesture?: string) => void;
   selected: number | null;
   onSelect: (id: number | null) => void;
 }
@@ -575,10 +630,12 @@ export function AnnotateLayer({
   const next = useRef(1);
   /** What the pointer is doing. Kept in a ref: it changes per frame. */
   const drag = useRef<
-    | { kind: "move"; id: number; grabX: number; grabY: number; from: Shape }
-    | { kind: "handle"; id: number; handle: string; from: Shape }
+    | { kind: "move"; id: number; grabX: number; grabY: number; from: Shape; gesture: string }
+    | { kind: "handle"; id: number; handle: string; from: Shape; gesture: string }
     | null
   >(null);
+  /** Counts the drags, so each one is its own step to undo. */
+  const gestures = useRef(0);
 
   // Ids have to clear whatever is already there, or an undo plus a new mark
   // would collide.
@@ -641,8 +698,11 @@ export function AnnotateLayer({
     };
   };
 
-  const replace = (id: number, patch: Partial<Shape>) =>
-    onShapes(shapes.map((shape) => (shape.id === id ? { ...shape, ...patch } : shape)));
+  const replace = (id: number, patch: Partial<Shape>, gesture: string) =>
+    onShapes(
+      shapes.map((shape) => (shape.id === id ? { ...shape, ...patch } : shape)),
+      gesture,
+    );
 
   const onDown = (event: ReactPointerEvent) => {
     // A click beside an open text field puts that text down and does nothing
@@ -672,6 +732,7 @@ export function AnnotateLayer({
           grabX: point.x,
           grabY: point.y,
           from: under,
+          gesture: `drag-${++gestures.current}`,
         };
       }
       return;
@@ -712,10 +773,24 @@ export function AnnotateLayer({
       // coordinates unsigned, so a single negative one makes the **whole** save
       // fail — crop and every other mark with it — and all the user sees is a
       // toast. So the shift is limited to what the mark's own extent allows.
-      const xs = [from.x1, from.x2, ...(from.points?.map(([x]) => x) ?? [])];
-      const ys = [from.y1, from.y2, ...(from.points?.map(([, y]) => y) ?? [])];
+      //
+      // A text is measured by its box, not its anchor: `x2` is `x1` for a text,
+      // and with only the corner counted the words could be pushed off the right
+      // and bottom edges and were cut off in the file.
+      //
+      // And a mark that already reaches past an edge — after a crop that cut
+      // through it — may stay where it is. The limit used to come out positive
+      // there, and the very first pixel of a drag shoved the mark back inside:
+      // it jumped. Now it can go anywhere that does not take it further out.
+      const frame = from.tool === "text" ? bounds(from, measure) : null;
+      const xs = frame
+        ? [frame.x, frame.x + frame.width]
+        : [from.x1, from.x2, ...(from.points?.map(([x]) => x) ?? [])];
+      const ys = frame
+        ? [frame.y, frame.y + frame.height]
+        : [from.y1, from.y2, ...(from.points?.map(([, y]) => y) ?? [])];
       const shift = (raw: number, low: number, high: number) =>
-        Math.min(Math.max(raw, -low), high);
+        Math.min(Math.max(raw, Math.min(-low, 0)), Math.max(high, 0));
       const dx = shift(point.x - state.grabX, Math.min(...xs), width - Math.max(...xs));
       const dy = shift(point.y - state.grabY, Math.min(...ys), height - Math.max(...ys));
       replace(state.id, {
@@ -724,7 +799,7 @@ export function AnnotateLayer({
         x2: from.x2 + dx,
         y2: from.y2 + dy,
         points: from.points?.map(([x, y]) => [x + dx, y + dy] as [number, number]),
-      });
+      }, state.gesture);
       return;
     }
 
@@ -736,6 +811,7 @@ export function AnnotateLayer({
           state.handle === "start"
             ? { x1: point.x, y1: point.y }
             : { x2: point.x, y2: point.y },
+          state.gesture,
         );
         return;
       }
@@ -744,13 +820,17 @@ export function AnnotateLayer({
         // bigger, and the text never leaves its corner.
         const lines = (from.text ?? "").split("\n").length;
         const grown = Math.max(6, point.y - from.y1);
-        replace(state.id, { size: Math.max(6, Math.round(grown / (lines * LINE_HEIGHT))) });
+        replace(
+          state.id,
+          { size: Math.max(6, Math.round(grown / (lines * LINE_HEIGHT))) },
+          state.gesture,
+        );
         return;
       }
       const box = bounds(from);
       const anchorX = state.handle.endsWith("Left") ? box.x + box.width : box.x;
       const anchorY = state.handle.startsWith("top") ? box.y + box.height : box.y;
-      replace(state.id, { x1: anchorX, y1: anchorY, x2: point.x, y2: point.y });
+      replace(state.id, { x1: anchorX, y1: anchorY, x2: point.x, y2: point.y }, state.gesture);
       return;
     }
 
@@ -888,7 +968,13 @@ export function AnnotateLayer({
                 event.stopPropagation();
                 event.preventDefault();
                 (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-                drag.current = { kind: "handle", id: chosen.id, handle: key, from: chosen };
+                drag.current = {
+                  kind: "handle",
+                  id: chosen.id,
+                  handle: key,
+                  from: chosen,
+                  gesture: `drag-${++gestures.current}`,
+                };
               }}
               onPointerMove={onMove}
               onPointerUp={(event) => {
@@ -927,7 +1013,10 @@ export function AnnotateLayer({
           style={{
             ...css(typing.x, typing.y),
             color: style.color,
-            font: `600 ${Math.max(9, style.size * box.scale)}px Inter, "Segoe UI", sans-serif`,
+            // No lower limit. There was one of 9 px, and a small caption on a
+            // scaled-down picture was typed larger than it lands — it shrank
+            // the moment it was put down.
+            font: `600 ${style.size * box.scale}px Inter, "Segoe UI", sans-serif`,
             lineHeight: LINE_HEIGHT,
             WebkitTextStroke: `${Math.max(2, style.size / 10) * box.scale}px ${style.altColor}`,
             // The canvas strokes first and fills over it. Without this the

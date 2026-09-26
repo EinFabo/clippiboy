@@ -226,10 +226,65 @@ export function ShotViewer({
     else onIndexChange(Math.min(index, clips.length - 2));
   }, [clip, clips.length, index, close, onDelete, onIndexChange]);
 
-  /** Every change to the marks that comes from the user — and only those. */
-  const editShapes: typeof setShapes = useCallback((next) => {
+  /**
+   * The marks as they stood before each change, newest last — what Undo walks
+   * back through. Empty means: as loaded or last saved.
+   *
+   * Undo used to take the *last mark of the list* away, whatever had happened.
+   * After deleting a mark it deleted a second one; after moving or recolouring
+   * one it deleted the newest instead of putting the change back.
+   */
+  const history = useRef<Shape[][]>([]);
+  /** The gesture the newest entry belongs to — see `editShapes`. */
+  const lastGesture = useRef<string | null>(null);
+  /**
+   * The marks right now, readable outside a render. `editShapes` needs the value
+   * it replaces to keep it, and a state updater is no place for that: React runs
+   * those twice in StrictMode, which would record every step twice.
+   */
+  const current = useRef<Shape[]>([]);
+
+  /** Marks from outside — loaded, saved, thrown away. Nothing to undo there. */
+  const resetShapes = useCallback((next: Shape[]) => {
+    current.current = next;
+    history.current = [];
+    lastGesture.current = null;
     setShapes(next);
-    setUnsaved(true);
+  }, []);
+
+  /**
+   * Every change to the marks that comes from the user — and only those.
+   *
+   * A change carrying the same `gesture` as the one before it joins that step
+   * instead of starting a new one: a drag writes the marks on every pointer
+   * move, a slider on every notch, and each is still one thing to undo.
+   */
+  const editShapes = useCallback(
+    (next: Shape[] | ((drawn: Shape[]) => Shape[]), gesture?: string) => {
+      const before = current.current;
+      const after = typeof next === "function" ? next(before) : next;
+      if (gesture === undefined || gesture !== lastGesture.current) {
+        history.current.push(before);
+      }
+      lastGesture.current = gesture ?? null;
+      current.current = after;
+      setShapes(after);
+      setUnsaved(true);
+    },
+    [],
+  );
+
+  /** One step back. Back at the start, nothing is unsaved any more. */
+  const undo = useCallback(() => {
+    const previous = history.current.pop();
+    if (!previous) return;
+    lastGesture.current = null;
+    current.current = previous;
+    setShapes(previous);
+    setUnsaved(history.current.length > 0);
+    // Or the panel keeps offering the options of a mark that may be gone, and
+    // its handles stay lying over the picture.
+    setSelected(null);
   }, []);
 
   const step = useCallback(
@@ -253,7 +308,7 @@ export function ShotViewer({
     setBroken(false);
     setMode("view");
     setSel(null);
-    setShapes([]);
+    resetShapes([]);
     setUnsaved(false);
     setAskingDiscard(false);
     setSelected(null);
@@ -269,7 +324,7 @@ export function ShotViewer({
       .then((loaded) => {
         if (!current) return;
         setEdit(loaded);
-        setShapes(readMarks(loaded));
+        resetShapes(readMarks(loaded));
         setUnsaved(false);
         // Now from the original's width rather than the cropped picture's.
         // Marks are drawn, stored and painted in the original's coordinates,
@@ -303,7 +358,8 @@ export function ShotViewer({
         // One step at a time: Escape leaves the crop, and only the next one
         // closes the viewer. Otherwise a mis-drawn rectangle would cost the
         // whole picture you were looking at.
-        if (mode !== "view") tryLeaveEditing();
+        if (mode === "crop") leaveCrop();
+        else if (mode !== "view") tryLeaveEditing();
         else close();
       } else if (
         mode === "draw" &&
@@ -312,14 +368,17 @@ export function ShotViewer({
       ) {
         event.preventDefault();
         dropSelected();
-      } else if (mode === "draw" && (event.ctrlKey || event.metaKey) && event.key === "z") {
-        // The last mark back, one at a time. Nothing to redo: whoever wants it
-        // again draws it again — that is quicker than finding the button.
+      } else if (
+        mode === "draw" &&
+        (event.ctrlKey || event.metaKey) &&
+        !event.shiftKey &&
+        // With Caps Lock on the key reads "Z".
+        event.key.toLowerCase() === "z"
+      ) {
+        // One step back, whatever it was. Nothing to redo: whoever wants it
+        // again does it again — that is quicker than finding the button.
         event.preventDefault();
-        editShapes((drawn) => drawn.slice(0, -1));
-        // Or the panel keeps offering the options of a mark that is gone, and
-        // its handles stay lying over the picture.
-        setSelected(null);
+        undo();
       } else if (mode === "view" && event.key === "ArrowLeft") {
         step(-1);
       } else if (mode === "view" && event.key === "ArrowRight") {
@@ -334,7 +393,7 @@ export function ShotViewer({
   // them through `tryLeaveEditing`. Without them Escape would keep asking a
   // closure from an earlier render whether anything is unsaved, and act on its
   // stale answer — which is the very loss this is meant to prevent.
-  }, [askingDelete, askingDiscard, close, edit, mode, selected, step, unsaved]);
+  }, [askingDelete, askingDiscard, close, edit, mode, selected, step, undo, unsaved]);
 
   if (!clip) return null;
 
@@ -390,9 +449,22 @@ export function ShotViewer({
     setMode("view");
     setSel(null);
     setSelected(null);
-    if (edit) setShapes(readMarks(edit));
+    if (edit) resetShapes(readMarks(edit));
     setUnsaved(false);
     setAskingDiscard(false);
+  };
+
+  /**
+   * Out of the crop and nothing else.
+   *
+   * "Cancel" there used to be `leaveEditing`, which also put the marks back to
+   * their saved state — draw a dozen, try a crop, cancel it, and all of them were
+   * gone without a question. Unsaved marks now wait in the drawing they came from.
+   */
+  const leaveCrop = () => {
+    setSel(null);
+    setAskingDiscard(false);
+    setMode(unsaved ? "draw" : "view");
   };
 
   /**
@@ -455,7 +527,7 @@ export function ShotViewer({
       // another frame of reference, and the core is the one that knows.
       const loaded = await api.screenshotEdit(clip.id);
       setEdit(loaded);
-      setShapes(readMarks(loaded));
+      resetShapes(readMarks(loaded));
       setUnsaved(false);
       setSelected(null);
       setSel(null);
@@ -499,8 +571,11 @@ export function ShotViewer({
 
   const restyle = (patch: Partial<Style>) => {
     if (chosen) {
-      editShapes((drawn) =>
-        drawn.map((shape) => (shape.id === chosen.id ? { ...shape, ...patch } : shape)),
+      editShapes(
+        (drawn) =>
+          drawn.map((shape) => (shape.id === chosen.id ? { ...shape, ...patch } : shape)),
+        // The slider writes on every notch; one pull is one step to undo.
+        `style-${chosen.id}-${Object.keys(patch).join()}`,
       );
       return;
     }
@@ -770,11 +845,8 @@ export function ShotViewer({
                     <Button
                       size="sm"
                       variant="ghost"
-                      disabled={shapes.length === 0}
-                      onClick={() => {
-                        editShapes((drawn) => drawn.slice(0, -1));
-                        setSelected(null);
-                      }}
+                      disabled={!unsaved}
+                      onClick={undo}
                     >
                       Undo
                     </Button>
@@ -854,21 +926,9 @@ export function ShotViewer({
                     >
                       {busy ? "Cropping …" : "Crop"}
                     </Button>
-                    {askingDiscard ? (
-                      <ConfirmDelete
-                        question="Discard unsaved marks?"
-                        confirmLabel="Discard the marks"
-                        confirmTitle="Throw them away"
-                        cancelLabel="Keep drawing"
-                        cancelTitle="Back to the marks — Escape does the same"
-                        onConfirm={leaveEditing}
-                        onCancel={() => setAskingDiscard(false)}
-                      />
-                    ) : (
-                      <Button size="sm" variant="ghost" onClick={leaveEditing}>
-                        Cancel
-                      </Button>
-                    )}
+                    <Button size="sm" variant="ghost" onClick={leaveCrop}>
+                      Cancel
+                    </Button>
                   </div>
                   <p className="text-xs text-ink-faint">
                     Drag on the picture to select, drag inside it to move it.
