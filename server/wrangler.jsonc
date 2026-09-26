@@ -1,0 +1,26 @@
+// The friends server: accounts via Discord, friend lists in D1, and one
+// Durable Object per user that holds that user's live connection.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "clippiboy-friends",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "observability": { "enabled": true },
+  "vars": {
+    // Public — it is in every authorize URL anyway. The secret is set with
+    // `wrangler secret put DISCORD_CLIENT_SECRET`.
+    "DISCORD_CLIENT_ID": ""
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "clippiboy-friends",
+      "database_id": "67470f4b-416f-4180-adf3-6d924f15459d",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }]
+}
