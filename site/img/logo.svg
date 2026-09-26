@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="ClippiBoy">
+  <defs>
+    <radialGradient id="cbDisc" cx="34%" cy="24%" r="92%">
+      <stop offset="0" stop-color="#1d1533"/>
+      <stop offset=".55" stop-color="#110c1f"/>
+      <stop offset="1" stop-color="#08060f"/>
+    </radialGradient>
+    <linearGradient id="cbRim" x1="0" y1="0" x2=".45" y2="1">
+      <stop offset="0" stop-color="#7c4fd8"/>
+      <stop offset=".5" stop-color="#452a7f"/>
+      <stop offset="1" stop-color="#2a1a4d"/>
+    </linearGradient>
+    <linearGradient id="cbMark" x1=".08" y1=".05" x2=".92" y2=".95">
+      <stop offset="0" stop-color="#b492ff"/>
+      <stop offset=".45" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="cbPlay" x1=".1" y1="0" x2=".9" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Scheibe -->
+  <circle cx="128" cy="128" r="125" fill="url(#cbDisc)"/>
+  <circle cx="128" cy="128" r="123.5" fill="none" stroke="url(#cbRim)" stroke-width="3"/>
+
+  <!-- C-Bogen, nach rechts geoeffnet -->
+  <path d="M177.03 86.86 A64 64 0 1 0 177.03 169.14"
+        fill="none" stroke="url(#cbMark)" stroke-width="28" stroke-linecap="round"/>
+
+  <!-- Play-Dreieck in der Oeffnung -->
+  <path d="M111.6 102.1 L143.2 128 L111.6 153.9 Z"
+        fill="url(#cbPlay)" stroke="url(#cbPlay)" stroke-width="9" stroke-linejoin="round"/>
+</svg>

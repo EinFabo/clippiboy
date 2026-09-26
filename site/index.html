@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClippiBoy — replay buffer for Windows</title>
+  <meta name="description" content="ClippiBoy keeps the last minutes of your game in memory. Press a key and the clip is saved from before you pressed it, with every sound on its own track. Free, for Windows 10 and 11.">
+  <meta name="theme-color" content="#0f0b1a">
+  <meta property="og:title" content="ClippiBoy">
+  <meta property="og:description" content="A replay buffer for Windows. Every audio source on its own track.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+  <link rel="preload" href="fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <a class="brand" href="./" aria-label="ClippiBoy home">
+      <img src="img/logo.svg" alt="" width="32" height="32">
+      <span>ClippiBoy</span>
+    </a>
+    <nav aria-label="Sections">
+      <a href="#audio">Audio</a>
+      <a href="#features">Features</a>
+      <a href="#streamdeck">Stream Deck</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/EinFabo/clippiboy">GitHub</a>
+    </nav>
+    <a class="btn btn-small" data-download href="https://github.com/EinFabo/clippiboy/releases/latest">Download</a>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="hero-text">
+        <h1>Save what already happened.</h1>
+        <p class="lede">ClippiBoy keeps the last minutes of your game in memory. When something
+          worth keeping happens, press a key: the clip is saved from <em>before</em> you pressed it,
+          with every sound on its own track.</p>
+        <div class="cta">
+          <a class="btn" data-download href="https://github.com/EinFabo/clippiboy/releases/latest">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9m0 0-4-4m4 4 4-4M4 16h12"/></svg>
+            Download for Windows
+          </a>
+          <p class="cta-meta"><span data-version>Latest version</span>, free, for Windows 10 and 11</p>
+        </div>
+      </div>
+
+      <figure class="buffer" aria-label="Demo: the replay buffer">
+        <div class="buffer-frame">
+          <div class="lane-labels" aria-hidden="true">
+            <span>Picture</span><span>Game</span><span>Discord</span><span>Microphone</span>
+          </div>
+          <canvas id="buffer" aria-hidden="true"></canvas>
+          <div class="toast" id="toast" role="status" aria-live="polite">
+            <img src="img/logo.svg" alt="" width="22" height="22">
+            <span><b>Clip saved</b> the last 30 seconds, 3 audio tracks</span>
+          </div>
+        </div>
+        <div class="ticks" aria-hidden="true"><span>2:00 ago</span><span>1:00 ago</span><span>now</span></div>
+        <figcaption>
+          <button class="try" id="try" type="button">
+            Try it:
+            <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>S</kbd>
+          </button>
+          <span class="try-note">The buffer never stops. Saving just cuts out what's already there.</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    <section class="audio" id="audio">
+      <div class="audio-text">
+        <h2>Turn Discord down after the fact.</h2>
+        <p>Most recorders flatten everything into one track the moment they record.
+          ClippiBoy keeps the game, each app you pick and your microphone apart, all the
+          way into the saved clip.</p>
+        <p>So when your friend is too loud over the best play of the night, you open the clip
+          and move one slider. No video editor, no second recording.</p>
+        <p class="small">Per-app audio needs Windows 11. Output devices and microphones work on Windows 10 too.</p>
+      </div>
+
+      <div class="mixer" aria-label="Try the track mix">
+        <div class="mix-row" data-track="game">
+          <span class="mix-name">Game</span>
+          <canvas class="mix-wave" aria-hidden="true"></canvas>
+          <input type="range" min="-30" max="12" step="1" value="0" aria-label="Game volume">
+          <output>0 dB</output>
+          <button type="button" class="mute" aria-pressed="false" aria-label="Mute game">M</button>
+        </div>
+        <div class="mix-row" data-track="discord">
+          <span class="mix-name">Discord</span>
+          <canvas class="mix-wave" aria-hidden="true"></canvas>
+          <input type="range" min="-30" max="12" step="1" value="6" aria-label="Discord volume">
+          <output>+6 dB</output>
+          <button type="button" class="mute" aria-pressed="false" aria-label="Mute Discord">M</button>
+        </div>
+        <div class="mix-row" data-track="mic">
+          <span class="mix-name">Microphone</span>
+          <canvas class="mix-wave" aria-hidden="true"></canvas>
+          <input type="range" min="-30" max="12" step="1" value="0" aria-label="Microphone volume">
+          <output>0 dB</output>
+          <button type="button" class="mute" aria-pressed="false" aria-label="Mute microphone">M</button>
+        </div>
+        <div class="mix-row mix-sum">
+          <span class="mix-name">In the clip</span>
+          <canvas class="mix-wave" id="sum" aria-hidden="true"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="features" id="features">
+      <h2>Everything around the clip</h2>
+      <dl>
+        <div><dt>Ready in a second or two</dt>
+          <dd>One hardware encoder runs all the time (NVIDIA, AMD or Intel). Saving cuts the finished
+            video out of memory, so nothing is encoded twice and your game keeps its frame rate.</dd></div>
+        <div><dt>Edit inside the app</dt>
+          <dd>Name, description, game, the volume of every track and a frame-accurate trim.
+            Changed your mind? Undo the trim and the whole clip is back.</dd></div>
+        <div><dt>Export to a size</dt>
+          <dd>Need it under 10 MB for a chat? Pick the size and ClippiBoy works out bitrate and
+            resolution so it fits, and stays sharp.</dd></div>
+        <div><dt>Recordings</dt>
+          <dd>Start and stop by hand for as long as your disk allows, while the replay buffer keeps
+            running next to it.</dd></div>
+        <div><dt>Screenshots</dt>
+          <dd>Their own hotkey, their own gallery, and an editor for cropping, marking and blurring
+            that never touches the original.</dd></div>
+        <div><dt>A console over your game</dt>
+          <dd>Open it with <kbd>Alt</kbd><kbd>C</kbd> without leaving the game: buffer status,
+            frame rate, audio levels and your latest clips.</dd></div>
+        <div><dt>A banner, not a pop-up</dt>
+          <dd>A small overlay confirms each saved clip. It never takes focus, so your next keypress
+            still goes to the game.</dd></div>
+        <div><dt>Knows what you're playing</dt>
+          <dd>Games are detected by their process. Clips are sorted by game, and the buffer can run
+            only while you play.</dd></div>
+        <div><dt>Out of the way</dt>
+          <dd>Lives in the tray, starts with Windows if you like, and updates itself with one click,
+            never in the middle of a recording.</dd></div>
+      </dl>
+    </section>
+
+    <section class="keys" id="hotkeys">
+      <h2>Four keys to remember</h2>
+      <table>
+        <tbody>
+          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>S</kbd></td><td>Save clip</td></tr>
+          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>B</kbd></td><td>Buffer on or off</td></tr>
+          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></td><td>Screenshot</td></tr>
+          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>R</kbd></td><td>Start or stop a recording</td></tr>
+        </tbody>
+      </table>
+      <p class="small">All of them can be changed in the settings, even to a single key like <kbd>F9</kbd>.</p>
+    </section>
+
+    <section class="deck" id="streamdeck">
+      <div class="deck-text">
+        <h2>On your Stream Deck</h2>
+        <p>The plugin puts ClippiBoy's four buttons on real keys, and the keys show what's going on:
+          how much is in the buffer, whether it's running, how long a recording has been going.</p>
+        <p>Double-click the downloaded file and the Stream Deck software installs it. Then turn on
+          <i>Settings → Stream Deck</i> in ClippiBoy. Nothing to type, and nothing reachable from
+          outside your PC.</p>
+        <a class="btn btn-ghost" data-plugin href="https://github.com/EinFabo/clippiboy/releases/latest">Download the plugin</a>
+      </div>
+      <ul class="deck-keys">
+        <li><span class="sd"><img src="img/sd-save.png" alt="" width="72" height="72"><small>1:47</small></span>Save clip</li>
+        <li><span class="sd"><img src="img/sd-screenshot.png" alt="" width="72" height="72"><small></small></span>Screenshot</li>
+        <li><span class="sd"><img src="img/sd-buffer.png" alt="" width="72" height="72"><small>on</small></span>Replay buffer</li>
+        <li><span class="sd"><img src="img/sd-record.png" alt="" width="72" height="72"><small>12:34</small></span>Recording</li>
+      </ul>
+    </section>
+
+    <section class="install" id="install">
+      <h2>Getting started</h2>
+      <ol>
+        <li><b>Run the installer.</b> It installs for your user only, so you don't need admin rights.</li>
+        <li><b>Let it fetch ffmpeg once.</b> On first start ClippiBoy downloads about 80 MB and checks it
+          against a fixed checksum. The buffer already runs while that happens.</li>
+        <li><b>Play.</b> When something happens, press <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>S</kbd>.
+          The clip is in your clips folder a second later.</li>
+      </ol>
+
+      <div class="req">
+        <h3>You need</h3>
+        <ul>
+          <li>Windows 10 or 11, 64-bit</li>
+          <li>WebView2, which Windows 11 already has and Windows 10 gets through Windows Update</li>
+          <li>A graphics card with a video encoder helps; without one ClippiBoy falls back to the CPU</li>
+        </ul>
+      </div>
+
+      <div class="release" id="release">
+        <h3>Latest release</h3>
+        <p data-release>See the <a href="https://github.com/EinFabo/clippiboy/releases/latest">latest release on GitHub</a>.</p>
+        <p><a href="https://github.com/EinFabo/clippiboy/releases">All versions and what changed</a></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <img src="img/logo.svg" alt="" width="24" height="24">
+    <p>ClippiBoy is made by <a href="https://github.com/EinFabo">EinFabo</a>.
+      <a href="https://github.com/EinFabo/clippiboy">Source code</a> and
+      <a href="https://github.com/EinFabo/clippiboy/issues">bug reports</a> on GitHub.
+      © 2026 EinFabo. Free to use, <a href="https://github.com/EinFabo/clippiboy/blob/main/LICENSE">all rights reserved</a>.</p>
+  </footer>
+
+  <script src="main.js" defer></script>
+</body>
+</html>
