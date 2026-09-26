@@ -24,7 +24,8 @@
 //! of fullscreen. So that case is recognised before anything is shown and only
 //! says so.
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::time::Duration;
 
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
 
@@ -41,6 +42,14 @@ pub const MAX_SCALE: f64 = 1.6;
 /// The window that had the focus when the console opened — the game, normally.
 /// Stored as a raw handle; zero means there is nothing to go back to.
 static PREVIOUS: AtomicIsize = AtomicIsize::new(0);
+
+/// Counts the openings. The hotkey's fallback below uses it to tell "still the
+/// console I was asked to close" from "closed and opened again since".
+static OPENINGS: AtomicU64 = AtomicU64::new(0);
+
+/// How long the page gets to play its way out before the hotkey closes the
+/// window anyway — `CLOSE_MS` in Console.tsx plus room for a slow frame.
+const CLOSE_GRACE: Duration = Duration::from_millis(600);
 
 /// Create the console window, hidden. Called once at startup.
 pub fn create(app: &tauri::AppHandle) {
@@ -106,10 +115,45 @@ pub fn is_open(app: &tauri::AppHandle) -> bool {
 
 pub fn toggle(app: &tauri::AppHandle) {
     if is_open(app) {
-        close(app);
+        request_close(app);
     } else {
         open(app);
     }
+}
+
+/// The hotkey's way out: through the page, like Escape and the click beside the
+/// dock. Hiding straight from here skipped the page's exit — the window was
+/// gone in the same frame, and Windows' own hide transition pulled the glow in
+/// from the screen edges (Punkt 14). The page plays its exit and then calls
+/// `close_console` itself.
+///
+/// Should the page not answer — still loading, or hung — the window must not
+/// stay over the game, so it is closed here after a grace period. Only if it is
+/// still the same opening: pressed shut and open again in between, the fallback
+/// would otherwise close the fresh one.
+fn request_close(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    if window.emit("console-close-request", ()).is_err() {
+        close(app);
+        return;
+    }
+    let opening = OPENINGS.load(Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(CLOSE_GRACE);
+        if OPENINGS.load(Ordering::SeqCst) != opening {
+            return;
+        }
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if OPENINGS.load(Ordering::SeqCst) == opening && is_open(&handle) {
+                log::warn!("console did not close itself; closing it from the core");
+                close(&handle);
+            }
+        });
+    });
 }
 
 /// Bring the console up on the screen being played on.
@@ -132,6 +176,7 @@ pub fn open(app: &tauri::AppHandle) {
         return;
     };
 
+    OPENINGS.fetch_add(1, Ordering::SeqCst);
     remember_foreground();
     // Before it is up: the flag takes hold on the next showing, never on the
     // window standing in front of the game.

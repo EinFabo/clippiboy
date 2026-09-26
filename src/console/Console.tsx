@@ -241,6 +241,9 @@ export function Console() {
         trendPush(e.payload);
       }),
       listen<Clip>("clip-saved", () => void loadClips()),
+      // Der Hotkey zum Schließen. Er geht über die Seite wie Escape, damit der
+      // Weg hinaus gespielt wird, bevor der Kern das Fenster versteckt.
+      listen("console-close-request", () => close()),
       // Gone from the screen — alt-tabbed away, or the game took the focus
       // back. It comes back as it opens, so everything standing goes now.
       listen("console-closed", () => {
@@ -311,7 +314,7 @@ export function Console() {
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));
     };
-  }, [loadClips, trendPush]);
+  }, [loadClips, trendPush, close]);
 
   /** Open something above the dock — a panel, or the player. The window is the
    *  screen and never changes size, so this is nothing but state. */
