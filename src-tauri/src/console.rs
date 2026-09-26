@@ -125,6 +125,12 @@ pub fn open(app: &tauri::AppHandle) {
         return;
     };
 
+    // Bei jedem Öffnen, nicht einmal beim Start: der GPU-Prozess von WebView2
+    // entsteht erst, wenn das erste Fenster zeichnet, und nach einem Absturz neu.
+    // Schon angehobene Prozesse überspringt `raise`.
+    #[cfg(windows)]
+    std::thread::spawn(crate::gpu_priority::raise);
+
     remember_foreground();
     // Before it is up: the flag takes hold on the next showing, never on the
     // window standing in front of the game.
