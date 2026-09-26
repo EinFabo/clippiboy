@@ -5,30 +5,34 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ClippiBoy — replay buffer for Windows</title>
   <meta name="description" content="ClippiBoy keeps the last minutes of your game in memory. Press a key and the clip is saved from before you pressed it, with every sound on its own track. Free, for Windows 10 and 11.">
-  <meta name="theme-color" content="#0f0b1a">
+  <meta name="theme-color" content="#08080a">
   <meta property="og:title" content="ClippiBoy">
   <meta property="og:description" content="A replay buffer for Windows. Every audio source on its own track.">
   <meta property="og:type" content="website">
   <link rel="icon" href="img/logo.svg" type="image/svg+xml">
-  <link rel="preload" href="fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
 
+  <div class="hero-glow" aria-hidden="true"></div>
+
   <header class="top">
     <a class="brand" href="./" aria-label="ClippiBoy home">
-      <img src="img/logo.svg" alt="" width="32" height="32">
+      <img src="img/logo.svg" alt="" width="34" height="34">
       <span>ClippiBoy</span>
     </a>
-    <nav aria-label="Sections">
+    <nav class="pillnav" aria-label="Sections">
+      <span class="pillnav-mark" aria-hidden="true"></span>
       <a href="#audio">Audio</a>
       <a href="#features">Features</a>
       <a href="#streamdeck">Stream Deck</a>
       <a href="#install">Install</a>
-      <a href="https://github.com/EinFabo/clippiboy">GitHub</a>
+      <span class="pillnav-sep" aria-hidden="true"></span>
+      <span class="live" aria-hidden="true"><span class="live-dot"></span>Buffer on</span>
     </nav>
-    <a class="btn btn-small" data-download href="https://github.com/EinFabo/clippiboy/releases/latest">Download</a>
+    <a class="btn btn-primary btn-sm" data-download href="https://github.com/EinFabo/clippiboy/releases/latest">Download</a>
   </header>
 
   <main id="main">
@@ -39,7 +43,7 @@
           worth keeping happens, press a key: the clip is saved from <em>before</em> you pressed it,
           with every sound on its own track.</p>
         <div class="cta">
-          <a class="btn" data-download href="https://github.com/EinFabo/clippiboy/releases/latest">
+          <a class="btn btn-primary" data-download href="https://github.com/EinFabo/clippiboy/releases/latest">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9m0 0-4-4m4 4 4-4M4 16h12"/></svg>
             Download for Windows
           </a>
@@ -53,16 +57,24 @@
             <span>Picture</span><span>Game</span><span>Discord</span><span>Microphone</span>
           </div>
           <canvas id="buffer" aria-hidden="true"></canvas>
-          <div class="toast" id="toast" role="status" aria-live="polite">
-            <img src="img/logo.svg" alt="" width="22" height="22">
-            <span><b>Clip saved</b> the last 30 seconds, 3 audio tracks</span>
+          <div class="banner" id="toast" role="status" aria-live="polite" hidden>
+            <svg class="banner-outline" aria-hidden="true"><rect class="halo" pathLength="100"/><rect class="line" pathLength="100"/></svg>
+            <span class="banner-rim" aria-hidden="true"></span>
+            <div class="banner-thumb" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7"/></svg>
+            </div>
+            <div class="banner-text">
+              <p class="banner-label">ClippiBoy</p>
+              <p class="banner-title">Clip saved</p>
+              <p class="banner-detail">Counter-Strike 2 · last 30 s · 3 tracks</p>
+            </div>
           </div>
         </div>
         <div class="ticks" aria-hidden="true"><span>2:00 ago</span><span>1:00 ago</span><span>now</span></div>
         <figcaption>
-          <button class="try" id="try" type="button">
-            Try it:
-            <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>S</kbd>
+          <button class="btn btn-secondary" id="try" type="button">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9m0 0-4-4m4 4 4-4M4 16h12"/></svg>
+            Save clip
           </button>
           <span class="try-note">The buffer never stops. Saving just cuts out what's already there.</span>
         </figcaption>
@@ -143,15 +155,14 @@
     </section>
 
     <section class="keys" id="hotkeys">
-      <h2>Four keys to remember</h2>
-      <table>
-        <tbody>
-          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>S</kbd></td><td>Save clip</td></tr>
-          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>B</kbd></td><td>Buffer on or off</td></tr>
-          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></td><td>Screenshot</td></tr>
-          <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>R</kbd></td><td>Start or stop a recording</td></tr>
-        </tbody>
-      </table>
+      <h2>Five keys to remember</h2>
+      <ul class="keys-list">
+        <li><span>Save clip</span><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>S</kbd></span></li>
+        <li><span>Buffer on or off</span><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>B</kbd></span></li>
+        <li><span>Screenshot</span><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></span></li>
+        <li><span>Start or stop a recording</span><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>R</kbd></span></li>
+        <li><span>Open the console</span><span><kbd>Alt</kbd><kbd>C</kbd></span></li>
+      </ul>
       <p class="small">All of them can be changed in the settings, even to a single key like <kbd>F9</kbd>.</p>
     </section>
 
@@ -163,7 +174,7 @@
         <p>Double-click the downloaded file and the Stream Deck software installs it. Then turn on
           <i>Settings → Stream Deck</i> in ClippiBoy. Nothing to type, and nothing reachable from
           outside your PC.</p>
-        <a class="btn btn-ghost" data-plugin href="https://github.com/EinFabo/clippiboy/releases/latest">Download the plugin</a>
+        <a class="btn btn-secondary" data-plugin href="https://github.com/EinFabo/clippiboy/releases/latest">Download the plugin</a>
       </div>
       <ul class="deck-keys">
         <li><span class="sd"><img src="img/sd-save.png" alt="" width="72" height="72"><small>1:47</small></span>Save clip</li>

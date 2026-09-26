@@ -32,7 +32,7 @@ const tracks = {
     return talking ? 0.2 + 0.5 * smooth(i, 2, 32) * (0.6 + 0.4 * hash(i, 33)) : 0.02 * hash(i, 34);
   },
 };
-const COLORS = { game: "#8b5cf6", discord: "#a5b4fc", mic: "#f0abfc" };
+const COLORS = { game: "#8b5cf6", discord: "#a78bfa", mic: "#ddd6fe" };
 
 function fitCanvas(canvas) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -69,10 +69,21 @@ function fitCanvas(canvas) {
   function save() {
     saves.push({ at: t, shownAt: performance.now() });
     saves = saves.slice(-3);
-    toast.classList.add("show");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.classList.remove("show"), 2800);
+    showBanner();
     if (reduced) draw();
+  }
+
+  // The same card the app puts over the game: in, line around, rim, out.
+  function showBanner() {
+    clearTimeout(toastTimer);
+    toast.hidden = false;
+    toast.classList.remove("in", "out");
+    void toast.offsetWidth; // restart the animations
+    toast.classList.add("in");
+    toastTimer = setTimeout(() => {
+      toast.classList.replace("in", "out");
+      toastTimer = setTimeout(() => { toast.hidden = true; }, 260);
+    }, 3500);
   }
 
   function draw() {
@@ -96,7 +107,7 @@ function fitCanvas(canvas) {
       const x = xOf(c * colSec);
       const light = 16 + 30 * smooth(c, 60, 41) + (hash(c, 42) > 0.93 ? 22 : 0);
       const hue = 250 + 40 * smooth(c, 90, 43);
-      ctx.fillStyle = `hsl(${hue} 45% ${light}%)`;
+      ctx.fillStyle = `hsl(${hue} 40% ${light}%)`;
       roundRect(ctx, x + 1, pic.y + 12, COL * 6 - 3, pic.h - 20, 4);
     }
 
@@ -124,9 +135,9 @@ function fitCanvas(canvas) {
       if (fade <= 0) continue;
       const x1 = xOf(s.at), x0 = xOf(s.at - CLIP * eased);
       ctx.globalAlpha = fade;
-      ctx.fillStyle = "rgba(139,92,246,0.22)";
+      ctx.fillStyle = "rgba(139,92,246,0.2)";
       ctx.fillRect(x0, 0, x1 - x0, h);
-      ctx.fillStyle = "#c4b5fd";
+      ctx.fillStyle = "#a78bfa";
       ctx.fillRect(x0, 0, 2, h);
       ctx.fillRect(x1 - 2, 0, 2, h);
       ctx.fillRect(x0, 0, 10, 2); ctx.fillRect(x0, h - 2, 10, 2);
@@ -137,11 +148,11 @@ function fitCanvas(canvas) {
 
     // now
     const g = ctx.createLinearGradient(w - 60, 0, w, 0);
-    g.addColorStop(0, "rgba(23,17,39,0)");
-    g.addColorStop(1, "rgba(23,17,39,0.9)");
+    g.addColorStop(0, "rgba(18,18,21,0)");
+    g.addColorStop(1, "rgba(18,18,21,0.9)");
     ctx.fillStyle = g;
     ctx.fillRect(w - 60, 0, 60, h);
-    ctx.fillStyle = "#c4b5fd";
+    ctx.fillStyle = "#ef4444";
     ctx.fillRect(w - 2, 0, 2, h);
   }
 
@@ -177,12 +188,6 @@ function fitCanvas(canvas) {
   }
 
   tryBtn.addEventListener("click", save);
-  addEventListener("keydown", (e) => {
-    if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === "KeyS") {
-      e.preventDefault();
-      save();
-    }
-  });
 })();
 
 /* ---------- The mixer ---------- */
@@ -207,7 +212,7 @@ function fitCanvas(canvas) {
     values.forEach((v, i) => {
       const clipped = v > 1;
       const bh = Math.max(1, Math.min(1, v) * (h - 2));
-      ctx.fillStyle = clipped ? "#f43f5e" : color;
+      ctx.fillStyle = clipped ? "#ef4444" : color;
       ctx.fillRect(i * bw, mid - bh / 2, Math.max(1, bw - 1.2), bh);
     });
   }
@@ -225,7 +230,7 @@ function fitCanvas(canvas) {
       }
       bars(row.querySelector("canvas"), vals, COLORS[name]);
     });
-    bars(sum, total, "#c4b5fd");
+    bars(sum, total, "#ffffff");
   }
 
   rows.forEach((row) => {
@@ -246,6 +251,42 @@ function fitCanvas(canvas) {
   render();
   let rt = 0;
   addEventListener("resize", () => { cancelAnimationFrame(rt); rt = requestAnimationFrame(render); });
+})();
+
+/* ---------- The sliding mark in the nav, like the app's ---------- */
+
+(function nav() {
+  const nav = document.querySelector(".pillnav");
+  if (!nav) return;
+  const mark = nav.querySelector(".pillnav-mark");
+  const links = [...nav.querySelectorAll('a[href^="#"]')];
+  let current = null;
+
+  function moveTo(a) {
+    if (!a) { mark.style.opacity = "0"; return; }
+    mark.style.width = a.offsetWidth + "px";
+    mark.style.transform = `translateX(${a.offsetLeft}px)`;
+    mark.style.opacity = "1";
+  }
+  function setCurrent(a) {
+    current = a;
+    links.forEach((l) => (l === a ? l.setAttribute("aria-current", "true") : l.removeAttribute("aria-current")));
+    moveTo(a);
+  }
+
+  links.forEach((a) => {
+    a.addEventListener("mouseenter", () => moveTo(a));
+  });
+  nav.addEventListener("mouseleave", () => moveTo(current));
+
+  const sections = links.map((a) => document.querySelector(a.getAttribute("href")));
+  const seen = new Map();
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => seen.set(e.target, e.isIntersecting));
+    const i = sections.findIndex((sec) => seen.get(sec));
+    setCurrent(i >= 0 ? links[i] : null);
+  }, { rootMargin: "-45% 0px -50% 0px" });
+  sections.forEach((sec) => sec && io.observe(sec));
 })();
 
 /* ---------- Latest release from GitHub ---------- */
