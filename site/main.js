@@ -289,52 +289,98 @@ function fitCanvas(canvas) {
   sections.forEach((sec) => sec && io.observe(sec));
 })();
 
-/* ---------- Latest release from GitHub ---------- */
+/* ---------- Latest release ---------- */
 
-(async function release() {
-  const KEY = "clippiboy-release";
-  let data = null;
-  try { data = JSON.parse(sessionStorage.getItem(KEY)); } catch {}
-  if (!data) {
-    try {
-      const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
-        headers: { Accept: "application/vnd.github+json" },
-      });
-      if (!res.ok) return;
-      data = await res.json();
-      try { sessionStorage.setItem(KEY, JSON.stringify(data)); } catch {}
-    } catch {
-      return; // the links already point at the release page
-    }
-  }
+// The page is published with the latest release already written into it, and
+// release.json beside it (.github/scripts/bake-release.mjs, run after every
+// release). Only where that file is missing — a local copy, a deploy that could
+// not reach GitHub — does the browser ask the GitHub API itself: 60 requests an
+// hour per address, which is why it is the fallback and not the way.
 
-  const assets = data.assets || [];
-  const setup = assets.find((a) => /-setup\.exe$/i.test(a.name));
-  const plugin = assets.find((a) => /\.streamDeckPlugin$/i.test(a.name));
-  const version = String(data.tag_name || "").replace(/^v/, "");
+const isSetup = (a) => /-setup\.exe$/i.test(a.name);
 
-  if (setup) {
-    document.querySelectorAll("[data-download]").forEach((a) => { a.href = setup.browser_download_url; });
+/** The baked file. Same origin, no rate limit, and never older than the deploy. */
+async function fromSite() {
+  try {
+    const res = await fetch("release.json", { cache: "no-cache" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && data.setup ? data : null;
+  } catch {
+    return null;
   }
-  if (plugin) {
-    document.querySelectorAll("[data-plugin]").forEach((a) => { a.href = plugin.browser_download_url; });
-  }
-  if (version) {
-    const mb = setup ? `, ${(setup.size / 1048576).toFixed(1)} MB` : "";
-    document.querySelectorAll("[data-version]").forEach((el) => { el.textContent = `Version ${version}${mb}`; });
-  }
+}
 
+/** The same shape, asked of GitHub. All releases, so the download count adds up. */
+async function fromApi() {
+  const KEY = "clippiboy-release-v2";
+  try {
+    const kept = JSON.parse(sessionStorage.getItem(KEY));
+    if (kept) return kept;
+  } catch {}
+  let list;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=100`, {
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    if (!res.ok) return null;
+    list = await res.json();
+  } catch {
+    return null; // the links already point at the release page
+  }
+  const apps = list.filter((r) => !r.draft && !r.prerelease && /^v\d/.test(r.tag_name));
+  // A release still uploading has no installer yet — the one before it is the
+  // one to offer, and nothing half-done goes into the cache.
+  const latest = apps.find((r) => r.assets.some(isSetup));
+  if (!latest) return null;
+  const setup = latest.assets.find(isSetup);
+  const plugin = latest.assets.find((a) => /\.streamDeckPlugin$/i.test(a.name));
+  const data = {
+    version: latest.tag_name.replace(/^v/, ""),
+    publishedAt: latest.published_at,
+    url: latest.html_url,
+    setup: { url: setup.browser_download_url, size: setup.size },
+    plugin: plugin ? { url: plugin.browser_download_url } : null,
+    downloads: apps.flatMap((r) => r.assets).filter(isSetup).reduce((n, a) => n + a.download_count, 0),
+  };
+  try { sessionStorage.setItem(KEY, JSON.stringify(data)); } catch {}
+  return data;
+}
+
+/** Wording has to match bake-release.mjs, which writes the same into the HTML. */
+function show(data) {
+  document.querySelectorAll("[data-download]").forEach((a) => { a.href = data.setup.url; });
+  if (data.plugin) {
+    document.querySelectorAll("[data-plugin]").forEach((a) => { a.href = data.plugin.url; });
+  }
+  const mb = (data.setup.size / 1048576).toFixed(1);
+  document.querySelectorAll("[data-version]").forEach((el) => {
+    el.textContent = `Version ${data.version}, ${mb} MB`;
+  });
+  if (data.downloads > 0) {
+    document.querySelectorAll("[data-downloads]").forEach((el) => {
+      el.textContent = ` · ${data.downloads.toLocaleString("en-US")} downloads`;
+      el.hidden = false;
+    });
+  }
   const target = document.querySelector("[data-release]");
-  if (target && version) {
-    const date = data.published_at
-      ? new Date(data.published_at).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })
+  if (target) {
+    const date = data.publishedAt
+      ? new Date(data.publishedAt).toLocaleDateString("en-GB", {
+          day: "numeric", month: "long", year: "numeric", timeZone: "UTC",
+        })
       : "";
     const link = document.createElement("a");
-    link.href = data.html_url;
+    link.href = data.url;
     link.textContent = "What's new";
     target.replaceChildren(
-      `ClippiBoy ${version}${date ? `, released ${date}` : ""}. `,
+      `ClippiBoy ${data.version}${date ? `, released ${date}` : ""}. `,
       link,
     );
   }
+}
+
+(async function release() {
+  const data = (await fromSite()) ?? (await fromApi());
+  if (data) show(data);
 })();

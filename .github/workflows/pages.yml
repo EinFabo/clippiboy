@@ -1,16 +1,24 @@
 # Publishes site/ to GitHub Pages: https://einfabo.github.io/clippiboy/
 #
 # One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
-# The page reads the latest release from the GitHub API in the browser, so a new
-# release needs no redeploy — only changes to site/ do.
+#
+# Runs on changes to site/ and after every finished release: the latest version,
+# its size, the direct links and the download count are written into the page
+# here (.github/scripts/bake-release.mjs), not looked up by every visitor's
+# browser. The browser only asks GitHub itself if release.json is missing.
 
 name: Pages
 
 on:
   push:
     branches: [main]
-    paths: ["site/**", ".github/workflows/pages.yml"]
+    paths: ["site/**", ".github/workflows/pages.yml", ".github/scripts/bake-release.mjs"]
   workflow_dispatch:
+  # After the release workflow, not on the tag: only then are the installer and
+  # the plugin attached. A page baked earlier would link a release without them.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
 
 permissions:
   contents: read
@@ -23,6 +31,8 @@ concurrency:
 
 jobs:
   deploy:
+    # A failed release has nothing new to show.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -30,6 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Write the latest release into the page
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/scripts/bake-release.mjs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
