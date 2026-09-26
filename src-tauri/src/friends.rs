@@ -28,8 +28,8 @@ use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http::Head
 
 use crate::state::AppState;
 
-const SERVER: &str = "https://clippiboy-friends.fabian081964.workers.dev";
-const SOCKET: &str = "wss://clippiboy-friends.fabian081964.workers.dev/ws";
+const SERVER: &str = "https://api.clippiboy.com";
+const SOCKET: &str = "wss://api.clippiboy.com/ws";
 /// The server closes a connection after 100 s without a word.
 const PING_EVERY: Duration = Duration::from_secs(30);
 /// No pong for this long and the connection is as good as dead — the laptop

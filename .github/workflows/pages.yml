@@ -1,4 +1,5 @@
-# Publishes site/ to GitHub Pages: https://einfabo.github.io/clippiboy/
+# Publishes site/ to GitHub Pages: https://einfabo.github.io/clippiboy/ — served at
+# https://clippiboy.com through the worker in server/site-proxy.
 #
 # One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
 #

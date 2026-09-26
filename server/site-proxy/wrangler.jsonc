@@ -1,0 +1,14 @@
+// clippiboy.com in front of the GitHub Pages site. The page itself is still
+// built and deployed by .github/workflows/pages.yml, which writes the latest
+// release into it — this only gives it the domain.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "clippiboy-site",
+  "main": "index.ts",
+  "compatibility_date": "2026-09-01",
+  "routes": [
+    { "pattern": "clippiboy.com", "custom_domain": true },
+    { "pattern": "www.clippiboy.com", "custom_domain": true }
+  ],
+  "workers_dev": false
+}

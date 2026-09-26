@@ -4,8 +4,9 @@ A Cloudflare Worker behind the Friends page: sign-in with Discord, friend lists
 in D1, and one Durable Object per user (`Hub`) that holds the app's live
 connection and passes presence — online, which game, since when — to friends.
 
-Live at `https://clippiboy-friends.fabian081964.workers.dev`. The app talks to it
-from `src-tauri/src/friends.rs`.
+Live at `https://api.clippiboy.com`; the old `clippiboy-friends.fabian081964.workers.dev`
+stays on for builds from before the domain. The app talks to it from
+`src-tauri/src/friends.rs`.
 
 ## Deploy
 
@@ -18,7 +19,8 @@ npm run deploy        # applies migrations/ to D1, then deploys
 
 Sign-in needs a Discord application (https://discord.com/developers/applications):
 
-1. OAuth2 → Redirects: `https://clippiboy-friends.fabian081964.workers.dev/auth/callback`
+1. OAuth2 → Redirects, both of them: `https://api.clippiboy.com/auth/callback` and
+   `https://clippiboy-friends.fabian081964.workers.dev/auth/callback`
 2. The Client ID goes into `vars.DISCORD_CLIENT_ID` in `wrangler.jsonc`.
 3. The Client Secret: `npx wrangler secret put DISCORD_CLIENT_SECRET`
 4. `npm run types && npm run deploy`

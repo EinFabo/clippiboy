@@ -6,6 +6,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "observability": { "enabled": true },
+  // The app talks to api.clippiboy.com. The workers.dev address stays on, so
+  // builds from before the domain keep working.
+  "routes": [{ "pattern": "api.clippiboy.com", "custom_domain": true }],
+  "workers_dev": true,
   "vars": {
     // Public — it is in every authorize URL anyway. The secret is set with
     // `wrangler secret put DISCORD_CLIENT_SECRET`.
