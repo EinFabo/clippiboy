@@ -207,18 +207,39 @@ export function Console() {
     }
   }, [say]);
 
+  /** Die Blende ist durch — jetzt darf der Kern das Fenster verstecken. Zwei
+   *  Bilder Abstand, damit das letzte, leere Bild auch auf dem Schirm war:
+   *  `animationend` sagt nur, dass es berechnet ist. Kommt zweimal (Ereignis
+   *  und Notfall-Uhr), zählt das erste. */
+  const finishClose = useCallback(() => {
+    if (closeTimer.current === null) return;
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        // Inzwischen weggetabbt: `console-closed` hat schon aufgeräumt, und ein
+        // Aufruf jetzt zöge den Vordergrund von dort weg.
+        if (closingRef.current) void api.closeConsole();
+      }),
+    );
+  }, []);
+
   /** Out of the way first, hidden second. The window itself is hidden by the
    *  core, and that takes effect the same frame — so the whole console has to
-   *  have left the screen before the call goes out. */
+   *  have left the screen before the call goes out.
+   *
+   *  Auf das Ende der Blende gewartet, nicht auf die Uhr. Eine Uhr über
+   *  `CLOSE_MS` lief los, bevor die Blende überhaupt anfing (sie beginnt erst
+   *  mit dem nächsten gezeichneten Bild), und ohne GPU kommen die Bilder nicht
+   *  pünktlich — das Fenster verschwand bei gut zwei Dritteln der Blende. Die
+   *  Uhr bleibt nur als Notnagel, falls `animationend` nie kommt (etwa bei
+   *  reduzierter Bewegung). */
   const close = useCallback(() => {
     if (!inTauri || closingRef.current) return;
     closingRef.current = true;
     setClosing(true);
-    closeTimer.current = window.setTimeout(() => {
-      closeTimer.current = null;
-      void api.closeConsole();
-    }, CLOSE_MS);
-  }, []);
+    closeTimer.current = window.setTimeout(finishClose, CLOSE_MS + 300);
+  }, [finishClose]);
 
   useEffect(() => {
     if (!inTauri) return;
@@ -737,6 +758,17 @@ export function Console() {
         // nach oben — siehe `--warn-lift` in console.css.
         data-warn={Math.min(trouble.length, TROUBLE_LINES)}
         data-leaving={closing}
+        // Das Ende der eigenen Blende, nicht das eines Kindes — die blubbern
+        // hier ebenfalls hoch.
+        onAnimationEnd={(event) => {
+          if (
+            closing &&
+            event.target === event.currentTarget &&
+            event.animationName === "cb-fade-out"
+          ) {
+            finishClose();
+          }
+        }}
         style={
           {
             "--cb-scale": String(scale),
