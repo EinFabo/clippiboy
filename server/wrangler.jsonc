@@ -9,7 +9,7 @@
   "vars": {
     // Public — it is in every authorize URL anyway. The secret is set with
     // `wrangler secret put DISCORD_CLIENT_SECRET`.
-    "DISCORD_CLIENT_ID": ""
+    "DISCORD_CLIENT_ID": "1553530949491236894"
   },
   "d1_databases": [
     {
