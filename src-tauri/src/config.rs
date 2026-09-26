@@ -62,6 +62,8 @@ pub fn default_config() -> AppConfig {
         overlay: OverlayConfig::default(),
         tray_hint_shown: false,
         control: ControlConfig::default(),
+        accent_color: None,
+        colors_unlocked: false,
     }
 }
 

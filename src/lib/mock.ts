@@ -115,6 +115,8 @@ export const mockConfig: AppConfig = {
   },
   trayHintShown: false,
   control: { enabled: true, port: 47653, token: "mock-token" },
+  accentColor: null,
+  colorsUnlocked: false,
 };
 
 export const mockClips: Clip[] = [

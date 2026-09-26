@@ -41,11 +41,18 @@
 }
 
 :root {
+  /* Two more steps of the accent, beside the three in @theme — where the
+     violet used to be written out as a number. Their values here are exactly
+     those numbers, so the violet looks as it always did. An accent of one's own
+     replaces all five at once (lib/accent.ts), with steps mixed from it. */
+  --color-accent-strong: #7c3aed;
+  --color-accent-night: #2a1b6b;
+
   --hero-gradient: linear-gradient(
     180deg,
-    #7c3aed 0%,
-    #4c1d95 22%,
-    #2a1b6b 48%,
+    var(--color-accent-strong) 0%,
+    var(--color-accent-deep) 22%,
+    var(--color-accent-night) 48%,
     #08080a 100%
   );
   --glass: rgba(26, 26, 31, 0.72);

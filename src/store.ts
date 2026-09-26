@@ -25,7 +25,8 @@ export type SettingsTab =
   | "banner"
   | "console"
   | "storage"
-  | "about";
+  | "about"
+  | "colors";
 
 interface EngineState {
   ready: boolean;

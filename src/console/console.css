@@ -74,17 +74,21 @@ body,
   background:
     radial-gradient(
       85% 70% at 0% 108%,
-      rgb(124 58 237 / 0.5),
-      rgb(76 29 149 / 0.2) 45%,
+      color-mix(in srgb, var(--color-accent-strong) 50%, transparent),
+      color-mix(in srgb, var(--color-accent-deep) 20%, transparent) 45%,
       transparent 75%
     ),
     radial-gradient(
       85% 70% at 100% 108%,
-      rgb(124 58 237 / 0.5),
-      rgb(76 29 149 / 0.2) 45%,
+      color-mix(in srgb, var(--color-accent-strong) 50%, transparent),
+      color-mix(in srgb, var(--color-accent-deep) 20%, transparent) 45%,
       transparent 75%
     ),
-    linear-gradient(0deg, rgb(42 27 107 / 0.35) 0%, transparent 34%);
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--color-accent-night) 35%, transparent) 0%,
+      transparent 34%
+    );
   /* Kommt mit dem Dock herauf, nicht vor ihm: stand der Schein sofort da,
      während die Leiste noch unterwegs war, färbte sich das Spiel einen
      Wimpernschlag lang ohne erkennbaren Grund. Dieselbe Dauer wie `cb-dock-in`.
@@ -140,8 +144,12 @@ body,
      auf der Unterkante, der nach oben hin ausläuft: damit bleibt die Regel
      stehen, die unten am Dock schon steht — das Lila gehört in die Kante, nicht
      in die Scheibe. Die Ecken waren die Frage, die Antwort ist die Kante. */
-  --con-dock-edge: rgb(167 139 250 / 0.5);
-  --con-dock-glow: linear-gradient(0deg, rgb(139 92 246 / 0.14) 0%, transparent 26%);
+  --con-dock-edge: color-mix(in srgb, var(--color-accent-bright) 50%, transparent);
+  --con-dock-glow: linear-gradient(
+    0deg,
+    color-mix(in srgb, var(--color-accent) 14%, transparent) 0%,
+    transparent 26%
+  );
 
   /* Das Licht, das beim Öffnen einmal um das Dock läuft. */
   --con-rim: var(--color-accent);

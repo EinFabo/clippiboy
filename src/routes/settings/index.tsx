@@ -1,3 +1,5 @@
+import { useRef } from "react";
+
 import { useEngine, type SettingsTab } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Segmented } from "@/components/ui/Controls";
@@ -7,6 +9,7 @@ import { BannerTab } from "./Banner";
 import { ConsoleTab } from "./Console";
 import { StorageTab } from "./Storage";
 import { AboutTab } from "./About";
+import { ColorsTab } from "./Colors";
 
 /** In order of how often someone comes looking. */
 const tabs: Array<{ key: SettingsTab; label: string; page: () => React.ReactNode }> = [
@@ -18,20 +21,50 @@ const tabs: Array<{ key: SettingsTab; label: string; page: () => React.ReactNode
   { key: "about", label: "About", page: AboutTab },
 ];
 
+const extra = { key: "colors" as const, label: "Colors", page: ColorsTab };
+
+const MARK = "99d15a6e77987125bbd2c42bb6ce0c70fd692cf9e6ce9d915a0cca157fc7d0c4";
+
+async function digest(text: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export function Settings() {
   const tab = useEngine((s) => s.settingsTab);
   const setTab = useEngine((s) => s.setSettingsTab);
   const lastError = useEngine((s) => s.lastError);
-  const Page = tabs.find(({ key }) => key === tab)?.page ?? HotkeysTab;
+  const unlocked = useEngine((s) => s.config.colorsUnlocked);
+  const patchConfig = useEngine((s) => s.patchConfig);
+  const shown = unlocked ? [...tabs, extra] : tabs;
+  const Page = shown.find(({ key }) => key === tab)?.page ?? HotkeysTab;
+  const taps = useRef<number[]>([]);
+
+  const tap = (at: number) => {
+    taps.current = [...taps.current, at].slice(-5);
+    if (unlocked || taps.current.length < 5) return;
+    void digest(taps.current.join(",")).then((hash) => {
+      if (hash !== MARK) return;
+      taps.current = [];
+      void patchConfig({ colorsUnlocked: true });
+      setTab(extra.key);
+    });
+  };
 
   return (
     <div className="space-y-8 pb-12">
       <header className="space-y-6 pt-10">
-        <h1 className="display text-4xl">Settings</h1>
+        <h1 className="display select-none text-4xl">
+          {[..."Settings"].map((letter, at) => (
+            <span key={at} onClick={() => tap(at)}>
+              {letter}
+            </span>
+          ))}
+        </h1>
         <Segmented
           className="w-fit"
           value={tab}
-          options={tabs.map(({ key, label }) => ({ key, label }))}
+          options={shown.map(({ key, label }) => ({ key, label }))}
           onChange={setTab}
         />
       </header>

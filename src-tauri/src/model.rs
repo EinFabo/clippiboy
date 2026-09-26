@@ -416,6 +416,24 @@ pub struct AppConfig {
     /// The local port for the Stream Deck plugin — see [`ControlConfig`].
     #[serde(default)]
     pub control: ControlConfig,
+    /// An accent of one's own, as `#rrggbb`, for the app, the banner and the
+    /// console alike. `None` is the violet everything was designed in.
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    /// Whether the Colors tab is shown in the settings.
+    #[serde(default)]
+    pub colors_unlocked: bool,
+}
+
+/// An accent colour as the config keeps it: `#rrggbb`, lower case — or nothing.
+///
+/// It ends up in a CSS custom property in three windows, so only this one form
+/// gets through; anything else counts as "back to violet".
+pub fn clean_accent(color: Option<&str>) -> Option<String> {
+    let color = color?.trim();
+    let hex = color.strip_prefix('#')?;
+    (hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| format!("#{}", hex.to_ascii_lowercase()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -631,6 +649,17 @@ pub struct EngineStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only `#rrggbb` gets into the CSS of three windows — the rest is violet.
+    #[test]
+    fn an_accent_is_six_hex_digits_or_nothing() {
+        assert_eq!(clean_accent(Some(" #3B82F6 ")), Some("#3b82f6".into()));
+        assert_eq!(clean_accent(Some("#fff")), None);
+        assert_eq!(clean_accent(Some("red")), None);
+        assert_eq!(clean_accent(Some("#12345g")), None);
+        assert_eq!(clean_accent(Some("#123456; background: url(x)")), None);
+        assert_eq!(clean_accent(None), None);
+    }
 
     /// `config::load` throws the **whole** configuration away when it cannot be
     /// parsed — sources, hotkeys, clip directory. A file written before

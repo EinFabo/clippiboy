@@ -204,6 +204,10 @@ export interface AppConfig {
   overlay: OverlayConfig;
   trayHintShown: boolean;
   control: ControlConfig;
+  /** An accent of one's own as `#rrggbb`; `null` is the violet. */
+  accentColor: string | null;
+  /** Whether the Colors tab is shown in the settings. */
+  colorsUnlocked: boolean;
 }
 
 export interface Clip {
