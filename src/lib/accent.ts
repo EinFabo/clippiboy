@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 
+import { renderLogo } from "@/components/ui/Logo";
 import { api, inTauri } from "@/lib/ipc";
 import type { Accent, AppConfig } from "@/lib/types";
 
@@ -62,6 +63,12 @@ const PERIOD = { slow: 30_000, medium: 15_000 };
 /** How often the turning hue is written while the main window shows. */
 const FRAME_MS = 80;
 
+/** The tray icon's edge in pixels — Windows scales it down to what it needs. */
+const ICON_SIZE = 128;
+
+/** Settle time before the icons are drawn: a picker reports every move. */
+const ICON_MS = 250;
+
 /**
  * The hue right now. Taken from the clock rather than counted, so every window
  * arrives at the same one — the console opened mid-turn shows the colour the
@@ -121,9 +128,20 @@ export function accentOf(config: AppConfig): Accent {
 export function installAccent({ turning = false }: { turning?: boolean } = {}) {
   if (!inTauri) return;
   let current: Accent | null = null;
+  let iconTimer: number | undefined;
   const take = (accent: Accent) => {
     current = accent;
     applyAccent(accent);
+    // The tray and the task bar: drawn by the main window alone, from the logo
+    // as it now stands — not on every turn of the RGB hue, only when the accent
+    // itself changes. In RGB they carry the whole wheel instead.
+    if (!turning) return;
+    window.clearTimeout(iconTimer);
+    iconTimer = window.setTimeout(() => {
+      void renderLogo(ICON_SIZE, accent.mode === "rgb")
+        .then((pixels) => api.setLogoIcon(Array.from(pixels), ICON_SIZE))
+        .catch(() => {});
+    }, ICON_MS);
   };
   const refresh = () => {
     if (current?.mode === "rgb" && !document.hidden) applyAccent(current);

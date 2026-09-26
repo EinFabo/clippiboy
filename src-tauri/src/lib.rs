@@ -1143,6 +1143,7 @@ pub fn run() {
             commands::reveal_clip,
             commands::update_clip,
             commands::set_clip_tags,
+            commands::set_logo_icon,
             commands::clip_tracks,
             commands::clip_waveform,
             commands::apply_clip_edit,

@@ -19,9 +19,7 @@ pub struct TrayHandles {
     save: MenuItem<tauri::Wry>,
     record: MenuItem<tauri::Wry>,
     last_recording: std::sync::atomic::AtomicBool,
-    /// The tray icon as drawn, in violet — what every recolouring starts from.
-    base_icon: Image<'static>,
-    /// Both follow the accent colour — see [`apply_accent`].
+    /// Both follow the accent colour — see [`set_logo`].
     active_icon: parking_lot::Mutex<Image<'static>>,
     idle_icon: parking_lot::Mutex<Image<'static>>,
     /// Tooltip last set — saves resetting it once a second.
@@ -95,6 +93,8 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
             .map(owned)
             .unwrap_or_else(|| Image::new_owned(vec![0; 4], 1, 1))
     });
+    // Recoloured here only until the main window sends the logo it draws
+    // (`set_logo`) — a moment after start.
     let accent = app.state::<AppState>().config_snapshot().accent();
     let active_icon = crate::tint::tint(&base_icon, &accent);
     let idle_icon = dimmed(&active_icon);
@@ -166,7 +166,6 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
         save,
         record,
         last_recording: std::sync::atomic::AtomicBool::new(false),
-        base_icon,
         active_icon: parking_lot::Mutex::new(active_icon),
         idle_icon: parking_lot::Mutex::new(idle_icon),
         last_tooltip: parking_lot::Mutex::new(String::new()),
@@ -175,16 +174,20 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Put the tray icon and the main window's icon into the accent colour.
+/// The logo as the main window drew it, in the colours on screen — for the tray
+/// and the task bar. Sent on every change of the accent (`lib/accent.ts`), so
+/// the icons are the very logo the app shows, in every style.
 ///
 /// The one in the tray is swapped at once if it is showing; the other of the
 /// pair waits for the next change of state in [`refresh`].
-pub fn apply_accent(app: &tauri::AppHandle, accent: &crate::model::Accent) {
-    window_icon(app, accent);
+pub fn set_logo(app: &tauri::AppHandle, logo: Image<'static>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_icon(logo.clone());
+    }
     let Some(handles) = app.try_state::<TrayHandles>() else {
         return;
     };
-    let active = crate::tint::tint(&handles.base_icon, accent);
+    let active = logo;
     let idle = dimmed(&active);
     let showing = if handles.last_active.load(std::sync::atomic::Ordering::SeqCst) {
         active.clone()
@@ -198,8 +201,10 @@ pub fn apply_accent(app: &tauri::AppHandle, accent: &crate::model::Accent) {
     }
 }
 
-/// The icon in the task bar and in Alt+Tab. Only the main window has one there —
-/// the banner and the console stay out of the task bar.
+/// The icon in the task bar and in Alt+Tab, recoloured here in the core — only
+/// for the moment after start, until the main window has drawn the real one
+/// (see [`set_logo`]). Only the main window has one there; the banner and the
+/// console stay out of the task bar.
 fn window_icon(app: &tauri::AppHandle, accent: &crate::model::Accent) {
     let (Some(window), Some(icon)) = (app.get_webview_window("main"), app.default_window_icon())
     else {

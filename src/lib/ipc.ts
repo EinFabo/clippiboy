@@ -38,6 +38,8 @@ export const api = {
   listEncoders: () => invoke<EncoderInfo[]>("list_encoders"),
 
   getConfig: () => invoke<AppConfig>("get_config"),
+  /** The logo as RGBA pixels, square, for the tray and the task bar. */
+  setLogoIcon: (rgba: number[], size: number) => invoke<void>("set_logo_icon", { rgba, size }),
   setConfig: (config: AppConfig) => invoke<void>("set_config", { config }),
   /** Throws when a combination is invalid or already taken. */
   /** All four at once — the core only accepts them together. */

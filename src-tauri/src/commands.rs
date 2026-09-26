@@ -79,8 +79,9 @@ pub fn set_config(
     // never read the settings page. Told once, to all of them.
     if previous.accent() != next.accent() {
         use tauri::Emitter;
+        // The icons follow once the main window has drawn the logo anew
+        // (`set_logo_icon`).
         let _ = app.emit("accent-changed", next.accent());
-        crate::tray::apply_accent(&app, &next.accent());
     }
     // Otherwise the player cannot reach clips outside the Videos folder.
     crate::allow_clip_dir(&app, &next.clip_dir);
@@ -726,6 +727,17 @@ pub fn copy_clip_file(state: State<'_, AppState>, id: String) -> Result<()> {
         return Err("The clip file is no longer there.".into());
     }
     crate::clipboard::copy_files(&[path])
+}
+
+/// The logo as the main window drew it — square RGBA — for the tray and the
+/// task bar. See `tray::set_logo`.
+#[tauri::command]
+pub fn set_logo_icon(app: tauri::AppHandle, rgba: Vec<u8>, size: u32) -> Result<()> {
+    if size == 0 || size > 512 || rgba.len() != (size * size * 4) as usize {
+        return Err("The logo came in the wrong size.".into());
+    }
+    crate::tray::set_logo(&app, tauri::image::Image::new_owned(rgba, size, size));
+    Ok(())
 }
 
 /// Close the console over the game. The window asks for this itself — on
