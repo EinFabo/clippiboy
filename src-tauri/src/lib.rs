@@ -27,6 +27,7 @@ pub mod shot;
 pub mod state;
 pub mod stems;
 pub mod thumbs;
+pub mod tint;
 pub mod tools;
 pub mod tray;
 pub mod updater;

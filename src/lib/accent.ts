@@ -6,7 +6,8 @@ import { api, inTauri } from "@/lib/ipc";
  * The accent colour, in whichever window this runs — app, banner, console.
  *
  * The violet sits in five tokens (tokens.css): three in `@theme`, two beside
- * them for the steps that used to be written out as numbers. Left alone, they
+ * them for the steps that used to be written out as numbers — and the logo in
+ * eleven more of its own. Left alone, they
  * stay exactly the violet. An accent of one's own sets all five on `<html>`,
  * the other four mixed from it — one colour chosen, and the lighter and darker
  * steps still sit to it the way they sat to the violet.
@@ -17,6 +18,19 @@ const STEPS: Array<[string, (color: string) => string]> = [
   ["--color-accent-strong", (c) => `color-mix(in oklab, ${c}, black 12%)`],
   ["--color-accent-deep", (c) => `color-mix(in oklab, ${c}, black 55%)`],
   ["--color-accent-night", (c) => `color-mix(in oklab, ${c} 34%, #0a0a12)`],
+  // The logo: a near-black disc with a hint of the colour, a rim that fades
+  // from it into the dark, and the C and the play mark in it at full strength.
+  ["--logo-disc-1", (c) => `color-mix(in oklab, ${c} 14%, #0c0b12)`],
+  ["--logo-disc-2", (c) => `color-mix(in oklab, ${c} 8%, #09080e)`],
+  ["--logo-disc-3", (c) => `color-mix(in oklab, ${c} 4%, #070609)`],
+  ["--logo-rim-1", (c) => `color-mix(in oklab, ${c}, black 15%)`],
+  ["--logo-rim-2", (c) => `color-mix(in oklab, ${c} 48%, #0a0a12)`],
+  ["--logo-rim-3", (c) => `color-mix(in oklab, ${c} 28%, #0a0a12)`],
+  ["--logo-mark-1", (c) => `color-mix(in oklab, ${c}, white 38%)`],
+  ["--logo-mark-2", (c) => c],
+  ["--logo-mark-3", (c) => `color-mix(in oklab, ${c}, black 22%)`],
+  ["--logo-play-1", (c) => `color-mix(in oklab, ${c}, white 30%)`],
+  ["--logo-play-2", (c) => `color-mix(in oklab, ${c}, black 12%)`],
 ];
 
 /** Only this form is set — the core keeps nothing else either. */

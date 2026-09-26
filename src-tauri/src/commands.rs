@@ -79,6 +79,7 @@ pub fn set_config(
     if previous.accent_color != next.accent_color {
         use tauri::Emitter;
         let _ = app.emit("accent-changed", next.accent_color.clone());
+        crate::tray::apply_accent(&app, next.accent_color.as_deref());
     }
     // Otherwise the player cannot reach clips outside the Videos folder.
     crate::allow_clip_dir(&app, &next.clip_dir);

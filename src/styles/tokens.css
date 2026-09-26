@@ -48,6 +48,21 @@
   --color-accent-strong: #7c3aed;
   --color-accent-night: #2a1b6b;
 
+  /* The logo's own shades, exactly as assets/logo.svg draws them — the inline
+     mark (components/ui/Logo.tsx) paints with these, and an accent of one's own
+     replaces them like the five above. */
+  --logo-disc-1: #1d1533;
+  --logo-disc-2: #110c1f;
+  --logo-disc-3: #08060f;
+  --logo-rim-1: #7c4fd8;
+  --logo-rim-2: #452a7f;
+  --logo-rim-3: #2a1a4d;
+  --logo-mark-1: #b492ff;
+  --logo-mark-2: #8b5cf6;
+  --logo-mark-3: #6d28d9;
+  --logo-play-1: #a78bfa;
+  --logo-play-2: #7c3aed;
+
   --hero-gradient: linear-gradient(
     180deg,
     var(--color-accent-strong) 0%,

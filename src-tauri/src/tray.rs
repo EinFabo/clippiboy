@@ -19,8 +19,11 @@ pub struct TrayHandles {
     save: MenuItem<tauri::Wry>,
     record: MenuItem<tauri::Wry>,
     last_recording: std::sync::atomic::AtomicBool,
-    active_icon: Image<'static>,
-    idle_icon: Image<'static>,
+    /// The tray icon as drawn, in violet — what every recolouring starts from.
+    base_icon: Image<'static>,
+    /// Both follow the accent colour — see [`apply_accent`].
+    active_icon: parking_lot::Mutex<Image<'static>>,
+    idle_icon: parking_lot::Mutex<Image<'static>>,
     /// Tooltip last set — saves resetting it once a second.
     last_tooltip: parking_lot::Mutex<String>,
     last_active: std::sync::atomic::AtomicBool,
@@ -86,13 +89,16 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
-    let active_icon = Image::from_bytes(TRAY_PNG).map(|icon| owned(&icon)).unwrap_or_else(|err| {
+    let base_icon = Image::from_bytes(TRAY_PNG).map(|icon| owned(&icon)).unwrap_or_else(|err| {
         log::warn!("could not read the tray icon: {err}");
         app.default_window_icon()
             .map(owned)
             .unwrap_or_else(|| Image::new_owned(vec![0; 4], 1, 1))
     });
+    let accent = app.state::<AppState>().config_snapshot().accent_color;
+    let active_icon = crate::tint::tint(&base_icon, accent.as_deref());
     let idle_icon = dimmed(&active_icon);
+    window_icon(app, accent.as_deref());
 
     TrayIconBuilder::with_id(ID)
         .icon(idle_icon.clone())
@@ -160,12 +166,46 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
         save,
         record,
         last_recording: std::sync::atomic::AtomicBool::new(false),
-        active_icon,
-        idle_icon,
+        base_icon,
+        active_icon: parking_lot::Mutex::new(active_icon),
+        idle_icon: parking_lot::Mutex::new(idle_icon),
         last_tooltip: parking_lot::Mutex::new(String::new()),
         last_active: std::sync::atomic::AtomicBool::new(false),
     });
     Ok(())
+}
+
+/// Put the tray icon and the main window's icon into the accent colour.
+///
+/// The one in the tray is swapped at once if it is showing; the other of the
+/// pair waits for the next change of state in [`refresh`].
+pub fn apply_accent(app: &tauri::AppHandle, accent: Option<&str>) {
+    window_icon(app, accent);
+    let Some(handles) = app.try_state::<TrayHandles>() else {
+        return;
+    };
+    let active = crate::tint::tint(&handles.base_icon, accent);
+    let idle = dimmed(&active);
+    let showing = if handles.last_active.load(std::sync::atomic::Ordering::SeqCst) {
+        active.clone()
+    } else {
+        idle.clone()
+    };
+    *handles.active_icon.lock() = active;
+    *handles.idle_icon.lock() = idle;
+    if let Some(tray) = app.tray_by_id(ID) {
+        let _ = tray.set_icon(Some(showing));
+    }
+}
+
+/// The icon in the task bar and in Alt+Tab. Only the main window has one there —
+/// the banner and the console stay out of the task bar.
+fn window_icon(app: &tauri::AppHandle, accent: Option<&str>) {
+    let (Some(window), Some(icon)) = (app.get_webview_window("main"), app.default_window_icon())
+    else {
+        return;
+    };
+    let _ = window.set_icon(crate::tint::tint(icon, accent));
 }
 
 pub fn show_main_window(app: &tauri::AppHandle) {
@@ -234,9 +274,9 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
         .swap(status.buffer_active, std::sync::atomic::Ordering::SeqCst);
     if was_active != status.buffer_active {
         let icon = if status.buffer_active {
-            handles.active_icon.clone()
+            handles.active_icon.lock().clone()
         } else {
-            handles.idle_icon.clone()
+            handles.idle_icon.lock().clone()
         };
         let _ = tray.set_icon(Some(icon));
         let _ = handles.toggle.set_checked(status.buffer_active);

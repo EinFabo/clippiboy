@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import logo from "@/assets/logo.svg";
+import { Mark } from "@/components/ui/Logo";
 
 const win = () => getCurrentWindow();
 
@@ -33,7 +33,8 @@ export function TitleBar() {
       className="fixed inset-x-0 top-0 z-50 flex h-10 items-center justify-between px-3"
     >
       <div data-tauri-drag-region className="flex items-center gap-2 pl-1">
-        <img src={logo} alt="" className="h-[18px] w-[18px]" draggable={false} />
+        {/* Inline rather than the file: it takes the accent colour. */}
+        <Mark className="pointer-events-none h-[18px] w-[18px]" />
         <span className="text-[13px] font-semibold tracking-tight">ClippiBoy</span>
       </div>
       <div className="flex items-center gap-1">
