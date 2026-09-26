@@ -120,6 +120,14 @@ export const mockConfig: AppConfig = {
   accentMode: "solid",
   accentColor2: null,
   rgbSpeed: "slow",
+  friends: {
+    invisible: false,
+    shareGame: true,
+    notifyRequests: true,
+    notifyOnline: false,
+    notifyGames: true,
+    notifyWhilePlaying: false,
+  },
 };
 
 export const mockClips: Clip[] = [

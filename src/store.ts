@@ -25,6 +25,7 @@ export type SettingsTab =
   | "banner"
   | "console"
   | "storage"
+  | "friends"
   | "about"
   | "colors";
 

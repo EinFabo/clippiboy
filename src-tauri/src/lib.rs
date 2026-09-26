@@ -13,6 +13,7 @@ pub mod edit;
 pub mod encode;
 pub mod export;
 pub mod filing;
+pub mod friends;
 pub mod game;
 pub mod gpu;
 pub mod logging;
@@ -849,6 +850,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // Every 2 s, look which game is running in the foreground.
             if tick % 40 == 0 {
                 let tick_game = state.track_game();
+                friends::set_game(&handle, tick_game.held.as_deref());
                 // Whatever moved — the game to a new process, an application
                 // that started playing and now belongs in the leftovers — the
                 // streams follow. The enumerating and rebuilding happens on a
@@ -1015,6 +1017,10 @@ pub fn run() {
             }
             tray::show_main_window(app);
         }))
+        // After single-instance on purpose: a `clippiboy://` link starts a
+        // second process, which hands the link over and ends itself.
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -1081,6 +1087,22 @@ pub fn run() {
             }
             overlay::create(handle);
             console::create(handle);
+            friends::start(handle);
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // The installer registers the scheme; this keeps it pointing
+                // at the exe that actually runs (a dev build, a moved install).
+                #[cfg(windows)]
+                if let Err(err) = handle.deep_link().register_all() {
+                    log::warn!("could not register clippiboy:// links: {err}");
+                }
+                let links = handle.clone();
+                handle.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        friends::handle_url(&links, url.as_str());
+                    }
+                });
+            }
             if let Err(err) = tray::build(handle) {
                 log::error!("could not create the tray icon: {err}");
             }
@@ -1159,6 +1181,18 @@ pub fn run() {
             commands::ffmpeg_status,
             commands::retry_ffmpeg,
             commands::regenerate_control_token,
+            friends::friends_state,
+            friends::friends_sign_in,
+            friends::friends_cancel_sign_in,
+            friends::friends_sign_out,
+            friends::friends_refresh,
+            friends::friends_request,
+            friends::friends_accept,
+            friends::friends_remove,
+            friends::friends_block,
+            friends::friends_unblock,
+            friends::friends_set_allow_requests,
+            friends::friends_delete_account,
         ])
         .build(tauri::generate_context!())
         .expect("could not start ClippiBoy");

@@ -14,6 +14,7 @@ import { Dashboard } from "./routes/Dashboard";
 import { Clips } from "./routes/Clips";
 import { AudioMixer } from "./routes/AudioMixer";
 import { Recording } from "./routes/Recording";
+import { Friends } from "./routes/Friends";
 import { Settings } from "./routes/settings";
 
 export default function App() {
@@ -78,6 +79,7 @@ export default function App() {
             )}
             {route === "audio" && <AudioMixer />}
             {route === "recording" && <Recording onNavigate={setRoute} />}
+            {route === "friends" && <Friends />}
             {route === "settings" && <Settings />}
           </div>
         </main>

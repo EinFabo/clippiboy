@@ -22,7 +22,11 @@ tauri-plugin-process = "2"
 tauri-plugin-autostart = "2"
 # ClippiBoy runs once. A second start hands its arguments to the one already
 # there and brings its window up instead of opening a window of its own.
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Friends: Discord's login comes back as a clippiboy:// link, and friends'
+# news arrives as a Windows notification while the window is away.
+tauri-plugin-deep-link = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
@@ -48,6 +52,11 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 sha2 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+# The friends server's live connection. The TLS is the rustls from above, the
+# roots are Windows' own; tokio is the runtime Tauri already runs on.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+tokio = { version = "1", features = ["macros", "time", "sync"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

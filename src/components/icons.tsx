@@ -44,7 +44,15 @@ export const IconSettings = ({ className = base }: P) => (
   </svg>
 );
 
-export const IconArrowUpRight = ({ className = base }: P) => (
+export const IconFriends = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="9" cy="8" r="3.5" />
+    <path d="M2.5 20a6.5 6.5 0 0 1 13 0" />
+    <path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M18 14.2a6.5 6.5 0 0 1 3.5 5.8" />
+  </svg>
+);
+
+export const IconArrowUpRight =({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
     <path d="M7 17 17 7M8 7h9v9" />
   </svg>

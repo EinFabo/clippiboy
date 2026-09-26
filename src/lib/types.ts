@@ -226,6 +226,56 @@ export interface AppConfig {
   /** The second colour of the gradient, `#rrggbb`; `null` is the violet. */
   accentColor2: string | null;
   rgbSpeed: RgbSpeed;
+  friends: FriendsConfig;
+}
+
+/** What friends see of you, and what you hear about them. */
+export interface FriendsConfig {
+  invisible: boolean;
+  shareGame: boolean;
+  notifyRequests: boolean;
+  notifyOnline: boolean;
+  notifyGames: boolean;
+  notifyWhilePlaying: boolean;
+}
+
+export interface FriendUser {
+  id: string;
+  username: string;
+  displayName: string;
+  avatar: string | null;
+}
+
+export interface FriendMe extends FriendUser {
+  friendCode: string;
+  allowRequests: boolean;
+}
+
+export interface FriendPending extends FriendUser {
+  /** When the request was made, ms since the epoch. */
+  since: number;
+}
+
+export interface FriendPresence {
+  game: string | null;
+  /** When the game started, ms since the epoch. */
+  since: number | null;
+}
+
+/** Everything the Friends page draws — the core sends it whole on every change. */
+export interface FriendsView {
+  signedIn: boolean;
+  signingIn: boolean;
+  connected: boolean;
+  me: FriendMe | null;
+  lists: {
+    friends: FriendUser[];
+    incoming: FriendPending[];
+    outgoing: FriendPending[];
+    blocked: FriendUser[];
+  };
+  /** Online friends by id; missing means offline. */
+  presence: Record<string, FriendPresence>;
 }
 
 export interface Clip {

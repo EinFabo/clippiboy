@@ -75,6 +75,9 @@ pub fn set_config(
     config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
     config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
     let next = state.replace_config(config);
+    if previous.friends != next.friends {
+        crate::friends::config_changed(&app);
+    }
     // Every window paints in the accent — the banner and the console too, which
     // never read the settings page. Told once, to all of them.
     if previous.accent() != next.accent() {

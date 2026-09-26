@@ -308,6 +308,36 @@ impl Default for ControlConfig {
     }
 }
 
+/// What friends see of you, and what you hear about them. The account itself
+/// lives on the friends server; only these choices live here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FriendsConfig {
+    /// Look offline to everyone while still seeing them.
+    pub invisible: bool,
+    /// Friends see which game runs, not just that you are online.
+    pub share_game: bool,
+    pub notify_requests: bool,
+    pub notify_online: bool,
+    pub notify_games: bool,
+    /// Windows notifications while one's own game runs. Off: nothing pops up
+    /// over the game.
+    pub notify_while_playing: bool,
+}
+
+impl Default for FriendsConfig {
+    fn default() -> Self {
+        Self {
+            invisible: false,
+            share_game: true,
+            notify_requests: true,
+            notify_online: false,
+            notify_games: true,
+            notify_while_playing: false,
+        }
+    }
+}
+
 /// S saves, B is the buffer, P is the picture.
 pub fn default_screenshot_hotkey() -> String {
     "Ctrl+Shift+P".into()
@@ -463,6 +493,9 @@ pub struct AppConfig {
     pub accent_color_2: Option<String>,
     #[serde(default)]
     pub rgb_speed: RgbSpeed,
+    /// Privacy and notices for the friends list — see [`FriendsConfig`].
+    #[serde(default)]
+    pub friends: FriendsConfig,
 }
 
 impl AppConfig {

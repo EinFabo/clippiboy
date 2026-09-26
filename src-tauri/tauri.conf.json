@@ -28,7 +28,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: https://cdn.discordapp.com; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'",
       "assetProtocol": {
         "enable": true,
         "scope": ["$VIDEO/**", "$APPDATA/ClippiBoy/**"]
@@ -36,6 +36,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["clippiboy"]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/EinFabo/clippiboy/releases/latest/download/latest.json"

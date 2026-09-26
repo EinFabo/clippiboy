@@ -3,6 +3,7 @@ import { cn } from "@/lib/cn";
 import {
   IconAudio,
   IconClips,
+  IconFriends,
   IconHome,
   IconMonitor,
   IconRecord,
@@ -13,8 +14,9 @@ import { SLIDE, SlidingIndicator } from "./ui/SlidingIndicator";
 import { LiveDot } from "./ui/LiveDot";
 import { animate, EASE_SPRING } from "@/lib/motion";
 import { useEngine } from "@/store";
+import { useFriends } from "@/lib/friends";
 
-export type Route = "dashboard" | "clips" | "audio" | "recording" | "settings";
+export type Route = "dashboard" | "clips" | "audio" | "recording" | "friends" | "settings";
 
 const items: Array<{ id: Route; label: string; icon: typeof IconHome }> = [
   { id: "dashboard", label: "Overview", icon: IconHome },
@@ -23,6 +25,7 @@ const items: Array<{ id: Route; label: string; icon: typeof IconHome }> = [
   // "Video", not "Recording": since recordings exist, the word means the
   // thing started by hand — this page is about how the picture is captured.
   { id: "recording", label: "Video", icon: IconMonitor },
+  { id: "friends", label: "Friends", icon: IconFriends },
   { id: "settings", label: "Settings", icon: IconSettings },
 ];
 
@@ -37,6 +40,7 @@ export function NavBar({
   const recording = useEngine((s) => s.recording);
   const recordingSeconds = useEngine((s) => s.recordingSeconds);
   const recordingProgress = useEngine((s) => s.recordingProgress);
+  const requests = useFriends((s) => s.lists.incoming.length);
 
   return (
     <nav className="absolute inset-x-0 top-12 z-40 flex justify-center px-8">
@@ -63,6 +67,14 @@ export function NavBar({
           >
             <Icon className="h-4 w-4" />
             {label}
+            {id === "friends" && requests > 0 && (
+              <span
+                title={`${requests} friend request${requests === 1 ? "" : "s"}`}
+                className="grid h-4.5 min-w-4.5 place-items-center rounded-pill bg-accent px-1 text-[10px] font-semibold text-white tabular-nums"
+              >
+                {requests}
+              </span>
+            )}
           </button>
         ))}
 
