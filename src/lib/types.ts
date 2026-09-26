@@ -65,6 +65,20 @@ export type TargetKind = "monitor" | "window";
     passen — der Kern reicht den Wert nur durch, gezeichnet wird er hier. */
 export type ConsoleStyle = "dock" | "pill" | "radial";
 
+/** How the accent is laid on. Has to match `AccentMode` in `model.rs`. */
+export type AccentMode = "solid" | "gradient" | "rgb";
+
+/** How long one turn of the hue takes in RGB. Matches `RgbSpeed` in `model.rs`. */
+export type RgbSpeed = "slow" | "medium";
+
+/** Everything about the accent, as `accent-changed` carries it (`Accent` in `model.rs`). */
+export interface Accent {
+  mode: AccentMode;
+  color: string | null;
+  color2: string | null;
+  speed: RgbSpeed;
+}
+
 export interface CaptureTarget {
   kind: TargetKind;
   id: string;
@@ -208,6 +222,10 @@ export interface AppConfig {
   accentColor: string | null;
   /** Whether the Colors tab is shown in the settings. */
   colorsUnlocked: boolean;
+  accentMode: AccentMode;
+  /** The second colour of the gradient, `#rrggbb`; `null` is the violet. */
+  accentColor2: string | null;
+  rgbSpeed: RgbSpeed;
 }
 
 export interface Clip {

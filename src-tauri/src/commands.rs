@@ -73,13 +73,14 @@ pub fn set_config(
         crate::notify(&app, "error", "Stop the recording before changing the source.");
     }
     config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
+    config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
     let next = state.replace_config(config);
     // Every window paints in the accent — the banner and the console too, which
     // never read the settings page. Told once, to all of them.
-    if previous.accent_color != next.accent_color {
+    if previous.accent() != next.accent() {
         use tauri::Emitter;
-        let _ = app.emit("accent-changed", next.accent_color.clone());
-        crate::tray::apply_accent(&app, next.accent_color.as_deref());
+        let _ = app.emit("accent-changed", next.accent());
+        crate::tray::apply_accent(&app, &next.accent());
     }
     // Otherwise the player cannot reach clips outside the Videos folder.
     crate::allow_clip_dir(&app, &next.clip_dir);

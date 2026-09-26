@@ -64,6 +64,9 @@ pub fn default_config() -> AppConfig {
         control: ControlConfig::default(),
         accent_color: None,
         colors_unlocked: false,
+        accent_mode: crate::model::AccentMode::default(),
+        accent_color_2: None,
+        rgb_speed: crate::model::RgbSpeed::default(),
     }
 }
 

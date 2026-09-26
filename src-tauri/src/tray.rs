@@ -95,10 +95,10 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
             .map(owned)
             .unwrap_or_else(|| Image::new_owned(vec![0; 4], 1, 1))
     });
-    let accent = app.state::<AppState>().config_snapshot().accent_color;
-    let active_icon = crate::tint::tint(&base_icon, accent.as_deref());
+    let accent = app.state::<AppState>().config_snapshot().accent();
+    let active_icon = crate::tint::tint(&base_icon, &accent);
     let idle_icon = dimmed(&active_icon);
-    window_icon(app, accent.as_deref());
+    window_icon(app, &accent);
 
     TrayIconBuilder::with_id(ID)
         .icon(idle_icon.clone())
@@ -179,7 +179,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
 ///
 /// The one in the tray is swapped at once if it is showing; the other of the
 /// pair waits for the next change of state in [`refresh`].
-pub fn apply_accent(app: &tauri::AppHandle, accent: Option<&str>) {
+pub fn apply_accent(app: &tauri::AppHandle, accent: &crate::model::Accent) {
     window_icon(app, accent);
     let Some(handles) = app.try_state::<TrayHandles>() else {
         return;
@@ -200,7 +200,7 @@ pub fn apply_accent(app: &tauri::AppHandle, accent: Option<&str>) {
 
 /// The icon in the task bar and in Alt+Tab. Only the main window has one there —
 /// the banner and the console stay out of the task bar.
-fn window_icon(app: &tauri::AppHandle, accent: Option<&str>) {
+fn window_icon(app: &tauri::AppHandle, accent: &crate::model::Accent) {
     let (Some(window), Some(icon)) = (app.get_webview_window("main"), app.default_window_icon())
     else {
         return;

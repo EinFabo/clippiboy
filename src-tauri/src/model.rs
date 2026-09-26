@@ -352,6 +352,39 @@ pub enum ConsoleStyle {
     Radial,
 }
 
+/// How the accent colour is laid on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccentMode {
+    /// One colour, its lighter and darker steps mixed from it.
+    #[default]
+    Solid,
+    /// The bright steps from the first colour, the dark ones from the second —
+    /// every gradient in the app then runs from one to the other.
+    Gradient,
+    /// The hue turns. Only the main window moves; see `lib/accent.ts`.
+    Rgb,
+}
+
+/// How long one turn of the hue takes in [`AccentMode::Rgb`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RgbSpeed {
+    #[default]
+    Slow,
+    Medium,
+}
+
+/// Everything about the accent, as the windows are told it in `accent-changed`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Accent {
+    pub mode: AccentMode,
+    pub color: Option<String>,
+    pub color_2: Option<String>,
+    pub speed: RgbSpeed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -423,6 +456,24 @@ pub struct AppConfig {
     /// Whether the Colors tab is shown in the settings.
     #[serde(default)]
     pub colors_unlocked: bool,
+    #[serde(default)]
+    pub accent_mode: AccentMode,
+    /// The second colour of [`AccentMode::Gradient`], as `#rrggbb`.
+    #[serde(default)]
+    pub accent_color_2: Option<String>,
+    #[serde(default)]
+    pub rgb_speed: RgbSpeed,
+}
+
+impl AppConfig {
+    pub fn accent(&self) -> Accent {
+        Accent {
+            mode: self.accent_mode,
+            color: self.accent_color.clone(),
+            color_2: self.accent_color_2.clone(),
+            speed: self.rgb_speed,
+        }
+    }
 }
 
 /// An accent colour as the config keeps it: `#rrggbb`, lower case — or nothing.

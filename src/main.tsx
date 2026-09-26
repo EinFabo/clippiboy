@@ -6,7 +6,7 @@ import { installLockdown } from "./lib/lockdown";
 import { installAccent } from "./lib/accent";
 
 installLockdown();
-installAccent();
+installAccent({ turning: true });
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

@@ -117,6 +117,9 @@ export const mockConfig: AppConfig = {
   control: { enabled: true, port: 47653, token: "mock-token" },
   accentColor: null,
   colorsUnlocked: false,
+  accentMode: "solid",
+  accentColor2: null,
+  rgbSpeed: "slow",
 };
 
 export const mockClips: Clip[] = [
