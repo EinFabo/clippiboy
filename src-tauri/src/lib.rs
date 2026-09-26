@@ -15,7 +15,6 @@ pub mod export;
 pub mod filing;
 pub mod game;
 pub mod gpu;
-pub mod gpu_priority;
 pub mod logging;
 pub mod mft;
 pub mod model;

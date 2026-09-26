@@ -13,7 +13,8 @@
 //! told how much room that takes.
 //!
 //! Two things it shares with the banner. It carries the same browser arguments,
-//! or WebView2 stops drawing a window that spends its life hidden. And it starts
+//! or WebView2 stops drawing a window that spends its life hidden — and draws
+//! without the GPU, which a game without a frame cap keeps too busy. And it starts
 //! out content protected, so it does not turn up inside a clip saved while it is
 //! open — the one setting that lifts that is there so Discord can see it in a
 //! screen share, and it costs exactly what it says (`protect`).
@@ -46,7 +47,13 @@ pub fn create(app: &tauri::AppHandle) {
     if app.get_webview_window(LABEL).is_some() {
         return;
     }
-    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("console.html".into()))
+    let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("console.html".into()));
+    // Der Datenordner des Banners, weil dessen Argumente: ohne GPU, sonst ruckelt
+    // die Konsole über einem Spiel, das die Karte auslastet (`overlay::BROWSER_ARGS`).
+    if let Some(dir) = overlay::data_dir(app) {
+        builder = builder.data_directory(dir);
+    }
+    let window = builder
         .title("ClippiBoy")
         .inner_size(1280.0, 720.0)
         .decorations(false)
@@ -124,12 +131,6 @@ pub fn open(app: &tauri::AppHandle) {
         log::warn!("console window missing");
         return;
     };
-
-    // Bei jedem Öffnen, nicht einmal beim Start: der GPU-Prozess von WebView2
-    // entsteht erst, wenn das erste Fenster zeichnet, und nach einem Absturz neu.
-    // Schon angehobene Prozesse überspringt `raise`.
-    #[cfg(windows)]
-    std::thread::spawn(crate::gpu_priority::raise);
 
     remember_foreground();
     // Before it is up: the flag takes hold on the next showing, never on the

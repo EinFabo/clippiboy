@@ -37,14 +37,36 @@ const MARGIN: f64 = 24.0;
 /// default list has to be carried along, otherwise the mini menu and SmartScreen
 /// come back with it.
 ///
-/// The main window gets the same string in `tauri.conf.json`: two webviews with
-/// different arguments would need separate data directories, and the second one
-/// does not start without them.
+/// Dazu `--disable-gpu`: alles, was über dem Spiel steht, zeichnet auf der CPU.
+/// Ein Spiel ohne FPS-Grenze hat bei der GPU immer ein paar Bilder in der
+/// Schlange, und jeder Auftrag von WebView2 reiht sich dahinter ein, ganz gleich
+/// wie klein — Konsole und Player ruckelten, sobald das Spiel die Karte ganz
+/// auslastete, und liefen glatt mit FPS-Grenze. Eine höhere Scheduler-Klasse für
+/// den GPU-Prozess (*High*) half nur ab und an, *Realtime* verlangt Adminrechte.
+/// Ohne GPU rastert Chromium mit WARP; auf die Karte kommt nur noch das
+/// Zusammensetzen durch den DWM, und das läuft ohnehin vorn. Die Clips sind
+/// H.264, das dekodiert Chromium auch ohne GPU.
+///
+/// Das Hauptfenster behält die GPU und darum seine eigenen Argumente in
+/// `tauri.conf.json`. Webviews mit verschiedenen Argumenten brauchen getrennte
+/// Datenordner, sonst startet die zweite nicht — siehe `DATA_DIR`.
 pub(crate) const BROWSER_ARGS: &str = concat!(
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion",
     " --disable-backgrounding-occluded-windows",
     " --disable-renderer-backgrounding",
+    " --disable-gpu",
 );
+
+/// Der Datenordner von Banner und Konsole, neben dem `EBWebView` des
+/// Hauptfensters. Beide teilen sich damit einen Browser-Prozess, der keine GPU
+/// anfasst. Keins der Fenster legt etwas im Browser-Speicher ab, getrennt geht
+/// also nichts verloren.
+pub(crate) fn data_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_local_data_dir()
+        .ok()
+        .map(|dir| dir.join("EBWebView-overlay"))
+}
 
 /// How long the webview gets between the window appearing and the banner being
 /// sent, when it was hidden until then. The window is transparent and still
@@ -116,13 +138,17 @@ pub fn create(app: &tauri::AppHandle) {
     if app.get_webview_window(LABEL).is_some() {
         return;
     }
-    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()))
+    let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()));
+    if let Some(dir) = data_dir(app) {
+        builder = builder.data_directory(dir);
+    }
+    let window = builder
         .title("ClippiBoy Overlay")
         .inner_size(WIDTH, HEIGHT)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
-        // Keeps the banner from being drawn only sometimes — see `BROWSER_ARGS`.
+        // Keeps the banner drawing, and off the GPU — see `BROWSER_ARGS`.
         .additional_browser_args(BROWSER_ARGS)
         // The banner belongs on the screen, not in the clip. Windows excludes a
         // window with this display affinity from every screen capture — including
