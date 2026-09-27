@@ -554,25 +554,20 @@ async fn fetch(
     let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(addr.clone(), ALPN))
         .await
         .map_err(|_| "could not reach them".to_string())?
-        .map_err(|err| err.to_string())?;
+        .map_err(net)?;
     let (mut send, mut recv) = connection.open_bi().await.map_err(|err| err.to_string())?;
-    let ask = serde_json::to_vec(&Ask { id: id.into(), secret: secret.into(), offset }).map_err(|e| e.to_string())?;
-    send.write_all(&(ask.len() as u32).to_be_bytes()).await.map_err(|e| e.to_string())?;
-    send.write_all(&ask).await.map_err(|e| e.to_string())?;
+    let ask = serde_json::to_vec(&Ask { id: id.into(), secret: secret.into(), offset }).map_err(net)?;
+    send.write_all(&(ask.len() as u32).to_be_bytes()).await.map_err(net)?;
+    send.write_all(&ask).await.map_err(net)?;
     let _ = send.finish();
 
     let mut header = [0u8; 8];
-    recv.read_exact(&mut header).await.map_err(|e| e.to_string())?;
+    recv.read_exact(&mut header).await.map_err(net)?;
     let rest = u64::from_be_bytes(header);
     if offset + rest != size {
         return Err("they offered a different file".into());
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(part)
-        .map_err(|err| format!("Could not write the clip: {err}"))?;
-    file.set_len(offset).map_err(|e| e.to_string())?;
+    let mut file = open_part(part, offset).map_err(|err| format!("Could not write the clip: {err}"))?;
     let mut moved = offset;
     let mut buf = vec![0u8; CHUNK];
     let mut last_emit = std::time::Instant::now();
@@ -581,7 +576,7 @@ async fn fetch(
             connection.close(2u32.into(), b"cancelled");
             return Err("cancelled".into());
         }
-        let n = match recv.read(&mut buf).await.map_err(|e| e.to_string())? {
+        let n = match recv.read(&mut buf).await.map_err(net)? {
             Some(n) => n,
             None => break,
         };
@@ -592,7 +587,7 @@ async fn fetch(
             set_in(app, id, |t| t.moved = moved);
         }
     }
-    file.flush().map_err(|e| e.to_string())?;
+    file.flush().map_err(net)?;
     if moved != size {
         return Err("the line dropped".into());
     }
@@ -677,16 +672,16 @@ impl ProtocolHandler for Serve {
 
 /// A receiver dialled in: check the ask, then stream the file from its offset.
 async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
-    let (mut send, mut recv) = connection.accept_bi().await.map_err(|e| e.to_string())?;
+    let (mut send, mut recv) = connection.accept_bi().await.map_err(net)?;
     let mut length = [0u8; 4];
-    recv.read_exact(&mut length).await.map_err(|e| e.to_string())?;
+    recv.read_exact(&mut length).await.map_err(net)?;
     let length = u32::from_be_bytes(length) as usize;
     if length > 4096 {
         return Err("ask too long".into());
     }
     let mut ask = vec![0u8; length];
-    recv.read_exact(&mut ask).await.map_err(|e| e.to_string())?;
-    let ask: Ask = serde_json::from_slice(&ask).map_err(|e| e.to_string())?;
+    recv.read_exact(&mut ask).await.map_err(net)?;
+    let ask: Ask = serde_json::from_slice(&ask).map_err(net)?;
 
     let (path, size) = {
         let share = app.state::<Share>();
@@ -703,10 +698,10 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
     };
     emit(app);
     let offset = ask.offset.min(size);
-    send.write_all(&(size - offset).to_be_bytes()).await.map_err(|e| e.to_string())?;
+    send.write_all(&(size - offset).to_be_bytes()).await.map_err(net)?;
 
-    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut file = std::fs::File::open(&path).map_err(net)?;
+    file.seek(SeekFrom::Start(offset)).map_err(net)?;
     let cancelled = cancel_flag(app, &ask.id);
     let mut moved = offset;
     let mut buf = vec![0u8; CHUNK];
@@ -716,11 +711,11 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
             connection.close(2u32.into(), b"cancelled");
             return Ok(());
         }
-        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        let n = file.read(&mut buf).map_err(net)?;
         if n == 0 {
             break;
         }
-        send.write_all(&buf[..n]).await.map_err(|e| e.to_string())?;
+        send.write_all(&buf[..n]).await.map_err(net)?;
         moved += n as u64;
         if last_emit.elapsed() >= EMIT_EVERY {
             last_emit = std::time::Instant::now();
@@ -825,6 +820,23 @@ fn hash_file(path: &Path, limit: u64) -> Result<String, String> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// The part file, cut back to `offset` and positioned there.
+///
+/// Not `append`: on Windows that grants only FILE_APPEND_DATA, and cutting the
+/// file then fails with "access denied" — which dropped every connection
+/// before its first byte.
+fn open_part(part: &Path, offset: u64) -> std::io::Result<std::fs::File> {
+    let mut file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(part)?;
+    file.set_len(offset)?;
+    file.seek(SeekFrom::Start(offset))?;
+    Ok(file)
+}
+
+/// A network error with its cause — "connection lost" alone says nothing.
+fn net(err: impl std::fmt::Debug) -> String {
+    format!("{err:?}")
+}
+
 /// Only a plain name with a known ending — never a path from the other side.
 fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
@@ -900,6 +912,24 @@ mod tests {
             hash_file(&file, u64::MAX).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_part_file_resumes_where_it_was_cut() {
+        let dir = std::env::temp_dir().join(format!("cb-share-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("a.part");
+        std::fs::write(&part, b"abcdef").unwrap();
+        // Four bytes are trusted, the rest of the last try is not.
+        let mut file = open_part(&part, 4).unwrap();
+        file.write_all(b"XY").unwrap();
+        drop(file);
+        assert_eq!(std::fs::read(&part).unwrap(), b"abcdXY");
+        let mut fresh = open_part(&dir.join("b.part"), 0).unwrap();
+        fresh.write_all(b"new").unwrap();
+        drop(fresh);
+        assert_eq!(std::fs::read(dir.join("b.part")).unwrap(), b"new");
         let _ = std::fs::remove_dir_all(dir);
     }
 

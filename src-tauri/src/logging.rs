@@ -74,7 +74,10 @@ pub fn init() {
     };
     let opened = file.is_some();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    // iroh (sending clips, `share.rs`) logs every UDP packet at info — a
+    // transfer would bury everything else. Its warnings are what matters.
+    const FILTER: &str = "info,iroh=warn,iroh_relay=warn,noq=warn,noq_proto=warn,noq_udp=warn,netwatch=warn,portmapper=warn,tracing::span=warn";
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(FILTER))
         // Both copies come off one writer, so colour would land in the file as
         // escape sequences. A log somebody has to read in Notepad is worth more
         // than a coloured level on a console the release build does not have.
