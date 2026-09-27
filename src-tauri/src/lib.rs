@@ -61,15 +61,22 @@ pub fn notify(app: &tauri::AppHandle, kind: &'static str, message: impl Into<Str
 
 /// Save a clip and report the result — shared by hotkey, tray and button so all
 /// three routes behave identically.
+/// Who played the same game when the running recording started. A recording
+/// can run for an hour: whoever was there at the start and has gone by the end
+/// belongs on it as much as whoever is there at the end.
+static RECORDING_FRIENDS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
+
 /// Friends in the same game right now go onto a clip just saved as tags
 /// ("with Luca"), so the tag filter finds who was in it later. Before
-/// `clip-saved` goes out, so the page gets the tags with the clip.
-fn tag_friends(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip) {
+/// `clip-saved` goes out, so the page gets the tags with the clip. `earlier`
+/// adds names from before — a recording's start.
+fn tag_friends(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip, earlier: Vec<String>) {
     if !state.config_snapshot().friends.tag_friends {
         return;
     }
     let Some(game) = clip.game.as_deref() else { return };
-    let names = friends::playing(app, game);
+    let mut names = earlier;
+    names.extend(friends::playing(app, game));
     if names.is_empty() {
         return;
     }
@@ -108,7 +115,7 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, Strin
                     log::error!("could not index the clip: {err}");
                 }
             }
-            tag_friends(app, &state, &mut clip);
+            tag_friends(app, &state, &mut clip, Vec::new());
             let _ = app.emit("clip-saved", clip.clone());
             notify(app, "ok", format!("Clip saved · {seconds} s"));
             overlay::show_with_thumb(
@@ -153,7 +160,7 @@ pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip,
                     log::error!("could not index the screenshot: {err}");
                 }
             }
-            tag_friends(app, &state, &mut clip);
+            tag_friends(app, &state, &mut clip, Vec::new());
             let _ = app.emit("clip-saved", clip.clone());
             notify(app, "ok", "Screenshot saved".to_string());
             overlay::show_with_thumb(
@@ -187,6 +194,12 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     match state.start_recording() {
         Ok(()) => {
+            *RECORDING_FRIENDS.lock() = state
+                .current_game
+                .lock()
+                .as_deref()
+                .map(|game| friends::playing(app, game))
+                .unwrap_or_default();
             overlay::set_recording(app, true);
             notify(app, "ok", "Recording started");
             overlay::show(
@@ -221,7 +234,7 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
                     log::error!("could not index the recording: {err}");
                 }
             }
-            tag_friends(app, &state, &mut clip);
+            tag_friends(app, &state, &mut clip, std::mem::take(&mut *RECORDING_FRIENDS.lock()));
             let _ = app.emit("clip-saved", clip.clone());
             let length = format::duration(clip.duration_ms);
             notify(app, "ok", format!("Recording saved · {length}"));
