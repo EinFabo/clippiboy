@@ -214,6 +214,9 @@ pub fn set_recording(app: &tauri::AppHandle, recording: bool) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
+    // Also on the way down: whoever draws the badge has to know the corner
+    // and whether it is switched on at all.
+    announce(&window, &config);
     if wanted {
         if let Err(err) = place(&window, &config) {
             log::warn!("could not position the overlay: {err}");
@@ -286,6 +289,28 @@ pub fn reposition(app: &tauri::AppHandle) {
     if let Err(err) = place(&window, &config) {
         log::warn!("could not position the overlay: {err}");
     }
+    announce(&window, &config);
+}
+
+/// What the page needs for the badge: which corner of the window it leans
+/// into, and whether it is wanted at all. The window already stands in the
+/// chosen screen corner, but the badge is far smaller than the window — without
+/// this it sat top right inside it, a window's width away from a left corner.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Placement {
+    corner: OverlayCorner,
+    rec_badge: bool,
+}
+
+fn announce(window: &tauri::WebviewWindow, config: &OverlayConfig) {
+    let _ = window.emit(
+        "overlay-place",
+        Placement {
+            corner: config.corner,
+            rec_badge: config.rec_badge,
+        },
+    );
 }
 
 /// Show the banner, provided it is not switched off in the settings.

@@ -1,12 +1,28 @@
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { fileUrl, inTauri } from "@/lib/ipc";
-import type { EngineStatus, OverlayBanner } from "@/lib/types";
+import type { EngineStatus, OverlayBanner, OverlayCorner } from "@/lib/types";
 import { formatDuration } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
 /** How long the fade-out animation runs — has to match `cb-card-out`. */
 const LEAVE_MS = 240;
+
+/** Where the REC badge sits in the window: in the corner that faces the chosen
+ *  screen corner, like the banners do. */
+const CORNERS: Record<OverlayCorner, string> = {
+  topLeft: "items-start justify-start",
+  topRight: "items-start justify-end",
+  bottomLeft: "items-end justify-start",
+  bottomRight: "items-end justify-end",
+};
+
+/** What Rust says about the badge (`overlay-place` in `overlay.rs`). Until the
+ *  first word arrives, the defaults from the settings hold. */
+interface Placement {
+  corner: OverlayCorner;
+  recBadge: boolean;
+}
 
 interface Shown extends OverlayBanner {
   /** Increments with every banner; forces a remount so the CSS animations run
@@ -27,6 +43,7 @@ export function Overlay() {
   /** How long the running recording has been going, or `null` when none is.
    *  The badge below hangs off this. */
   const [recording, setRecording] = useState<number | null>(null);
+  const [place, setPlace] = useState<Placement>({ corner: "bottomRight", recBadge: true });
   const timers = useRef<number[]>([]);
   const seq = useRef(0);
 
@@ -81,21 +98,33 @@ export function Overlay() {
       else unstatus = fn;
     });
 
+    // Corner and switch for the badge. Comes with every change to the
+    // settings and with every recording that starts, so it is there before the
+    // badge is.
+    let unplace: (() => void) | undefined;
+    listen<Placement>("overlay-place", (event) => {
+      setPlace(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unplace = fn;
+    });
+
     const running = timers.current;
     return () => {
       cancelled = true;
       running.forEach(clearTimeout);
       unlisten?.();
       unstatus?.();
+      unplace?.();
     };
   }, []);
 
   // While a recording runs the window stays up, and this is what stands in it
   // between banners: the red light and how long it has been going.
   if (!banner) {
-    if (recording === null) return null;
+    if (recording === null || !place.recBadge) return null;
     return (
-      <div className="flex h-full w-full items-start justify-end p-3">
+      <div className={cn("flex h-full w-full p-3", CORNERS[place.corner])}>
         <div className="cb-rec flex items-center gap-2 rounded-inner px-3 py-1.5">
           <span className="cb-rec-dot h-2.5 w-2.5 rounded-pill bg-live" />
           <span className="text-[13px] font-bold tracking-wide text-live">REC</span>
