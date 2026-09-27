@@ -794,9 +794,14 @@ body,
 /* Rund statt eckig, und die Knöpfe tragen ihre Bedeutung im Bild statt in der
    Schrift. Das ist der Handel: eine Leiste, die halb so breit ist, gegen
    Beschriftungen, die man erst lernen muss. */
+/* Rechts mehr Luft als ringsum: die Leiste ist mit dem dreizeiligen Status gut
+   90 hoch und rechts also mit ~45 gerundet, der Knopf mit 29. Bei 8 Abstand saß
+   seine Rundung nicht in der der Leiste und stieß fast an die Kante, während der
+   Status links 28 Luft hat. Mit 18 laufen die beiden Rundungen etwa um dieselbe
+   Mitte. */
 .cb-ui[data-style="pill"] .cb-dock {
   border-radius: 999px;
-  padding: 8px;
+  padding: 8px 18px 8px 8px;
   gap: 4px;
 }
 
@@ -804,12 +809,18 @@ body,
   padding: 0 18px 0 20px;
 }
 
+/* Breiter als hoch und ganz rund: die Fläche des offenen Panels und die beim
+   Überfahren sind so selbst kleine Pillen und wiederholen die Form der Leiste.
+   Als Kreis (62 × 62, 50 %) sahen sie aus wie aus dem Ring-Stil geliehen. */
 .cb-ui[data-style="pill"] .cb-dock-btn {
-  width: 62px;
-  height: 62px;
-  border-radius: 50%;
+  width: 76px;
+  height: 58px;
+  border-radius: 999px;
   padding: 0;
   justify-content: center;
+  /* Das Dock streckt seine Kinder (`items-stretch`); mit fester Höhe blieb der
+     Knopf deshalb oben stehen und aller Rest lag unter ihm. */
+  align-self: center;
 }
 
 .cb-ui[data-style="pill"] .cb-dock-label {
@@ -981,8 +992,9 @@ body,
    Es waren einmal fünf, gleichmäßig auf 72 Grad verteilt. Mit dem Ton-Panel
    kam ein sechster dazu, und der hätte ohne eigene Stelle in der Mitte
    gelegen, über dem Puffer-Stand — der Kreis muss also mitwachsen, nicht nur
-   die Liste. Wer einen siebten hinzufügt, rechnet hier neu: `x = 162·sin α`,
-   `y = −162·cos α`, α in gleichen Schritten. */
+   die Liste. Der siebte, der Freunde-Knopf, hat seine Aufteilung darunter. Wer
+   einen achten hinzufügt, rechnet neu: `x = 162·sin α`, `y = −162·cos α`, α in
+   gleichen Schritten. */
 .cb-ui[data-style="radial"] .cb-dock-btn {
   position: absolute;
   left: 50%;
@@ -1012,6 +1024,39 @@ body,
 
 .cb-ui[data-style="radial"] .cb-dock-btn:nth-of-type(6) {
   translate: -140px -81px;
+}
+
+/* Angemeldet kommt der Freunde-Knopf als siebter dazu — und stand ohne eigene
+   Stelle genau in der Mitte, über dem Puffer-Stand. Dann gilt eine zweite
+   Aufteilung, alle 360/7 ≈ 51,4 Grad einer, nach derselben Formel. Der Abstand
+   zwischen zwei Nachbarn ist damit 141 statt 162 — bei 80 Durchmesser bleiben
+   gut 60 Pixel Luft. Ohne Anmeldung gilt die Sechser-Aufteilung darüber. */
+.cb-ui[data-style="radial"] .cb-dock:has(.cb-dock-btn:nth-of-type(7)) .cb-dock-btn:nth-of-type(1) {
+  translate: 0px -162px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock:has(.cb-dock-btn:nth-of-type(7)) .cb-dock-btn:nth-of-type(2) {
+  translate: 126.7px -101px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock:has(.cb-dock-btn:nth-of-type(7)) .cb-dock-btn:nth-of-type(3) {
+  translate: 157.9px 36px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock:has(.cb-dock-btn:nth-of-type(7)) .cb-dock-btn:nth-of-type(4) {
+  translate: 70.3px 146px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock:has(.cb-dock-btn:nth-of-type(7)) .cb-dock-btn:nth-of-type(5) {
+  translate: -70.3px 146px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock:has(.cb-dock-btn:nth-of-type(7)) .cb-dock-btn:nth-of-type(6) {
+  translate: -157.9px 36px;
+}
+
+.cb-ui[data-style="radial"] .cb-dock:has(.cb-dock-btn:nth-of-type(7)) .cb-dock-btn:nth-of-type(7) {
+  translate: -126.7px -101px;
 }
 
 /* Der Hub beim Überfahren geht in `translate`, nicht in `transform` — der
