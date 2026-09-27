@@ -6,7 +6,7 @@ import type { FocusClip } from "./lib/types";
 import { TitleBar } from "./components/TitleBar";
 import { NavBar, type Route } from "./components/NavBar";
 import { Toasts } from "./components/Toasts";
-import { SharePicker, Transfers } from "./components/Share";
+import { ClipPicker, SharePicker, Transfers } from "./components/Share";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { FfmpegNotice } from "./components/FfmpegNotice";
 import { TextMenu } from "./components/TextMenu";
@@ -87,6 +87,7 @@ export default function App() {
         <Toasts />
         <Transfers />
         <SharePicker />
+        <ClipPicker />
         {/* Takes the WebView's own menu away and gives text fields one in the
             program's style. */}
         <TextMenu />

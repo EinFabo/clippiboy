@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
-import type { AudioSource, Clip, ConsoleStyle, EngineStatus } from "@/lib/types";
+import type { AudioSource, Clip, ConsoleStyle, EngineStatus, FriendUser } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { mockClips, mockConfig } from "@/lib/mock";
 import {
@@ -18,6 +18,7 @@ import {
   IconRecord,
   IconScissors,
   IconSearch,
+  IconSend,
   IconTrash,
 } from "@/components/icons";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
@@ -31,7 +32,8 @@ import {
 } from "@/components/ui/PlayerControls";
 import { AudioPanel, useLevelBars } from "./Audio";
 import { Offers } from "./Offers";
-import { FriendsPanel } from "./Friends";
+import { FriendsPanel, SendTo } from "./Friends";
+import { shareApi } from "@/lib/share";
 import { useFriends } from "@/lib/friends";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
@@ -157,6 +159,11 @@ export function Console() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  /** Die Kachel, über der gerade die Freundeliste zum Senden liegt. */
+  const [sendFor, setSendFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (panel !== "clips") setSendFor(null);
+  }, [panel]);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const noteTimer = useRef<number | null>(null);
@@ -410,6 +417,15 @@ export function Console() {
     }
   };
 
+  /** Direkt an einen Freund — Annehmen und Fortschritt laufen danach im
+   *  Kern und in den Karten des Hauptfensters, hier reicht ein Satz. */
+  const sendTo = (clip: Clip, friend: FriendUser) =>
+    run(`send-${clip.id}`, async () => {
+      setSendFor(null);
+      await shareApi.send(clip.id, friend.id);
+      say(`Gefragt: ${friend.displayName}`);
+    });
+
   const saveClip = () =>
     run("clip", async () => {
       await api.saveClip();
@@ -629,6 +645,13 @@ export function Console() {
                           </Tool>
                         ))}
                       <Tool
+                        label="An einen Freund senden"
+                        busy={busy === `send-${clip.id}`}
+                        onClick={() => setSendFor(clip.id)}
+                      >
+                        <IconSend className="h-4 w-4" />
+                      </Tool>
+                      <Tool
                         label={clip.favorite ? "Favorit entfernen" : "Favorit"}
                         onClick={() =>
                           run("fav", async () => {
@@ -651,6 +674,9 @@ export function Console() {
                     </>
                   )}
                 </div>
+                {sendFor === clip.id && (
+                  <SendTo clip={clip} onSend={sendTo} onClose={() => setSendFor(null)} />
+                )}
               </article>
             ))}
           </div>
@@ -662,7 +688,7 @@ export function Console() {
         hint={friendsHint}
         leaving={leaving}
       >
-        <FriendsPanel />
+        <FriendsPanel latest={clips[0] ?? null} onSend={sendTo} />
       </Sheet>
     ) : which === "audio" ? (
       <Sheet

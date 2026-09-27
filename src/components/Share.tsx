@@ -1,14 +1,16 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
-import { useFriends } from "@/lib/friends";
+import { canReceive, useFriends } from "@/lib/friends";
+import { clipName, formatDuration } from "@/lib/format";
+import { fileUrl } from "@/lib/ipc";
 import { isOver, megabytes, shareApi, useShare } from "@/lib/share";
 import type { Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Avatar } from "@/routes/Friends";
 import { Button } from "@/components/ui/Button";
 import { ProgressBar } from "@/components/ui/ProgressBar";
-import { IconCheck, IconClose, IconGamepad, IconHeart } from "@/components/icons";
+import { IconCheck, IconClose, IconGamepad, IconHeart, IconSend } from "@/components/icons";
 
 /**
  * "Send to a friend": the friends who are online right now, favourites first.
@@ -122,6 +124,125 @@ export function SharePicker() {
         {error && <p className="mt-3 text-sm text-live">{error}</p>}
         <div className="mt-5 flex justify-end">
           <Button variant="ghost" onClick={() => pick(null)}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** How many clips the friend-first picker offers — the recent ones are what you
+ *  send; the rest is a right click in the library away. */
+const RECENT_CLIPS = 12;
+
+/**
+ * "Send a clip" from the Friends page: the friend is chosen, now the clip. The
+ * other way round from [`SharePicker`], same sending underneath.
+ */
+export function ClipPicker() {
+  const friend = useShare((s) => s.choosingFor);
+  const chooseFor = useShare((s) => s.chooseFor);
+  const clips = useEngine((s) => s.clips);
+  const presence = useFriends((s) => (friend ? s.presence[friend.id] : undefined));
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState<string | null>(null);
+
+  useEffect(() => {
+    setError(null);
+    setSending(null);
+  }, [friend]);
+
+  useEffect(() => {
+    if (!friend) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") chooseFor(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [friend, chooseFor]);
+
+  if (!friend) return null;
+
+  const reachable = canReceive(presence);
+  const recent = clips.slice(0, RECENT_CLIPS);
+
+  const send = (clipId: string) => {
+    setSending(clipId);
+    setError(null);
+    shareApi
+      .send(clipId, friend.id)
+      .then(() => chooseFor(null))
+      .catch((err) => {
+        setError(String(err));
+        setSending(null);
+      });
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm" onClick={() => chooseFor(null)}>
+      <div
+        className="w-[560px] rounded-card border border-line bg-surface p-6 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center gap-3">
+          <Avatar user={friend} />
+          <div className="min-w-0">
+            <h2 data-tauri-drag-region className="truncate text-[16px] font-medium">
+              Send a clip to {friend.displayName}
+            </h2>
+            <p className="text-xs text-ink-muted">Straight to their PC, in full quality. They have to say yes.</p>
+          </div>
+        </div>
+
+        <div className="mt-5 max-h-[380px] overflow-y-auto">
+          {!reachable ? (
+            <p className="rounded-inner bg-elevated px-4 py-3 text-sm text-ink-muted">
+              {presence?.busy ? `${friend.displayName} is busy right now.` : `${friend.displayName} isn't online anymore.`}
+            </p>
+          ) : recent.length === 0 ? (
+            <p className="rounded-inner bg-elevated px-4 py-3 text-sm text-ink-muted">No clips yet.</p>
+          ) : (
+            <div className="grid grid-cols-3 gap-3">
+              {recent.map((clip) => (
+                <button
+                  key={clip.id}
+                  disabled={sending !== null}
+                  onClick={() => send(clip.id)}
+                  className={cn(
+                    "group rounded-inner p-1 text-left transition-colors hover:bg-hover disabled:cursor-default",
+                    sending !== null && sending !== clip.id && "opacity-50",
+                  )}
+                >
+                  <span className="relative block aspect-video overflow-hidden rounded-[10px] bg-elevated">
+                    {clip.thumbPath && (
+                      <img
+                        src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
+                        alt=""
+                        draggable={false}
+                        className="h-full w-full object-cover"
+                      />
+                    )}
+                    <span className="absolute right-1.5 bottom-1.5 rounded-pill bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold">
+                      {clip.screenshot ? "Screenshot" : formatDuration(clip.durationMs)}
+                    </span>
+                    <span className="absolute inset-0 grid place-items-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
+                      <IconSend className="h-5 w-5" />
+                    </span>
+                  </span>
+                  <span className="mt-1.5 block truncate text-xs font-medium">
+                    {sending === clip.id ? "Asking…" : clipName(clip)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {error && <p className="mt-3 text-sm text-live">{error}</p>}
+        <div className="mt-5 flex justify-end">
+          <Button variant="ghost" onClick={() => chooseFor(null)}>
             Close
           </Button>
         </div>

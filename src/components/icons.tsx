@@ -52,6 +52,13 @@ export const IconFriends = ({ className = base }: P) => (
   </svg>
 );
 
+/** A paper plane — "send this to a friend". */
+export const IconSend = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 3 10.5 13.5M21 3l-6.5 18-4-7.5L3 9.5 21 3Z" />
+  </svg>
+);
+
 export const IconArrowUpRight =({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
     <path d="M7 17 17 7M8 7h9v9" />

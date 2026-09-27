@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { inTauri } from "./ipc";
-import type { FriendsView } from "./types";
+import type { FriendPresence, FriendsView } from "./types";
 
 /**
  * The friends list as the core holds it. Account, lists, presence and the live
@@ -41,6 +41,12 @@ export const useFriends = create<FriendsView>(() => empty);
 if (inTauri) {
   void listen<FriendsView>("friends-state", (event) => useFriends.setState(event.payload, true));
   void invoke<FriendsView>("friends_state").then((view) => useFriends.setState(view, true));
+}
+
+/** Can a clip go to them right now? Online and not busy — like Quick Share,
+ *  there is no mailbox for the others. */
+export function canReceive(presence: FriendPresence | null | undefined): boolean {
+  return !!presence && !presence.busy;
 }
 
 /** "XXXX-XXXX" — readable over voice chat. */

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { inTauri } from "./ipc";
-import type { Clip, Transfer } from "./types";
+import type { Clip, FriendUser, Transfer } from "./types";
 
 /**
  * Clips going to and coming from friends. The core (`share.rs`) does the
@@ -23,12 +23,17 @@ interface ShareState {
   /** The clip whose "Send to a friend" picker is open. */
   picking: Clip | null;
   pick: (clip: Clip | null) => void;
+  /** The friend whose "Send a clip" picker is open — the same, the other way round. */
+  choosingFor: FriendUser | null;
+  chooseFor: (friend: FriendUser | null) => void;
 }
 
 export const useShare = create<ShareState>((set) => ({
   transfers: [],
   picking: null,
   pick: (clip) => set({ picking: clip }),
+  choosingFor: null,
+  chooseFor: (friend) => set({ choosingFor: friend }),
 }));
 
 if (inTauri) {

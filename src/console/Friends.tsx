@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
-import { friendsApi, playingFor, useFriends } from "@/lib/friends";
-import type { FriendPresence, FriendUser } from "@/lib/types";
+import { canReceive, friendsApi, playingFor, useFriends } from "@/lib/friends";
+import { clipName } from "@/lib/format";
+import type { Clip, FriendPresence, FriendUser } from "@/lib/types";
+import { IconClose, IconSend } from "@/components/icons";
 
 /**
  * Die Freunde in der Konsole — c01 und c05 aus dem Freunde-Labor: oben offene
@@ -11,7 +13,14 @@ import type { FriendPresence, FriendUser } from "@/lib/types";
  * Kein eigener Kanal: `friends-state` geht an jedes Fenster, und der Store in
  * `lib/friends.ts` hört hier genauso zu wie im Hauptfenster.
  */
-export function FriendsPanel() {
+export function FriendsPanel({
+  latest,
+  onSend,
+}: {
+  /** The newest clip — what "Letzten Clip senden" sends. */
+  latest: Clip | null;
+  onSend: (clip: Clip, friend: FriendUser) => void;
+}) {
   const { signedIn, lists, presence, lastSeen } = useFriends();
   const [showOffline, setShowOffline] = useState(false);
   const now = useNow();
@@ -35,7 +44,14 @@ export function FriendsPanel() {
         <p className="text-sm text-ink-muted">Noch keine Freunde. Hinzufügen geht im Fenster unter Freunde.</p>
       )}
       {[...playing, ...online].map((friend) => (
-        <Row key={friend.id} friend={friend} presence={presence[friend.id]} now={now} />
+        <Row
+          key={friend.id}
+          friend={friend}
+          presence={presence[friend.id]}
+          now={now}
+          latest={latest}
+          onSend={onSend}
+        />
       ))}
       {offline.length > 0 && (
         <>
@@ -91,11 +107,15 @@ function Row({
   presence,
   lastSeen,
   now,
+  latest,
+  onSend,
 }: {
   friend: FriendUser;
   presence: FriendPresence | null;
   lastSeen?: number;
   now: number;
+  latest?: Clip | null;
+  onSend?: (clip: Clip, friend: FriendUser) => void;
 }) {
   const duration = presence?.game ? playingFor(presence.since, now) : null;
   const line = !presence
@@ -112,24 +132,85 @@ function Row({
         <p className="truncate text-[13px] font-semibold">{friend.displayName}</p>
         <p className={cn("truncate text-xs", presence?.game ? "text-accent-bright" : "text-ink-muted")}>{line}</p>
       </div>
+      {latest && onSend && canReceive(presence) && (
+        <button
+          title={`Letzten Clip senden: ${clipName(latest)}`}
+          onClick={() => onSend(latest, friend)}
+          className="flex shrink-0 items-center gap-1.5 rounded-pill bg-white/10 px-3 py-1.5 text-xs font-semibold transition-colors hover:bg-white/15"
+        >
+          <IconSend className="h-3.5 w-3.5" />
+          Letzten Clip
+        </button>
+      )}
     </div>
   );
 }
 
-function Face({ user, status }: { user: FriendUser; status?: "on" | "game" | "busy" | "off" }) {
-  const [broken, setBroken] = useState(false);
+/**
+ * Über einer Clip-Kachel: an wen soll er gehen? Nur wer online und nicht
+ * beschäftigt ist — ohne Postfach dazwischen kann niemand sonst annehmen.
+ */
+export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: Clip, friend: FriendUser) => void; onClose: () => void }) {
+  const { signedIn, lists, presence } = useFriends();
+  const reachable = lists.friends.filter((f) => canReceive(presence[f.id]));
   return (
-    <span className="relative h-9 w-9 shrink-0">
+    <div className="absolute inset-0 z-10 flex flex-col rounded-inner bg-black/85 p-2 backdrop-blur-md">
+      <div className="flex items-center justify-between px-1 pb-1">
+        <span className="text-xs font-semibold text-ink-muted">Senden an</span>
+        <button
+          aria-label="Schließen"
+          onClick={onClose}
+          className="grid h-6 w-6 place-items-center rounded-pill text-ink-muted transition-colors hover:bg-white/10 hover:text-ink"
+        >
+          <IconClose className="h-3 w-3" />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {!signedIn ? (
+          <p className="px-1 text-xs text-ink-muted">Erst im Fenster unter Freunde anmelden.</p>
+        ) : reachable.length === 0 ? (
+          <p className="px-1 text-xs text-ink-muted">Gerade ist kein Freund online.</p>
+        ) : (
+          reachable.map((friend) => (
+            <button
+              key={friend.id}
+              onClick={() => onSend(clip, friend)}
+              className="flex w-full items-center gap-2 rounded-[10px] px-1.5 py-1 text-left transition-colors hover:bg-white/10"
+            >
+              <Face user={friend} size="sm" />
+              <span className="min-w-0 flex-1 truncate text-xs font-semibold">{friend.displayName}</span>
+              <IconSend className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Face({
+  user,
+  status,
+  size = "md",
+}: {
+  user: FriendUser;
+  status?: "on" | "game" | "busy" | "off";
+  size?: "sm" | "md";
+}) {
+  const [broken, setBroken] = useState(false);
+  const box = size === "sm" ? "h-6 w-6" : "h-9 w-9";
+  return (
+    <span className={cn("relative shrink-0", box)}>
       {user.avatar && !broken ? (
         <img
           src={user.avatar}
           alt=""
           draggable={false}
           onError={() => setBroken(true)}
-          className="h-9 w-9 rounded-pill object-cover"
+          className={cn("rounded-pill object-cover", box)}
         />
       ) : (
-        <span className="grid h-9 w-9 place-items-center rounded-pill bg-white/10 text-sm font-bold text-ink-muted">
+        <span className={cn("grid place-items-center rounded-pill bg-white/10 font-bold text-ink-muted", box, size === "sm" ? "text-[10px]" : "text-sm")}>
           {user.displayName.slice(0, 1).toUpperCase()}
         </span>
       )}

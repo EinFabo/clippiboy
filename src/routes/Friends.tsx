@@ -1,13 +1,14 @@
 import { useEffect, useState, type FormEvent, type MouseEvent } from "react";
 import { cn } from "@/lib/cn";
-import { formatCode, friendsApi, lastSeenText, playingFor, useFriends } from "@/lib/friends";
+import { canReceive, formatCode, friendsApi, lastSeenText, playingFor, useFriends } from "@/lib/friends";
+import { useShare } from "@/lib/share";
 import type { FriendPending, FriendPresence, FriendUser } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { useMenu } from "@/components/ui/Menu";
 import { useShallow } from "zustand/react/shallow";
-import { IconCheck, IconClose, IconCopy, IconGamepad, IconHeart, IconPlus } from "@/components/icons";
+import { IconCheck, IconClose, IconCopy, IconGamepad, IconHeart, IconPlus, IconSend } from "@/components/icons";
 
 /** Shows what the core answered — a refusal from the server reads as it is. */
 function report(error: unknown) {
@@ -361,8 +362,22 @@ function FriendRow({
       },
     });
 
+  const chooseFor = useShare((s) => s.chooseFor);
+  const reachable = canReceive(presence);
+
   const openMenu = (event: MouseEvent) =>
     menu.open(event, [
+      ...(reachable
+        ? [
+            {
+              kind: "item" as const,
+              label: "Send a clip…",
+              icon: <IconSend className="h-4 w-4" />,
+              onSelect: () => chooseFor(friend),
+            },
+            { kind: "separator" as const },
+          ]
+        : []),
       {
         kind: "item",
         label: favorite ? "Remove from favorites" : "Add to favorites",
@@ -417,6 +432,17 @@ function FriendRow({
           </p>
         )}
       </div>
+      {reachable && (
+        <button
+          aria-label={`Send a clip to ${friend.displayName}`}
+          title="Send a clip"
+          onClick={() => chooseFor(friend)}
+          className="grid h-8 w-8 place-items-center rounded-pill text-ink-muted opacity-0 transition
+            hover:bg-hover hover:text-ink group-hover:opacity-100 focus-visible:opacity-100"
+        >
+          <IconSend className="h-4 w-4" />
+        </button>
+      )}
       <button
         aria-label={`More for ${friend.displayName}`}
         onClick={openMenu}
