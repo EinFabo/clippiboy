@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { type ReactNode, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
@@ -129,7 +129,9 @@ export function AudioMixer() {
   const list = useRef<HTMLDivElement>(null);
 
   const deviceName = useMemo(
-    () => (id: string) => devices.find((d) => d.id === id)?.name ?? id,
+    // An empty id follows whatever Windows has as its default device.
+    () => (id: string) =>
+      id === "" ? "Windows default" : (devices.find((d) => d.id === id)?.name ?? id),
     [devices],
   );
   // Anti-cheat games cannot be named — `list_processes` needs to read their
@@ -436,9 +438,7 @@ export function AudioMixer() {
         </div>
 
         {config.sources.length === 0 && (
-          <Card className="grid h-32 place-items-center text-sm text-ink-muted">
-            No audio source configured yet.
-          </Card>
+          <QuickSetup onAdd={upsertSource} onPick={() => setAdding(true)} />
         )}
       </section>
 
@@ -449,6 +449,119 @@ export function AudioMixer() {
 
       <AvailableSources processes={processes} />
     </div>
+  );
+}
+
+/**
+ * Quick audio setup: in place of an empty source list — a fresh install, or
+ * every source removed — the two that nearly everyone wants, one click away.
+ * What you hear and your microphone, pinned to the devices Windows has as its
+ * defaults right now and named after them, exactly as picking them by hand
+ * would. Not "follow the default" (an empty id): the core rightly warns about
+ * a source whose name and device can drift apart, and a setup that raises a
+ * warning the moment it is done is the wrong first impression. Game audio is
+ * left out on purpose: the output already carries it.
+ */
+function QuickSetup({
+  onAdd,
+  onPick,
+}: {
+  onAdd: (source: AudioSource) => Promise<void>;
+  onPick: () => void;
+}) {
+  const devices = useEngine((s) => s.devices);
+  const output = devices.find((d) => d.kind === "output" && d.isDefault);
+  const input = devices.find((d) => d.kind === "input" && d.isDefault);
+  const [withOutput, setWithOutput] = useState(true);
+  const [withInput, setWithInput] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const make = (label: string, kind: SourceKind): AudioSource => ({
+    id: `src-${crypto.randomUUID().slice(0, 8)}`,
+    label,
+    kind,
+    enabled: true,
+    gainDb: 0,
+    muted: false,
+    solo: false,
+    separateTrack: wantsOwnTrack(kind),
+  });
+
+  const add = async () => {
+    setBusy(true);
+    try {
+      // One after the other: each call writes the whole configuration.
+      if (withOutput && output) {
+        await onAdd(make(output.name, { type: "outputDevice", deviceId: output.id }));
+      }
+      if (withInput && input) {
+        await onAdd(make(input.name, { type: "inputDevice", deviceId: input.id }));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rows: Array<{
+    on: boolean;
+    set: (on: boolean) => void;
+    icon: ReactNode;
+    title: string;
+    device: string;
+  }> = [
+    {
+      on: withOutput,
+      set: setWithOutput,
+      icon: <IconSpeaker className="h-4 w-4" />,
+      title: "Desktop audio",
+      device: output ? output.name : "",
+    },
+  ];
+  if (!output) rows.pop();
+  if (input) {
+    rows.push({
+      on: withInput,
+      set: setWithInput,
+      icon: <IconMic className="h-4 w-4" />,
+      title: "Microphone",
+      device: input.name,
+    });
+  }
+  const nothing = !(withOutput && output) && !(withInput && input);
+
+  return (
+    <Card className="p-5">
+      <h3 className="text-sm font-semibold">Quick setup</h3>
+      <p className="mt-1 text-xs text-ink-muted">
+        No audio source yet, so your clips would be silent. Add what you hear and your
+        microphone — the devices Windows uses right now. You can change either later.
+      </p>
+      <div className="mt-4 grid gap-2">
+        {rows.map((row) => (
+          <div
+            key={row.title}
+            className="flex items-center justify-between gap-4 rounded-inner border border-line bg-elevated px-4 py-3"
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="text-ink-muted">{row.icon}</span>
+              <div className="min-w-0">
+                <p className="text-sm">{row.title}</p>
+                <p className="truncate text-xs text-ink-faint">{row.device}</p>
+              </div>
+            </div>
+            <Toggle checked={row.on} onChange={row.set} />
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 flex items-center justify-end gap-2">
+        <Button size="sm" variant="ghost" onClick={onPick}>
+          Pick sources myself
+        </Button>
+        <Button size="sm" variant="primary" disabled={busy || nothing} onClick={() => void add()}>
+          {busy ? "Adding…" : "Add"}
+        </Button>
+      </div>
+    </Card>
   );
 }
 
