@@ -83,7 +83,7 @@ export const mockConfig: AppConfig = {
       separateTrack: true,
     },
   ],
-  clipDir: "C:\\Users\\fabia\\Videos\\ClippiBoy",
+  clipDir: "C:\\Users\\user\\Videos\\ClippiBoy",
   saveClipHotkey: "Ctrl+Shift+S",
   toggleBufferHotkey: "Ctrl+Shift+B",
   screenshotHotkey: "Ctrl+Shift+P",
@@ -137,7 +137,7 @@ export const mockConfig: AppConfig = {
 export const mockClips: Clip[] = [
   {
     id: "c1",
-    path: "C:\\Users\\fabia\\Videos\\ClippiBoy\\cs2_2026-08-17_22-14-03.mp4",
+    path: "C:\\Users\\user\\Videos\\ClippiBoy\\cs2_2026-08-17_22-14-03.mp4",
     createdAt: Date.now() - 1000 * 60 * 12,
     durationMs: 32_000,
     game: "Counter-Strike 2",
@@ -157,7 +157,7 @@ export const mockClips: Clip[] = [
   },
   {
     id: "c2",
-    path: "C:\\Users\\fabia\\Videos\\ClippiBoy\\cs2_2026-08-17_21-48-51.mp4",
+    path: "C:\\Users\\user\\Videos\\ClippiBoy\\cs2_2026-08-17_21-48-51.mp4",
     createdAt: Date.now() - 1000 * 60 * 60 * 3,
     durationMs: 60_000,
     game: "Counter-Strike 2",
@@ -177,7 +177,7 @@ export const mockClips: Clip[] = [
   },
   {
     id: "c3",
-    path: "C:\\Users\\fabia\\Videos\\ClippiBoy\\nohesi_2026-08-16_02-11-20.mp4",
+    path: "C:\\Users\\user\\Videos\\ClippiBoy\\nohesi_2026-08-16_02-11-20.mp4",
     createdAt: Date.now() - 1000 * 60 * 60 * 26,
     durationMs: 18_500,
     game: "No Hesi",
@@ -201,7 +201,7 @@ export const mockClips: Clip[] = [
   // window titles are deliberate: they come from a German-locale Windows.
   {
     id: "c4",
-    path: "C:\\Users\\fabia\\Videos\\ClippiBoy\\clip_2026-08-15_19-02-44.mp4",
+    path: "C:\\Users\\user\\Videos\\ClippiBoy\\clip_2026-08-15_19-02-44.mp4",
     createdAt: Date.now() - 1000 * 60 * 60 * 30,
     durationMs: 24_000,
     game: null,
@@ -221,11 +221,11 @@ export const mockClips: Clip[] = [
   },
   ...[
     "(102) WIR MÜSSEN PAYEN - YouTube – Opera",
-    "C:\\Users\\fabia\\projects\\clippiboy\\synctest.mp4",
+    "C:\\Users\\user\\projects\\clippiboy\\synctest.mp4",
     "Snipping Tool Überlagerung",
   ].map((game, i) => ({
     id: `c${5 + i}`,
-    path: `C:\\Users\\fabia\\Videos\\ClippiBoy\\clip_2026-08-1${i}_08-30-00.mp4`,
+    path: `C:\\Users\\user\\Videos\\ClippiBoy\\clip_2026-08-1${i}_08-30-00.mp4`,
     createdAt: Date.now() - 1000 * 60 * 60 * (40 + i * 5),
     durationMs: 12_000 + i * 3000,
     game,
@@ -245,7 +245,7 @@ export const mockClips: Clip[] = [
   })),
   ...["Counter-Strike 2", null].map((game, i) => ({
     id: `s${1 + i}`,
-    path: `C:\\Users\\fabia\\Videos\\ClippiBoy\\shot_2026-08-2${i}_19-04-1${i}.png`,
+    path: `C:\\Users\\user\\Videos\\ClippiBoy\\shot_2026-08-2${i}_19-04-1${i}.png`,
     createdAt: Date.now() - 1000 * 60 * (30 + i * 90),
     // A still has no length, and the gallery shows the camera instead.
     durationMs: 0,

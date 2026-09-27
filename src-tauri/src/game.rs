@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(
             resolve_name(
                 "unknown.exe",
-                "C:\\Users\\fabia\\projects\\clippiboy\\synctest.mp4",
+                "C:\\Users\\user\\projects\\clippiboy\\synctest.mp4",
                 true
             ),
             None
