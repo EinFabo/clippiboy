@@ -55,7 +55,10 @@ zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 # The friends server's live connection. The TLS is the rustls from above, the
 # roots are Windows' own; tokio is the runtime Tauri already runs on.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
-tokio = { version = "1", features = ["macros", "time", "sync"] }
+tokio = { version = "1", features = ["macros", "time", "sync", "rt"] }
+# Sending clips to friends, PC to PC (see `share.rs`): QUIC with hole punching,
+# and iroh's relays where two routers will not let a direct line through.
+iroh = "1.2"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [target.'cfg(windows)'.dependencies]

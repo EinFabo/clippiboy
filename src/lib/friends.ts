@@ -33,6 +33,7 @@ const empty: FriendsView = {
   me: null,
   lists: { friends: [], incoming: [], outgoing: [], blocked: [] },
   presence: {},
+  lastSeen: {},
 };
 
 export const useFriends = create<FriendsView>(() => empty);
@@ -45,6 +46,18 @@ if (inTauri) {
 /** "XXXX-XXXX" — readable over voice chat. */
 export function formatCode(code: string): string {
   return code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+}
+
+/** "Last seen 5 min ago", "… yesterday", "… 3 days ago". */
+export function lastSeenText(at: number | undefined, now: number): string {
+  if (at === undefined) return "Offline";
+  const minutes = Math.max(0, Math.floor((now - at) / 60_000));
+  if (minutes < 1) return "Last seen just now";
+  if (minutes < 60) return `Last seen ${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Last seen ${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "Last seen yesterday" : `Last seen ${days} days ago`;
 }
 
 /** "42 min", "1 h 5 min" since a moment in ms. */

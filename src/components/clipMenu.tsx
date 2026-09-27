@@ -4,6 +4,7 @@ import {
   IconCopy,
   IconExport,
   IconFolder,
+  IconFriends,
   IconHeart,
   IconPaste,
   IconPencil,
@@ -14,6 +15,7 @@ import {
 import { useMenu, type MenuEntry, type MenuTrigger } from "@/components/ui/Menu";
 import { useEngine } from "@/store";
 import { api, inTauri } from "@/lib/ipc";
+import { useShare } from "@/lib/share";
 import type { Clip } from "@/lib/types";
 
 /** What the calling site contributes on top. */
@@ -46,6 +48,7 @@ export function useClipMenu() {
   const menu = useMenu();
   const setFavorite = useEngine((state) => state.setFavorite);
   const fileClip = useEngine((state) => state.fileClip);
+  const pickFriend = useShare((state) => state.pick);
 
   return (trigger: MenuTrigger, clip: Clip, options: Options) => {
     const entries: MenuEntry[] = [];
@@ -112,6 +115,14 @@ export function useClipMenu() {
       icon: <IconCopy className={icon} />,
       disabled: !inTauri,
       onSelect: () => void api.copyClipFile(clip.id),
+    });
+    entries.push({
+      kind: "item",
+      label: "Send to a friend…",
+      // Straight to their PC, full quality — see `share.rs`.
+      icon: <IconFriends className={icon} />,
+      disabled: !inTauri,
+      onSelect: () => pickFriend(clip),
     });
     // Recordings only: a still is small already, and the arithmetic here is all
     // about length.

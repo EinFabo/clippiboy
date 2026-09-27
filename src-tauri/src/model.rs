@@ -323,6 +323,16 @@ pub struct FriendsConfig {
     /// Windows notifications while one's own game runs. Off: nothing pops up
     /// over the game.
     pub notify_while_playing: bool,
+    /// A line of one's own under the name, empty for none. The server cuts it
+    /// to 60 characters.
+    pub status: String,
+    /// Do not disturb: friends see it, no notices pop up, and clips sent
+    /// meanwhile are turned down without asking.
+    pub busy: bool,
+    /// Friend ids pinned to the top. Only here — the server never hears of it.
+    pub favorites: Vec<String>,
+    /// Whose clips may be offered at all.
+    pub accept_clips: AcceptClips,
 }
 
 impl Default for FriendsConfig {
@@ -334,8 +344,22 @@ impl Default for FriendsConfig {
             notify_online: false,
             notify_games: true,
             notify_while_playing: false,
+            status: String::new(),
+            busy: false,
+            favorites: Vec::new(),
+            accept_clips: AcceptClips::All,
         }
     }
+}
+
+/// Who may send one a clip. Offers from anyone else never reach the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AcceptClips {
+    #[default]
+    All,
+    Favorites,
+    Off,
 }
 
 /// S saves, B is the buffer, P is the picture.

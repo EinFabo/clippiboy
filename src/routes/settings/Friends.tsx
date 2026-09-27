@@ -2,11 +2,11 @@ import { useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { friendsApi, useFriends } from "@/lib/friends";
-import type { FriendsConfig } from "@/lib/types";
+import type { AcceptClips, FriendsConfig } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
-import { Toggle } from "@/components/ui/Controls";
+import { Segmented, Toggle } from "@/components/ui/Controls";
 import { Row } from "./shared";
 
 export function FriendsTab() {
@@ -49,6 +49,29 @@ export function FriendsTab() {
               disabled={!signedIn}
               onChange={(allow) => run(friendsApi.setAllowRequests(allow))}
             />
+          </Row>
+        </Card>
+      </section>
+
+      <section>
+        <SectionTitle title="Clips from friends" />
+        <Card className="divide-y divide-line">
+          <Row
+            label="Who can send me clips"
+            hint="Straight from their PC to yours — you still say yes to each one"
+          >
+            <Segmented<AcceptClips>
+              value={friends.acceptClips}
+              options={[
+                { key: "all", label: "Friends" },
+                { key: "favorites", label: "Favorites" },
+                { key: "off", label: "Nobody" },
+              ]}
+              onChange={(acceptClips) => patch({ acceptClips })}
+            />
+          </Row>
+          <Row label="Busy" hint="No notices pop up, and clips sent meanwhile are turned down">
+            <Toggle checked={friends.busy} onChange={(busy) => patch({ busy })} />
           </Row>
         </Card>
       </section>

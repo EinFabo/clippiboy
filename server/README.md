@@ -40,3 +40,25 @@ and expire after 180 days without use.
 
 `scripts/e2e.mjs` runs the whole flow with two seeded test accounts — see the
 comment at the top.
+
+Against a local `wrangler dev` instead of the deployed worker:
+
+```sh
+npx wrangler d1 migrations apply clippiboy-friends --local
+node scripts/e2e.mjs --seed > seed.sql && npx wrangler d1 execute clippiboy-friends --local --file seed.sql
+npx wrangler dev --port 8799 &
+FRIENDS_SERVER=http://127.0.0.1:8799 node scripts/e2e.mjs
+```
+
+## Relay
+
+Besides presence, the socket carries `{t: "relay", to, body}`: the hub passes
+`body` on to that friend's apps as `{t: "relay", from, body}` and keeps nothing.
+It is the handshake for sending a clip (`src-tauri/src/share.rs`) — the clip
+itself goes PC to PC over iroh, never through here. Only accepted friends, at
+most 4 KB and 30 messages per 10 s per connection; otherwise, or when the
+friend has no app online, the sender gets `{t: "relayFailed", to, ref, reason}`.
+
+Presence also carries `status` (a line of the user's own, cut to 60 characters)
+and `busy`; going offline stamps `lastSeen` in the user's hub, which snapshots
+and presence messages pass on.

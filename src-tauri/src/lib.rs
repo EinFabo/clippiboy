@@ -15,6 +15,7 @@ pub mod export;
 pub mod filing;
 pub mod friends;
 pub mod game;
+pub mod share;
 pub mod gpu;
 pub mod logging;
 pub mod mft;
@@ -1088,6 +1089,7 @@ pub fn run() {
             overlay::create(handle);
             console::create(handle);
             friends::start(handle);
+            share::start(handle);
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 // The installer registers the scheme; this keeps it pointing
@@ -1193,6 +1195,12 @@ pub fn run() {
             friends::friends_unblock,
             friends::friends_set_allow_requests,
             friends::friends_delete_account,
+            share::share_state,
+            share::share_send,
+            share::share_accept,
+            share::share_decline,
+            share::share_cancel,
+            share::share_clear,
         ])
         .build(tauri::generate_context!())
         .expect("could not start ClippiBoy");

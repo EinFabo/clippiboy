@@ -79,6 +79,12 @@ pub struct Presence {
     pub game: Option<String>,
     /// When the game started, ms since the epoch.
     pub since: Option<i64>,
+    /// Their own line under the name.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Do not disturb — no clips to them right now.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 /// Everything the Friends page draws, sent whole on every change.
@@ -94,6 +100,8 @@ pub struct FriendsView {
     pub lists: Lists,
     /// Friends who are online, by id. Missing means offline.
     pub presence: HashMap<String, Presence>,
+    /// When an offline friend was last seen, ms since the epoch, by id.
+    pub last_seen: HashMap<String, i64>,
 }
 
 #[derive(Default)]
@@ -323,6 +331,7 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
         // Presence of someone who is no longer a friend must not linger.
         let ids: HashSet<&str> = lists.friends.iter().map(|user| user.id.as_str()).collect();
         view.presence.retain(|id, _| ids.contains(id.as_str()));
+        view.last_seen.retain(|id, _| ids.contains(id.as_str()));
         previous
     };
     emit(app);
@@ -459,9 +468,26 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 enum ServerMessage {
-    Snapshot { friends: HashMap<String, Option<Presence>> },
-    Presence { id: String, presence: Option<Presence> },
+    Snapshot {
+        friends: HashMap<String, Option<Presence>>,
+        #[serde(default, rename = "lastSeen")]
+        last_seen: HashMap<String, Option<i64>>,
+    },
+    Presence {
+        id: String,
+        presence: Option<Presence>,
+        #[serde(default, rename = "lastSeen")]
+        last_seen: Option<i64>,
+    },
     Friends,
+    /// A friend's app sent this one something — the clip handshake.
+    Relay { from: String, body: serde_json::Value },
+    /// The server could not pass one of ours on.
+    RelayFailed {
+        #[serde(default, rename = "ref")]
+        reference: Option<serde_json::Value>,
+        reason: String,
+    },
 }
 
 async fn handle_message(app: &AppHandle, text: &str) {
@@ -471,14 +497,24 @@ async fn handle_message(app: &AppHandle, text: &str) {
     };
     let friends = app.state::<Friends>();
     match message {
-        ServerMessage::Snapshot { friends: all } => {
-            friends.view.lock().presence =
-                all.into_iter().filter_map(|(id, presence)| Some((id, presence?))).collect();
+        ServerMessage::Snapshot { friends: all, last_seen } => {
+            {
+                let mut view = friends.view.lock();
+                view.presence = all.into_iter().filter_map(|(id, presence)| Some((id, presence?))).collect();
+                view.last_seen = last_seen.into_iter().filter_map(|(id, at)| Some((id, at?))).collect();
+            }
             emit(app);
         }
-        ServerMessage::Presence { id, presence } => {
+        ServerMessage::Relay { from, body } => crate::share::handle_relay(app, &from, body),
+        ServerMessage::RelayFailed { reference, reason } => {
+            crate::share::relay_failed(app, reference.as_ref().and_then(|r| r.as_str()), &reason)
+        }
+        ServerMessage::Presence { id, presence, last_seen } => {
             let (name, before) = {
                 let mut view = friends.view.lock();
+                if let Some(at) = last_seen {
+                    view.last_seen.insert(id.clone(), at);
+                }
                 let name = view
                     .lists
                     .friends
@@ -523,8 +559,37 @@ fn presence_message(app: &AppHandle, kind: &str) -> String {
         "invisible": config.invisible,
         "game": game.as_ref().map(|(name, _)| name),
         "since": game.as_ref().map(|(_, since)| since),
+        "status": config.status,
+        "busy": config.busy,
     })
     .to_string()
+}
+
+// --- For sending clips ---------------------------------------------------------
+
+/// A friend's presence, if they are online.
+pub fn presence_of(app: &AppHandle, id: &str) -> Option<Presence> {
+    app.try_state::<Friends>()?.view.lock().presence.get(id).cloned()
+}
+
+pub fn friend_name(app: &AppHandle, id: &str) -> Option<String> {
+    let friends = app.try_state::<Friends>()?;
+    let view = friends.view.lock();
+    view.lists.friends.iter().find(|user| user.id == id).map(|user| user.display_name.clone())
+}
+
+/// Hands a friend's app a message through the server. False when there is no
+/// connection to send it on.
+pub fn send_relay(app: &AppHandle, to: &str, body: &impl Serialize) -> bool {
+    let Some(friends) = app.try_state::<Friends>() else { return false };
+    let Some(outbox) = friends.outbox.lock().clone() else { return false };
+    let text = serde_json::json!({ "t": "relay", "to": to, "body": body }).to_string();
+    outbox.send(text).is_ok()
+}
+
+/// Someone wants to send a clip.
+pub fn announce_clip(app: &AppHandle, text: &str) {
+    alert(app, Alert::Clip, text);
 }
 
 fn send_presence(app: &AppHandle, kind: &str) {
@@ -540,6 +605,7 @@ enum Alert {
     Request,
     Online,
     Game,
+    Clip,
 }
 
 /// In the app while its window is in front; as a Windows notification while it
@@ -550,8 +616,10 @@ fn alert(app: &AppHandle, kind: Alert, text: &str) {
         Alert::Request => config.notify_requests,
         Alert::Online => config.notify_online,
         Alert::Game => config.notify_games,
+        // An offer waits for an answer — it has to be seen.
+        Alert::Clip => true,
     };
-    if !wanted {
+    if !wanted || config.busy {
         return;
     }
     let in_front = app

@@ -244,7 +244,7 @@ pub fn prune(dir: &Path, clip_dir: &Path) {
 
 /// A free file name in the target folder. The names carry milliseconds, so a
 /// collision is the exception — but nothing gets overwritten regardless.
-fn free_name(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn free_name(dir: &Path, name: &str) -> PathBuf {
     let target = dir.join(name);
     if !target.exists() {
         return target;

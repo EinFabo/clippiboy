@@ -237,7 +237,17 @@ export interface FriendsConfig {
   notifyOnline: boolean;
   notifyGames: boolean;
   notifyWhilePlaying: boolean;
+  /** A line of one's own under the name; empty for none. */
+  status: string;
+  /** Do not disturb: no notices, and clips sent meanwhile are turned down. */
+  busy: boolean;
+  /** Friend ids pinned to the top — kept only on this PC. */
+  favorites: string[];
+  acceptClips: AcceptClips;
 }
+
+/** Whose clips may be offered at all. */
+export type AcceptClips = "all" | "favorites" | "off";
 
 export interface FriendUser {
   id: string;
@@ -260,6 +270,8 @@ export interface FriendPresence {
   game: string | null;
   /** When the game started, ms since the epoch. */
   since: number | null;
+  status: string | null;
+  busy: boolean;
 }
 
 /** Everything the Friends page draws — the core sends it whole on every change. */
@@ -276,6 +288,26 @@ export interface FriendsView {
   };
   /** Online friends by id; missing means offline. */
   presence: Record<string, FriendPresence>;
+  /** When an offline friend was last seen, ms since the epoch. */
+  lastSeen: Record<string, number>;
+}
+
+/** A clip on its way to or from a friend — see `share.rs`. */
+export interface Transfer {
+  id: string;
+  direction: "out" | "in";
+  friendId: string;
+  friendName: string;
+  name: string;
+  size: number;
+  moved: number;
+  stage: "preparing" | "asking" | "moving" | "done" | "declined" | "expired" | "cancelled" | "failed";
+  error: string | null;
+  /** Out: the clip sent. In: the clip in one's own library once it is in. */
+  clipId: string | null;
+  game: string | null;
+  durationMs: number;
+  screenshot: boolean;
 }
 
 export interface Clip {

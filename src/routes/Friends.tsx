@@ -1,12 +1,13 @@
 import { useEffect, useState, type FormEvent, type MouseEvent } from "react";
 import { cn } from "@/lib/cn";
-import { formatCode, friendsApi, playingFor, useFriends } from "@/lib/friends";
+import { formatCode, friendsApi, lastSeenText, playingFor, useFriends } from "@/lib/friends";
 import type { FriendPending, FriendPresence, FriendUser } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { useMenu } from "@/components/ui/Menu";
-import { IconCheck, IconClose, IconCopy, IconGamepad, IconPlus } from "@/components/icons";
+import { useShallow } from "zustand/react/shallow";
+import { IconCheck, IconClose, IconCopy, IconGamepad, IconHeart, IconPlus } from "@/components/icons";
 
 /** Shows what the core answered — a refusal from the server reads as it is. */
 function report(error: unknown) {
@@ -84,7 +85,9 @@ function SignIn() {
 function SignedIn() {
   const lists = useFriends((s) => s.lists);
   const presence = useFriends((s) => s.presence);
+  const lastSeen = useFriends((s) => s.lastSeen);
   const connected = useFriends((s) => s.connected);
+  const favorites = useEngine((s) => s.config.friends.favorites);
   const [error, setError] = useState<string | null>(null);
   const now = useNow();
 
@@ -94,9 +97,16 @@ function SignedIn() {
     return () => window.removeEventListener("cb-friends-error", onError);
   }, []);
 
-  const playing = lists.friends.filter((f) => presence[f.id]?.game);
-  const online = lists.friends.filter((f) => presence[f.id] && !presence[f.id].game);
-  const offline = lists.friends.filter((f) => !presence[f.id]);
+  // Favourites first in every group; below that the server's alphabetical
+  // order, and offline the ones seen most recently.
+  const favorite = (a: FriendUser, b: FriendUser) =>
+    Number(favorites.includes(b.id)) - Number(favorites.includes(a.id));
+  const sorted = [...lists.friends].sort(favorite);
+  const playing = sorted.filter((f) => presence[f.id]?.game);
+  const online = sorted.filter((f) => presence[f.id] && !presence[f.id].game);
+  const offline = sorted
+    .filter((f) => !presence[f.id])
+    .sort((a, b) => favorite(a, b) || (lastSeen[b.id] ?? 0) - (lastSeen[a.id] ?? 0));
 
   return (
     <>
@@ -134,9 +144,9 @@ function SignedIn() {
         </Card>
       ) : (
         <>
-          <Group title="In game" friends={playing} presence={presence} now={now} />
-          <Group title="Online" friends={online} presence={presence} now={now} />
-          <Group title="Offline" friends={offline} presence={presence} now={now} />
+          <Group title="In game" friends={playing} presence={presence} lastSeen={lastSeen} now={now} />
+          <Group title="Online" friends={online} presence={presence} lastSeen={lastSeen} now={now} />
+          <Group title="Offline" friends={offline} presence={presence} lastSeen={lastSeen} now={now} />
         </>
       )}
     </>
@@ -145,9 +155,18 @@ function SignedIn() {
 
 function Profile({ connected }: { connected: boolean }) {
   const me = useFriends((s) => s.me);
-  const invisible = useEngine((s) => s.config.friends.invisible);
+  const { config, patchConfig } = useEngine(useShallow((s) => ({ config: s.config.friends, patchConfig: s.patchConfig })));
+  const invisible = config.invisible;
   const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState(config.status);
+  useEffect(() => setStatus(config.status), [config.status]);
   if (!me) return <Card className="h-[112px] animate-pulse" />;
+
+  const saveStatus = () => {
+    const text = status.trim().slice(0, 60);
+    if (text !== config.status) void patchConfig({ friends: { ...config, status: text } });
+  };
+  const presenceStatus: Status = !connected ? "offline" : invisible ? "invisible" : config.busy ? "busy" : "online";
 
   const copy = () => {
     void navigator.clipboard.writeText(formatCode(me.friendCode)).then(() => {
@@ -158,12 +177,34 @@ function Profile({ connected }: { connected: boolean }) {
 
   return (
     <Card className="flex items-center gap-4 p-5">
-      <Avatar user={me} status={!connected ? "offline" : invisible ? "invisible" : "online"} size="lg" />
+      <Avatar user={me} status={presenceStatus} size="lg" />
       <div className="min-w-0 flex-1">
-        <p className="truncate font-semibold">{me.displayName}</p>
-        <p className="truncate text-xs text-ink-muted">
-          {!connected ? "Connecting…" : invisible ? "Invisible — you look offline" : `@${me.username}`}
+        <p className="flex items-center gap-2">
+          <span className="truncate font-semibold">{me.displayName}</span>
+          <button
+            onClick={() => void patchConfig({ friends: { ...config, busy: !config.busy } })}
+            title={config.busy ? "Busy: no notices, clips are turned down" : "Set yourself busy"}
+            className={cn(
+              "shrink-0 rounded-pill border px-2 py-0.5 text-[11px] transition-colors",
+              config.busy ? "border-live/50 bg-live/10 text-live" : "border-line text-ink-muted hover:bg-hover",
+            )}
+          >
+            {config.busy ? "Busy" : "Available"}
+          </button>
         </p>
+        <input
+          value={status}
+          maxLength={60}
+          onChange={(e) => setStatus(e.target.value)}
+          onBlur={saveStatus}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+          placeholder={!connected ? "Connecting…" : invisible ? "Invisible — you look offline" : "What are you up to?"}
+          aria-label="Your status"
+          className="mt-0.5 w-full truncate bg-transparent text-xs text-ink-muted outline-none placeholder:text-ink-faint
+            focus:text-ink"
+        />
       </div>
       <button
         onClick={copy}
@@ -264,11 +305,13 @@ function Group({
   title,
   friends,
   presence,
+  lastSeen,
   now,
 }: {
   title: string;
   friends: FriendUser[];
   presence: Record<string, FriendPresence>;
+  lastSeen: Record<string, number>;
   now: number;
 }) {
   if (friends.length === 0) return null;
@@ -280,7 +323,13 @@ function Group({
       />
       <Card className="divide-y divide-line">
         {friends.map((friend) => (
-          <FriendRow key={friend.id} friend={friend} presence={presence[friend.id] ?? null} now={now} />
+          <FriendRow
+            key={friend.id}
+            friend={friend}
+            presence={presence[friend.id] ?? null}
+            lastSeen={lastSeen[friend.id]}
+            now={now}
+          />
         ))}
       </Card>
     </section>
@@ -290,18 +339,36 @@ function Group({
 function FriendRow({
   friend,
   presence,
+  lastSeen,
   now,
 }: {
   friend: FriendUser;
   presence: FriendPresence | null;
+  lastSeen: number | undefined;
   now: number;
 }) {
   const menu = useMenu();
-  const status = !presence ? "offline" : presence.game ? "playing" : "online";
+  const { config, patchConfig } = useEngine(useShallow((s) => ({ config: s.config.friends, patchConfig: s.patchConfig })));
+  const favorite = config.favorites.includes(friend.id);
+  const status: Status = !presence ? "offline" : presence.busy ? "busy" : presence.game ? "playing" : "online";
   const duration = presence?.game ? playingFor(presence.since, now) : null;
+
+  const toggleFavorite = () =>
+    void patchConfig({
+      friends: {
+        ...config,
+        favorites: favorite ? config.favorites.filter((id) => id !== friend.id) : [...config.favorites, friend.id],
+      },
+    });
 
   const openMenu = (event: MouseEvent) =>
     menu.open(event, [
+      {
+        kind: "item",
+        label: favorite ? "Remove from favorites" : "Add to favorites",
+        icon: <IconHeart filled={favorite} className="h-4 w-4" />,
+        onSelect: toggleFavorite,
+      },
       {
         kind: "item",
         label: "Copy Discord name",
@@ -330,15 +397,24 @@ function FriendRow({
     >
       <Avatar user={friend} status={status} />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{friend.displayName}</p>
-        {status === "playing" ? (
+        <p className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+          <span className="truncate">{friend.displayName}</span>
+          {favorite && <IconHeart filled className="h-3.5 w-3.5 shrink-0 text-accent-bright" />}
+          {presence?.status && (
+            <span className="truncate text-xs font-normal text-ink-muted">— {presence.status}</span>
+          )}
+        </p>
+        {presence?.game ? (
           <p className="flex min-w-0 items-center gap-1.5 text-xs text-accent-bright">
             <IconGamepad className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">{presence!.game}</span>
+            <span className="truncate">{presence.game}</span>
             {duration && <span className="shrink-0 text-ink-muted">· {duration}</span>}
+            {presence.busy && <span className="shrink-0 text-live">· Busy</span>}
           </p>
         ) : (
-          <p className="truncate text-xs text-ink-muted">{status === "online" ? "Online" : "Offline"}</p>
+          <p className={cn("truncate text-xs", status === "busy" ? "text-live" : "text-ink-muted")}>
+            {status === "busy" ? "Busy" : status === "online" ? "Online" : lastSeenText(lastSeen, now)}
+          </p>
         )}
       </div>
       <button
@@ -359,9 +435,9 @@ function FriendRow({
 
 // --- Bits ----------------------------------------------------------------------
 
-type Status = "playing" | "online" | "offline" | "invisible";
+type Status = "playing" | "online" | "busy" | "offline" | "invisible";
 
-function Avatar({ user, status, size = "md" }: { user: FriendUser; status?: Status; size?: "md" | "lg" }) {
+export function Avatar({ user, status, size = "md" }: { user: FriendUser; status?: Status; size?: "md" | "lg" }) {
   const [broken, setBroken] = useState(false);
   const box = size === "lg" ? "h-14 w-14" : "h-10 w-10";
   return (
@@ -386,6 +462,7 @@ function Avatar({ user, status, size = "md" }: { user: FriendUser; status?: Stat
             size === "lg" ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
             status === "playing" && "bg-accent",
             status === "online" && "bg-ok",
+            status === "busy" && "bg-live",
             status === "offline" && "bg-ink-faint",
             status === "invisible" && "bg-surface ring-2 ring-inset ring-ink-faint",
           )}
