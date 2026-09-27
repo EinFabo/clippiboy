@@ -117,6 +117,7 @@ export function Overlay() {
     // sign in the picture frame, and that is enough at a glance.
     screenshot: "text-accent-bright",
     recording: "text-live",
+    friend: "text-accent-bright",
   }[banner.kind];
 
   const stroke = {
@@ -127,6 +128,7 @@ export function Overlay() {
     info: "var(--color-line-strong)",
     screenshot: "var(--color-accent-bright)",
     recording: "var(--color-live)",
+    friend: "var(--color-accent-bright)",
   }[banner.kind];
 
   // "Buffer off" plays the line backwards and greys it out along the way — the
@@ -223,6 +225,15 @@ function Mark({ kind }: { kind: OverlayBanner["kind"] }) {
     return (
       <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8">
         <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />
+      </svg>
+    );
+  }
+  if (kind === "friend") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="9" cy="8" r="3.5" />
+        <path d="M2.5 20a6.5 6.5 0 0 1 13 0" />
+        <path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M18 14.2a6.5 6.5 0 0 1 3.5 5.8" />
       </svg>
     );
   }

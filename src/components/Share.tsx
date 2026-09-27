@@ -134,28 +134,36 @@ export function SharePicker() {
 /** Offers waiting for an answer and clips on their way, bottom right on every page. */
 export function Transfers() {
   const transfers = useShare((s) => s.transfers);
-  const shown = transfers.filter((t) => !isOver(t) || t.stage !== "cancelled");
+  // Called off by one side or the other — nothing left to show.
+  useEffect(() => {
+    for (const t of transfers) if (t.stage === "cancelled") void shareApi.dismiss(t.id);
+  }, [transfers]);
+  const shown = transfers.filter((t) => t.stage !== "cancelled");
   if (shown.length === 0) return null;
-  const anyOver = shown.some(isOver);
 
   return (
     <div className="fixed right-6 bottom-6 z-40 flex w-[340px] flex-col gap-2">
       {shown.map((transfer) => (
         <TransferCard key={transfer.id} transfer={transfer} />
       ))}
-      {anyOver && (
-        <button
-          onClick={() => void shareApi.clear()}
-          className="self-end rounded-pill px-3 py-1 text-xs text-ink-muted transition-colors hover:bg-hover hover:text-ink"
-        >
-          Clear finished
-        </button>
-      )}
     </div>
   );
 }
 
+/** How long a finished card stays: long enough to read, a failure longer. */
+function lingerMs(t: Transfer): number {
+  return t.stage === "failed" ? 15_000 : 6_000;
+}
+
 function TransferCard({ transfer: t }: { transfer: Transfer }) {
+  const over = isOver(t);
+  // Finished cards go by themselves — they piled up before.
+  useEffect(() => {
+    if (!over) return;
+    const timer = window.setTimeout(() => void shareApi.dismiss(t.id), lingerMs(t));
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [over, t.id, t.stage]);
   const [busy, setBusy] = useState(false);
   const run = (action: Promise<void>) => {
     setBusy(true);

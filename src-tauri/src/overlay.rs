@@ -91,6 +91,8 @@ pub enum BannerKind {
     Screenshot,
     /// A recording started by hand began, or was written.
     Recording,
+    /// A friend offers a clip, or one went across (`share.rs`).
+    Friend,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -286,17 +288,18 @@ pub fn show_with_thumb(
         BannerKind::Error => config.on_error,
         BannerKind::Screenshot => config.on_screenshot,
         BannerKind::Recording => config.on_recording,
-        BannerKind::Info => true,
+        BannerKind::Info | BannerKind::Friend => true,
     };
     if !wanted {
         return;
     }
 
-    // Errors stay longer, otherwise they are simply missed while playing.
-    let duration_ms = if kind == BannerKind::Error {
-        config.duration_ms.max(6000)
-    } else {
-        config.duration_ms
+    // Errors stay longer, otherwise they are simply missed while playing; an
+    // offer from a friend waits for an answer, so it has to be read.
+    let duration_ms = match kind {
+        BannerKind::Error => config.duration_ms.max(6000),
+        BannerKind::Friend => config.duration_ms.max(7000),
+        _ => config.duration_ms,
     };
 
     let Some(window) = app.get_webview_window(LABEL) else {

@@ -288,6 +288,13 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
                     t.moved = t.size;
                     t.clip_id = Some(clip.id.clone());
                 });
+                crate::overlay::show_with_thumb(
+                    &app,
+                    crate::overlay::BannerKind::Friend,
+                    format!("Clip from {name}"),
+                    Some("In your clips".into()),
+                    clip.thumb_path.clone(),
+                );
                 let _ = app.emit("clip-saved", clip);
                 crate::notify(&app, "ok", format!("Clip from {name} received"));
             }
@@ -297,6 +304,11 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
             Err(err) => {
                 log::warn!("share: receive of {id} failed: {err}");
                 set_in(&app, &id, |t| fail(t, &err));
+                // Otherwise the sender stands at whatever percentage it got to.
+                let friend = app.state::<Share>().incoming.lock().get(&id).map(|i| i.transfer.friend_id.clone());
+                if let Some(friend) = friend {
+                    crate::friends::send_relay(&app, &friend, &Signal::ShareCancel { id: id.clone() });
+                }
             }
         }
     });
@@ -335,6 +347,17 @@ pub fn share_cancel(app: AppHandle, id: String) {
     if let Some(friend) = friend {
         crate::friends::send_relay(&app, &friend, &Signal::ShareCancel { id });
     }
+}
+
+/// Takes one finished transfer off the list — the page does it a few seconds
+/// after the end, so the cards do not pile up.
+#[tauri::command]
+pub fn share_dismiss(app: AppHandle, id: String) {
+    let share = app.state::<Share>();
+    share.outgoing.lock().retain(|key, o| key != &id || !o.transfer.stage.over());
+    share.incoming.lock().retain(|key, i| key != &id || !i.transfer.stage.over());
+    share.cancelled.lock().remove(&id);
+    emit(&app);
 }
 
 /// Clears finished transfers off the list.
@@ -386,7 +409,14 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
                     t.stage = Stage::Cancelled;
                 }
             };
-            set_out(app, &id, cancel);
+            // Mid-transfer, their end gave up — worth saying, not hiding.
+            set_out(app, &id, |t| {
+                if t.stage == Stage::Moving {
+                    fail(t, "It didn't get through to them.");
+                } else {
+                    cancel(t);
+                }
+            });
             set_in(app, &id, cancel);
         }
     }
@@ -431,6 +461,7 @@ fn offered(
     }
     let friend_name = crate::friends::friend_name(app, from).unwrap_or_else(|| "A friend".into());
     let name = meta.title.clone().unwrap_or_else(|| meta.file_name.clone());
+    let what = if meta.screenshot { "screenshot" } else { "clip" };
     let transfer = Transfer {
         id: id.clone(),
         direction: Direction::In,
@@ -452,6 +483,15 @@ fn offered(
     );
     emit(app);
     crate::friends::announce_clip(app, &format!("{friend_name} wants to send you {name} ({})", megabytes(size)));
+    // Over the game too: the banner cannot be clicked, so it says where the
+    // answer goes — the console has the buttons.
+    let hotkey = app.state::<AppState>().config_snapshot().console_hotkey;
+    crate::overlay::show(
+        app,
+        crate::overlay::BannerKind::Friend,
+        format!("{friend_name} wants to send you a {what}"),
+        Some(format!("{} · {hotkey} to answer", megabytes(size))),
+    );
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -523,8 +563,11 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                     let _ = send.write_all(b"k").await;
                     let _ = send.finish();
                 }
+                // Closing drops whatever is still unsent — the "k" with it,
+                // and the sender stood at 100 % for good. The sender hangs up
+                // once it has read it; until then, wait (not forever).
+                let _ = tokio::time::timeout(Duration::from_secs(5), connection.closed()).await;
                 std::fs::rename(&part, &target).map_err(|err| format!("Could not keep the clip: {err}"))?;
-                connection.close(0u32.into(), b"thanks");
                 return file_clip(app, &target, &meta, size, &from);
             }
             Err(err) => {
@@ -741,9 +784,30 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
             t.stage = Stage::Done;
             t.moved = t.size;
         });
+        // The receiver waits for this before it lets go.
+        connection.close(0u32.into(), b"done");
+        let name = app
+            .state::<Share>()
+            .outgoing
+            .lock()
+            .get(&ask.id)
+            .map(|o| o.transfer.friend_name.clone())
+            .unwrap_or_else(|| "Your friend".into());
+        crate::overlay::show(app, crate::overlay::BannerKind::Friend, format!("{name} has your clip"), None);
+    } else if bad_hash(connection) {
+        // Every byte went out, and what arrived did not match. A line that
+        // merely dropped stays open instead: they dial again for the rest.
+        set_out(app, &ask.id, |t| fail(t, "It arrived damaged on their side — try sending it again."));
     }
-    connection.closed().await;
     Ok(())
+}
+
+/// Did the receiver hang up with "bad hash" (code 1)?
+fn bad_hash(connection: &Connection) -> bool {
+    matches!(
+        connection.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) if close.error_code == 1u32.into()
+    )
 }
 
 // --- Bits ----------------------------------------------------------------------

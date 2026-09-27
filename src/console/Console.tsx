@@ -29,6 +29,7 @@ import {
   jump,
 } from "@/components/ui/PlayerControls";
 import { AudioPanel, useLevelBars } from "./Audio";
+import { Offers } from "./Offers";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
 
@@ -736,6 +737,10 @@ export function Console() {
           darin gerechnet wüchse der Verlauf bei Größe 1,6 aus dem Bild heraus,
           statt in den Ecken des Bildschirms zu sitzen, die er meint. */}
       {glow && <div className="cb-glow" data-leaving={closing} />}
+      {/* Clips von Freunden, oben und außerhalb von `.cb-ui`: mit dem Dock hat
+          die Frage nichts zu tun, und sie soll nicht mitzoomen. */}
+      <Offers />
+
       {/* Everything that is operated. The size setting zooms this and nothing
           else — see the head of console.css. `--inset` hangs off it too, so the
           dock keeps clear of the task bar. */}

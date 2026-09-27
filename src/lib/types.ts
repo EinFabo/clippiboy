@@ -491,7 +491,7 @@ export interface ShotEdit {
 
 /** Payload of the `overlay-banner` event (overlay window only). */
 export interface OverlayBanner {
-  kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot" | "recording";
+  kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot" | "recording" | "friend";
   title: string;
   detail: string | null;
   thumbPath: string | null;

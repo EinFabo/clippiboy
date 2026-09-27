@@ -13,6 +13,8 @@ export const shareApi = {
   accept: (id: string) => invoke<void>("share_accept", { id }),
   decline: (id: string) => invoke<void>("share_decline", { id }),
   cancel: (id: string) => invoke<void>("share_cancel", { id }),
+  /** Off the list once it is over. */
+  dismiss: (id: string) => invoke<void>("share_dismiss", { id }),
   clear: () => invoke<void>("share_clear"),
 };
 

@@ -1202,6 +1202,7 @@ pub fn run() {
             share::share_accept,
             share::share_decline,
             share::share_cancel,
+            share::share_dismiss,
             share::share_clear,
         ])
         .build(tauri::generate_context!())
