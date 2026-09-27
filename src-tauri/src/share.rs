@@ -167,10 +167,6 @@ pub struct Share {
     cancelled: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
-pub fn start(app: &AppHandle) {
-    app.manage(Share::default());
-}
-
 // --- Commands ------------------------------------------------------------------
 
 #[tauri::command]

@@ -87,4 +87,16 @@ pub fn init() {
     } else {
         log::warn!("no log file at {} — stderr only", path.display());
     }
+
+    // The release build aborts on a panic, and the message went to the stderr
+    // it does not have: a tester saw the window vanish and the log simply
+    // stopped. Now the reason is the log's last line. Location survives
+    // `strip`; the message says what went wrong.
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        log::error!("panic on thread '{}': {info}", thread.name().unwrap_or("unnamed"));
+        log::logger().flush();
+        default(info);
+    }));
 }

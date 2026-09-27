@@ -1035,6 +1035,9 @@ pub fn run() {
         ))
         .manage(updater::Pending::default())
         .manage(AppState::new())
+        // Here rather than in `setup`: the page asks for the transfers as soon
+        // as it loads, and that can beat the three seconds `setup` takes.
+        .manage(share::Share::default())
         .setup(|app| {
             let handle = app.handle();
             // Before anything reads the recording settings: put the saved screen
@@ -1089,7 +1092,6 @@ pub fn run() {
             overlay::create(handle);
             console::create(handle);
             friends::start(handle);
-            share::start(handle);
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 // The installer registers the scheme; this keeps it pointing
