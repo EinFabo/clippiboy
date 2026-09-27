@@ -127,7 +127,7 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
       >
         {/* The dim layer covers the title bar, so the heading takes over
             moving the window. */}
-        <h2 data-tauri-drag-region className="text-base font-medium">
+        <h2 data-tauri-drag-region className="text-[16px] font-medium">
           Export a copy
         </h2>
         <p className="mt-1 text-xs text-ink-muted">

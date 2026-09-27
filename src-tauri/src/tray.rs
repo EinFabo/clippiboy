@@ -183,6 +183,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
 pub fn set_logo(app: &tauri::AppHandle, logo: Image<'static>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_icon(logo.clone());
+        big_icon(&window, &logo);
     }
     let Some(handles) = app.try_state::<TrayHandles>() else {
         return;
@@ -210,8 +211,75 @@ fn window_icon(app: &tauri::AppHandle, accent: &crate::model::Accent) {
     else {
         return;
     };
-    let _ = window.set_icon(crate::tint::tint(icon, accent));
+    let tinted = crate::tint::tint(icon, accent);
+    let _ = window.set_icon(tinted.clone());
+    big_icon(&window, &tinted);
 }
+
+/// The large icon of the window, beside the small one `set_icon` sets.
+///
+/// Tauri's `set_icon` only reaches `ICON_SMALL`. The task bar, Alt+Tab and the
+/// Task Manager's app list take `ICON_BIG`, and without one of ours they fall
+/// back to the violet icon inside the exe — the colour changed in the tray and
+/// the title, but never there.
+#[cfg(windows)]
+fn big_icon(window: &tauri::WebviewWindow, logo: &Image<'_>) {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIcon, DestroyIcon, SendMessageW, HICON, ICON_BIG, WM_SETICON,
+    };
+
+    /// The icon we set last. Windows keeps using it until the next one is in,
+    /// so it is freed only then — in RGB mode a new one comes several times a
+    /// second.
+    static LAST: AtomicIsize = AtomicIsize::new(0);
+
+    // Tauri hands out its own `windows` version's HWND — only the pointer counts.
+    let Ok(hwnd) = window.hwnd().map(|h| HWND(h.0)) else {
+        return;
+    };
+    let (width, height) = (logo.width(), logo.height());
+    // Windows wants the colours as BGRA, and a mask of zeros so the alpha
+    // channel alone decides what shows.
+    let mut bgra = logo.rgba().to_vec();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let mask = vec![0u8; (width.div_ceil(32) * 4 * height) as usize];
+    let icon = unsafe {
+        CreateIcon(
+            None,
+            width as i32,
+            height as i32,
+            1,
+            32,
+            mask.as_ptr(),
+            bgra.as_ptr(),
+        )
+    };
+    let Ok(icon) = icon else {
+        log::warn!("could not build the task bar icon");
+        return;
+    };
+    unsafe {
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            WPARAM(ICON_BIG as usize),
+            LPARAM(icon.0 as isize),
+        );
+    }
+    let previous = LAST.swap(icon.0 as isize, Ordering::SeqCst);
+    if previous != 0 {
+        unsafe {
+            let _ = DestroyIcon(HICON(previous as *mut std::ffi::c_void));
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn big_icon(_window: &tauri::WebviewWindow, _logo: &Image<'_>) {}
 
 pub fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {

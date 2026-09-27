@@ -63,7 +63,7 @@ export function SharePicker() {
         className="w-[420px] rounded-card border border-line bg-surface p-6 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <h2 data-tauri-drag-region className="text-base font-medium">
+        <h2 data-tauri-drag-region className="text-[16px] font-medium">
           Send to a friend
         </h2>
         <p className="mt-1 text-xs text-ink-muted">
