@@ -338,11 +338,16 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
     if announce {
         let known: HashSet<&str> = previous.incoming.iter().map(|p| p.user.id.as_str()).collect();
         for request in lists.incoming.iter().filter(|p| !known.contains(p.user.id.as_str())) {
-            alert(app, Alert::Request, &format!("{} sent you a friend request", request.user.display_name), None);
+            alert(
+                app,
+                Alert::Request,
+                &format!("{} sent you a friend request", request.user.display_name),
+                request.user.avatar.clone(),
+            );
         }
         let asked: HashSet<&str> = previous.outgoing.iter().map(|p| p.user.id.as_str()).collect();
         for friend in lists.friends.iter().filter(|user| asked.contains(user.id.as_str())) {
-            alert(app, Alert::Request, &format!("{} accepted your friend request", friend.display_name), None);
+            alert(app, Alert::Accepted, &format!("{} accepted your friend request", friend.display_name), friend.avatar.clone());
         }
     }
     Ok(())
@@ -572,6 +577,13 @@ pub fn presence_of(app: &AppHandle, id: &str) -> Option<Presence> {
     app.try_state::<Friends>()?.view.lock().presence.get(id).cloned()
 }
 
+/// A friend's picture (a Discord URL), for the banners about them.
+pub fn friend_avatar(app: &AppHandle, id: &str) -> Option<String> {
+    let friends = app.try_state::<Friends>()?;
+    let view = friends.view.lock();
+    view.lists.friends.iter().find(|user| user.id == id).and_then(|user| user.avatar.clone())
+}
+
 pub fn friend_name(app: &AppHandle, id: &str) -> Option<String> {
     let friends = app.try_state::<Friends>()?;
     let view = friends.view.lock();
@@ -603,6 +615,8 @@ fn send_presence(app: &AppHandle, kind: &str) {
 #[derive(Clone, Copy)]
 enum Alert {
     Request,
+    /// One of ours was answered — nothing left to do, so no hint to the console.
+    Accepted,
     Online,
     Game,
     Clip,
@@ -613,7 +627,7 @@ enum Alert {
 fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
     let config = app.state::<AppState>().config_snapshot().friends;
     let wanted = match kind {
-        Alert::Request => config.notify_requests,
+        Alert::Request | Alert::Accepted => config.notify_requests,
         Alert::Online => config.notify_online,
         Alert::Game => config.notify_games,
         // An offer waits for an answer — it has to be seen.
@@ -639,14 +653,17 @@ fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
     if overlay.overlay.enabled {
         use crate::overlay::BannerKind;
         match kind {
-            Alert::Online => crate::overlay::show_friend(app, BannerKind::FriendOnline, text.to_owned(), avatar),
-            Alert::Game => crate::overlay::show_friend(app, BannerKind::FriendGame, text.to_owned(), avatar),
-            Alert::Request => crate::overlay::show(
+            Alert::Online => crate::overlay::show_friend(app, BannerKind::FriendOnline, text.to_owned(), None, None, avatar),
+            Alert::Game => crate::overlay::show_friend(app, BannerKind::FriendGame, text.to_owned(), None, None, avatar),
+            Alert::Request => crate::overlay::show_friend(
                 app,
                 BannerKind::Friend,
-                text,
+                text.to_owned(),
                 Some(format!("{} to answer", overlay.console_hotkey)),
+                None,
+                avatar,
             ),
+            Alert::Accepted => crate::overlay::show_friend(app, BannerKind::Friend, text.to_owned(), None, None, avatar),
             // `share.rs` has put its banner up already.
             Alert::Clip => {}
         }

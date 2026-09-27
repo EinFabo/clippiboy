@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::model::{AcceptClips, Clip, ClipKind};
+use crate::model::{AcceptClips, Clip, ClipEdit, ClipKind, TrackMix};
 use crate::state::AppState;
 
 const ALPN: &[u8] = b"clippiboy/share/1";
@@ -93,6 +93,31 @@ pub struct Transfer {
     pub game: Option<String>,
     pub duration_ms: u64,
     pub screenshot: bool,
+    pub recording: bool,
+}
+
+impl Transfer {
+    /// What to call the thing in a sentence — a banner must not say "clip"
+    /// about a screenshot or a recording.
+    fn noun(&self) -> &'static str {
+        noun(self.screenshot, self.recording)
+    }
+}
+
+fn noun(screenshot: bool, recording: bool) -> &'static str {
+    if screenshot {
+        "screenshot"
+    } else if recording {
+        "recording"
+    } else {
+        "clip"
+    }
+}
+
+/// "clip" → "Clip", for the start of a sentence.
+fn capital(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 // --- On the wire -------------------------------------------------------------------
@@ -112,7 +137,28 @@ struct Meta {
     screenshot: bool,
     #[serde(default)]
     recording: bool,
+    /// The individual tracks, so the mixer works on the other side too
+    /// (`stems.rs`). Cut to the clip already, so they start where it starts.
+    /// Empty for a clip with a single track, and from senders before 0.7.3.
+    #[serde(default)]
+    tracks: Vec<TrackOffer>,
+    /// The sender's levels for those tracks — the mix the clip file carries.
+    #[serde(default)]
+    mix: Vec<TrackMix>,
 }
+
+/// One individual track in an offer. It is fetched like the clip itself,
+/// on a connection of its own, before the clip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackOffer {
+    label: String,
+    size: u64,
+    sha256: String,
+}
+
+/// More would be a strange clip, or not a clip at all.
+const MAX_TRACKS: usize = 16;
 
 /// The handshake, passed through the friends server as the body of a relay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +185,10 @@ struct Ask {
     id: String,
     secret: String,
     offset: u64,
+    /// Which individual track, or `None` for the clip. Left out on the wire
+    /// for the clip, so a sender before 0.7.3 reads the ask it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    track: Option<u32>,
 }
 
 // --- State ---------------------------------------------------------------------
@@ -146,7 +196,19 @@ struct Ask {
 struct Outgoing {
     transfer: Transfer,
     path: PathBuf,
+    /// The clip file's size. `transfer.size` counts the tracks as well.
+    size: u64,
     secret: String,
+    /// The individual tracks, cut to the clip, in the order of the offer.
+    tracks: Vec<Cut>,
+}
+
+/// An individual track cut for sending — a file of its own in the temp folder.
+struct Cut {
+    label: String,
+    path: PathBuf,
+    size: u64,
+    sha256: String,
 }
 
 struct Incoming {
@@ -195,7 +257,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "clip.mp4".into());
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let meta = Meta {
+    let mut meta = Meta {
         file_name: file_name.clone(),
         title: clip.title.clone(),
         game: clip.game.clone(),
@@ -204,6 +266,8 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         height: clip.height,
         screenshot: clip.screenshot,
         recording: clip.recording,
+        tracks: Vec::new(),
+        mix: Vec::new(),
     };
     let transfer = Transfer {
         id: id.clone(),
@@ -219,22 +283,34 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         game: clip.game.clone(),
         duration_ms: clip.duration_ms,
         screenshot: clip.screenshot,
+        recording: clip.recording,
     };
     let secret = uuid::Uuid::new_v4().simple().to_string();
     let share = app.state::<Share>();
     share.outgoing.lock().insert(
         id.clone(),
-        Outgoing { transfer, path: path.clone(), secret: secret.clone() },
+        Outgoing { transfer, path: path.clone(), size, secret: secret.clone(), tracks: Vec::new() },
     );
     emit(&app);
 
+    // The individual tracks lie in coordinates of the untouched recording;
+    // the clip is the stretch from `original.start_ms` on.
+    let stems = if clip.screenshot { None } else { crate::stems::stored(&clip.id) };
+    let start_ms = clip.original.map(|original| original.start_ms).unwrap_or(0);
+    let length_ms = clip.duration_ms;
+    let cut_id = id.clone();
     let prepared = async {
         let hashing = tokio::task::spawn_blocking(move || hash_file(&path, u64::MAX));
+        let cutting = tokio::task::spawn_blocking(move || match stems {
+            Some(stems) => cut_tracks(&cut_id, &stems, start_ms, length_ms),
+            None => Vec::new(),
+        });
         let router = router(&app).await?;
         let sha256 = hashing.await.map_err(|err| err.to_string())??;
-        Ok::<_, String>((router.endpoint().addr(), sha256))
+        let tracks = cutting.await.unwrap_or_default();
+        Ok::<_, String>((router.endpoint().addr(), sha256, tracks))
     };
-    let (addr, sha256) = match prepared.await {
+    let (addr, sha256, tracks) = match prepared.await {
         Ok(ok) => ok,
         Err(err) => {
             set_out(&app, &id, |t| fail(t, &err));
@@ -243,6 +319,19 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     };
     if out_stage(&app, &id) != Some(Stage::Preparing) {
         return Ok(()); // Called off meanwhile.
+    }
+    if !tracks.is_empty() {
+        meta.tracks = tracks
+            .iter()
+            .map(|cut| TrackOffer { label: cut.label.clone(), size: cut.size, sha256: cut.sha256.clone() })
+            .collect();
+        meta.mix = clip.edit.as_ref().map(|edit| edit.tracks.clone()).unwrap_or_default();
+        let extra: u64 = tracks.iter().map(|cut| cut.size).sum();
+        if let Some(entry) = app.state::<Share>().outgoing.lock().get_mut(&id) {
+            entry.transfer.size = size + extra;
+            entry.tracks = tracks;
+        }
+        emit(&app);
     }
     let offer = Signal::ShareOffer { id: id.clone(), size, sha256, secret, addr, meta };
     if !crate::friends::send_relay(&app, &friend_id, &offer) {
@@ -283,20 +372,22 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
         match receive(&app, &id).await {
             Ok(clip) => {
                 let name = in_friend_name(&app, &id);
+                let what = capital(noun(clip.screenshot, clip.recording));
                 set_in(&app, &id, |t| {
                     t.stage = Stage::Done;
                     t.moved = t.size;
                     t.clip_id = Some(clip.id.clone());
                 });
-                crate::overlay::show_with_thumb(
+                crate::overlay::show_friend(
                     &app,
                     crate::overlay::BannerKind::Friend,
-                    format!("Clip from {name}"),
+                    format!("{what} from {name}"),
                     Some("In your clips".into()),
                     clip.thumb_path.clone(),
+                    None,
                 );
                 let _ = app.emit("clip-saved", clip);
-                crate::notify(&app, "ok", format!("Clip from {name} received"));
+                crate::notify(&app, "ok", format!("{what} from {name} received"));
             }
             Err(err) if cancel_flag(&app, &id).load(Ordering::SeqCst) => {
                 log::info!("share: receive of {id} called off: {err}");
@@ -461,14 +552,20 @@ fn offered(
     }
     let friend_name = crate::friends::friend_name(app, from).unwrap_or_else(|| "A friend".into());
     let name = meta.title.clone().unwrap_or_else(|| meta.file_name.clone());
-    let what = if meta.screenshot { "screenshot" } else { "clip" };
+    let what = noun(meta.screenshot, meta.recording);
+    // Tracks that do not add up are left behind; the clip still comes.
+    let mut meta = meta;
+    if meta.tracks.len() > MAX_TRACKS || meta.tracks.iter().any(|track| track.sha256.len() != 64) {
+        meta.tracks.clear();
+    }
+    let total = size + meta.tracks.iter().map(|track| track.size).sum::<u64>();
     let transfer = Transfer {
         id: id.clone(),
         direction: Direction::In,
         friend_id: from.to_owned(),
         friend_name: friend_name.clone(),
         name: name.clone(),
-        size,
+        size: total,
         moved: 0,
         stage: Stage::Asking,
         error: None,
@@ -476,21 +573,24 @@ fn offered(
         game: meta.game.clone(),
         duration_ms: meta.duration_ms,
         screenshot: meta.screenshot,
+        recording: meta.recording,
     };
     app.state::<Share>().incoming.lock().insert(
         id.clone(),
         Incoming { transfer, size, sha256, secret, addr, meta },
     );
     emit(app);
-    crate::friends::announce_clip(app, &format!("{friend_name} wants to send you {name} ({})", megabytes(size)));
+    crate::friends::announce_clip(app, &format!("{friend_name} wants to send you {name} ({})", megabytes(total)));
     // Over the game too: the banner cannot be clicked, so it says where the
     // answer goes — the console has the buttons.
     let hotkey = app.state::<AppState>().config_snapshot().console_hotkey;
-    crate::overlay::show(
+    crate::overlay::show_friend(
         app,
         crate::overlay::BannerKind::Friend,
         format!("{friend_name} wants to send you a {what}"),
-        Some(format!("{} · {hotkey} to answer", megabytes(size))),
+        Some(format!("{} · {hotkey} to answer", megabytes(total))),
+        None,
+        crate::friends::friend_avatar(app, from),
     );
 
     let app = app.clone();
@@ -538,16 +638,22 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
 
     let router = router(app).await?;
     let cancelled = cancel_flag(app, id);
+    // The tracks first: small, and the sender counts the transfer as done
+    // once the clip is in — after that it would not hand them out any more.
+    let clip_id = uuid::Uuid::new_v4().to_string();
+    let has_tracks = fetch_tracks(app, router.endpoint(), &addr, id, &secret, &meta.tracks, &clip_id, &cancelled).await;
+    let base: u64 = meta.tracks.iter().map(|track| track.size).sum();
     let mut last_error = String::new();
     for attempt in 0..ATTEMPTS {
         if cancelled.load(Ordering::SeqCst) {
             let _ = std::fs::remove_file(&part);
+            crate::stems::remove(&clip_id);
             return Err("cancelled".into());
         }
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(2u64.pow(attempt.min(4)))).await;
         }
-        match fetch(app, router.endpoint(), &addr, id, &secret, size, &part, &cancelled).await {
+        match fetch(app, router.endpoint(), &addr, id, &secret, None, size, base, &part, &cancelled).await {
             Ok(connection) => {
                 let file = part.clone();
                 let expected = sha256.clone();
@@ -556,6 +662,7 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                     .map_err(|err| err.to_string())??;
                 if whole != expected {
                     let _ = std::fs::remove_file(&part);
+                    crate::stems::remove(&clip_id);
                     connection.close(1u32.into(), b"bad hash");
                     return Err("The clip arrived damaged — ask them to send it again.".into());
                 }
@@ -567,8 +674,11 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                 // and the sender stood at 100 % for good. The sender hangs up
                 // once it has read it; until then, wait (not forever).
                 let _ = tokio::time::timeout(Duration::from_secs(5), connection.closed()).await;
-                std::fs::rename(&part, &target).map_err(|err| format!("Could not keep the clip: {err}"))?;
-                return file_clip(app, &target, &meta, size, &from);
+                if let Err(err) = std::fs::rename(&part, &target) {
+                    crate::stems::remove(&clip_id);
+                    return Err(format!("Could not keep the clip: {err}"));
+                }
+                return file_clip(app, &clip_id, &target, &meta, size, &from, has_tracks);
             }
             Err(err) => {
                 log::info!("share: attempt {} for {id}: {err}", attempt + 1);
@@ -577,7 +687,70 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
         }
     }
     let _ = std::fs::remove_file(&part);
+    crate::stems::remove(&clip_id);
     Err(format!("The clip did not get through: {last_error}"))
+}
+
+/// The individual tracks into the stems store of the clip to be, each checked
+/// against its hash. All or none: a mixer with a track missing would be worse
+/// than the clip's own mixed audio. False when there are none to be had.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_tracks(
+    app: &AppHandle,
+    endpoint: &Endpoint,
+    addr: &EndpointAddr,
+    id: &str,
+    secret: &str,
+    tracks: &[TrackOffer],
+    clip_id: &str,
+    cancelled: &AtomicBool,
+) -> bool {
+    if tracks.is_empty() {
+        return false;
+    }
+    if let Err(err) = std::fs::create_dir_all(crate::stems::dir(clip_id)) {
+        log::info!("share: no folder for the tracks: {err}");
+        return false;
+    }
+    let mut base = 0;
+    for (index, track) in tracks.iter().enumerate() {
+        let target = crate::stems::track_path(clip_id, index as u32);
+        let part = target.with_extension("m4a.part");
+        let mut kept = false;
+        for attempt in 0..ATTEMPTS {
+            if cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(2u64.pow(attempt.min(4)))).await;
+            }
+            match fetch(app, endpoint, addr, id, secret, Some(index as u32), track.size, base, &part, cancelled).await {
+                Ok(connection) => {
+                    // Every byte is in; the sender waits for this to let go.
+                    connection.close(0u32.into(), b"track");
+                    let file = part.clone();
+                    let whole = tokio::task::spawn_blocking(move || hash_file(&file, u64::MAX)).await;
+                    kept = matches!(whole, Ok(Ok(hash)) if hash == track.sha256)
+                        && std::fs::rename(&part, &target).is_ok();
+                    break;
+                }
+                Err(err) => log::info!("share: track {index} of {id}, attempt {}: {err}", attempt + 1),
+            }
+        }
+        if !kept {
+            log::info!("share: track {index} of {id} did not arrive — the clip comes without its tracks");
+            crate::stems::remove(clip_id);
+            return false;
+        }
+        base += track.size;
+    }
+    let labels: Vec<String> = tracks.iter().map(|track| track.label.clone()).collect();
+    if let Err(err) = crate::stems::write_index(clip_id, &labels) {
+        log::info!("share: track index not written: {err}");
+        crate::stems::remove(clip_id);
+        return false;
+    }
+    true
 }
 
 /// One try: dial, ask for the rest, write it to the part file. Returns the
@@ -589,7 +762,10 @@ async fn fetch(
     addr: &EndpointAddr,
     id: &str,
     secret: &str,
+    track: Option<u32>,
     size: u64,
+    // Bytes of the transfer that came before this file, for the progress.
+    base: u64,
     part: &Path,
     cancelled: &AtomicBool,
 ) -> Result<Connection, String> {
@@ -599,7 +775,7 @@ async fn fetch(
         .map_err(|_| "could not reach them".to_string())?
         .map_err(net)?;
     let (mut send, mut recv) = connection.open_bi().await.map_err(|err| err.to_string())?;
-    let ask = serde_json::to_vec(&Ask { id: id.into(), secret: secret.into(), offset }).map_err(net)?;
+    let ask = serde_json::to_vec(&Ask { id: id.into(), secret: secret.into(), offset, track }).map_err(net)?;
     send.write_all(&(ask.len() as u32).to_be_bytes()).await.map_err(net)?;
     send.write_all(&ask).await.map_err(net)?;
     let _ = send.finish();
@@ -627,7 +803,7 @@ async fn fetch(
         moved += n as u64;
         if last_emit.elapsed() >= EMIT_EVERY {
             last_emit = std::time::Instant::now();
-            set_in(app, id, |t| t.moved = moved);
+            set_in(app, id, |t| t.moved = base + moved);
         }
     }
     file.flush().map_err(net)?;
@@ -638,8 +814,16 @@ async fn fetch(
 }
 
 /// Into the library, tagged with who sent it.
-fn file_clip(app: &AppHandle, path: &Path, meta: &Meta, size: u64, from: &str) -> Result<Clip, String> {
-    let id = uuid::Uuid::new_v4().to_string();
+fn file_clip(
+    app: &AppHandle,
+    id: &str,
+    path: &Path,
+    meta: &Meta,
+    size: u64,
+    from: &str,
+    has_tracks: bool,
+) -> Result<Clip, String> {
+    let id = id.to_owned();
     let thumb = if meta.screenshot {
         crate::thumbs::make_still(path, &id)
     } else {
@@ -658,7 +842,13 @@ fn file_clip(app: &AppHandle, path: &Path, meta: &Meta, size: u64, from: &str) -
         title: meta.title.clone(),
         description: None,
         favorite: false,
-        edit: None,
+        // The sender's levels, so the mixer opens where the clip's own audio
+        // stands. The range is the whole file, as after any saved edit.
+        edit: (has_tracks && !meta.mix.is_empty()).then(|| ClipEdit {
+            start_ms: 0,
+            end_ms: meta.duration_ms,
+            tracks: meta.mix.clone(),
+        }),
         original: None,
         original_available: false,
         screenshot: meta.screenshot,
@@ -726,7 +916,7 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
     recv.read_exact(&mut ask).await.map_err(net)?;
     let ask: Ask = serde_json::from_slice(&ask).map_err(net)?;
 
-    let (path, size) = {
+    let (path, size, base) = {
         let share = app.state::<Share>();
         let mut outgoing = share.outgoing.lock();
         let entry = outgoing.get_mut(&ask.id).ok_or("unknown offer")?;
@@ -737,7 +927,17 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
             return Err("not allowed".into());
         }
         entry.transfer.stage = Stage::Moving;
-        (entry.path.clone(), entry.transfer.size)
+        // The tracks go first, so the clip's bytes count after all of them.
+        let tracks: u64 = entry.tracks.iter().map(|cut| cut.size).sum();
+        match ask.track {
+            None => (entry.path.clone(), entry.size, tracks),
+            Some(index) => {
+                let index = index as usize;
+                let cut = entry.tracks.get(index).ok_or("unknown track")?;
+                let before = entry.tracks[..index].iter().map(|cut| cut.size).sum();
+                (cut.path.clone(), cut.size, before)
+            }
+        }
     };
     emit(app);
     let offset = ask.offset.min(size);
@@ -762,11 +962,18 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         moved += n as u64;
         if last_emit.elapsed() >= EMIT_EVERY {
             last_emit = std::time::Instant::now();
-            set_out(app, &ask.id, |t| t.moved = moved);
+            set_out(app, &ask.id, |t| t.moved = base + moved);
         }
     }
     let _ = send.finish();
-    set_out(app, &ask.id, |t| t.moved = moved);
+    set_out(app, &ask.id, |t| t.moved = base + moved);
+
+    // A track is done once the receiver hangs up — it checks the hash on its
+    // own, and a bad one simply means the clip comes without tracks.
+    if ask.track.is_some() {
+        let _ = tokio::time::timeout(Duration::from_secs(30), connection.closed()).await;
+        return Ok(());
+    }
 
     // The receiver checks the hash and answers on a second stream.
     let arrived = tokio::time::timeout(Duration::from_secs(120), async {
@@ -786,14 +993,28 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         });
         // The receiver waits for this before it lets go.
         connection.close(0u32.into(), b"done");
-        let name = app
+        let (name, friend, what) = app
             .state::<Share>()
             .outgoing
             .lock()
-            .get(&ask.id)
-            .map(|o| o.transfer.friend_name.clone())
-            .unwrap_or_else(|| "Your friend".into());
-        crate::overlay::show(app, crate::overlay::BannerKind::Friend, format!("{name} has your clip"), None);
+            .get_mut(&ask.id)
+            .map(|o| {
+                // The cut tracks have done their job.
+                for cut in o.tracks.drain(..) {
+                    let _ = std::fs::remove_file(&cut.path);
+                }
+                (o.transfer.friend_name.clone(), o.transfer.friend_id.clone(), o.transfer.noun())
+            })
+            .unwrap_or_else(|| ("Your friend".into(), String::new(), "clip"));
+        let avatar = crate::friends::friend_avatar(app, &friend);
+        crate::overlay::show_friend(
+            app,
+            crate::overlay::BannerKind::Friend,
+            format!("{name} has your {what}"),
+            None,
+            None,
+            avatar,
+        );
     } else if bad_hash(connection) {
         // Every byte went out, and what arrived did not match. A line that
         // merely dropped stays open instead: they dial again for the rest.
@@ -876,6 +1097,46 @@ fn fail(transfer: &mut Transfer, error: &str) {
 }
 
 /// SHA-256 of the first `limit` bytes, as hex.
+/// The individual tracks cut to the clip, into the temp folder. Best effort:
+/// whatever goes wrong, the clip still goes — only without its tracks.
+fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length_ms: u64) -> Vec<Cut> {
+    let dir = std::env::temp_dir().join("clippiboy-share").join(crate::muxer::sanitize(id));
+    let cut = || -> Result<Vec<Cut>, String> {
+        if stems.len() > MAX_TRACKS {
+            return Err(format!("{} tracks", stems.len()));
+        }
+        std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
+        let mut cuts = Vec::with_capacity(stems.len());
+        let mut sorted: Vec<_> = stems.iter().collect();
+        sorted.sort_by_key(|track| track.index);
+        for (slot, track) in sorted.into_iter().enumerate() {
+            let source = track.preview_path.as_deref().ok_or("track without a file")?;
+            let path = dir.join(format!("{slot}.m4a"));
+            // Copying AAC cuts on a frame, some 20 ms — nothing an ear hears.
+            let mut command = crate::muxer::ffmpeg();
+            command
+                .args(["-y", "-hide_banner", "-loglevel", "error", "-ss", &seconds(start_ms), "-i"])
+                .arg(source)
+                .args(["-t", &seconds(length_ms), "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"])
+                .arg(&path);
+            crate::muxer::run(&mut command, "Spur zum Senden schneiden")?;
+            let size = std::fs::metadata(&path).map_err(|err| err.to_string())?.len();
+            let sha256 = hash_file(&path, u64::MAX)?;
+            cuts.push(Cut { label: track.label.clone(), path, size, sha256 });
+        }
+        Ok(cuts)
+    };
+    match cut() {
+        Ok(cuts) => cuts,
+        Err(err) => {
+            log::info!("share: tracks not sent along: {err}");
+            let _ = std::fs::remove_dir_all(&dir);
+            Vec::new()
+        }
+    }
+}
+
 fn hash_file(path: &Path, limit: u64) -> Result<String, String> {
     let file = std::fs::File::open(path).map_err(|err| format!("Could not read the clip: {err}"))?;
     let mut reader = std::io::BufReader::with_capacity(CHUNK, file.take(limit));
@@ -1001,5 +1262,23 @@ mod tests {
     fn stages_that_are_over() {
         assert!(Stage::Done.over() && Stage::Failed.over() && Stage::Expired.over());
         assert!(!Stage::Asking.over() && !Stage::Moving.over());
+    }
+
+    #[test]
+    fn an_ask_for_the_clip_reads_as_before_0_7_3() {
+        let ask = Ask { id: "a".into(), secret: "s".into(), offset: 7, track: None };
+        let text = serde_json::to_string(&ask).unwrap();
+        assert!(!text.contains("track"), "{text}");
+        let old: Ask = serde_json::from_str(r#"{"id":"a","secret":"s","offset":0}"#).unwrap();
+        assert_eq!(old.track, None);
+    }
+
+    #[test]
+    fn an_offer_from_before_0_7_3_has_no_tracks() {
+        let meta: Meta = serde_json::from_str(
+            r#"{"fileName":"a.mp4","title":null,"game":null,"durationMs":1000,"width":1920,"height":1080}"#,
+        )
+        .unwrap();
+        assert!(meta.tracks.is_empty() && meta.mix.is_empty());
     }
 }

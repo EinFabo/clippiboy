@@ -107,7 +107,7 @@ export function Overlay() {
     );
   }
 
-  if (banner.kind === "friendOnline" || banner.kind === "friendGame") {
+  if (banner.kind === "friend" || banner.kind === "friendOnline" || banner.kind === "friendGame") {
     return <FriendNotice banner={banner} leaving={leaving} />;
   }
 
@@ -121,9 +121,6 @@ export function Overlay() {
     // sign in the picture frame, and that is enough at a glance.
     screenshot: "text-accent-bright",
     recording: "text-live",
-    friend: "text-accent-bright",
-    friendOnline: "text-ok",
-    friendGame: "text-ok",
   }[banner.kind];
 
   const stroke = {
@@ -134,9 +131,6 @@ export function Overlay() {
     info: "var(--color-line-strong)",
     screenshot: "var(--color-accent-bright)",
     recording: "var(--color-live)",
-    friend: "var(--color-accent-bright)",
-    friendOnline: "var(--color-ok)",
-    friendGame: "var(--color-ok)",
   }[banner.kind];
 
   // "Buffer off" plays the line backwards and greys it out along the way — the
@@ -236,15 +230,6 @@ function Mark({ kind }: { kind: OverlayBanner["kind"] }) {
       </svg>
     );
   }
-  if (kind === "friend") {
-    return (
-      <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="9" cy="8" r="3.5" />
-        <path d="M2.5 20a6.5 6.5 0 0 1 13 0" />
-        <path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M18 14.2a6.5 6.5 0 0 1 3.5 5.8" />
-      </svg>
-    );
-  }
   if (kind === "buffer" || kind === "bufferOff") {
     return (
       <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -262,16 +247,24 @@ function Mark({ kind }: { kind: OverlayBanner["kind"] }) {
 }
 
 /**
- * The quiet friend notices from the friends lab: `friendOnline` is the pill
- * (f02), `friendGame` the half-height card (f01). Both smaller and shorter than
- * a clip banner, and both hug the screen edge of the chosen corner rather than
- * sitting in the middle of the 416 px window.
+ * Everything about a friend. `friendOnline` is the pill (f02 from the friends
+ * lab); the rest wear the half-height card (f01) — a game started, and since
+ * the second banner lab also requests and clips (`friend`), which used to
+ * borrow the big clip card. Smaller than a clip banner, and hugging the screen
+ * edge of the chosen corner rather than sitting in the middle of the 416 px
+ * window.
+ *
+ * The line says what kind of news it is: green for presence, the accent for
+ * what wants something from you — so those follow an accent of one's own.
  */
 function FriendNotice({ banner, leaving }: { banner: Shown; leaving: boolean }) {
   const corner = banner.corner ?? "topRight";
   const right = corner.endsWith("Right");
   const top = corner.startsWith("top");
   const pill = banner.kind === "friendOnline";
+  const asks = banner.kind === "friend";
+  // A clip that arrived shows its frame where the face would be.
+  const thumb = fileUrl(banner.thumbPath);
   return (
     <div
       className={cn(
@@ -286,26 +279,40 @@ function FriendNotice({ banner, leaving }: { banner: Shown; leaving: boolean }) 
         data-side={right ? "right" : "left"}
         className={cn(
           "cb-notice relative flex items-center",
-          pill ? "h-10 gap-2.5 rounded-pill pr-4 pl-1.5" : "h-16 w-full gap-3 rounded-card px-3",
+          pill ? "h-10 gap-2.5 rounded-pill pr-4 pl-1.5" : "min-h-16 w-full gap-3 rounded-card px-3 py-2.5",
         )}
       >
         {!pill && (
           <svg
             className="cb-outline pointer-events-none absolute inset-0 h-full w-full overflow-visible"
-            style={{ "--cb-stroke": "var(--color-ok)" } as CSSProperties}
+            style={{ "--cb-stroke": asks ? "var(--color-accent-bright)" : "var(--color-ok)" } as CSSProperties}
             aria-hidden
           >
             <rect className="cb-halo" pathLength={100} />
             <rect className="cb-line" pathLength={100} />
           </svg>
         )}
-        <Face src={banner.avatar ?? null} name={banner.title} size={pill ? 28 : 40} playing={!pill} />
+        {thumb && !pill ? (
+          <img
+            src={thumb}
+            alt=""
+            className="relative aspect-video h-10 shrink-0 rounded-[8px] bg-black object-cover"
+          />
+        ) : (
+          <Face
+            src={banner.avatar ?? null}
+            name={banner.title}
+            size={pill ? 28 : 40}
+            dot={pill ? "online" : asks ? null : "playing"}
+          />
+        )}
         {pill ? (
           <span className="truncate text-[13px] font-medium text-ink">{banner.title}</span>
         ) : (
           <div className="relative min-w-0">
             <p className="text-[10px] font-semibold tracking-[0.1em] text-accent-bright uppercase">Friend</p>
             <p className="truncate text-sm font-semibold text-ink">{banner.title}</p>
+            {banner.detail && <p className="truncate text-xs text-ink-muted">{banner.detail}</p>}
           </div>
         )}
       </div>
@@ -313,7 +320,18 @@ function FriendNotice({ banner, leaving }: { banner: Shown; leaving: boolean }) 
   );
 }
 
-function Face({ src, name, size, playing }: { src: string | null; name: string; size: number; playing: boolean }) {
+function Face({
+  src,
+  name,
+  size,
+  dot,
+}: {
+  src: string | null;
+  name: string;
+  size: number;
+  /** The presence dot; none on a request or a clip, where it would say nothing. */
+  dot: "online" | "playing" | null;
+}) {
   const [broken, setBroken] = useState(false);
   return (
     <span className="relative shrink-0" style={{ width: size, height: size }}>
@@ -324,12 +342,14 @@ function Face({ src, name, size, playing }: { src: string | null; name: string; 
           {name.slice(0, 1).toUpperCase()}
         </span>
       )}
-      <span
-        className={cn(
-          "absolute -right-0.5 -bottom-0.5 h-3 w-3 rounded-pill border-2 border-[#15131c]",
-          playing ? "bg-accent" : "bg-ok",
-        )}
-      />
+      {dot && (
+        <span
+          className={cn(
+            "absolute -right-0.5 -bottom-0.5 h-3 w-3 rounded-pill border-2 border-[#15131c]",
+            dot === "playing" ? "bg-accent" : "bg-ok",
+          )}
+        />
+      )}
     </span>
   );
 }

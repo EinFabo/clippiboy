@@ -308,6 +308,7 @@ export interface Transfer {
   game: string | null;
   durationMs: number;
   screenshot: boolean;
+  recording: boolean;
 }
 
 export interface Clip {

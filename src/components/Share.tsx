@@ -337,24 +337,31 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
   );
 }
 
+/** What to call it in a sentence — never "clip" for a screenshot or a recording. */
+function noun(t: Transfer): string {
+  return t.screenshot ? "screenshot" : t.recording ? "recording" : "clip";
+}
+
 function headline(t: Transfer): string {
   const who = t.friendName;
+  const what = noun(t);
+  const What = what[0].toUpperCase() + what.slice(1);
   if (t.direction === "in") {
     switch (t.stage) {
       case "asking":
-        return `${who} wants to send you a ${t.screenshot ? "screenshot" : "clip"}`;
+        return `${who} wants to send you a ${what}`;
       case "moving":
         return `Receiving from ${who}…`;
       case "done":
         return `From ${who} — in your clips`;
       case "expired":
-        return `Missed a clip from ${who}`;
+        return `Missed a ${what} from ${who}`;
       case "declined":
-        return `Declined ${who}'s clip`;
+        return `Declined ${who}'s ${what}`;
       case "failed":
-        return `Clip from ${who} didn't arrive`;
+        return `${What} from ${who} didn't arrive`;
       default:
-        return `Clip from ${who}`;
+        return `${What} from ${who}`;
     }
   }
   switch (t.stage) {
@@ -365,7 +372,7 @@ function headline(t: Transfer): string {
     case "moving":
       return `Sending to ${who}…`;
     case "done":
-      return `${who} has your clip`;
+      return `${who} has your ${what}`;
     case "declined":
       return `${who} said no`;
     case "expired":
@@ -373,6 +380,6 @@ function headline(t: Transfer): string {
     case "failed":
       return `Couldn't send to ${who}`;
     default:
-      return `Clip for ${who}`;
+      return `${What} for ${who}`;
   }
 }

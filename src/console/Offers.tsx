@@ -31,7 +31,7 @@ function Offer({ transfer: t }: { transfer: Transfer }) {
     action.finally(() => setBusy(false));
   };
   const share = t.size > 0 ? t.moved / t.size : 0;
-  const what = t.screenshot ? "einen Screenshot" : "einen Clip";
+  const what = t.screenshot ? "einen Screenshot" : t.recording ? "eine Aufnahme" : "einen Clip";
 
   return (
     <div className="cb-glass rounded-[18px] px-4 py-3.5">

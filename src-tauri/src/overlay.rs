@@ -303,11 +303,20 @@ pub fn show_with_thumb(
     show_banner(app, kind, title.into(), detail, thumb_path, None);
 }
 
-/// A friend notice (`FriendOnline` or `FriendGame`), with their picture.
-/// Whether one is wanted at all — per occasion, and over a game — is decided
-/// in `friends.rs` before it gets here.
-pub fn show_friend(app: &tauri::AppHandle, kind: BannerKind, title: String, avatar: Option<String>) {
-    show_banner(app, kind, title, None, None, avatar);
+/// Everything about a friend, with their picture: the notices (`FriendOnline`,
+/// `FriendGame`) and the banners that matter more (`Friend` — requests and
+/// clips). All of them wear the half-height card; a clip that arrived shows its
+/// frame there instead of the face. Whether one is wanted at all — per
+/// occasion, and over a game — is decided before it gets here.
+pub fn show_friend(
+    app: &tauri::AppHandle,
+    kind: BannerKind,
+    title: String,
+    detail: Option<String>,
+    thumb_path: Option<String>,
+    avatar: Option<String>,
+) {
+    show_banner(app, kind, title, detail, thumb_path, avatar);
 }
 
 fn show_banner(

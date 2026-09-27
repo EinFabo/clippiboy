@@ -120,6 +120,13 @@ fn from_index(clip_id: &str) -> Option<Vec<ClipTrack>> {
     )
 }
 
+/// The stored tracks, provided they are complete — without pulling anything
+/// out of the clip file. `None` for a clip with a single track, whose audio
+/// lives in the clip itself.
+pub fn stored(clip_id: &str) -> Option<Vec<ClipTrack>> {
+    from_index(clip_id)
+}
+
 /// Stored tracks, provided they are complete.
 fn read_index(clip_id: &str) -> Option<Vec<Entry>> {
     let text = std::fs::read_to_string(index_path(clip_id))
