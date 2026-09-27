@@ -1,6 +1,6 @@
 [package]
 name = "clippiboy"
-version = "0.6.6"
+version = "0.7.0"
 description = "Effizienter Clip-Recorder mit echtem Multi-Source-Audio"
 edition = "2021"
 rust-version = "1.77"
