@@ -381,3 +381,20 @@
     animation-iteration-count: 1 !important;
   }
 }
+
+/* "Clear all trims": the warning and the "Freed …" line come in from just
+   above, the way a note does. */
+@keyframes cb-freed-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.cb-freed-in {
+  animation: cb-freed-in 220ms var(--ease-entrance) both;
+}

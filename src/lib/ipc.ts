@@ -13,6 +13,7 @@ import type {
   EngineStatus,
   LevelMap,
   StorageUsage,
+  TrimOriginals,
   TrackMix,
   UpdateInfo,
   UpdateProgress,
@@ -181,6 +182,10 @@ export const api = {
     invoke<Clip>("discard_clip_original", { id }),
   /** What the originals, tracks and thumbnails occupy in the app data folder. */
   storageUsage: () => invoke<StorageUsage>("storage_usage"),
+  /** How many trimmed clips keep their untouched recording, and their size. */
+  trimOriginals: () => invoke<TrimOriginals>("trim_originals"),
+  /** Throw all of those away at once; returns what was freed. */
+  discardAllOriginals: () => invoke<TrimOriginals>("discard_all_originals"),
   /**
    * Write a copy of the clip that comes in under `targetBytes`. The clip itself
    * is not touched — this is a second file at `output`.

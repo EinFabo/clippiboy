@@ -14,6 +14,7 @@ import type {
   ShotRect,
   ShotStep,
   TrackMix,
+  TrimOriginals,
   UpdateInfo,
   UpdateProgress,
   FfmpegStatus,
@@ -132,6 +133,8 @@ interface EngineState {
   restoreClipOriginal: (id: string) => Promise<void>;
   /** Throw the untouched recording away, keep the trimmed clip. */
   discardClipOriginal: (id: string) => Promise<void>;
+  /** The same for every trimmed clip at once. Returns what was freed. */
+  discardAllOriginals: () => Promise<TrimOriginals>;
   /**
    * Write a screenshot from its original, its marks and its crop — see
    * `api.writeScreenshot`.
@@ -228,7 +231,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     // with it. Previously the target list stayed empty in that case too and no
     // source could be picked on the recording page.
     const fail = (what: string, err: unknown) => {
-      console.error(`${what} fehlgeschlagen`, err);
+      console.error(`${what} failed`, err);
       set({ lastError: `${what}: ${String(err)}` });
     };
     const load = async <T>(
@@ -247,12 +250,12 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       const [config, devices, processes, targets, encoders, clips] =
         await Promise.all([
-          load("Konfiguration lesen", api.getConfig, get().config),
-          load("read audio devices", api.listAudioDevices, []),
-          load("Anwendungen lesen", api.listAudioProcesses, []),
-          load("Aufnahmequellen lesen", api.listCaptureTargets, []),
-          load("Encoder lesen", api.listEncoders, []),
-          load("Clips lesen", api.listClips, []),
+          load("Reading the settings", api.getConfig, get().config),
+          load("Reading audio devices", api.listAudioDevices, []),
+          load("Reading applications", api.listAudioProcesses, []),
+          load("Reading capture sources", api.listCaptureTargets, []),
+          load("Reading encoders", api.listEncoders, []),
+          load("Reading clips", api.listClips, []),
         ]);
       set({ ready: true, config, devices, processes, targets, encoders, clips });
 
@@ -327,7 +330,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       set({ targets: await api.listCaptureTargets() });
     } catch (err) {
-      set({ lastError: `Aufnahmequellen lesen: ${String(err)}` });
+      set({ lastError: `Reading capture sources: ${String(err)}` });
     }
   },
 
@@ -589,6 +592,15 @@ export const useEngine = create<EngineState>((set, get) => ({
       set({ lastError: String(err) });
       throw err;
     }
+  },
+
+  async discardAllOriginals() {
+    const freed = await api.discardAllOriginals();
+    // Every clip's `originalAvailable` may have changed — read them all again
+    // rather than guess which.
+    const clips = await api.listClips();
+    set({ clips });
+    return freed;
   },
 
   async restoreClipOriginal(id) {

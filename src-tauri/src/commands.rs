@@ -13,7 +13,7 @@ use crate::preview;
 use crate::stems;
 use crate::model::{
     AppConfig, AudioDevice, AudioProcess, AudioSource, CaptureTarget, Clip, ClipEdit, ClipTrack,
-    EncoderInfo, EngineStatus, StorageUsage, TrackMix,
+    EncoderInfo, EngineStatus, StorageUsage, TrackMix, TrimOriginals,
 };
 use crate::state::AppState;
 
@@ -1090,17 +1090,46 @@ pub fn export_clip(
     Ok(())
 }
 
-/// What the originals, the individual tracks and the thumbnails occupy.
+/// What ClippiBoy occupies: the clips themselves, and what grows out of sight
+/// beside them — originals, individual tracks, thumbnails, the web views' cache.
 ///
-/// The clips themselves are not counted — those lie in the user's own folder and
-/// are plainly visible there. This is the part that grows out of sight.
+/// The clips used to be left out, on the grounds that they lie plainly visible
+/// in the user's own folder. But whoever opens "Storage" wants the whole of it,
+/// and a total of 400 MB beside 11 GB of clips read as simply wrong.
+///
+/// The clips are counted file by file from the library rather than by walking
+/// the clip folder: the folder can have changed, and older clips stay where
+/// they were saved.
 #[tauri::command(async)]
-pub fn storage_usage() -> Result<StorageUsage> {
+pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<StorageUsage> {
+    use tauri::Manager;
+    let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string())).unwrap_or_default();
+    let clips_bytes = clips
+        .iter()
+        .filter_map(|clip| std::fs::metadata(&clip.path).ok())
+        .map(|meta| meta.len())
+        .sum();
+    let cache_bytes = app.path().app_local_data_dir().map(|dir| dir_bytes(&dir)).unwrap_or(0);
     Ok(StorageUsage {
+        clips_bytes,
         originals_bytes: dir_bytes(&edit::root()),
         tracks_bytes: dir_bytes(&crate::stems::root()),
         thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
+        cache_bytes,
     })
+}
+
+/// What "Clear all trims" in the storage settings would free.
+#[tauri::command(async)]
+pub fn trim_originals() -> TrimOriginals {
+    edit::trim_originals()
+}
+
+/// Throw away the untouched recording of every trimmed clip. The trims stay;
+/// only undoing them is gone. Returns what was freed.
+#[tauri::command(async)]
+pub fn discard_all_originals() -> TrimOriginals {
+    edit::discard_all_originals()
 }
 
 /// Everything below a folder, in bytes. Missing folders count as nothing.

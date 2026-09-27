@@ -425,9 +425,19 @@ export interface TrackMix {
 
 /** What ClippiBoy keeps out of sight in the app data directory. */
 export interface StorageUsage {
+  /** The clips, screenshots and recordings themselves. */
+  clipsBytes: number;
   originalsBytes: number;
   tracksBytes: number;
   thumbsBytes: number;
+  /** The web views' own folders. */
+  cacheBytes: number;
+}
+
+/** Untouched recordings kept to undo trims — what "Clear all trims" frees. */
+export interface TrimOriginals {
+  count: number;
+  bytes: number;
 }
 
 export interface EngineStatus {

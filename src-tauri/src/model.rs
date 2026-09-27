@@ -707,9 +707,22 @@ pub struct TrackMix {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageUsage {
+    /// The clips, screenshots and recordings themselves, wherever they lie.
+    pub clips_bytes: u64,
     pub originals_bytes: u64,
     pub tracks_bytes: u64,
     pub thumbs_bytes: u64,
+    /// The web views' own folders (WebView2 cache and storage).
+    pub cache_bytes: u64,
+}
+
+/// The untouched recordings kept for undoing trims: how many, and how much.
+/// Before "Clear all trims" what there is to free, after it what was freed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrimOriginals {
+    pub count: u32,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

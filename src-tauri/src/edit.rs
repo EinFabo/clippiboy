@@ -149,6 +149,53 @@ pub fn discard_original(clip_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The untouched recordings of trimmed clips, found on disk — clip id and size.
+///
+/// Only `video.mp4`: the same folders hold the untouched copies of edited
+/// screenshots, and those are the image editor's undo, not a trim's.
+fn trim_originals_on_disk() -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(root()) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let video = entry.path().join("video.mp4");
+            let size = std::fs::metadata(&video).ok().filter(|meta| meta.is_file())?.len();
+            Some((entry.file_name().to_string_lossy().into_owned(), size))
+        })
+        .collect()
+}
+
+/// What "Clear all trims" would free.
+pub fn trim_originals() -> crate::model::TrimOriginals {
+    let found = trim_originals_on_disk();
+    crate::model::TrimOriginals {
+        count: found.len() as u32,
+        bytes: found.iter().map(|(_, size)| size).sum(),
+    }
+}
+
+/// [`discard_original`] for every trimmed clip at once, and what that freed.
+///
+/// Holds [`WORKING`] throughout, so it never pulls a file out from under a trim
+/// being written. One that cannot go (open in a player somewhere) is left
+/// standing and simply not counted — the rest still go.
+pub fn discard_all_originals() -> crate::model::TrimOriginals {
+    let _busy = WORKING.lock();
+    let mut freed = crate::model::TrimOriginals::default();
+    for (clip_id, size) in trim_originals_on_disk() {
+        match discard_original(&clip_id) {
+            Ok(()) => {
+                freed.count += 1;
+                freed.bytes += size;
+            }
+            Err(err) => log::info!("original of {clip_id} kept: {err}"),
+        }
+    }
+    freed
+}
+
 /// The excerpt the editor is showing right now — in seconds of the **current**
 /// file, converted to milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

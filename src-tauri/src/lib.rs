@@ -1203,6 +1203,8 @@ pub fn run() {
             commands::restore_clip_original,
             commands::discard_clip_original,
             commands::storage_usage,
+            commands::trim_originals,
+            commands::discard_all_originals,
             commands::export_clip,
             commands::reveal_path,
             commands::app_version,
