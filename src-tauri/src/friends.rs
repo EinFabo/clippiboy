@@ -629,25 +629,31 @@ fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
         crate::notify(app, "ok", text);
         return;
     }
-    if app.state::<Friends>().game.lock().is_some() {
-        if !config.notify_while_playing {
-            return;
-        }
-        // Over a game our own banner, not Windows' — a toast there steals
-        // focus in some games and sits in the wrong corner in all of them.
+    if !config.notify_while_playing && app.state::<Friends>().game.lock().is_some() {
+        return;
+    }
+    // Our own banner, in game and on the desktop alike — not Windows'. A toast
+    // steals focus in some games, sits in the wrong corner in all of them, and
+    // from a build without installer it even says "Windows PowerShell".
+    let overlay = app.state::<AppState>().config_snapshot();
+    if overlay.overlay.enabled {
         use crate::overlay::BannerKind;
         match kind {
             Alert::Online => crate::overlay::show_friend(app, BannerKind::FriendOnline, text.to_owned(), avatar),
             Alert::Game => crate::overlay::show_friend(app, BannerKind::FriendGame, text.to_owned(), avatar),
-            Alert::Request => {
-                let hotkey = app.state::<AppState>().config_snapshot().console_hotkey;
-                crate::overlay::show(app, BannerKind::Friend, text, Some(format!("{hotkey} to answer")));
-            }
+            Alert::Request => crate::overlay::show(
+                app,
+                BannerKind::Friend,
+                text,
+                Some(format!("{} to answer", overlay.console_hotkey)),
+            ),
             // `share.rs` has put its banner up already.
             Alert::Clip => {}
         }
         return;
     }
+    // Banners switched off altogether: then Windows' notice is the only way
+    // left to hear of it.
     use tauri_plugin_notification::NotificationExt;
     if let Err(err) = app.notification().builder().title("ClippiBoy").body(text).show() {
         log::info!("friends: notification failed: {err}");
