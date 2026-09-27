@@ -107,6 +107,10 @@ export function Overlay() {
     );
   }
 
+  if (banner.kind === "friendOnline" || banner.kind === "friendGame") {
+    return <FriendNotice banner={banner} leaving={leaving} />;
+  }
+
   const accent = {
     clip: "text-accent-bright",
     buffer: "text-ok",
@@ -118,6 +122,8 @@ export function Overlay() {
     screenshot: "text-accent-bright",
     recording: "text-live",
     friend: "text-accent-bright",
+    friendOnline: "text-ok",
+    friendGame: "text-ok",
   }[banner.kind];
 
   const stroke = {
@@ -129,6 +135,8 @@ export function Overlay() {
     screenshot: "var(--color-accent-bright)",
     recording: "var(--color-live)",
     friend: "var(--color-accent-bright)",
+    friendOnline: "var(--color-ok)",
+    friendGame: "var(--color-ok)",
   }[banner.kind];
 
   // "Buffer off" plays the line backwards and greys it out along the way — the
@@ -250,5 +258,78 @@ function Mark({ kind }: { kind: OverlayBanner["kind"] }) {
       <rect x="3" y="5" width="18" height="14" rx="3" />
       <path d="M10 9.5v5l4.5-2.5L10 9.5Z" />
     </svg>
+  );
+}
+
+/**
+ * The quiet friend notices from the friends lab: `friendOnline` is the pill
+ * (f02), `friendGame` the half-height card (f01). Both smaller and shorter than
+ * a clip banner, and both hug the screen edge of the chosen corner rather than
+ * sitting in the middle of the 416 px window.
+ */
+function FriendNotice({ banner, leaving }: { banner: Shown; leaving: boolean }) {
+  const corner = banner.corner ?? "topRight";
+  const right = corner.endsWith("Right");
+  const top = corner.startsWith("top");
+  const pill = banner.kind === "friendOnline";
+  return (
+    <div
+      className={cn(
+        "flex h-full w-full p-3",
+        right ? "justify-end" : "justify-start",
+        top ? "items-start" : "items-end",
+      )}
+    >
+      <div
+        key={banner.seq}
+        data-leaving={leaving}
+        data-side={right ? "right" : "left"}
+        className={cn(
+          "cb-notice relative flex items-center",
+          pill ? "h-10 gap-2.5 rounded-pill pr-4 pl-1.5" : "h-16 w-full gap-3 rounded-card px-3",
+        )}
+      >
+        {!pill && (
+          <svg
+            className="cb-outline pointer-events-none absolute inset-0 h-full w-full overflow-visible"
+            style={{ "--cb-stroke": "var(--color-ok)" } as CSSProperties}
+            aria-hidden
+          >
+            <rect className="cb-halo" pathLength={100} />
+            <rect className="cb-line" pathLength={100} />
+          </svg>
+        )}
+        <Face src={banner.avatar ?? null} name={banner.title} size={pill ? 28 : 40} playing={!pill} />
+        {pill ? (
+          <span className="truncate text-[13px] font-medium text-ink">{banner.title}</span>
+        ) : (
+          <div className="relative min-w-0">
+            <p className="text-[10px] font-semibold tracking-[0.1em] text-accent-bright uppercase">Friend</p>
+            <p className="truncate text-sm font-semibold text-ink">{banner.title}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Face({ src, name, size, playing }: { src: string | null; name: string; size: number; playing: boolean }) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <span className="relative shrink-0" style={{ width: size, height: size }}>
+      {src && !broken ? (
+        <img src={src} alt="" onError={() => setBroken(true)} className="h-full w-full rounded-pill object-cover" />
+      ) : (
+        <span className="grid h-full w-full place-items-center rounded-pill bg-accent-deep text-xs font-bold text-ink">
+          {name.slice(0, 1).toUpperCase()}
+        </span>
+      )}
+      <span
+        className={cn(
+          "absolute -right-0.5 -bottom-0.5 h-3 w-3 rounded-pill border-2 border-[#15131c]",
+          playing ? "bg-accent" : "bg-ok",
+        )}
+      />
+    </span>
   );
 }

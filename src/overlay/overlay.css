@@ -11,6 +11,74 @@ body,
    stroke-dashoffset). No layout, no repaint of the content — otherwise the
    banner stutters exactly when the game needs the GPU. */
 
+/* The friend notices (f01, f02 from the friends lab): the card's ground, but
+   they slide in from the screen edge they stand on and leave the same way —
+   quieter than the clip banner's zoom. Their ground and outline rules come
+   after `.cb-card` further down; these are only the moves. */
+@keyframes cb-notice-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes cb-notice-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes cb-notice-out-right {
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes cb-notice-out-left {
+  to {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+
+.cb-notice {
+  background: linear-gradient(180deg, var(--hud-top) 0%, var(--hud-bottom) 100%);
+  box-shadow:
+    0 3px 8px rgba(0, 0, 0, 0.5),
+    0 1px 2px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 var(--hud-sheen);
+  will-change: transform, opacity;
+  animation: cb-notice-in-right 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.cb-notice[data-side="left"] {
+  animation-name: cb-notice-in-left;
+}
+
+.cb-notice[data-leaving="true"] {
+  animation: cb-notice-out-right 240ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+.cb-notice[data-leaving="true"][data-side="left"] {
+  animation-name: cb-notice-out-left;
+}
+
+/* The half-height card is less round than the clip banner; more specific than
+   `.cb-outline rect` below, so the order does not matter. */
+.cb-notice .cb-outline rect {
+  rx: 15px;
+}
+
 @keyframes cb-card-in {
   from {
     opacity: 0;

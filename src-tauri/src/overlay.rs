@@ -93,6 +93,18 @@ pub enum BannerKind {
     Recording,
     /// A friend offers a clip, or one went across (`share.rs`).
     Friend,
+    /// A friend came online — the small pill (f02 from the friends lab).
+    FriendOnline,
+    /// A friend started a game — the half-height card (f01).
+    FriendGame,
+}
+
+impl BannerKind {
+    /// The quiet friend notices: smaller, shorter, and never in the way of a
+    /// banner that matters more.
+    fn is_notice(self) -> bool {
+        matches!(self, BannerKind::FriendOnline | BannerKind::FriendGame)
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -103,7 +115,17 @@ pub struct Banner {
     pub detail: Option<String>,
     pub thumb_path: Option<String>,
     pub duration_ms: u32,
+    /// A friend's picture (a Discord URL) for the friend notices.
+    pub avatar: Option<String>,
+    /// The small notices hug the screen edge this corner is on, instead of
+    /// floating in the middle of the window.
+    pub corner: OverlayCorner,
 }
+
+/// Until when (ms since the epoch) a banner that matters stands. A friend
+/// coming online is worth less than a saved clip — it waits its turn by simply
+/// not showing.
+static IMPORTANT_UNTIL: AtomicU64 = AtomicU64::new(0);
 
 /// Counts the banners shown so a late hide order does not clear away a banner
 /// that has appeared in the meantime.
@@ -278,6 +300,24 @@ pub fn show_with_thumb(
     detail: Option<String>,
     thumb_path: Option<String>,
 ) {
+    show_banner(app, kind, title.into(), detail, thumb_path, None);
+}
+
+/// A friend notice (`FriendOnline` or `FriendGame`), with their picture.
+/// Whether one is wanted at all — per occasion, and over a game — is decided
+/// in `friends.rs` before it gets here.
+pub fn show_friend(app: &tauri::AppHandle, kind: BannerKind, title: String, avatar: Option<String>) {
+    show_banner(app, kind, title, None, None, avatar);
+}
+
+fn show_banner(
+    app: &tauri::AppHandle,
+    kind: BannerKind,
+    title: String,
+    detail: Option<String>,
+    thumb_path: Option<String>,
+    avatar: Option<String>,
+) {
     let config = app.state::<AppState>().config_snapshot().overlay;
     if !config.enabled {
         return;
@@ -288,19 +328,30 @@ pub fn show_with_thumb(
         BannerKind::Error => config.on_error,
         BannerKind::Screenshot => config.on_screenshot,
         BannerKind::Recording => config.on_recording,
-        BannerKind::Info | BannerKind::Friend => true,
+        BannerKind::Info | BannerKind::Friend | BannerKind::FriendOnline | BannerKind::FriendGame => true,
     };
     if !wanted {
         return;
     }
 
     // Errors stay longer, otherwise they are simply missed while playing; an
-    // offer from a friend waits for an answer, so it has to be read.
+    // offer from a friend waits for an answer, so it has to be read. The
+    // notices are the other way round: said, and gone.
     let duration_ms = match kind {
         BannerKind::Error => config.duration_ms.max(6000),
         BannerKind::Friend => config.duration_ms.max(7000),
+        BannerKind::FriendOnline => 3000,
+        BannerKind::FriendGame => 4500,
         _ => config.duration_ms,
     };
+    let now = now_ms();
+    if kind.is_notice() {
+        if now < IMPORTANT_UNTIL.load(Ordering::SeqCst) {
+            return;
+        }
+    } else {
+        IMPORTANT_UNTIL.store(now + duration_ms as u64 + 600, Ordering::SeqCst);
+    }
 
     let Some(window) = app.get_webview_window(LABEL) else {
         log::warn!("overlay window missing — dropping the banner");
@@ -324,10 +375,12 @@ pub fn show_with_thumb(
 
     let banner = Banner {
         kind,
-        title: title.into(),
+        title,
         detail,
         thumb_path,
         duration_ms,
+        avatar,
+        corner: config.corner,
     };
 
     // Sending, and hiding again afterwards, happen off the caller's thread: the
@@ -444,4 +497,11 @@ fn place(window: &tauri::WebviewWindow, config: &OverlayConfig) -> tauri::Result
     };
     window.set_size(PhysicalSize::new(width, height))?;
     window.set_position(PhysicalPosition::new(origin.x + x, origin.y + y))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }

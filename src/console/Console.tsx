@@ -11,6 +11,7 @@ import {
   IconCamera,
   IconClips,
   IconCopy,
+  IconFriends,
   IconHeart,
   IconPencil,
   IconPlay,
@@ -30,6 +31,8 @@ import {
 } from "@/components/ui/PlayerControls";
 import { AudioPanel, useLevelBars } from "./Audio";
 import { Offers } from "./Offers";
+import { FriendsPanel } from "./Friends";
+import { useFriends } from "@/lib/friends";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
 
@@ -63,7 +66,7 @@ const RESTING: EngineStatus = {
   screenFallback: null,
 };
 
-type Panel = "clips" | "audio" | "perf" | null;
+type Panel = "clips" | "audio" | "perf" | "friends" | null;
 
 /**
  * Die Spielzeit, wie sie unter dem Spielnamen steht.
@@ -120,6 +123,15 @@ export function Console() {
   /** Clips von heute — die Zahl im Statusblock. */
   const [today, setToday] = useState(inTauri ? 0 : clipsToday(mockClips));
   const [panel, setPanel] = useState<Panel>(null);
+  /** Der Freunde-Knopf steht nur da, wenn es Freunde geben kann; die Zahl an
+   *  ihm sind offene Anfragen, die man im Panel gleich annehmen kann. */
+  const friendsSignedIn = useFriends((s) => s.signedIn);
+  const friendRequests = useFriends((s) => s.lists.incoming.length);
+  const friendsOnline = useFriends((s) => Object.keys(s.presence).length);
+  const friendsHint =
+    friendRequests > 0
+      ? `${friendRequests} ${friendRequests === 1 ? "Anfrage" : "Anfragen"} · ${friendsOnline} online`
+      : `${friendsOnline} online`;
   /** Zählt jedes Öffnen. Das Fenster wird nur versteckt, die Seite bleibt
    *  geladen — ohne diesen Schlüssel liefe das Licht um das Dock (`cb-dock`)
    *  genau einmal pro Programmstart statt bei jedem Öffnen. */
@@ -644,6 +656,14 @@ export function Console() {
           </div>
         )}
       </Sheet>
+    ) : which === "friends" ? (
+      <Sheet
+        title="Freunde"
+        hint={friendsHint}
+        leaving={leaving}
+      >
+        <FriendsPanel />
+      </Sheet>
     ) : which === "audio" ? (
       <Sheet
         title="Ton"
@@ -947,6 +967,22 @@ export function Console() {
             >
               <span className="text-[15px] font-bold tabular-nums">{status.fps.toFixed(0)}</span>
             </DockButton>
+            {friendsSignedIn && (
+              <DockButton
+                label="Freunde"
+                active={panel === "friends"}
+                onClick={() => (panel === "friends" ? back() : void show("friends"))}
+              >
+                <span className="relative">
+                  <IconFriends className="h-6 w-6" />
+                  {friendRequests > 0 && (
+                    <span className="absolute -top-1 -right-2 grid h-4 min-w-4 place-items-center rounded-pill bg-accent px-1 text-[10px] font-bold text-white">
+                      {friendRequests}
+                    </span>
+                  )}
+                </span>
+              </DockButton>
+            )}
           </div>
         </div>
 

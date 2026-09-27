@@ -90,7 +90,7 @@ export function FriendsTab() {
           </Row>
           <Row
             label="Notify me while I'm playing"
-            hint="Off: nothing pops up over your game — the Friends page still shows it all"
+            hint="On: a small ClippiBoy banner over the game. Off: nothing pops up — the console (Alt+C) still shows it all"
           >
             <Toggle
               checked={friends.notifyWhilePlaying}

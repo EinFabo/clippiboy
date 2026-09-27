@@ -338,11 +338,11 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
     if announce {
         let known: HashSet<&str> = previous.incoming.iter().map(|p| p.user.id.as_str()).collect();
         for request in lists.incoming.iter().filter(|p| !known.contains(p.user.id.as_str())) {
-            alert(app, Alert::Request, &format!("{} sent you a friend request", request.user.display_name));
+            alert(app, Alert::Request, &format!("{} sent you a friend request", request.user.display_name), None);
         }
         let asked: HashSet<&str> = previous.outgoing.iter().map(|p| p.user.id.as_str()).collect();
         for friend in lists.friends.iter().filter(|user| asked.contains(user.id.as_str())) {
-            alert(app, Alert::Request, &format!("{} accepted your friend request", friend.display_name));
+            alert(app, Alert::Request, &format!("{} accepted your friend request", friend.display_name), None);
         }
     }
     Ok(())
@@ -520,7 +520,7 @@ async fn handle_message(app: &AppHandle, text: &str) {
                     .friends
                     .iter()
                     .find(|user| user.id == id)
-                    .map(|user| user.display_name.clone());
+                    .map(|user| (user.display_name.clone(), user.avatar.clone()));
                 let before = match &presence {
                     Some(presence) => view.presence.insert(id, presence.clone()),
                     None => view.presence.remove(&id),
@@ -528,12 +528,12 @@ async fn handle_message(app: &AppHandle, text: &str) {
                 (name, before)
             };
             emit(app);
-            if let (Some(name), Some(now)) = (name, presence) {
+            if let (Some((name, avatar)), Some(now)) = (name, presence) {
                 match (before, now.game) {
-                    (None, Some(game)) => alert(app, Alert::Game, &format!("{name} is playing {game}")),
-                    (None, None) => alert(app, Alert::Online, &format!("{name} is online")),
+                    (None, Some(game)) => alert(app, Alert::Game, &format!("{name} is playing {game}"), avatar),
+                    (None, None) => alert(app, Alert::Online, &format!("{name} is online"), avatar),
                     (Some(before), Some(game)) if before.game.as_deref() != Some(game.as_str()) => {
-                        alert(app, Alert::Game, &format!("{name} started {game}"))
+                        alert(app, Alert::Game, &format!("{name} started {game}"), avatar)
                     }
                     _ => {}
                 }
@@ -589,7 +589,7 @@ pub fn send_relay(app: &AppHandle, to: &str, body: &impl Serialize) -> bool {
 
 /// Someone wants to send a clip.
 pub fn announce_clip(app: &AppHandle, text: &str) {
-    alert(app, Alert::Clip, text);
+    alert(app, Alert::Clip, text, None);
 }
 
 fn send_presence(app: &AppHandle, kind: &str) {
@@ -610,7 +610,7 @@ enum Alert {
 
 /// In the app while its window is in front; as a Windows notification while it
 /// is not — but never over one's own game unless that is wanted.
-fn alert(app: &AppHandle, kind: Alert, text: &str) {
+fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
     let config = app.state::<AppState>().config_snapshot().friends;
     let wanted = match kind {
         Alert::Request => config.notify_requests,
@@ -629,7 +629,23 @@ fn alert(app: &AppHandle, kind: Alert, text: &str) {
         crate::notify(app, "ok", text);
         return;
     }
-    if !config.notify_while_playing && app.state::<Friends>().game.lock().is_some() {
+    if app.state::<Friends>().game.lock().is_some() {
+        if !config.notify_while_playing {
+            return;
+        }
+        // Over a game our own banner, not Windows' — a toast there steals
+        // focus in some games and sits in the wrong corner in all of them.
+        use crate::overlay::BannerKind;
+        match kind {
+            Alert::Online => crate::overlay::show_friend(app, BannerKind::FriendOnline, text.to_owned(), avatar),
+            Alert::Game => crate::overlay::show_friend(app, BannerKind::FriendGame, text.to_owned(), avatar),
+            Alert::Request => {
+                let hotkey = app.state::<AppState>().config_snapshot().console_hotkey;
+                crate::overlay::show(app, BannerKind::Friend, text, Some(format!("{hotkey} to answer")));
+            }
+            // `share.rs` has put its banner up already.
+            Alert::Clip => {}
+        }
         return;
     }
     use tauri_plugin_notification::NotificationExt;

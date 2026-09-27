@@ -491,11 +491,15 @@ export interface ShotEdit {
 
 /** Payload of the `overlay-banner` event (overlay window only). */
 export interface OverlayBanner {
-  kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot" | "recording" | "friend";
+  kind: "clip" | "buffer" | "bufferOff" | "error" | "info" | "screenshot" | "recording" | "friend" | "friendOnline" | "friendGame";
   title: string;
   detail: string | null;
   thumbPath: string | null;
   durationMs: number;
+  /** A friend's picture, for the friend notices. */
+  avatar?: string | null;
+  /** The screen corner the banner stands in — the small notices hug its edge. */
+  corner?: "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
 }
 
 export type LevelMap = Record<string, number>;
