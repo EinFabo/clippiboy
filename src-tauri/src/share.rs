@@ -251,7 +251,9 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         return Err("They are busy right now.".into());
     }
     let path = PathBuf::from(&clip.path);
-    let size = std::fs::metadata(&path).map_err(|_| "The clip's file is missing.")?.len();
+    let size = std::fs::metadata(&path)
+        .map_err(|_| format!("The {}'s file is missing.", noun(clip.screenshot, clip.recording)))?
+        .len();
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -628,6 +630,7 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     } else {
         ClipKind::Clip
     };
+    let what = noun(meta.screenshot, meta.recording);
     let dir = crate::filing::dir_for(Path::new(&config.clip_dir), meta.game.as_deref(), false, kind);
     std::fs::create_dir_all(&dir).map_err(|err| format!("Could not create the folder: {err}"))?;
     let target = crate::filing::free_name(&dir, &safe_file_name(&meta.file_name));
@@ -664,7 +667,7 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                     let _ = std::fs::remove_file(&part);
                     crate::stems::remove(&clip_id);
                     connection.close(1u32.into(), b"bad hash");
-                    return Err("The clip arrived damaged — ask them to send it again.".into());
+                    return Err(format!("The {what} arrived damaged — ask them to send it again."));
                 }
                 if let Ok((mut send, _)) = connection.open_bi().await {
                     let _ = send.write_all(b"k").await;
@@ -676,7 +679,7 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                 let _ = tokio::time::timeout(Duration::from_secs(5), connection.closed()).await;
                 if let Err(err) = std::fs::rename(&part, &target) {
                     crate::stems::remove(&clip_id);
-                    return Err(format!("Could not keep the clip: {err}"));
+                    return Err(format!("Could not keep the {what}: {err}"));
                 }
                 return file_clip(app, &clip_id, &target, &meta, size, &from, has_tracks);
             }
@@ -688,7 +691,7 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     }
     let _ = std::fs::remove_file(&part);
     crate::stems::remove(&clip_id);
-    Err(format!("The clip did not get through: {last_error}"))
+    Err(format!("The {what} did not get through: {last_error}"))
 }
 
 /// The individual tracks into the stems store of the clip to be, each checked
@@ -786,7 +789,7 @@ async fn fetch(
     if offset + rest != size {
         return Err("they offered a different file".into());
     }
-    let mut file = open_part(part, offset).map_err(|err| format!("Could not write the clip: {err}"))?;
+    let mut file = open_part(part, offset).map_err(|err| format!("Could not write the file: {err}"))?;
     let mut moved = offset;
     let mut buf = vec![0u8; CHUNK];
     let mut last_emit = std::time::Instant::now();
@@ -799,7 +802,7 @@ async fn fetch(
             Some(n) => n,
             None => break,
         };
-        file.write_all(&buf[..n]).map_err(|err| format!("Could not write the clip: {err}"))?;
+        file.write_all(&buf[..n]).map_err(|err| format!("Could not write the file: {err}"))?;
         moved += n as u64;
         if last_emit.elapsed() >= EMIT_EVERY {
             last_emit = std::time::Instant::now();
@@ -1138,10 +1141,10 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
 }
 
 fn hash_file(path: &Path, limit: u64) -> Result<String, String> {
-    let file = std::fs::File::open(path).map_err(|err| format!("Could not read the clip: {err}"))?;
+    let file = std::fs::File::open(path).map_err(|err| format!("Could not read the file: {err}"))?;
     let mut reader = std::io::BufReader::with_capacity(CHUNK, file.take(limit));
     let mut hasher = Sha256::new();
-    std::io::copy(&mut reader, &mut hasher).map_err(|err| format!("Could not read the clip: {err}"))?;
+    std::io::copy(&mut reader, &mut hasher).map_err(|err| format!("Could not read the file: {err}"))?;
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
