@@ -520,3 +520,21 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
   color: var(--ink-muted);
   font-size: 0.88rem;
 }
+
+/* ---------- Legal text (privacy.html): one readable column ---------- */
+
+.legal {
+  max-width: 72ch;
+  margin: 0 auto;
+  padding: clamp(40px, 7vw, 80px) var(--gutter) 0;
+}
+.legal h1 { font-size: clamp(2rem, 5vw, 3rem); overflow-wrap: break-word; }
+.legal > .small { margin-top: 16px; }
+.legal section { margin-top: 48px; }
+.legal h2 { font-size: clamp(1.3rem, 2.4vw, 1.6rem); max-width: none; }
+.legal h3 { margin-top: 28px; }
+.legal p, .legal ul { margin-top: 12px; color: rgba(255, 255, 255, 0.82); }
+.legal ul { padding-left: 1.2em; }
+.legal li + li { margin-top: 8px; }
+.legal strong { color: var(--ink); font-weight: 600; }
+.legal code { font-size: 0.9em; padding: 1px 6px; border-radius: 6px; background: var(--elevated); }
