@@ -31,12 +31,12 @@ function Offer({ transfer: t }: { transfer: Transfer }) {
     action.finally(() => setBusy(false));
   };
   const share = t.size > 0 ? t.moved / t.size : 0;
-  const what = t.screenshot ? "einen Screenshot" : t.recording ? "eine Aufnahme" : "einen Clip";
+  const what = t.screenshot ? "a screenshot" : t.recording ? "a recording" : "a clip";
 
   return (
     <div className="cb-glass rounded-[18px] px-4 py-3.5">
       <p className="truncate text-[13px] font-semibold">
-        {t.stage === "asking" ? `${t.friendName} will dir ${what} schicken` : `Empfange von ${t.friendName} …`}
+        {t.stage === "asking" ? `${t.friendName} wants to send you ${what}` : `Receiving from ${t.friendName}…`}
       </p>
       <p className="truncate text-xs text-ink-muted">
         {t.name} · {megabytes(t.size)}
@@ -49,7 +49,7 @@ function Offer({ transfer: t }: { transfer: Transfer }) {
             onClick={() => run(shareApi.decline(t.id))}
             className="rounded-pill px-3.5 py-1.5 text-xs font-semibold text-ink-muted transition-colors hover:bg-white/10 hover:text-ink"
           >
-            Ablehnen
+            Decline
           </button>
           <button
             disabled={busy}
@@ -59,7 +59,7 @@ function Offer({ transfer: t }: { transfer: Transfer }) {
               busy && "opacity-60",
             )}
           >
-            Annehmen
+            Accept
           </button>
         </div>
       ) : (

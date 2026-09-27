@@ -80,7 +80,7 @@ export function troubles({
     if (source.enabled && errors[source.id]) {
       out.push({
         severe: true,
-        text: `${source.label} nimmt nicht auf — die Spur bleibt im Clip still`,
+        text: `${source.label} is not recording — its track stays silent in the clip`,
       });
     }
   }
@@ -88,7 +88,7 @@ export function troubles({
   if (status.screenFallback) {
     out.push({
       severe: false,
-      text: `Der gewählte Bildschirm ist nicht da — aufgenommen wird ${status.screenFallback}`,
+      text: `The chosen screen is not connected — recording ${status.screenFallback} instead`,
     });
   }
 
@@ -104,7 +104,7 @@ export function troubles({
   if (droppedRecently > 0) {
     out.push({
       severe: false,
-      text: `${droppedRecently} ${droppedRecently === 1 ? "Bild" : "Bilder"} verworfen in der letzten Minute — der Encoder kommt nicht mit`,
+      text: `${droppedRecently} ${droppedRecently === 1 ? "frame" : "frames"} dropped in the last minute — the encoder cannot keep up`,
     });
   }
 
@@ -138,8 +138,7 @@ export function TroubleStrip({ list }: { list: Trouble[] }) {
       ))}
       {rest > 0 && (
         <p className="cb-warn-line cb-warn-rest">
-          und {rest} {rest === 1 ? "weitere Meldung" : "weitere Meldungen"} — im Fenster
-          nachsehen
+          and {rest} more {rest === 1 ? "notice" : "notices"} — see the main window
         </p>
       )}
     </div>

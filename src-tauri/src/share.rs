@@ -1120,7 +1120,7 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
                 .arg(source)
                 .args(["-t", &seconds(length_ms), "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"])
                 .arg(&path);
-            crate::muxer::run(&mut command, "Spur zum Senden schneiden")?;
+            crate::muxer::run(&mut command, "cutting a track to send")?;
             let size = std::fs::metadata(&path).map_err(|err| err.to_string())?.len();
             let sha256 = hash_file(&path, u64::MAX)?;
             cuts.push(Cut { label: track.label.clone(), path, size, sha256 });

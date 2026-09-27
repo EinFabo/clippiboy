@@ -281,7 +281,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
         .arg("-f")
         .arg("mp4")
         .arg(&temp);
-    let mut outcome = run(&mut copy, "Tonspur entpacken");
+    let mut outcome = run(&mut copy, "extracting an audio track");
 
     if outcome.is_err() {
         // If the track is in a format an MP4 will not take (PCM, say), only
@@ -296,7 +296,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
             .arg("-f")
             .arg("mp4")
             .arg(&temp);
-        outcome = run(&mut encode, "Tonspur entpacken");
+        outcome = run(&mut encode, "extracting an audio track");
     }
 
     if let Err(err) = outcome {

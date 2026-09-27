@@ -332,7 +332,7 @@ pub fn encode(
         }
     }
 
-    let outcome = run_reporting(&mut command, "Clip schreiben", length_ms, on_progress);
+    let outcome = run_reporting(&mut command, "writing the clip", length_ms, on_progress);
 
     // Everything from here that says "no" has to leave the half-written file
     // behind it gone, not lying in the clip folder.

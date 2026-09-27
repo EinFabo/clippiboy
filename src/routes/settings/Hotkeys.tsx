@@ -232,8 +232,8 @@ function Hotkeys() {
           />
         </Row>
         <Row
-          label="Konsole über dem Spiel"
-          hint="Info: Geht nicht über Spielen im exklusiven Vollbild"
+          label="Console over the game"
+          hint="Does not work over games in exclusive fullscreen"
         >
           <HotkeyInput
             value={config.consoleHotkey}

@@ -133,7 +133,7 @@ export function TrendChart({
       viewBox={`0 0 ${W} ${H}`}
       preserveAspectRatio="none"
       role="img"
-      aria-label={`Bildrate der letzten ${TREND_SECONDS} Sekunden`}
+      aria-label={`Frame rate over the last ${TREND_SECONDS} seconds`}
       className="cb-trend"
     >
       {/* Wo die Kurve liegen sollte: die eingestellte Rate als Marke, damit ein

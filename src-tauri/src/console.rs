@@ -285,6 +285,14 @@ pub struct Layout {
     /// Fenster steht schon, wenn die Seite es erfährt, und ein Dock, das sich
     /// eine Zehntelsekunde nach dem Aufgehen umbaut, hätte man gesehen.
     pub style: crate::model::ConsoleStyle,
+    /// How large the page will be, in its own (unzoomed) pixels. On the very
+    /// first opening the window still has its size from `create` — 1280 × 720 —
+    /// and WebView2 takes the new one on a few frames after the window got it.
+    /// An animation started in between is laid out against the small page and
+    /// clipped at its edge: the violet rim cut off, but only that once. The
+    /// page waits until it is this large. 0 when unknown.
+    pub width: f64,
+    pub height: f64,
 }
 
 /// Lay the window over the whole screen it was sent to.
@@ -360,6 +368,8 @@ fn place(window: &tauri::WebviewWindow) -> tauri::Result<Layout> {
         scale: wish,
         glow,
         style,
+        width: size.width as f64 / monitor.scale_factor(),
+        height: size.height as f64 / monitor.scale_factor(),
     })
 }
 

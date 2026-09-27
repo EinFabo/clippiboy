@@ -26,7 +26,7 @@ export function FriendsPanel({
   const now = useNow();
 
   if (!signedIn) {
-    return <p className="text-sm text-ink-muted">Im Fenster unter Freunde mit Discord anmelden.</p>;
+    return <p className="text-sm text-ink-muted">Sign in with Discord under Friends in the main window.</p>;
   }
 
   const playing = lists.friends.filter((f) => presence[f.id]?.game);
@@ -41,7 +41,7 @@ export function FriendsPanel({
         <Request key={request.id} user={request} />
       ))}
       {lists.friends.length === 0 && lists.incoming.length === 0 && (
-        <p className="text-sm text-ink-muted">Noch keine Freunde. Hinzufügen geht im Fenster unter Freunde.</p>
+        <p className="text-sm text-ink-muted">No friends yet. Add them under Friends in the main window.</p>
       )}
       {[...playing, ...online].map((friend) => (
         <Row
@@ -59,7 +59,7 @@ export function FriendsPanel({
             onClick={() => setShowOffline((v) => !v)}
             className="mt-1 justify-self-start rounded-pill px-3 py-1.5 text-xs text-ink-muted transition-colors hover:bg-white/10 hover:text-ink"
           >
-            {showOffline ? "Offline ausblenden" : `${offline.length} offline`}
+            {showOffline ? "Hide offline" : `${offline.length} offline`}
           </button>
           {showOffline &&
             offline.map((friend) => (
@@ -82,21 +82,21 @@ function Request({ user }: { user: FriendUser }) {
       <Face user={user} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-[13px] font-semibold">{user.displayName}</p>
-        <p className="truncate text-xs text-ink-muted">möchte dein Freund sein</p>
+        <p className="truncate text-xs text-ink-muted">wants to be your friend</p>
       </div>
       <button
         disabled={busy}
         onClick={() => run(friendsApi.remove(user.id))}
         className="rounded-pill bg-white/10 px-3 py-1.5 text-xs font-semibold transition-colors hover:bg-white/15"
       >
-        Ablehnen
+        Decline
       </button>
       <button
         disabled={busy}
         onClick={() => run(friendsApi.accept(user.id))}
         className="rounded-pill bg-white px-3 py-1.5 text-xs font-semibold text-black"
       >
-        Annehmen
+        Accept
       </button>
     </div>
   );
@@ -123,7 +123,7 @@ function Row({
     : presence.game
       ? `${presence.game}${duration ? ` · ${duration}` : ""}`
       : presence.busy
-        ? "Beschäftigt"
+        ? "Busy"
         : (presence.status ?? "Online");
   return (
     <div className={cn("flex items-center gap-3 rounded-[14px] px-2 py-2", !presence && "opacity-60")}>
@@ -134,12 +134,12 @@ function Row({
       </div>
       {latest && onSend && canReceive(presence) && (
         <button
-          title={`Letzten Clip senden: ${clipName(latest)}`}
+          title={`Send latest clip: ${clipName(latest)}`}
           onClick={() => onSend(latest, friend)}
           className="flex shrink-0 items-center gap-1.5 rounded-pill bg-white/10 px-3 py-1.5 text-xs font-semibold transition-colors hover:bg-white/15"
         >
           <IconSend className="h-3.5 w-3.5" />
-          Letzten Clip
+          Latest clip
         </button>
       )}
     </div>
@@ -156,9 +156,9 @@ export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: C
   return (
     <div className="absolute inset-0 z-10 flex flex-col rounded-inner bg-black/85 p-2 backdrop-blur-md">
       <div className="flex items-center justify-between px-1 pb-1">
-        <span className="text-xs font-semibold text-ink-muted">Senden an</span>
+        <span className="text-xs font-semibold text-ink-muted">Send to</span>
         <button
-          aria-label="Schließen"
+          aria-label="Close"
           onClick={onClose}
           className="grid h-6 w-6 place-items-center rounded-pill text-ink-muted transition-colors hover:bg-white/10 hover:text-ink"
         >
@@ -167,9 +167,9 @@ export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: C
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!signedIn ? (
-          <p className="px-1 text-xs text-ink-muted">Erst im Fenster unter Freunde anmelden.</p>
+          <p className="px-1 text-xs text-ink-muted">Sign in under Friends in the main window first.</p>
         ) : reachable.length === 0 ? (
-          <p className="px-1 text-xs text-ink-muted">Gerade ist kein Freund online.</p>
+          <p className="px-1 text-xs text-ink-muted">No friend is online right now.</p>
         ) : (
           reachable.map((friend) => (
             <button
@@ -233,12 +233,12 @@ function Face({
 function zuletzt(at: number | undefined, now: number): string {
   if (at === undefined) return "Offline";
   const minutes = Math.max(0, Math.floor((now - at) / 60_000));
-  if (minutes < 1) return "gerade eben da gewesen";
-  if (minutes < 60) return `zuletzt vor ${minutes} min`;
+  if (minutes < 1) return "just left";
+  if (minutes < 60) return `seen ${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `zuletzt vor ${hours} h`;
+  if (hours < 24) return `seen ${hours} h ago`;
   const days = Math.floor(hours / 24);
-  return days === 1 ? "zuletzt gestern" : `zuletzt vor ${days} Tagen`;
+  return days === 1 ? "seen yesterday" : `seen ${days} days ago`;
 }
 
 /** Die Uhr für „42 min" — eine halbe Minute genügt. */

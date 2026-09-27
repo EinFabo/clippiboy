@@ -70,6 +70,41 @@ const RESTING: EngineStatus = {
 
 type Panel = "clips" | "audio" | "perf" | "friends" | null;
 
+/** What the core sends with `console-opened` (`console::Layout`). */
+interface OpenedPayload {
+  bottomInset: number;
+  scale: number;
+  glow: boolean;
+  style: ConsoleStyle;
+  /** The page's size once the window has its own, in unzoomed pixels; 0 unknown. */
+  width: number;
+  height: number;
+}
+
+/**
+ * Resolves once the page is the given size (to within two pixels), and then
+ * two frames on, so the first frame drawn at that size is on screen. Gives up
+ * after half a second — better a clipped rim than a console that never opens.
+ */
+function untilSized(width: number, height: number): Promise<void> {
+  const fits = () =>
+    !(width > 0 && height > 0) ||
+    (Math.abs(window.innerWidth - width) <= 2 && Math.abs(window.innerHeight - height) <= 2);
+  if (fits()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      window.removeEventListener("resize", check);
+      window.clearTimeout(timer);
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    };
+    const check = () => {
+      if (fits()) done();
+    };
+    const timer = window.setTimeout(done, 500);
+    window.addEventListener("resize", check);
+  });
+}
+
 /**
  * Die Spielzeit, wie sie unter dem Spielnamen steht.
  *
@@ -78,7 +113,7 @@ type Panel = "clips" | "audio" | "perf" | "friends" | null;
  * niemand will beim Spielen wissen, dass es 1:12:34 sind.
  */
 function sessionTime(seconds: number): string {
-  if (seconds < 60) return "gerade erst";
+  if (seconds < 60) return "just started";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} min`;
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")}`;
@@ -132,7 +167,7 @@ export function Console() {
   const friendsOnline = useFriends((s) => Object.keys(s.presence).length);
   const friendsHint =
     friendRequests > 0
-      ? `${friendRequests} ${friendRequests === 1 ? "Anfrage" : "Anfragen"} · ${friendsOnline} online`
+      ? `${friendRequests} ${friendRequests === 1 ? "request" : "requests"} · ${friendsOnline} online`
       : `${friendsOnline} online`;
   /** Zählt jedes Öffnen. Das Fenster wird nur versteckt, die Seite bleibt
    *  geladen — ohne diesen Schlüssel liefe das Licht um das Dock (`cb-dock`)
@@ -170,6 +205,9 @@ export function Console() {
   const panelTimer = useRef<number | null>(null);
   /** Guards the way out against a second Escape while it runs. */
   const closingRef = useRef(false);
+  /** Counts openings, so a wait for the page's size that is overtaken — by a
+   *  closing, or by the next opening — does not start a stale one. */
+  const openTicket = useRef(0);
   /** Der ausstehende Aufruf am Ende des Wegs hinaus, zum Abbrechen. */
   const closeTimer = useRef<number | null>(null);
   /** Ob die Konsole in Bildschirmaufnahmen zu sehen ist — nur für den Satz
@@ -309,6 +347,7 @@ export function Console() {
         // weg (der Kern versteckt es, bevor er das hier sendet), die Blende
         // sieht also niemand — sie hinterlässt nur eine leere Seite für das
         // nächste Mal.
+        openTicket.current += 1;
         setClosing(true);
         setPanel(null);
         setLeavingPanel(null);
@@ -316,42 +355,55 @@ export function Console() {
         setRenaming(null);
         setConfirming(null);
       }),
-      listen<{ bottomInset: number; scale: number; glow: boolean; style: ConsoleStyle }>(
-        "console-opened",
-        (e) => {
-          closingRef.current = false;
-          setClosing(false);
-          setOpened((n) => n + 1);
-          setPanel(null);
-          setLeavingPanel(null);
-          setPlayingId(null);
-          setRenaming(null);
-          setConfirming(null);
-          setScale(e.payload.scale || 1);
-          setBottomInset(e.payload.bottomInset);
-          // Der Schein kommt mit dem Ereignis, nicht aus dem `getConfig()`
-          // darunter: der ist ein Aufruf über die Brücke und kommt erst ein paar
-          // Bilder später zurück. Wurde er zwischendurch abgeschaltet, während
-          // die Konsole zu war, sah man ihn genau so lange noch einmal
-          // aufleuchten. Hier steht er im selben Rutsch wie `closing` — eine
-          // Zeichnung, kein Nachziehen.
-          setGlow(e.payload.glow);
-          setStyle(e.payload.style);
-          void loadClips();
-          // The buffer length may have been changed in the app in the meantime;
-          // this is the moment it takes hold.
-          void api
-            .getConfig()
-            .then((config) => {
-              setBufferLength(Math.max(1, config.buffer.seconds));
-              setTargetFps(config.recording.fps);
-              setInCapture(config.consoleInCapture);
-              setSources(config.sources);
-            })
-            .catch(() => {});
-        },
-      ),
+      listen<OpenedPayload>("console-opened", (e) => {
+        // On the very first opening the page is still the size the window was
+        // created at, and only grows to the screen a few frames later. Started
+        // any earlier, the way in is laid out against the small page and the
+        // violet rim comes out cut off at its edge — that one time only. So
+        // wait until the page is as large as the core says it will be. The page
+        // is blank meanwhile (`closing` from the last closing), nobody sees the
+        // wait. Every later opening finds the size already right and starts
+        // at once.
+        const ticket = ++openTicket.current;
+        void untilSized(e.payload.width, e.payload.height).then(() => {
+          if (ticket !== openTicket.current) return;
+          begin(e.payload);
+        });
+      }),
     ];
+    /** Everything an opening resets and takes on — once the page has its size. */
+    function begin(payload: OpenedPayload) {
+      closingRef.current = false;
+      setClosing(false);
+      setOpened((n) => n + 1);
+      setPanel(null);
+      setLeavingPanel(null);
+      setPlayingId(null);
+      setRenaming(null);
+      setConfirming(null);
+      setScale(payload.scale || 1);
+      setBottomInset(payload.bottomInset);
+      // Der Schein kommt mit dem Ereignis, nicht aus dem `getConfig()`
+      // darunter: der ist ein Aufruf über die Brücke und kommt erst ein paar
+      // Bilder später zurück. Wurde er zwischendurch abgeschaltet, während
+      // die Konsole zu war, sah man ihn genau so lange noch einmal
+      // aufleuchten. Hier steht er im selben Rutsch wie `closing` — eine
+      // Zeichnung, kein Nachziehen.
+      setGlow(payload.glow);
+      setStyle(payload.style);
+      void loadClips();
+      // The buffer length may have been changed in the app in the meantime;
+      // this is the moment it takes hold.
+      void api
+        .getConfig()
+        .then((config) => {
+          setBufferLength(Math.max(1, config.buffer.seconds));
+          setTargetFps(config.recording.fps);
+          setInCapture(config.consoleInCapture);
+          setSources(config.sources);
+        })
+        .catch(() => {});
+    }
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));
     };
@@ -423,23 +475,23 @@ export function Console() {
     run(`send-${clip.id}`, async () => {
       setSendFor(null);
       await shareApi.send(clip.id, friend.id);
-      say(`Gefragt: ${friend.displayName}`);
+      say(`Asked ${friend.displayName}`);
     });
 
   const saveClip = () =>
     run("clip", async () => {
       await api.saveClip();
-      say("Clip gespeichert");
+      say("Clip saved");
     });
   const record = () =>
     run("rec", async () => {
       const running = await api.toggleRecording();
-      say(running ? "Aufnahme läuft" : "Aufnahme gespeichert");
+      say(running ? "Recording" : "Recording saved");
     });
   const shot = () =>
     run("shot", async () => {
       await api.takeScreenshot();
-      say("Screenshot gespeichert");
+      say("Screenshot saved");
     });
 
   /** Eine Tonquelle ändern: lauter, leiser, stumm.
@@ -485,8 +537,8 @@ export function Console() {
    *  Zählung, kein lesbares Laufwerk kein freier Platz. */
   const session = [
     status.gameSeconds !== null ? sessionTime(status.gameSeconds) : null,
-    today > 0 ? `${today} ${today === 1 ? "Clip" : "Clips"} heute` : null,
-    status.freeBytes !== null ? `${formatSize(status.freeBytes)} frei` : null,
+    today > 0 ? `${today} ${today === 1 ? "clip" : "clips"} today` : null,
+    status.freeBytes !== null ? `${formatSize(status.freeBytes)} free` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -503,16 +555,16 @@ export function Console() {
   /** Die Zeile unter der Bildrate. Sie sagt nicht mehr nur, wie es *jetzt*
    *  steht, sondern wann es zuletzt nicht so stand — dafür ist der Verlauf da. */
   const fpsHint = () => {
-    if (!status.bufferActive) return "Puffer aus";
-    if (trend.dipAgo === 0) return `von ${targetFps} · bricht gerade ein`;
-    if (trend.dipAgo !== null) return `von ${targetFps} · Einbruch vor ${trend.dipAgo} s`;
+    if (!status.bufferActive) return "Buffer off";
+    if (trend.dipAgo === 0) return `of ${targetFps} · dropping right now`;
+    if (trend.dipAgo !== null) return `of ${targetFps} · dipped ${trend.dipAgo} s ago`;
     // „gemessen" allein stand hier und las sich wie „so schnell läuft deine
     // Aufnahme". Gemeint ist etwas anderes: wie oft sich das Bild wirklich
     // geändert hat. Die Aufnahme läuft immer auf der eingestellten Rate — steht
     // das Bild still, wiederholt die Pipeline das letzte, und genau die fehlen.
     return status.fps >= targetFps - 1
-      ? `von ${targetFps} · volles Bild`
-      : `von ${targetFps} · Bild stand still`;
+      ? `of ${targetFps} · full rate`
+      : `of ${targetFps} · picture stood still`;
   };
 
   /** Ein Panel, wie es über dem Dock steht.
@@ -525,10 +577,10 @@ export function Console() {
    *  weil dort mal das eine und mal das andere weiter unten stand. */
   const sheetFor = (which: Exclude<Panel, null>, leaving: boolean) =>
     which === "clips" ? (
-      <Sheet title="Letzte Clips" hint="Klick spielt ab · Esc zurück" leaving={leaving}>
+      <Sheet title="Recent clips" hint="Click to play · Esc to go back" leaving={leaving}>
         {clips.length === 0 ? (
           <p className="px-2 py-8 text-center text-sm text-ink-muted">
-            Noch nichts aufgenommen.
+            Nothing recorded yet.
           </p>
         ) : (
           <div className="grid grid-cols-3 gap-3">
@@ -537,7 +589,7 @@ export function Console() {
                 <button
                   onClick={() => void show("clips", clip.id)}
                   className="cb-tile group relative block aspect-video w-full overflow-hidden rounded-inner bg-gradient-to-br from-accent-deep/40 to-black"
-                  aria-label={`${clip.screenshot ? "Öffnen" : "Abspielen"}: ${clipName(clip)}`}
+                  aria-label={`${clip.screenshot ? "Open" : "Play"}: ${clipName(clip)}`}
                 >
                   {clip.thumbPath && (
                     <img
@@ -591,7 +643,7 @@ export function Console() {
                           game: clip.game,
                         });
                         await loadClips();
-                        say("Umbenannt");
+                        say("Renamed");
                       });
                     }}
                     onBlur={() => setRenaming(null)}
@@ -610,7 +662,7 @@ export function Console() {
                         void run("delete", async () => {
                           await api.deleteClip(clip.id);
                           await loadClips();
-                          say("Gelöscht");
+                          say("Deleted");
                         });
                       }}
                       onCancel={() => setConfirming(null)}
@@ -618,11 +670,11 @@ export function Console() {
                   ) : (
                     <>
                       <Tool
-                        label="In die Zwischenablage"
+                        label="Copy to clipboard"
                         onClick={() =>
                           run("copy", async () => {
                             await api.copyClipFile(clip.id);
-                            say("In der Zwischenablage — Strg+V in Discord");
+                            say("Copied — Ctrl+V in Discord");
                           })
                         }
                       >
@@ -632,12 +684,12 @@ export function Console() {
                         DISCORD.map((mb) => (
                           <Tool
                             key={mb}
-                            label={`Auf ${mb} MB verkleinern und kopieren`}
+                            label={`Shrink to ${mb} MB and copy`}
                             busy={busy === `discord-${clip.id}-${mb}`}
                             onClick={() =>
                               run(`discord-${clip.id}-${mb}`, async () => {
                                 await api.exportForDiscord(clip.id, mb);
-                                say(`${mb} MB · in der Zwischenablage`);
+                                say(`${mb} MB · copied`);
                               })
                             }
                           >
@@ -645,14 +697,14 @@ export function Console() {
                           </Tool>
                         ))}
                       <Tool
-                        label="An einen Freund senden"
+                        label="Send to a friend"
                         busy={busy === `send-${clip.id}`}
                         onClick={() => setSendFor(clip.id)}
                       >
                         <IconSend className="h-4 w-4" />
                       </Tool>
                       <Tool
-                        label={clip.favorite ? "Favorit entfernen" : "Favorit"}
+                        label={clip.favorite ? "Remove from favorites" : "Favorite"}
                         onClick={() =>
                           run("fav", async () => {
                             await api.setClipFavorite(clip.id, !clip.favorite);
@@ -665,10 +717,10 @@ export function Console() {
                           className={cn("h-4 w-4", clip.favorite && "text-live")}
                         />
                       </Tool>
-                      <Tool label="Umbenennen" onClick={() => setRenaming(clip.id)}>
+                      <Tool label="Rename" onClick={() => setRenaming(clip.id)}>
                         <IconPencil className="h-4 w-4" />
                       </Tool>
-                      <Tool label="Löschen" onClick={() => setConfirming(clip.id)} danger>
+                      <Tool label="Delete" onClick={() => setConfirming(clip.id)} danger>
                         <IconTrash className="h-4 w-4" />
                       </Tool>
                     </>
@@ -684,7 +736,7 @@ export function Console() {
       </Sheet>
     ) : which === "friends" ? (
       <Sheet
-        title="Freunde"
+        title="Friends"
         hint={friendsHint}
         leaving={leaving}
       >
@@ -692,16 +744,16 @@ export function Console() {
       </Sheet>
     ) : which === "audio" ? (
       <Sheet
-        title="Ton"
-        hint="Gilt ab dem nächsten Clip"
+        title="Audio"
+        hint="Applies from the next clip"
         leaving={leaving}
       >
         <AudioPanel sources={sources} bars={levelBars} onChange={changeSource} />
       </Sheet>
     ) : (
       <Sheet
-        title="Leistung"
-        hint={`Die letzten ${TREND_SECONDS} Sekunden`}
+        title="Performance"
+        hint={`The last ${TREND_SECONDS} seconds`}
         leaving={leaving}
       >
         {/* Der Verlauf steht über den Zahlen, nicht darunter: er beantwortet
@@ -711,42 +763,42 @@ export function Console() {
           <figure className="cb-trend-box mb-3">
             <TrendChart samples={trend.samples} targetFps={targetFps} />
             <figcaption className="mt-1 flex justify-between text-[11px] text-ink-faint">
-              <span>vor {TREND_SECONDS} s</span>
-              <span>{targetFps} Bilder/s · rot: verworfen</span>
-              <span>jetzt</span>
+              <span>{TREND_SECONDS} s ago</span>
+              <span>{targetFps} fps · red: dropped</span>
+              <span>now</span>
             </figcaption>
           </figure>
         ) : (
           <p className="mb-3 text-xs text-ink-faint">
-            Der Verlauf füllt sich — eine Messung je Sekunde.
+            The chart fills up — one reading per second.
           </p>
         )}
         <div className="grid grid-cols-4 gap-3">
-          <Stat label="Bilder/s" value={status.fps.toFixed(0)} hint={fpsHint()} />
+          <Stat label="FPS" value={status.fps.toFixed(0)} hint={fpsHint()} />
           <Stat
-            label="Verworfen"
+            label="Dropped"
             // Der Zählerstand aus dem Status steht seit dem Start der Pipeline
             // da und wächst nur. Hier zählt, was gerade fehlt — der Rest steht
             // in der Zeile darunter.
             value={String(trend.dropped)}
             hint={
               trend.dropped > 0
-                ? `in der letzten Minute · ${status.droppedFrames} gesamt`
+                ? `in the last minute · ${status.droppedFrames} total`
                 : status.droppedFrames > 0
-                  ? `nichts zuletzt · ${status.droppedFrames} gesamt`
-                  : "alles drin"
+                  ? `none lately · ${status.droppedFrames} total`
+                  : "none"
             }
             bad={trend.dropped > 0}
           />
           <Stat
             label="Encoder"
             value={(status.encoder ?? "—").toUpperCase()}
-            hint={status.rateControl === "quality" ? "feste Qualität" : "feste Bitrate"}
+            hint={status.rateControl === "quality" ? "constant quality" : "constant bitrate"}
           />
           <Stat
-            label="Puffer"
+            label="Buffer"
             value={formatSize(status.bufferBytes)}
-            hint={`${Math.round(buffered)} s im Speicher`}
+            hint={`${Math.round(buffered)} s in memory`}
           />
         </div>
       </Sheet>
@@ -843,7 +895,7 @@ export function Console() {
                   game: playing.game,
                 });
                 await loadClips();
-                say("Umbenannt");
+                say("Renamed");
               });
             }}
             onClose={back}
@@ -854,7 +906,7 @@ export function Console() {
             onCopy={() =>
               run("copy", async () => {
                 await api.copyClipFile(playing.id);
-                say("In der Zwischenablage — Strg+V in Discord");
+                say("Copied — Ctrl+V in Discord");
               })
             }
           />
@@ -913,17 +965,17 @@ export function Console() {
                 {status.recording ? (
                   <>
                     <span className="h-2 w-2 shrink-0 rounded-pill bg-live" />
-                    Aufnahme {formatDuration(status.recordingSeconds * 1000)}
+                    Recording {formatDuration(status.recordingSeconds * 1000)}
                   </>
                 ) : status.bufferActive ? (
                   <>
                     <LiveDot />
-                    {formatDuration(buffered * 1000)} im Puffer
+                    {formatDuration(buffered * 1000)} buffered
                   </>
                 ) : (
                   <>
                     <span className="h-2 w-2 shrink-0 rounded-pill bg-line-strong" />
-                    Puffer aus
+                    Buffer off
                   </>
                 )}
               </div>
@@ -934,7 +986,7 @@ export function Console() {
                 />
               </div>
               <span className="truncate text-xs text-ink-muted">
-                {status.game ?? "Kein Spiel erkannt"}
+                {status.game ?? "No game detected"}
               </span>
               {/* Die Sitzung, direkt unter dem Spielnamen (k04). Sie steht nur
                   da, wenn es etwas zu sagen gibt — eine Zeile, die „—" oder
@@ -950,7 +1002,7 @@ export function Console() {
 
             <DockButton
               label="Clip"
-              hint={status.bufferActive ? undefined : "Puffer ist aus"}
+              hint={status.bufferActive ? undefined : "The buffer is off"}
               disabled={!status.bufferActive || busy === "clip"}
               busy={busy === "clip"}
               onClick={saveClip}
@@ -959,7 +1011,7 @@ export function Console() {
             </DockButton>
             <DockButton
               label={
-                status.recording ? formatDuration(status.recordingSeconds * 1000) : "Aufnahme"
+                status.recording ? formatDuration(status.recordingSeconds * 1000) : "Record"
               }
               busy={busy === "rec"}
               onClick={record}
@@ -980,14 +1032,14 @@ export function Console() {
               <IconClips className="h-6 w-6" />
             </DockButton>
             <DockButton
-              label="Ton"
+              label="Audio"
               active={panel === "audio"}
               onClick={() => (panel === "audio" ? back() : void show("audio"))}
             >
               <IconAudio className="h-6 w-6" />
             </DockButton>
             <DockButton
-              label="Leistung"
+              label="Performance"
               active={panel === "perf"}
               onClick={() => (panel === "perf" ? back() : void show("perf"))}
             >
@@ -995,7 +1047,7 @@ export function Console() {
             </DockButton>
             {friendsSignedIn && (
               <DockButton
-                label="Freunde"
+                label="Friends"
                 active={panel === "friends"}
                 onClick={() => (panel === "friends" ? back() : void show("friends"))}
               >
@@ -1016,10 +1068,10 @@ export function Console() {
           data-leaving={closing}
           className="cb-dock-line pointer-events-none absolute bottom-[calc(var(--inset,0px)+0.5rem)] left-1/2 -translate-x-1/2 text-[11px] text-ink-faint"
         >
-          Esc schließt · das Spiel läuft weiter ·{" "}
+          Esc closes · the game keeps running ·{" "}
           {inCapture
-            ? "in Aufnahmen und im Stream sichtbar"
-            : "die Konsole ist in keinem Clip zu sehen"}
+            ? "visible in recordings and streams"
+            : "the console stays out of every clip"}
         </p>
       </div>
     </div>
@@ -1277,7 +1329,7 @@ function ClipStage({
             ) : (
               <button
                 onClick={() => onRenaming(true)}
-                title="Umbenennen"
+                title="Rename"
                 className="group/name flex min-w-0 max-w-full items-center gap-1.5 text-left"
               >
                 <span className="truncate text-[15px] font-semibold">{clipName(clip)}</span>
@@ -1304,20 +1356,20 @@ function ClipStage({
               className="cb-btn inline-flex items-center gap-2 rounded-pill border border-line bg-elevated px-4 py-2 text-[13px] font-semibold hover:border-line-strong hover:bg-hover"
             >
               <IconCopy className="h-4 w-4" />
-              Kopieren
+              Copy
             </button>
             <button
               onClick={() => onOpenInApp(video.current?.currentTime ?? 0)}
               className="cb-btn inline-flex items-center gap-2 rounded-pill bg-accent px-4 py-2 text-[13px] font-semibold text-white hover:bg-accent-bright"
             >
               <IconArrowUpRight className="h-4 w-4" />
-              In der App öffnen
+              Open in the app
             </button>
             <button
               onClick={onClose}
               className="cb-btn rounded-pill border border-line bg-elevated px-4 py-2 text-[13px] font-semibold hover:border-line-strong hover:bg-hover"
             >
-              Zurück
+              Back
             </button>
           </div>
         </div>

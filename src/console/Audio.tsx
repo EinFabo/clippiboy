@@ -67,7 +67,7 @@ export function AudioPanel({
   if (shown.length === 0) {
     return (
       <p className="px-2 py-8 text-center text-sm text-ink-muted">
-        Keine Tonquelle eingeschaltet — der Clip bliebe still.
+        No audio source is on — the clip would be silent.
       </p>
     );
   }
@@ -131,7 +131,7 @@ function Row({
 
       <div className="w-40 shrink-0">
         <Slider
-          label={`Lautstärke ${source.label}`}
+          label={`Volume ${source.label}`}
           value={source.gainDb}
           min={-30}
           max={12}
@@ -147,7 +147,7 @@ function Row({
       <button
         onClick={() => onChange({ ...source, muted: !source.muted }, true)}
         aria-pressed={source.muted}
-        title={source.muted ? "Wieder aufnehmen" : "Stumm — kommt nicht in den Clip"}
+        title={source.muted ? "Record again" : "Mute — stays out of the clip"}
         // `cb-btn` und nicht `cb-tool`: die kleinen Werkzeuge werden im
         // Ring-Stil kreisrund, und aus einer Pille mit Beschriftung würde
         // dabei eine Ellipse.
@@ -158,7 +158,7 @@ function Row({
             : "border-line bg-elevated text-ink-muted hover:border-accent hover:text-accent-bright",
         )}
       >
-        {source.muted ? "AUS" : "AN"}
+        {source.muted ? "OFF" : "ON"}
       </button>
     </div>
   );
