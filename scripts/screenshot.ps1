@@ -1,4 +1,4 @@
-param([string]$Out = "C:\Users\fabia\projects\clippiboy\shot.png")
+param([string]$Out = "$PSScriptRoot\..\shot.png")
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
