@@ -41,7 +41,7 @@ function check(label, ok, extra) {
 }
 
 function socket(who, name) {
-  const ws = new WebSocket(BASE.replace("https", "wss") + "/ws", {
+  const ws = new WebSocket(BASE.replace(/^http/, "ws") + "/ws", {
     headers: { Authorization: `Bearer ${who.token}` },
   });
   const inbox = [];
@@ -99,10 +99,27 @@ check("A gets B's game change live", live?.presence?.game === "Rocket League", l
 sb.ws.send(JSON.stringify({ t: "presence", invisible: true, game: "Rocket League", since: Date.now() }));
 const hidden = await waitFor(sa.inbox, (m) => m.t === "presence" && m.id === B.id);
 check("invisible B looks offline", hidden && hidden.presence === null, hidden);
+check("going invisible stamps last seen", typeof hidden?.lastSeen === "number", hidden);
 
 sb.ws.send(JSON.stringify({ t: "presence", invisible: false, game: null, since: null }));
 const back = await waitFor(sa.inbox, (m) => m.t === "presence" && m.id === B.id);
 check("B online without game", back?.presence && back.presence.game === null, back);
+
+sb.ws.send(JSON.stringify({ t: "presence", invisible: false, game: null, since: null, status: `  back at  ${"x".repeat(80)}`, busy: true }));
+const busy = await waitFor(sa.inbox, (m) => m.t === "presence" && m.id === B.id);
+check("status text is cut to 60", busy?.presence?.status?.length === 60 && busy.presence.status.startsWith("back at x"), busy);
+check("B is busy", busy?.presence?.busy === true, busy);
+
+const offer = { kind: "share-offer", id: "o1", name: "Ace", size: 1234 };
+sa.ws.send(JSON.stringify({ t: "relay", to: B.id, body: offer }));
+const relayed = await waitFor(sb.inbox, (m) => m.t === "relay");
+check("relay reaches the friend", relayed?.from === A.id && relayed.body.id === "o1", relayed);
+sa.ws.send(JSON.stringify({ t: "relay", to: B.id, body: { id: "big", pad: "x".repeat(5000) } }));
+const big = await waitFor(sa.inbox, (m) => m.t === "relayFailed");
+check("relay refuses big bodies", big?.reason === "too big" && big.ref === "big", big);
+sa.ws.send(JSON.stringify({ t: "relay", to: "00000000-0000-4000-8000-0000000000ff", body: { id: "x" } }));
+const stranger = await waitFor(sa.inbox, (m) => m.t === "relayFailed");
+check("relay refuses strangers", stranger?.reason === "not a friend", stranger);
 
 sa.ws.send("ping");
 check("ping → pong", !!(await waitFor(sa.inbox, (m) => m === "pong")));
@@ -110,6 +127,16 @@ check("ping → pong", !!(await waitFor(sa.inbox, (m) => m === "pong")));
 sb.ws.close();
 const gone = await waitFor(sa.inbox, (m) => m.t === "presence" && m.id === B.id);
 check("B closing → offline", gone && gone.presence === null, gone);
+check("last seen moves on", gone?.lastSeen >= hidden?.lastSeen, gone);
+sa.ws.send(JSON.stringify({ t: "relay", to: B.id, body: { id: "o2" } }));
+const offline = await waitFor(sa.inbox, (m) => m.t === "relayFailed");
+check("relay to offline friend says so", offline?.reason === "offline" && offline.ref === "o2", offline);
+
+const sa2 = await socket(A, "A2");
+sa2.ws.send(JSON.stringify({ t: "hello", invisible: false, game: null, since: null }));
+const snap2 = await waitFor(sa2.inbox, (m) => m.t === "snapshot");
+check("snapshot carries last seen", snap2?.lastSeen?.[B.id] === gone?.lastSeen, snap2);
+sa2.ws.close();
 
 check("B blocks A", (await api(B, "POST", `/blocks/${A.id}`)).status === 200);
 const listA = await api(A, "GET", "/friends");
@@ -122,7 +149,7 @@ check("B unblocks", (await api(B, "DELETE", `/blocks/${A.id}`)).status === 200);
 
 check("exchange with junk refused", (await fetch(BASE + "/auth/exchange", { method: "POST", body: JSON.stringify({ code: "x", verifier: "y" }) })).status === 400);
 const start = await fetch(BASE + "/auth/start?challenge=" + "a".repeat(43), { redirect: "manual" });
-check("auth/start says not configured yet", start.status === 503, start.status);
+check("auth/start sends the browser to Discord", start.status === 302 && start.headers.get("location")?.startsWith("https://discord.com/"), start.status);
 
 sa.ws.close();
 console.log(failures === 0 ? "ALL PASSED" : `${failures} FAILED`);

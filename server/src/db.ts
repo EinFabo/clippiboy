@@ -68,6 +68,15 @@ export async function friendIds(db: D1Database, me: string): Promise<string[]> {
   return results.map((row) => row.id);
 }
 
+export async function areFriends(db: D1Database, a: string, b: string): Promise<boolean> {
+  const [first, second] = pair(a, b);
+  const row = await db
+    .prepare("SELECT 1 FROM friendships WHERE user_a = ? AND user_b = ? AND status = 'accepted'")
+    .bind(first, second)
+    .first();
+  return row !== null;
+}
+
 export interface DiscordUser {
   id: string;
   username: string;
