@@ -333,6 +333,9 @@ pub struct FriendsConfig {
     pub favorites: Vec<String>,
     /// Whose clips may be offered at all.
     pub accept_clips: AcceptClips,
+    /// Friends playing the same game when a clip is saved go onto it as tags
+    /// ("with Luca").
+    pub tag_friends: bool,
 }
 
 impl Default for FriendsConfig {
@@ -348,6 +351,7 @@ impl Default for FriendsConfig {
             busy: false,
             favorites: Vec::new(),
             accept_clips: AcceptClips::All,
+            tag_friends: true,
         }
     }
 }

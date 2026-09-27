@@ -131,6 +131,7 @@ export const mockConfig: AppConfig = {
     busy: false,
     favorites: [],
     acceptClips: "all",
+    tagFriends: true,
   },
 };
 

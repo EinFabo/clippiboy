@@ -244,6 +244,8 @@ export interface FriendsConfig {
   /** Friend ids pinned to the top — kept only on this PC. */
   favorites: string[];
   acceptClips: AcceptClips;
+  /** Friends in the same game go onto a new clip as tags ("with Luca"). */
+  tagFriends: boolean;
 }
 
 /** Whose clips may be offered at all. */

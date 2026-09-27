@@ -577,6 +577,25 @@ pub fn presence_of(app: &AppHandle, id: &str) -> Option<Presence> {
     app.try_state::<Friends>()?.view.lock().presence.get(id).cloned()
 }
 
+/// Friends playing this game right now, by name — for the tags on a clip saved
+/// in this moment. Whether it is the same match nobody can tell from here;
+/// the same game at the same time is what there is.
+pub fn playing(app: &AppHandle, game: &str) -> Vec<String> {
+    let Some(friends) = app.try_state::<Friends>() else { return Vec::new() };
+    let view = friends.view.lock();
+    view.lists
+        .friends
+        .iter()
+        .filter(|user| {
+            view.presence
+                .get(&user.id)
+                .and_then(|presence| presence.game.as_deref())
+                .is_some_and(|theirs| theirs.eq_ignore_ascii_case(game))
+        })
+        .map(|user| user.display_name.clone())
+        .collect()
+}
+
 /// A friend's picture (a Discord URL), for the banners about them.
 pub fn friend_avatar(app: &AppHandle, id: &str) -> Option<String> {
     let friends = app.try_state::<Friends>()?;

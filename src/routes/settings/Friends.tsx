@@ -70,6 +70,12 @@ export function FriendsTab() {
               onChange={(acceptClips) => patch({ acceptClips })}
             />
           </Row>
+          <Row
+            label="Tag friends on my clips"
+            hint="Friends playing the same game when you clip go on it as a tag, like “with Luca”"
+          >
+            <Toggle checked={friends.tagFriends} onChange={(tagFriends) => patch({ tagFriends })} />
+          </Row>
           <Row label="Busy" hint="No notices pop up, and clips sent meanwhile are turned down">
             <Toggle checked={friends.busy} onChange={(busy) => patch({ busy })} />
           </Row>
