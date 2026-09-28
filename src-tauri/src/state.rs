@@ -902,7 +902,10 @@ impl AppState {
 impl AppState {
     /// Start a recording by hand. Brings the pipeline up if the buffer is not
     /// running; it goes down again with the recording.
-    pub fn start_recording(&self) -> Result<(), String> {
+    ///
+    /// `friends_in` names the friends playing a game right now — asked for the
+    /// game the recording is filed under, so the two cannot disagree.
+    pub fn start_recording(&self, friends_in: &dyn Fn(&str) -> Vec<String>) -> Result<(), String> {
         let _lifecycle = self.lifecycle.lock();
         if self.is_recording() {
             return Err("A recording is already running.".into());
@@ -915,7 +918,7 @@ impl AppState {
             self.launch_pipeline(false)?;
         }
 
-        let outcome = self.attach_recorder();
+        let outcome = self.attach_recorder(friends_in);
         if outcome.is_err() && started_here {
             self.halt_pipeline();
         }
@@ -925,7 +928,7 @@ impl AppState {
         Ok(())
     }
 
-    fn attach_recorder(&self) -> Result<Arc<Recorder>, String> {
+    fn attach_recorder(&self, friends_in: &dyn Fn(&str) -> Vec<String>) -> Result<Arc<Recorder>, String> {
         let config = self.config_snapshot();
         let shared = self
             .shared
@@ -952,6 +955,10 @@ impl AppState {
             .lock()
             .clone()
             .or_else(|| self.current_game.lock().clone());
+        let friends = match game.as_deref() {
+            Some(game) if config.friends.tag_friends => friends_in(game),
+            _ => Vec::new(),
+        };
         let meta = recorder::Meta {
             id: uuid::Uuid::new_v4().to_string(),
             created_at: now_ms(),
@@ -961,6 +968,7 @@ impl AppState {
             // Written now, not only at stop: after a crash the folder is all
             // there is, and without it every track ends up in the main mix.
             separate: separate_tracks(&config.sources),
+            friends,
             ..recorder::Meta::default()
         };
         let guard = self.pipeline.lock();
@@ -1057,7 +1065,8 @@ impl AppState {
             original_available: false,
             screenshot: false,
             recording: true,
-            tags: Vec::new(),
+            // Not in the library yet — the caller stores them with the clip.
+            tags: meta.friends.iter().map(|name| crate::clips::friend_tag(name)).collect(),
         })
     }
 

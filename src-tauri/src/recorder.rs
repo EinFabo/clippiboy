@@ -70,6 +70,12 @@ pub struct Meta {
     /// after a crash it is counted off the stream.
     #[serde(default)]
     pub frames: Option<u64>,
+    /// Friends who played the same game when the recording started. Kept here
+    /// rather than beside the running recording, so that they stay with this
+    /// one: a stop that is still encoding while the next recording starts,
+    /// or a folder finished after a crash, still knows who was there.
+    #[serde(default)]
+    pub friends: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,7 +336,14 @@ impl Recorder {
         }
         let mut meta = self.meta.lock().clone();
         meta.separate = separate;
-        meta.game = game.or(meta.game);
+        if let Some(game) = game {
+            // The friends were looked up for the game at the start. Another
+            // game claiming the recording at the end is not one they were in.
+            if meta.game.as_deref().is_some_and(|start| !start.eq_ignore_ascii_case(&game)) {
+                meta.friends.clear();
+            }
+            meta.game = Some(game);
+        }
         meta.frames = Some(self.frames());
         // Labels as they stand now — a source renamed mid-recording.
         write_meta(&self.dir, &meta)?;
@@ -712,6 +725,30 @@ mod tests {
         assert!(!recorder.begin_window(&[ring_with("game")], 1250));
         let _ = recorder.finish(Vec::new(), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The friends from the start survive a stop in the same game and are
+    /// written to the folder, so a crash does not lose them either. Another
+    /// game at the stop drops them — they were not in that one.
+    #[test]
+    fn friends_from_the_start_stay_with_their_game() {
+        for (stop_game, kept) in [(None, true), (Some("VALORANT"), true), (Some("Minecraft"), false)] {
+            let dir = scratch("friends");
+            let meta = Meta {
+                id: "f".into(),
+                fps: 60,
+                game: Some("Valorant".into()),
+                friends: vec!["Luca".into()],
+                ..Meta::default()
+            };
+            let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+            let on_disk = read_meta(&recorder.dir).unwrap();
+            assert_eq!(on_disk.friends, vec!["Luca".to_string()]);
+            let meta = recorder.finish(Vec::new(), stop_game.map(String::from)).unwrap();
+            assert_eq!(!meta.friends.is_empty(), kept, "stop in {stop_game:?}");
+            assert_eq!(read_meta(&recorder.dir).unwrap().friends, meta.friends);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

@@ -153,23 +153,36 @@ pub fn discard_original(clip_id: &str) -> Result<(), String> {
 ///
 /// Only `video.mp4`: the same folders hold the untouched copies of edited
 /// screenshots, and those are the image editor's undo, not a trim's.
-fn trim_originals_on_disk() -> Vec<(String, u64)> {
+///
+/// `needed` are the folders (see [`folder_name`]) of clips whose file is gone.
+/// Their original is the only copy left, and [`repair`] puts it back on the
+/// next start — so they are neither counted nor cleared.
+fn trim_originals_on_disk(needed: &std::collections::HashSet<String>) -> Vec<(String, u64)> {
     let Ok(entries) = std::fs::read_dir(root()) else {
         return Vec::new();
     };
     entries
         .flatten()
         .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if needed.contains(&name) {
+                return None;
+            }
             let video = entry.path().join("video.mp4");
             let size = std::fs::metadata(&video).ok().filter(|meta| meta.is_file())?.len();
-            Some((entry.file_name().to_string_lossy().into_owned(), size))
+            Some((name, size))
         })
         .collect()
 }
 
-/// What "Clear all trims" would free.
-pub fn trim_originals() -> crate::model::TrimOriginals {
-    let found = trim_originals_on_disk();
+/// The name of a clip's folder in the store.
+pub fn folder_name(clip_id: &str) -> String {
+    sanitize(clip_id)
+}
+
+/// What "Clear all trims" would free. `needed` as in [`trim_originals_on_disk`].
+pub fn trim_originals(needed: &std::collections::HashSet<String>) -> crate::model::TrimOriginals {
+    let found = trim_originals_on_disk(needed);
     crate::model::TrimOriginals {
         count: found.len() as u32,
         bytes: found.iter().map(|(_, size)| size).sum(),
@@ -181,10 +194,10 @@ pub fn trim_originals() -> crate::model::TrimOriginals {
 /// Holds [`WORKING`] throughout, so it never pulls a file out from under a trim
 /// being written. One that cannot go (open in a player somewhere) is left
 /// standing and simply not counted — the rest still go.
-pub fn discard_all_originals() -> crate::model::TrimOriginals {
+pub fn discard_all_originals(needed: &std::collections::HashSet<String>) -> crate::model::TrimOriginals {
     let _busy = WORKING.lock();
     let mut freed = crate::model::TrimOriginals::default();
-    for (clip_id, size) in trim_originals_on_disk() {
+    for (clip_id, size) in trim_originals_on_disk(needed) {
         match discard_original(&clip_id) {
             Ok(()) => {
                 freed.count += 1;
@@ -368,6 +381,14 @@ fn run(
     on_progress: &impl Fn(f32),
 ) -> Result<Applied, String> {
     let _busy = WORKING.lock();
+
+    // The plan was made before the lock. "Clear all trims" may have thrown the
+    // original away while this run waited for it — and `source_path` would then
+    // quietly hand over the trimmed file, to be cut again with the original's
+    // times. Asked again, the plan fits what is there.
+    if plan.video == VideoSource::Original && !has_original(&clip.id) {
+        return Err("The original was cleared in the meantime — please try again.".into());
+    }
 
     let target = PathBuf::from(&clip.path);
     if !target.is_file() {

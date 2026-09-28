@@ -337,6 +337,11 @@ const TAG_MAX_CHARS: usize = 32;
 /// Tags as the table keeps them: trimmed, inner whitespace collapsed, a leading
 /// `#` dropped (people type it out of habit, the chip draws its own), cut to
 /// [`TAG_MAX_CHARS`], and each once regardless of case — the first spelling wins.
+/// The tag a clip gets for a friend who was in it.
+pub fn friend_tag(name: &str) -> String {
+    format!("with {name}")
+}
+
 pub fn clean_tags(tags: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();

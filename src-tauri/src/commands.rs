@@ -1121,15 +1121,28 @@ pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
 
 /// What "Clear all trims" in the storage settings would free.
 #[tauri::command(async)]
-pub fn trim_originals() -> TrimOriginals {
-    edit::trim_originals()
+pub fn trim_originals(state: State<'_, AppState>) -> Result<TrimOriginals> {
+    Ok(edit::trim_originals(&originals_still_needed(&state)?))
 }
 
 /// Throw away the untouched recording of every trimmed clip. The trims stay;
 /// only undoing them is gone. Returns what was freed.
 #[tauri::command(async)]
-pub fn discard_all_originals() -> TrimOriginals {
-    edit::discard_all_originals()
+pub fn discard_all_originals(state: State<'_, AppState>) -> Result<TrimOriginals> {
+    Ok(edit::discard_all_originals(&originals_still_needed(&state)?))
+}
+
+/// The store folders of clips whose file is missing — a crash between moving
+/// the original aside and putting the trimmed file in its place. There the
+/// original is the only copy. Without the library there is no telling which
+/// those are, so nothing is cleared at all.
+fn originals_still_needed(state: &State<'_, AppState>) -> Result<std::collections::HashSet<String>> {
+    let clips = with_library(state, |lib| lib.list().map_err(|e| e.to_string()))?;
+    Ok(clips
+        .iter()
+        .filter(|clip| !clip.screenshot && !Path::new(&clip.path).is_file())
+        .map(|clip| edit::folder_name(&clip.id))
+        .collect())
 }
 
 /// Everything below a folder, in bytes. Missing folders count as nothing.
