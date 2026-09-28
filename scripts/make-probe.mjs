@@ -34,51 +34,49 @@ const ZIP = join(OUT, "clippiboy-probe.zip");
 // hosts. `--full` puts the tools back for a complete end-to-end run.
 const SLIM = !process.argv.includes("--full");
 
-const LIESMICH = `ClippiBoy — Encoder-Test
+const README = `ClippiBoy — encoder test
 ========================
 
-Danke fürs Mitmachen. Der Test misst, wie sich der Video-Encoder deiner
-Grafikkarte unter verschiedenen Einstellungen verhält. Er nimmt dazu mehrmals
-ein paar Sekunden deinen Bildschirm auf.
+Thanks for helping out. The test measures how your graphics card's video
+encoder behaves under different settings. To do that, it records a few
+seconds of your screen several times.
 
-WICHTIG — vorher schließen:
+IMPORTANT — close these first:
 
-  * Spiele
-  * OBS, Shadowplay, ClippiBoy, jede andere Aufnahme- oder Streaming-Software
-  * alles, was die Grafikkarte beschäftigt
+  * Games
+  * OBS, ShadowPlay, ClippiBoy, any other recording or streaming software
+  * anything else that keeps the graphics card busy
 
-Das ist keine Förmlichkeit. Läuft etwas davon mit, teilt es sich den Encoder
-mit dem Test, und die Messung ist wertlos — beim ersten Versuch hier lief OBS
-im Hintergrund und hat eine gesunde Karte kaputt aussehen lassen. Der Test
-merkt das inzwischen selbst und sagt es im Bericht, aber dann war die Zeit
-umsonst.
+This is not a formality. If any of it keeps running, it shares the encoder
+with the test and the measurement is worthless — on the first attempt here,
+OBS was running in the background and made a healthy card look broken. The
+test now notices this itself and says so in the report, but then the time
+was wasted.
 
-So geht es:
+How it works:
 
-  1. Diesen Ordner irgendwohin entpacken (Desktop reicht).
-  2. clippiboy-probe.exe doppelklicken.
-  3. Der Test schaut selbst nach, ob noch etwas läuft, und sagt dir dann,
-     was du schließen sollst. Schließen, Enter drücken — dann geht es los.
-  4. Lass ein Video laufen, während der Test misst — irgendein YouTube-Clip
-     im Fenster reicht, Hauptsache es bewegt sich etwas. Auf einem stillen
-     Bildschirm hat der Encoder fast nichts zu tun, und dann misst der Test
-     das Falsche.
-  5. Warten, bis "Done" im Fenster steht — etwa vier Minuten. Solange läuft
-     der Test, auch wenn zwischendurch nichts passiert. Bitte in der Zeit
-     sonst nichts starten.
-  6. Die Datei report.txt zurückschicken, die dann in diesem Ordner liegt.
-     Danach Enter drücken, das Fenster schließt sich.
+  1. Unzip this folder anywhere (the desktop is fine).
+  2. Double-click clippiboy-probe.exe.
+  3. The test checks by itself whether anything is still running and then
+     tells you what to close. Close it, press Enter — then it starts.
+  4. Keep a video playing while the test measures — any YouTube clip in a
+     window will do, as long as something moves. On a still screen the
+     encoder has almost nothing to do, and the test measures the wrong thing.
+  5. Wait until "Done" appears in the window — about four minutes. The test
+     is running the whole time, even when nothing seems to happen. Please
+     don't start anything else meanwhile.
+  6. Send back the file report.txt that will then be in this folder.
+     After that, press Enter and the window closes.
 
-Falls Windows warnt, dass der Herausgeber unbekannt ist: "Weitere
-Informationen" und dann "Trotzdem ausführen".
+If Windows warns that the publisher is unknown: "More info" and then
+"Run anyway".
 
-Was aufgezeichnet wird: der Bildschirminhalt der genannten Sekunden. Das Bild
-verlässt deinen Rechner nicht — gebraucht wird nur die report.txt, und darin
-steht kein Bild, sondern nur Text: welche Grafikkarte, welcher Encoder, wie
-viele Bilder pro Sekunde. Wenn du magst, schau vorher hinein, es ist eine
-normale Textdatei.
+What gets recorded: the screen content during those seconds. The picture never
+leaves your computer — only report.txt is needed, and it contains no picture,
+just text: which graphics card, which encoder, how many frames per second. If
+you like, take a look inside first; it is a plain text file.
 
-Falls du gerade etwas Vertrauliches offen hast, mach es vorher zu.
+If you have anything confidential open right now, close it first.
 `;
 
 function run(command, args, options = {}) {
@@ -117,7 +115,7 @@ async function main() {
       await copyFile(join(RESOURCES, tool), join(STAGE, tool));
     }
   }
-  await writeFile(join(STAGE, "LIESMICH.txt"), LIESMICH, "utf8");
+  await writeFile(join(STAGE, "README.txt"), README, "utf8");
 
   await rm(ZIP, { force: true });
   run("powershell.exe", [

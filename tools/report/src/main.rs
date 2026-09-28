@@ -16,7 +16,7 @@ fn main() {
     let mut out = String::with_capacity(256 * 1024);
     let started = std::time::Instant::now();
 
-    println!("ClippiBoy-Bericht wird erstellt, einen Moment ...");
+    println!("Creating the ClippiBoy report, one moment ...");
 
     header(&mut out);
     system(&mut out);
@@ -32,25 +32,25 @@ fn main() {
 
     let _ = writeln!(
         out,
-        "\n--- Ende des Berichts (erstellt in {:.1} s) ---",
+        "\n--- End of report (created in {:.1} s) ---",
         started.elapsed().as_secs_f32()
     );
 
     let path = destination();
     match std::fs::write(&path, out.as_bytes()) {
         Ok(()) => {
-            println!("\nFertig. Die Datei liegt hier:\n\n    {}\n", path.display());
-            println!("Bitte diese eine Datei zurueckschicken.");
+            println!("\nDone. The file is here:\n\n    {}\n", path.display());
+            println!("Please send back this one file.");
         }
         Err(err) => {
-            eprintln!("\nDie Datei konnte nicht geschrieben werden: {err}");
-            eprintln!("Pfad war: {}", path.display());
+            eprintln!("\nThe file could not be written: {err}");
+            eprintln!("Path was: {}", path.display());
         }
     }
 
     // Double-clicked, the window would otherwise close before anything could be
     // read off it.
-    println!("\n[Eingabetaste zum Schliessen]");
+    println!("\n[Press Enter to close]");
     let mut wait = String::new();
     let _ = std::io::stdin().read_line(&mut wait);
 }
@@ -63,7 +63,7 @@ fn main() {
 /// there is a report nobody finds; that happened on the first machine this ran
 /// on.
 fn destination() -> PathBuf {
-    let name = "clippiboy-bericht.txt";
+    let name = "clippiboy-report.txt";
     let asked = powershell("[Environment]::GetFolderPath('Desktop')");
     let asked = PathBuf::from(asked.trim());
     if asked.is_dir() {
@@ -105,25 +105,25 @@ fn powershell(script: &str) -> String {
             if text.is_empty() {
                 let err = String::from_utf8_lossy(&done.stderr).trim_end().to_string();
                 if err.is_empty() {
-                    "(keine Angabe)".into()
+                    "(no output)".into()
                 } else {
-                    format!("(Fehler) {err}")
+                    format!("(error) {err}")
                 }
             } else {
                 text
             }
         }
-        Err(err) => format!("(PowerShell nicht erreichbar: {err})"),
+        Err(err) => format!("(PowerShell not available: {err})"),
     }
 }
 
 fn header(out: &mut String) {
     let _ = write!(
         out,
-        "ClippiBoy — Diagnosebericht\n\
-         Erstellt am: {}\n\
-         Rechner:     {}\n\
-         Benutzer:    {}\n",
+        "ClippiBoy — diagnostic report\n\
+         Created:  {}\n\
+         Computer: {}\n\
+         User:     {}\n",
         powershell("Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'"),
         std::env::var("COMPUTERNAME").unwrap_or_else(|_| "?".into()),
         std::env::var("USERNAME").unwrap_or_else(|_| "?".into()),
@@ -139,10 +139,10 @@ fn system(out: &mut String) {
             "$os = Get-CimInstance Win32_OperatingSystem; \
              $cs = Get-CimInstance Win32_ComputerSystem; \
              'Windows:   ' + $os.Caption + ' (Build ' + $os.BuildNumber + ')'; \
-             'Speicher:  ' + [math]::Round($cs.TotalPhysicalMemory/1GB,1) + ' GB'; \
-             'Prozessor: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name; \
+             'Memory:    ' + [math]::Round($cs.TotalPhysicalMemory/1GB,1) + ' GB'; \
+             'CPU:       ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name; \
              Get-CimInstance Win32_VideoController | ForEach-Object { \
-                'Grafik:    ' + $_.Name + ' (Treiber ' + $_.DriverVersion + ', ' + $_.DriverDate + ')' }"
+                'GPU:       ' + $_.Name + ' (driver ' + $_.DriverVersion + ', ' + $_.DriverDate + ')' }"
         )
     );
 }
@@ -156,16 +156,16 @@ fn installation(out: &mut String) {
             "$exe = Join-Path $env:LOCALAPPDATA 'ClippiBoy\\clippiboy.exe'; \
              if (Test-Path $exe) { \
                 $i = Get-Item $exe; \
-                'Programm:  ' + $exe; \
+                'Program:   ' + $exe; \
                 'Version:   ' + $i.VersionInfo.FileVersion; \
-                'Geaendert: ' + $i.LastWriteTime; \
-                'Groesse:   ' + [math]::Round($i.Length/1MB,1) + ' MB' \
-             } else { 'Programm nicht unter ' + $exe }; \
+                'Modified:  ' + $i.LastWriteTime; \
+                'Size:      ' + [math]::Round($i.Length/1MB,1) + ' MB' \
+             } else { 'Program not found at ' + $exe }; \
              $p = Get-Process clippiboy -ErrorAction SilentlyContinue; \
              if ($p) { \
                 foreach ($q in $p) { \
-                  'Laeuft:    PID ' + $q.Id + ', seit ' + $q.StartTime + ', reagiert: ' + $q.Responding } \
-             } else { 'Laeuft:    nein' }"
+                  'Running:   PID ' + $q.Id + ', since ' + $q.StartTime + ', responding: ' + $q.Responding } \
+             } else { 'Running:   no' }"
         )
     );
 }
@@ -180,20 +180,20 @@ fn autostart(out: &mut String) {
              $v = (Get-ItemProperty -Path $run -ErrorAction SilentlyContinue).PSObject.Properties | \
                   Where-Object { $_.Name -match 'clippi' }; \
              if ($v) { foreach ($e in $v) { 'Registry:  ' + $e.Name + ' = ' + $e.Value } } \
-             else { 'Registry:  kein Eintrag' }; \
+             else { 'Registry:  no entry' }; \
              $sf = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\Startup'; \
              $f = Get-ChildItem $sf -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'clippi' }; \
-             if ($f) { foreach ($e in $f) { 'Autostart-Ordner: ' + $e.Name } } \
-             else { 'Autostart-Ordner: kein Eintrag' }"
+             if ($f) { foreach ($e in $f) { 'Startup folder: ' + $e.Name } } \
+             else { 'Startup folder: no entry' }"
         )
     );
 }
 
 /// The settings, with the control port token taken out.
 fn configuration(out: &mut String) {
-    section(out, "Einstellungen (config.json)");
+    section(out, "Settings (config.json)");
     let Some(path) = data_dir().map(|d| d.join("config.json")) else {
-        let _ = writeln!(out, "APPDATA nicht gefunden.");
+        let _ = writeln!(out, "APPDATA not found.");
         return;
     };
     match std::fs::read_to_string(&path) {
@@ -201,7 +201,7 @@ fn configuration(out: &mut String) {
             let _ = writeln!(out, "{}\n", redact_token(&text));
         }
         Err(err) => {
-            let _ = writeln!(out, "{} konnte nicht gelesen werden: {err}", path.display());
+            let _ = writeln!(out, "{} could not be read: {err}", path.display());
         }
     }
 }
@@ -235,7 +235,7 @@ fn redact_token(text: &str) -> String {
             return out;
         };
         let len = tail[..close].len();
-        let _ = write!(out, "\"(entfernt, {len} Zeichen)\"");
+        let _ = write!(out, "\"(removed, {len} characters)\"");
         rest = &tail[close + 1..];
     }
     out.push_str(rest);
@@ -247,18 +247,18 @@ fn ffmpeg(out: &mut String) {
     let Some(root) = std::env::var_os("LOCALAPPDATA")
         .map(|p| PathBuf::from(p).join("gg.clippiboy.app").join("ffmpeg"))
     else {
-        let _ = writeln!(out, "LOCALAPPDATA nicht gefunden.");
+        let _ = writeln!(out, "LOCALAPPDATA not found.");
         return;
     };
     if !root.is_dir() {
         let _ = writeln!(
             out,
-            "Ordner {} gibt es nicht — ffmpeg wurde nie geladen.",
+            "Folder {} does not exist — ffmpeg was never downloaded.",
             root.display()
         );
         return;
     }
-    let _ = writeln!(out, "Ordner: {}", root.display());
+    let _ = writeln!(out, "Folder: {}", root.display());
     list_tree(out, &root, 0);
 }
 
@@ -283,14 +283,14 @@ fn list_tree(out: &mut String, dir: &Path, depth: usize) {
                 let _ = writeln!(out, "{pad}{name}  ({} Bytes)", meta.len());
             }
             Err(_) => {
-                let _ = writeln!(out, "{pad}{name}  (nicht lesbar)");
+                let _ = writeln!(out, "{pad}{name}  (not readable)");
             }
         }
     }
 }
 
 fn monitors(out: &mut String) {
-    section(out, "Bildschirme");
+    section(out, "Displays");
     let _ = writeln!(
         out,
         "{}",
@@ -298,14 +298,14 @@ fn monitors(out: &mut String) {
             "Add-Type -AssemblyName System.Windows.Forms; \
              [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { \
                 $_.DeviceName + '  ' + $_.Bounds.Width + 'x' + $_.Bounds.Height + \
-                ' bei ' + $_.Bounds.X + ',' + $_.Bounds.Y + \
-                (&{ if ($_.Primary) { '  (primaer)' } else { '' } }) }"
+                ' at ' + $_.Bounds.X + ',' + $_.Bounds.Y + \
+                (&{ if ($_.Primary) { '  (primary)' } else { '' } }) }"
         )
     );
 }
 
 fn event_log(out: &mut String) {
-    section(out, "Windows-Ereignisprotokoll (Abstuerze und Haenger)");
+    section(out, "Windows event log (crashes and hangs)");
     let _ = writeln!(
         out,
         "{}",
@@ -313,13 +313,13 @@ fn event_log(out: &mut String) {
             "$ErrorActionPreference = 'SilentlyContinue'; \
              $e = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddDays(-30)}; \
              $hits = $e | Where-Object { $_.Message -match 'clippiboy' }; \
-             if (-not $hits) { 'Nichts in den letzten 30 Tagen.' } else { \
+             if (-not $hits) { 'Nothing in the last 30 days.' } else { \
                $hits | ForEach-Object { \
-                 $name = 'Ereignis ' + $_.Id; \
-                 if ($_.Message -match 'Ereignisname:\\s*(\\w+)') { $name = $Matches[1] } \
+                 $name = 'Event ' + $_.Id; \
+                 if ($_.Message -match '(?:Ereignisname|Event Name):\\s*(\\w+)') { $name = $Matches[1] } \
                  elseif ($_.Message -match 'Faulting application name') { $name = 'AppCrash' }; \
                  $ver = ''; if ($_.Message -match 'P2:\\s*([\\d\\.]+)') { $ver = ' ver=' + $Matches[1] }; \
-                 $mod = ''; if ($_.Message -match 'Faulting module name:\\s*(\\S+)') { $mod = ' modul=' + $Matches[1] }; \
+                 $mod = ''; if ($_.Message -match 'Faulting module name:\\s*(\\S+)') { $mod = ' module=' + $Matches[1] }; \
                  $_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss') + '  ' + $name + $ver + $mod } }"
         )
     );
@@ -401,7 +401,7 @@ fn field(line: &str, key: &str) -> Option<u64> {
 /// the log ends inside is called out, because that is the only one that
 /// answers the question.
 fn frozen_capture(out: &mut String, logs: &[LogFile]) {
-    section(out, "Stehendes Bild? (die wichtigste Frage)");
+    section(out, "Frozen picture? (the most important question)");
 
     let mut any = false;
     for log in logs {
@@ -409,7 +409,7 @@ fn frozen_capture(out: &mut String, logs: &[LogFile]) {
         if ticks.len() < 2 {
             continue;
         }
-        let _ = writeln!(out, "-- {} ({} Messpunkte)", log.name, ticks.len());
+        let _ = writeln!(out, "-- {} ({} samples)", log.name, ticks.len());
 
         // Stretches of consecutive intervals in which nearly every frame was a
         // repeat, collected first and judged afterwards.
@@ -455,30 +455,30 @@ fn frozen_capture(out: &mut String, logs: &[LogFile]) {
 
         let reaches_end = runs.iter().any(|r| r.to == last_stamp);
         if runs.is_empty() {
-            let _ = writeln!(out, "   Keine Strecke ueber einer Minute.");
+            let _ = writeln!(out, "   No stretch longer than a minute.");
         } else {
             let _ = writeln!(
                 out,
-                "   Laengste Strecken mit stehendem Bild (ueber eine Minute), laengste zuerst:"
+                "   Longest stretches with a frozen picture (over a minute), longest first:"
             );
             for r in runs.iter().take(10) {
                 report_run(out, r, r.to == last_stamp);
             }
             if runs.len() > 10 {
-                let _ = writeln!(out, "   ... und {} weitere.", runs.len() - 10);
+                let _ = writeln!(out, "   ... and {} more.", runs.len() - 10);
             }
         }
         if reaches_end {
             let _ = writeln!(
                 out,
-                "   >>> Das Log endet MITTEN in einer solchen Strecke. Die Aufnahme hat sich\n\
-                 \x20      nicht mehr erholt — das ist der gesuchte Fehler."
+                "   >>> The log ends IN THE MIDDLE of such a stretch. The capture never\n\
+                 \x20      recovered — this is the bug we are looking for."
             );
         } else {
             let _ = writeln!(
                 out,
-                "   Die Aufnahme hat sich jedes Mal wieder erholt. Stehende Strecken sind dann\n\
-                 \x20  ein Bildschirm, auf dem nichts passiert — kein Fehler."
+                "   The capture recovered every time. Frozen stretches are then just a\n\
+                 \x20  display on which nothing happens — not a bug."
             );
         }
         any = true;
@@ -486,13 +486,13 @@ fn frozen_capture(out: &mut String, logs: &[LogFile]) {
         let last = ticks.last().unwrap();
         let _ = writeln!(
             out,
-            "   Gesamt bis zuletzt: {} Bilder, davon {} wiederholt, {} verworfen.",
+            "   Total up to the end: {} frames, {} of them repeated, {} dropped.",
             last.frames, last.repeated, last.dropped
         );
     }
 
     if !any {
-        let _ = writeln!(out, "Keine Pipeline-Zeilen in den Logs gefunden.");
+        let _ = writeln!(out, "No pipeline lines found in the logs.");
     }
 }
 
@@ -540,31 +540,31 @@ fn report_run(out: &mut String, run: &Run, reaches_end: bool) {
         0.0
     };
     let secs = run.seconds();
-    let mark = if reaches_end { "  <== bis zum Ende" } else { "" };
+    let mark = if reaches_end { "  <== until the end" } else { "" };
     let _ = writeln!(
         out,
-        "     {:>6.0} s   {} bis {}   {} Bilder, {:.0} % wiederholt{}",
+        "     {:>6.0} s   {} to {}   {} frames, {:.0} % repeated{}",
         secs, run.from, run.to, run.frames, share, mark
     );
 }
 
 fn raw_logs(out: &mut String, logs: &[LogFile]) {
     for log in logs {
-        section(out, &format!("Log: {} — Ereignisse", log.name));
+        section(out, &format!("Log: {} — events", log.name));
         let events: Vec<&str> = log
             .text
             .lines()
             .filter(|line| !line.contains("pipeline:") && !line.starts_with("      "))
             .collect();
         if events.is_empty() {
-            let _ = writeln!(out, "(nichts ausser Pipeline-Zeilen)");
+            let _ = writeln!(out, "(nothing but pipeline lines)");
         } else {
             let _ = writeln!(out, "{}", events.join("\n"));
         }
 
         // The pipeline lines are the bulk of the file and say the same thing
         // over and over. The tail is enough to see the state it ended in.
-        section(out, &format!("Log: {} — letzte Pipeline-Zeilen", log.name));
+        section(out, &format!("Log: {} — last pipeline lines", log.name));
         let ticks: Vec<&str> = log
             .text
             .lines()

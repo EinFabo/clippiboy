@@ -1,7 +1,7 @@
 # ClippiBoy — diagnostic report
 
 A program that runs once and writes everything needed for debugging into **one**
-file on the desktop: `clippiboy-bericht.txt`.
+file on the desktop: `clippiboy-report.txt`.
 
 Meant for the case where the person who sees the bug is not the person who can
 read a log. They run it and send back the one file.
