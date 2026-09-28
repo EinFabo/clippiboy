@@ -595,11 +595,22 @@ export const useEngine = create<EngineState>((set, get) => ({
   },
 
   async discardAllOriginals() {
-    const freed = await api.discardAllOriginals();
+    if (!inTauri) return { count: 0, bytes: 0 };
+    let freed: TrimOriginals;
+    try {
+      freed = await api.discardAllOriginals();
+    } catch (err) {
+      set({ lastError: String(err) });
+      throw err;
+    }
     // Every clip's `originalAvailable` may have changed — read them all again
-    // rather than guess which.
-    const clips = await api.listClips();
-    set({ clips });
+    // rather than guess which. The originals are gone either way: a failed
+    // read here must not make a clear that worked look like one that did not.
+    try {
+      set({ clips: await api.listClips() });
+    } catch (err) {
+      set({ lastError: String(err) });
+    }
     return freed;
   },
 

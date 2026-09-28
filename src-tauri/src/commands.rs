@@ -1109,13 +1109,18 @@ pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
         .filter_map(|clip| std::fs::metadata(&clip.path).ok())
         .map(|meta| meta.len())
         .sum();
-    let cache_bytes = app.path().app_local_data_dir().map(|dir| dir_bytes(&dir)).unwrap_or(0);
+    let local = app.path().app_local_data_dir().ok();
+    // ffmpeg lives in the same folder as the web views' cache (`tools.rs`), but
+    // unlike the cache it does not come and go — it gets a row of its own.
+    let tools_bytes = local.as_ref().map(|dir| dir_bytes(&dir.join("ffmpeg"))).unwrap_or(0);
+    let cache_bytes = local.as_ref().map(|dir| dir_bytes(dir)).unwrap_or(0).saturating_sub(tools_bytes);
     Ok(StorageUsage {
         clips_bytes,
         originals_bytes: dir_bytes(&edit::root()),
         tracks_bytes: dir_bytes(&crate::stems::root()),
         thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
         cache_bytes,
+        tools_bytes,
     })
 }
 
@@ -1148,7 +1153,9 @@ fn originals_still_needed(state: &State<'_, AppState>) -> Result<std::collection
 /// Everything below a folder, in bytes. Missing folders count as nothing.
 ///
 /// Hand-rolled rather than pulled in: the project carries no directory-walking
-/// dependency, and these three folders are one level of subfolders deep.
+/// dependency. Recursive to any depth — the web views' cache runs to thousands
+/// of files, which is why the storage page does not wait on this to show the
+/// rest.
 fn dir_bytes(root: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;

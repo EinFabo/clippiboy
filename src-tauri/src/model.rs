@@ -714,6 +714,9 @@ pub struct StorageUsage {
     pub thumbs_bytes: u64,
     /// The web views' own folders (WebView2 cache and storage).
     pub cache_bytes: u64,
+    /// ffmpeg, downloaded on the first start. Beside the cache in the same
+    /// folder, but nothing Windows ever trims.
+    pub tools_bytes: u64,
 }
 
 /// The untouched recordings kept for undoing trims: how many, and how much.

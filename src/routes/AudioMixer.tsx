@@ -31,6 +31,20 @@ function wantsOwnTrack(kind: SourceKind): boolean {
   return kind.type !== "outputDevice";
 }
 
+/** A new source as both "Quick setup" and "Pick a source" add it. */
+function newSource(label: string, kind: SourceKind): AudioSource {
+  return {
+    id: `src-${crypto.randomUUID().slice(0, 8)}`,
+    label,
+    kind,
+    enabled: true,
+    gainDb: 0,
+    muted: false,
+    solo: false,
+    separateTrack: wantsOwnTrack(kind),
+  };
+}
+
 /**
  * Is anything recorded application by application?
  *
@@ -476,26 +490,15 @@ function QuickSetup({
   const [withInput, setWithInput] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  const make = (label: string, kind: SourceKind): AudioSource => ({
-    id: `src-${crypto.randomUUID().slice(0, 8)}`,
-    label,
-    kind,
-    enabled: true,
-    gainDb: 0,
-    muted: false,
-    solo: false,
-    separateTrack: wantsOwnTrack(kind),
-  });
-
   const add = async () => {
     setBusy(true);
     try {
       // One after the other: each call writes the whole configuration.
       if (withOutput && output) {
-        await onAdd(make(output.name, { type: "outputDevice", deviceId: output.id }));
+        await onAdd(newSource(output.name, { type: "outputDevice", deviceId: output.id }));
       }
       if (withInput && input) {
-        await onAdd(make(input.name, { type: "inputDevice", deviceId: input.id }));
+        await onAdd(newSource(input.name, { type: "inputDevice", deviceId: input.id }));
       }
     } finally {
       setBusy(false);
@@ -719,17 +722,6 @@ function AddSourcePanel({
   const outputs = devices.filter((d) => d.kind === "output");
   const inputs = devices.filter((d) => d.kind === "input");
 
-  const make = (label: string, kind: SourceKind): AudioSource => ({
-    id: `src-${crypto.randomUUID().slice(0, 8)}`,
-    label,
-    kind,
-    enabled: true,
-    gainDb: 0,
-    muted: false,
-    solo: false,
-    separateTrack: wantsOwnTrack(kind),
-  });
-
   return (
     <Card className="mb-4 p-5">
       <div className="mb-4 flex items-center justify-between">
@@ -757,7 +749,7 @@ function AddSourcePanel({
               ? `follows the game automatically · right now ${detectedGame}`
               : "follows the game automatically · none detected right now"
         }
-        onPick={() => onAdd(make("Game", { type: "game" }))}
+        onPick={() => onAdd(newSource("Game", { type: "game" }))}
       />
 
       <div className="grid grid-cols-3 gap-6">
@@ -770,7 +762,7 @@ function AddSourcePanel({
             sub: p.exe,
             onPick: () =>
               onAdd(
-                make(p.name, {
+                newSource(p.name, {
                   type: "process",
                   pid: p.pid,
                   // Stored alongside the pid: the pid is dead the moment the
@@ -789,7 +781,7 @@ function AddSourcePanel({
             label: d.name,
             sub: d.isDefault ? "Default device" : "",
             onPick: () =>
-              onAdd(make(d.name, { type: "outputDevice", deviceId: d.id })),
+              onAdd(newSource(d.name, { type: "outputDevice", deviceId: d.id })),
           }))}
         />
         <SourceColumn
@@ -800,7 +792,7 @@ function AddSourcePanel({
             label: d.name,
             sub: d.isDefault ? "Default device" : "",
             onPick: () =>
-              onAdd(make(d.name, { type: "inputDevice", deviceId: d.id })),
+              onAdd(newSource(d.name, { type: "inputDevice", deviceId: d.id })),
           }))}
         />
       </div>

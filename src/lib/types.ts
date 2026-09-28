@@ -432,6 +432,8 @@ export interface StorageUsage {
   thumbsBytes: number;
   /** The web views' own folders. */
   cacheBytes: number;
+  /** ffmpeg, downloaded on the first start. */
+  toolsBytes: number;
 }
 
 /** Untouched recordings kept to undo trims — what "Clear all trims" frees. */

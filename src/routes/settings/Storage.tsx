@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
@@ -6,7 +6,8 @@ import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { api, inTauri } from "@/lib/ipc";
 import { formatSize } from "@/lib/format";
-import { IconCheck } from "@/components/icons";
+import { IconCheck, IconClose } from "@/components/icons";
+import { useCountUp } from "@/lib/useCountUp";
 import type { StorageUsage, TrimOriginals } from "@/lib/types";
 
 export function StorageTab() {
@@ -49,7 +50,17 @@ function Storage() {
     };
   }, [reads]);
 
-  if (!usage) return null;
+  // "Clear all trims" does not wait for the count: walking the web views'
+  // cache can take a moment, and the button has nothing to do with it.
+  return (
+    <>
+      {usage && <UsageCard usage={usage} />}
+      <ClearTrims onCleared={() => setReads((n) => n + 1)} />
+    </>
+  );
+}
+
+function UsageCard({ usage }: { usage: StorageUsage }) {
   const rows: Array<[string, number, string]> = [
     [
       "Clips",
@@ -72,35 +83,35 @@ function Storage() {
       usage.cacheBytes,
       "What the app's windows keep for themselves. Windows keeps it in check.",
     ],
+    [
+      "ffmpeg",
+      usage.toolsBytes,
+      "Downloaded once on the first start to write clips.",
+    ],
   ];
   const total = rows.reduce((sum, [, bytes]) => sum + bytes, 0);
 
   return (
-    <>
-      <Card className="mt-3 divide-y divide-line">
-        {rows.map(([label, bytes, hint]) => (
-          <div
-            key={label}
-            className="flex items-center justify-between gap-6 p-4"
-          >
-            <div>
-              <p className="text-sm">{label}</p>
-              <p className="mt-0.5 text-xs text-ink-faint">{hint}</p>
-            </div>
-            <span className="shrink-0 font-mono text-sm text-ink-muted">
-              {formatSize(bytes)}
-            </span>
+    <Card className="mt-3 divide-y divide-line">
+      {rows.map(([label, bytes, hint]) => (
+        <div
+          key={label}
+          className="flex items-center justify-between gap-6 p-4"
+        >
+          <div>
+            <p className="text-sm">{label}</p>
+            <p className="mt-0.5 text-xs text-ink-faint">{hint}</p>
           </div>
-        ))}
-        <div className="flex items-center justify-between gap-6 p-4">
-          <p className="text-sm font-medium">Everything ClippiBoy takes</p>
-          <span className="shrink-0 font-mono text-sm">
-            {formatSize(total)}
+          <span className="shrink-0 font-mono text-sm text-ink-muted">
+            {formatSize(bytes)}
           </span>
         </div>
-      </Card>
-      <ClearTrims onCleared={() => setReads((n) => n + 1)} />
-    </>
+      ))}
+      <div className="flex items-center justify-between gap-6 p-4">
+        <p className="text-sm font-medium">Everything ClippiBoy takes</p>
+        <span className="shrink-0 font-mono text-sm">{formatSize(total)}</span>
+      </div>
+    </Card>
   );
 }
 
@@ -117,62 +128,52 @@ const COUNT_MS = 900;
  * drains, so the space visibly goes rather than a number just changing.
  */
 function ClearTrims({ onCleared }: { onCleared: () => void }) {
-  const discardAll = useEngine((s) => s.discardAllOriginals);
   const [found, setFound] = useState<TrimOriginals | null>(null);
-  const [asking, setAsking] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [freed, setFreed] = useState<TrimOriginals | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  /** The size on screen while it counts down; `null` when not counting. */
-  const [counting, setCounting] = useState<number | null>(null);
-  const frame = useRef(0);
 
-  const read = useCallback(() => {
-    if (!inTauri) {
-      setFound({ count: 7, bytes: 3.4e9 });
-      return;
-    }
+  useEffect(() => {
     void api
       .trimOriginals()
       .then(setFound)
       .catch(() => setFound({ count: 0, bytes: 0 }));
   }, []);
 
-  useEffect(() => {
-    read();
-    return () => cancelAnimationFrame(frame.current);
-  }, [read]);
+  // Mounted only once the size is known, so it starts on that size rather than
+  // counting up to it from nothing.
+  if (!found) return null;
+  return (
+    <ClearTrimsCard found={found} setFound={setFound} onCleared={onCleared} />
+  );
+}
 
-  const countDown = (from: number) => {
-    const reduced = window.matchMedia(
-      "(prefers-reduced-motion: reduce)",
-    ).matches;
-    if (reduced || from <= 0) {
-      setCounting(null);
-      return;
-    }
-    const start = performance.now();
-    const step = (now: number) => {
-      const t = Math.min(1, (now - start) / COUNT_MS);
-      // Ease out: fast at first, settling onto zero.
-      const eased = 1 - Math.pow(1 - t, 3);
-      setCounting(from * (1 - eased));
-      if (t < 1) frame.current = requestAnimationFrame(step);
-      else setCounting(null);
-    };
-    setCounting(from);
-    frame.current = requestAnimationFrame(step);
-  };
+function ClearTrimsCard({
+  found,
+  setFound,
+  onCleared,
+}: {
+  found: TrimOriginals;
+  setFound: (found: TrimOriginals) => void;
+  onCleared: () => void;
+}) {
+  const discardAll = useEngine((s) => s.discardAllOriginals);
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [freed, setFreed] = useState<TrimOriginals | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Counts down to what is really left — a clip open in a player keeps its
+  // original, and the number stops there instead of reaching zero and jumping
+  // back. Threshold 0: a few bytes left are still a change worth showing.
+  const shownBytes = useCountUp(found.bytes, {
+    duration: COUNT_MS,
+    threshold: 0,
+  });
 
   const clear = async () => {
-    if (!found) return;
     setBusy(true);
     setError(null);
     try {
-      const result = inTauri ? await discardAll() : found;
+      const result = await discardAll();
       setAsking(false);
       setFreed(result);
-      countDown(found.bytes);
       // What could not go (a clip open in a player) stays counted.
       setFound({
         count: Math.max(0, found.count - result.count),
@@ -186,9 +187,7 @@ function ClearTrims({ onCleared }: { onCleared: () => void }) {
     }
   };
 
-  if (!found) return null;
   const nothing = found.count === 0;
-  const shownBytes = counting ?? found.bytes;
   const before = freed ? freed.bytes + found.bytes : found.bytes;
   const share = before > 0 ? shownBytes / before : 0;
 
@@ -220,7 +219,7 @@ function ClearTrims({ onCleared }: { onCleared: () => void }) {
         </div>
       </div>
 
-      {(counting !== null || (freed && found.bytes > 0)) && (
+      {freed && freed.count > 0 && shownBytes > 0 && (
         <div className="mt-4 h-1 overflow-hidden rounded-pill bg-elevated">
           <div
             className="h-full rounded-pill bg-accent-bright"
@@ -261,9 +260,13 @@ function ClearTrims({ onCleared }: { onCleared: () => void }) {
       {freed && !asking && (
         <p
           key={freed.bytes}
-          className="cb-freed-in mt-3 flex items-center gap-2 text-xs text-ok"
+          className={`cb-freed-in mt-3 flex items-center gap-2 text-xs ${freed.count === 0 ? "text-warn" : "text-ok"}`}
         >
-          <IconCheck className="h-4 w-4" />
+          {freed.count === 0 ? (
+            <IconClose className="h-4 w-4" />
+          ) : (
+            <IconCheck className="h-4 w-4" />
+          )}
           {freed.count === 0
             ? "Nothing could be cleared — is a clip open somewhere?"
             : `Freed ${formatSize(freed.bytes)} from ${freed.count} ${freed.count === 1 ? "clip" : "clips"}`}

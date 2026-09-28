@@ -295,6 +295,10 @@ export function Console() {
   const close = useCallback(() => {
     if (!inTauri || closingRef.current) return;
     closingRef.current = true;
+    // An opening still waiting for the page's size (see `untilSized`) must not
+    // start after this — its `begin()` would clear `closingRef` and bring the
+    // console up after all.
+    openTicket.current += 1;
     setClosing(true);
     closeTimer.current = window.setTimeout(finishClose, CLOSE_MS + 300);
   }, [finishClose]);
