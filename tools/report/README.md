@@ -1,45 +1,45 @@
-# ClippiBoy — Diagnosebericht
+# ClippiBoy — diagnostic report
 
-Ein Programm, das einmal ausgeführt wird und alles, was zur Fehlersuche nötig
-ist, in **eine** Datei auf dem Desktop schreibt: `clippiboy-bericht.txt`.
+A program that runs once and writes everything needed for debugging into **one**
+file on the desktop: `clippiboy-bericht.txt`.
 
-Gedacht für den Fall, dass der Mensch, der den Fehler sieht, nicht der Mensch
-ist, der ein Log lesen kann. Er startet es, schickt die eine Datei zurück.
+Meant for the case where the person who sees the bug is not the person who can
+read a log. They run it and send back the one file.
 
 ```
 npm run report
 ```
 
-baut `tools/report/target/release/clippiboy-report.exe` — eine einzelne Exe von
-rund 290 KB, ohne Abhängigkeiten, in wenigen Sekunden gebaut. Die kann man
-verschicken; sie braucht nichts weiter auf dem Zielrechner.
+builds `tools/report/target/release/clippiboy-report.exe` — a single exe of
+about 290 KB, with no dependencies, built in a few seconds. It can be sent
+around; it needs nothing else on the target machine.
 
-## Was drinsteht
+## What it contains
 
-- System, Grafikkarten samt Treiberdatum, Bildschirme mit ihrer Anordnung
-- Installierte Version, ob sie gerade läuft und ob sie antwortet
-- Autostart-Eintrag in der Registry und im Autostart-Ordner
-- `config.json` vollständig — **ohne** den Stream-Deck-Token
-- Welche ffmpeg-Version geholt wurde
-- Alle Abstürze und Hänger aus dem Windows-Ereignisprotokoll der letzten 30 Tage
-- **Ob das Bild stehengeblieben ist** — siehe unten
-- Die Logs: alle Ereigniszeilen, dazu die letzten Pipeline-Zeilen
+- System, graphics cards with driver date, displays with their arrangement
+- Installed version, whether it is running right now and whether it responds
+- Autostart entry in the registry and in the startup folder
+- `config.json` in full — **without** the Stream Deck token
+- Which ffmpeg version was fetched
+- All crashes and hangs from the Windows event log of the last 30 days
+- **Whether the picture froze** — see below
+- The logs: all event lines, plus the last pipeline lines
 
-## Die Frage nach dem stehenden Bild
+## The question of the frozen picture
 
-Windows.Graphics.Capture liefert nur dann ein Bild, wenn sich auf dem Schirm
-etwas geändert hat. Ein Bildschirm, auf dem nichts passiert, erzeugt deshalb
-minutenlang nur Wiederholer — völlig normal, besonders wenn aufgenommen und
-gearbeitet auf verschiedenen Schirmen wird.
+Windows.Graphics.Capture only delivers a frame when something on the screen has
+changed. A display on which nothing happens therefore produces nothing but
+repeats for minutes — perfectly normal, especially when recording and working
+happen on different displays.
 
-Der Unterschied liegt nicht im Stehen, sondern im **Nicht-Wiederkommen**. Eine
-Aufnahme, die an einem toten Schirm hängt, erholt sich nie mehr; ihre Strecke
-läuft bis ans Ende des Logs. Genau das sagt der Bericht in seiner letzten Zeile
-zu jedem Log — alles andere darüber ist nur Material.
+The difference is not in standing still but in **never coming back**. A
+recording stuck on a dead display never recovers; its stretch runs to the end
+of the log. That is exactly what the report says in its last line for each
+log — everything above it is just material.
 
-## Es liest nur
+## It only reads
 
-Nichts wird installiert, nichts geändert, nichts verschickt. Die Datei landet
-auf dem Desktop, und wer sie erzeugt hat, entscheidet, was damit geschieht. Der
-Token des Steuerungs-Ports wird auf dem Weg herausgenommen: ein Schlüssel, der
-durch einen Chat wandert, ist ein weggegebener Schlüssel.
+Nothing is installed, nothing is changed, nothing is sent. The file lands on
+the desktop, and whoever created it decides what happens with it. The control
+port's token is removed along the way: a key that travels through a chat is a
+key given away.
