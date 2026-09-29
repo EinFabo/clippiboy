@@ -94,7 +94,10 @@ fn store_tags(state: &AppState, clip: &mut model::Clip, names: Vec<String>) {
 
 /// Save a clip and report the result — shared by hotkey, tray and button so all
 /// three routes behave identically.
-pub fn save_clip_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
+///
+/// `seconds` is `None` for the configured clip length; a Stream Deck key can
+/// carry a length of its own.
+pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
 
     // Debounce before anything happens: if a save is already running, the key
@@ -109,7 +112,7 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, Strin
     // a second and a third time in that window.
     overlay::show(app, BannerKind::Clip, "Saving clip…", None);
 
-    match state.save_clip(None) {
+    match state.save_clip(seconds) {
         Ok(mut clip) => {
             let seconds = clip.duration_ms / 1000;
             if let Some(library) = state.library.lock().as_ref() {
@@ -718,7 +721,7 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
                 let app = app.clone();
                 // Muxing takes a moment — do not do it on the hotkey thread.
                 std::thread::spawn(move || {
-                    let _ = save_clip_and_notify(&app);
+                    let _ = save_clip_and_notify(&app, None);
                 });
             }
         }) {

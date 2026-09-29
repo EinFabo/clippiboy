@@ -166,8 +166,19 @@ fn handle(app: &tauri::AppHandle, mut request: Request, token: &str) {
             let body = status(app);
             respond(request, 200, body)
         }
-        (Method::Post, "/v1/clip") => reply_later(app, request, |app| {
-            match crate::save_clip_and_notify(app) {
+        (Method::Post, "/v1/clip") => {
+            // Optional `{"seconds": 150}`: a key set to a length of its own.
+            // Without it, or unreadable, the configured clip length applies.
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                return respond(request, 400, json!({ "ok": false, "error": "unreadable body" }));
+            }
+            let seconds = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|value| value.get("seconds")?.as_u64())
+                .filter(|&seconds| seconds > 0)
+                .map(|seconds| seconds.min(u32::MAX as u64) as u32);
+            reply_later(app, request, move |app| match crate::save_clip_and_notify(app, seconds) {
                 Ok(clip) => (
                     200,
                     json!({
@@ -178,8 +189,8 @@ fn handle(app: &tauri::AppHandle, mut request: Request, token: &str) {
                     }),
                 ),
                 Err(error) => (409, json!({ "ok": false, "error": error })),
-            }
-        }),
+            })
+        }
         (Method::Post, "/v1/screenshot") => reply_later(app, request, |app| {
             match crate::take_screenshot_and_notify(app) {
                 Ok(clip) => (

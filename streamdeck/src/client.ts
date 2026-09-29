@@ -41,6 +41,9 @@ export type Reachability = {
 	source: "handshake" | "manual" | null;
 	version: string | null;
 	handshakePath: string;
+	/** For the clip length a Save Clip key picks: how far it can reach, and what "App default" means. */
+	bufferSeconds: number | null;
+	clipSeconds: number | null;
 };
 
 /** How often the keys ask how things stand. Fast enough that the buffer level counts up visibly. */
@@ -108,6 +111,8 @@ class Client {
 			source: this.#connection?.source ?? null,
 			version: status?.version ?? null,
 			handshakePath: handshakePath(),
+			bufferSeconds: status?.bufferSeconds ?? null,
+			clipSeconds: status?.clipSeconds ?? null,
 		};
 	}
 

@@ -53,7 +53,8 @@
 				display: block;
 				margin-top: 10px;
 			}
-			input {
+			input,
+			select {
 				width: 100%;
 				box-sizing: border-box;
 				margin-top: 4px;
@@ -74,6 +75,12 @@
 				border-radius: 6px;
 				cursor: pointer;
 			}
+			.length {
+				margin-top: 14px;
+			}
+			.length label {
+				margin-top: 0;
+			}
 			code {
 				overflow-wrap: anywhere;
 				color: var(--muted);
@@ -83,6 +90,14 @@
 	<body>
 		<div class="state"><span class="dot" id="dot"></span><span id="state">Looking for ClippiBoy…</span></div>
 		<p class="note" id="note"></p>
+
+		<div class="length" id="length" hidden>
+			<label
+				>Clip length
+				<select id="seconds"></select>
+			</label>
+			<p class="note" id="length-note"></p>
+		</div>
 
 		<details id="manual">
 			<summary>Enter port and token by hand</summary>
@@ -101,12 +116,20 @@
 			// Which of the four keys the inspector was opened for — a message back to
 			// the plugin has to name it.
 			let actionUUID;
+			// This key's own settings — only the Save Clip key has any.
+			let settings = {};
+			// The last answer about ClippiBoy, for the lengths the buffer allows.
+			let reach = null;
 
 			// The handshake the Stream Deck software performs with every property
 			// inspector: it calls this function with the port to talk back on.
 			function connectElgatoStreamDeckSocket(port, inPluginUUID, registerEvent, info, actionInfo) {
 				uuid = inPluginUUID;
-				actionUUID = JSON.parse(actionInfo).action;
+				const action = JSON.parse(actionInfo);
+				actionUUID = action.action;
+				settings = action.payload?.settings ?? {};
+				document.getElementById("length").hidden = actionUUID !== "com.einfabo.clippiboy.save";
+				lengths();
 				socket = new WebSocket("ws://127.0.0.1:" + port);
 				socket.onopen = () => {
 					socket.send(JSON.stringify({ event: registerEvent, uuid }));
@@ -118,6 +141,9 @@
 						fill(data.payload.settings ?? {});
 					} else if (data.event === "sendToPropertyInspector") {
 						show(data.payload);
+					} else if (data.event === "didReceiveSettings") {
+						settings = data.payload.settings ?? {};
+						lengths();
 					}
 				};
 			}
@@ -132,7 +158,68 @@
 				if (settings.token) document.getElementById("token").value = settings.token;
 			}
 
-			function show(reach) {
+			/** `45 s`, `2:30`. */
+			function duration(seconds) {
+				if (seconds < 60) return seconds + " s";
+				return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+			}
+
+			/**
+			 * The lengths this key can pick: fine steps at the short end, coarser
+			 * ones further up, never past the buffer — there is nothing beyond it.
+			 */
+			function lengths() {
+				const select = document.getElementById("seconds");
+				const note = document.getElementById("length-note");
+				const buffer = reach?.bufferSeconds ?? null;
+				const chosen = Number(settings.seconds) || 0;
+
+				const options = [];
+				if (buffer) {
+					for (let s = 15; s < buffer; s += s < 60 ? 15 : s < 300 ? 30 : 60) options.push(s);
+					options.push(buffer);
+				}
+				if (chosen > 0 && !options.includes(chosen)) {
+					options.push(chosen);
+					options.sort((a, b) => a - b);
+				}
+
+				select.replaceChildren();
+				const standard = document.createElement("option");
+				standard.value = "0";
+				standard.textContent =
+					"App default" + (reach?.clipSeconds ? " — " + duration(reach.clipSeconds) : "");
+				select.append(standard);
+				for (const s of options) {
+					const option = document.createElement("option");
+					option.value = String(s);
+					option.textContent =
+						buffer && s > buffer ? duration(s) + " — longer than the buffer" : duration(s);
+					select.append(option);
+				}
+				select.value = String(chosen);
+
+				if (!buffer) {
+					note.textContent = "Start ClippiBoy to see every length its buffer allows.";
+				} else if (chosen > buffer) {
+					note.textContent =
+						"The buffer holds " + duration(buffer) + " — that is what this key saves until it is longer again.";
+				} else {
+					note.textContent =
+						"How much of the " + duration(buffer) + " buffer this key saves. Put two keys side by side for two lengths.";
+				}
+			}
+
+			document.getElementById("seconds").addEventListener("change", (event) => {
+				const seconds = Number(event.target.value) || 0;
+				settings = { ...settings, seconds: seconds || undefined };
+				send({ event: "setSettings", context: uuid, payload: settings });
+				lengths();
+			});
+
+			function show(answer) {
+				reach = answer;
+				lengths();
 				const dot = document.getElementById("dot");
 				const state = document.getElementById("state");
 				const note = document.getElementById("note");

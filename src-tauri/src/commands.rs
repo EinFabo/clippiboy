@@ -365,7 +365,7 @@ pub fn save_clip(
     seconds: Option<u32>,
 ) -> Result<Clip> {
     match seconds {
-        None => crate::save_clip_and_notify(&app),
+        None => crate::save_clip_and_notify(&app, None),
         Some(seconds) => {
             let clip = state.save_clip(Some(seconds))?;
             with_library(&state, |lib| lib.insert(&clip).map_err(|e| e.to_string()))?;

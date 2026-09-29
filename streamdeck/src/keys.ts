@@ -59,13 +59,14 @@ export abstract class ClippiBoyKey extends SingletonAction {
 }
 
 /**
- * How much is in the buffer, in as few characters as a key can carry.
+ * How much is in the buffer, in as few characters as a key can carry — or, with
+ * `cap`, how much of it a press would save.
  *
  * A dash for "no ClippiBoy" rather than an alarm icon: the app is not meant to
  * run around the clock, and a key that cries for help all evening teaches you
  * to ignore it.
  */
-export function bufferLabel(status: Status | null): string {
+export function bufferLabel(status: Status | null, cap?: number): string {
 	if (status === null) {
 		return "—";
 	}
@@ -75,7 +76,11 @@ export function bufferLabel(status: Status | null): string {
 	if (!status.bufferActive) {
 		return "off";
 	}
-	const seconds = Math.round(status.bufferedSeconds);
+	return durationLabel(Math.min(Math.round(status.bufferedSeconds), cap ?? Infinity));
+}
+
+/** `45s`, `2:30` — as short as a key can carry it. */
+export function durationLabel(seconds: number): string {
 	if (seconds < 60) {
 		return `${seconds}s`;
 	}

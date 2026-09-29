@@ -115,7 +115,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
             "save" => {
                 let app = app.clone();
                 // Muxing takes a moment — do not do it on the menu thread.
-                std::thread::spawn(move || crate::save_clip_and_notify(&app));
+                std::thread::spawn(move || crate::save_clip_and_notify(&app, None));
             }
             "record" => {
                 let app = app.clone();

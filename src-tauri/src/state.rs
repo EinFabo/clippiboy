@@ -757,7 +757,10 @@ impl AppState {
     /// from the settings, which is what the hotkey, the tray and the button do.
     pub fn save_clip(&self, seconds: Option<u32>) -> Result<Clip, String> {
         let config = self.config_snapshot();
+        // A length asked for from outside (a Stream Deck key set to 2:30) can
+        // outlast a buffer shortened since; the buffer is all there is.
         let seconds = seconds
+            .map(|asked| asked.min(config.buffer.seconds))
             .unwrap_or_else(|| config::effective_clip_seconds(&config.buffer))
             .max(1);
         // The buffer keeps what it has; the same press works once ffmpeg is in.
