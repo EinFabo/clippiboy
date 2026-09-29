@@ -360,11 +360,27 @@ impl AppState {
     /// reported there too.
     pub fn replace_config(&self, mut next: AppConfig) -> AppConfig {
         next.recording.encoder = crate::encode::resolve(next.recording.encoder);
-        {
+        let previous = {
             let mut guard = self.config.lock();
-            *guard = next.clone();
-        }
+            std::mem::replace(&mut *guard, next.clone())
+        };
         self.apply_audio();
+        // A running buffer takes a new length right away — longer fills up from
+        // here, shorter is cut down. Without this it kept the length it was
+        // started with until the next start, and a Stream Deck key on 3:00
+        // saved the old 1:30.
+        let memory = config::effective_memory_bytes(&next.recording, &next.buffer);
+        if next.buffer.seconds != previous.buffer.seconds
+            || memory != config::effective_memory_bytes(&previous.recording, &previous.buffer)
+        {
+            if let Some(shared) = self.shared.lock().as_ref() {
+                shared.set_buffer_seconds(next.buffer.seconds);
+                // Kept for a recording alone, the ring stays small.
+                if self.buffer_wanted() {
+                    shared.packets.lock().set_capacity(next.buffer.seconds, memory);
+                }
+            }
+        }
         // If a recording is running it has to learn about the changed sources
         // too — otherwise it mixes the old ones until the next restart. It gets
         // the **unresolved** ones: it only needs id, gain, mute, solo and the

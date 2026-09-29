@@ -20,7 +20,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +44,11 @@ const AUDIO_LAG_100NS: i64 = 80 * 10_000;
 /// The mixer's tick.
 const MIX_INTERVAL: Duration = Duration::from_millis(10);
 
+/// One buffer across the full clip length, plus some slack.
+fn samples_for(seconds: u32) -> usize {
+    (seconds as usize + 2) * SAMPLE_RATE as usize * CHANNELS
+}
+
 /// Ring buffer of one audio track (16-bit PCM), on the same QPC timeline as the
 /// video.
 pub struct TrackRing {
@@ -52,7 +57,10 @@ pub struct TrackRing {
     /// the same, only the label changes.
     label: Mutex<String>,
     inner: Mutex<TrackInner>,
-    capacity: usize,
+    /// In samples. Changeable while the buffer runs: the buffer length is a
+    /// slider, and a ring that kept its old length would cut the audio of a
+    /// longer clip short.
+    capacity: AtomicUsize,
 }
 
 struct TrackInner {
@@ -76,9 +84,18 @@ impl TrackRing {
                 primed: false,
                 silence: 0,
             }),
-            // One buffer across the full clip length, plus some slack.
-            capacity: (seconds as usize + 2) * SAMPLE_RATE as usize * CHANNELS,
+            capacity: AtomicUsize::new(samples_for(seconds)),
         }
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity.load(Ordering::Relaxed)
+    }
+
+    /// A new buffer length. Longer fills up from here on; shorter is cut down
+    /// with the next block.
+    pub(crate) fn set_seconds(&self, seconds: u32) {
+        self.capacity.store(samples_for(seconds), Ordering::Relaxed);
     }
 
     pub fn label(&self) -> String {
@@ -116,7 +133,7 @@ impl TrackRing {
             // Quiet for longer than the ring is long: everything in it is now
             // older than the buffer and nobody will ever read it again. Give
             // the memory back instead of holding minutes of nothing.
-            if inner.silence >= self.capacity {
+            if inner.silence >= self.capacity() {
                 inner.samples.clear();
                 inner.samples.shrink_to_fit();
                 inner.primed = false;
@@ -140,8 +157,9 @@ impl TrackRing {
         }
 
         inner.samples.extend(block.iter().copied());
-        if inner.samples.len() > self.capacity {
-            let excess = inner.samples.len() - self.capacity;
+        let capacity = self.capacity();
+        if inner.samples.len() > capacity {
+            let excess = inner.samples.len() - capacity;
             inner.samples.drain(..excess);
             let frames = (excess / CHANNELS) as i64;
             inner.start_100ns += frames * 10_000_000 / SAMPLE_RATE as i64;
@@ -240,7 +258,8 @@ fn write_wav(path: &Path, data: &[i16]) -> std::io::Result<()> {
 
 /// State shared by capture, encoder and mixer.
 pub struct Shared {
-    pub buffer_seconds: u32,
+    /// What a newly added source's ring is sized to — see [`Shared::set_buffer_seconds`].
+    buffer_seconds: AtomicU32,
     pub fps: u32,
     /// The encoded video packets.
     pub packets: Mutex<ReplayBuffer>,
@@ -355,6 +374,16 @@ impl Shared {
     }
 
     /// Take on a new source list and let the mixer know.
+    /// Resize every audio ring to a new buffer length, and the ones added later
+    /// with them. The video ring is resized by the caller: its length also
+    /// depends on whether the buffer is wanted at all (`AppState`).
+    pub fn set_buffer_seconds(&self, seconds: u32) {
+        self.buffer_seconds.store(seconds, Ordering::Relaxed);
+        for ring in self.tracks.lock().iter() {
+            ring.set_seconds(seconds);
+        }
+    }
+
     pub fn set_sources(&self, sources: Vec<AudioSource>) {
         *self.sources.lock() = sources;
         self.sources_generation.fetch_add(1, Ordering::Relaxed);
@@ -830,7 +859,7 @@ fn tracks_for(
 /// Bring the track list in line with a changed config.
 fn sync_tracks(shared: &Arc<Shared>, sources: &[AudioSource]) {
     let mut rings = shared.tracks.lock();
-    let next = tracks_for(sources, &rings, shared.buffer_seconds);
+    let next = tracks_for(sources, &rings, shared.buffer_seconds.load(Ordering::Relaxed));
     *rings = next;
 }
 
@@ -853,7 +882,7 @@ impl Pipeline {
         audio.reset_rings();
 
         let shared = Arc::new(Shared {
-            buffer_seconds,
+            buffer_seconds: AtomicU32::new(buffer_seconds),
             fps: recording.fps.max(1),
             packets: Mutex::new(ReplayBuffer::new(buffer_seconds, buffer_bytes)),
             tracks: Mutex::new(tracks),
@@ -1106,6 +1135,28 @@ mod tests {
     }
 
     #[test]
+    fn a_new_buffer_length_reaches_a_running_ring() {
+        // 1 s + 2 s slack = 3 s, then 4 s + 2 s = 6 s.
+        let ring = TrackRing::new("a".into(), "A".into(), 1);
+        let block = vec![7i16; SAMPLE_RATE as usize * CHANNELS];
+        let second = block.len();
+        for at in 0..5 {
+            ring.push(&block, qpc_of_frame(at * SAMPLE_RATE as i64));
+        }
+        assert_eq!(ring.inner.lock().samples.len(), 3 * second);
+
+        ring.set_seconds(4);
+        for at in 5..12 {
+            ring.push(&block, qpc_of_frame(at * SAMPLE_RATE as i64));
+        }
+        assert_eq!(ring.inner.lock().samples.len(), 6 * second, "longer fills up");
+
+        ring.set_seconds(1);
+        ring.push(&block, qpc_of_frame(12 * SAMPLE_RATE as i64));
+        assert_eq!(ring.inner.lock().samples.len(), 3 * second, "shorter is cut down");
+    }
+
+    #[test]
     fn the_oldest_audio_is_dropped_and_the_start_moves_with_it() {
         // 1 s capacity + 2 s slack = 3 s.
         let ring = TrackRing::new("a".into(), "A".into(), 1);
@@ -1116,7 +1167,7 @@ mod tests {
         }
         // 48000 is divisible by 6 — so the one-second steps are exact.
         let inner = ring.inner.lock();
-        assert_eq!(inner.samples.len(), ring.capacity);
+        assert_eq!(inner.samples.len(), ring.capacity());
         assert!(
             inner.start_100ns > 0,
             "the ring start has to move along, otherwise every window points beside"
