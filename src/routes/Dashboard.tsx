@@ -133,11 +133,16 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         )}
         {recording && (
           <p className="mt-3 text-xs text-ink-muted tabular-nums">
-            ~{formatSize(recordingBytes)} ·{" "}
-            <kbd className="rounded-inner border border-line bg-elevated px-1.5 py-0.5">
-              {config.recordHotkey}
-            </kbd>{" "}
-            stops it
+            ~{formatSize(recordingBytes)}
+            {config.recordHotkey && (
+              <>
+                {" "}·{" "}
+                <kbd className="rounded-inner border border-line bg-elevated px-1.5 py-0.5">
+                  {config.recordHotkey}
+                </kbd>{" "}
+                stops it
+              </>
+            )}
           </p>
         )}
       </header>
@@ -205,10 +210,16 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         />
         {recent.length === 0 ? (
           <Card className="grid h-44 place-items-center text-sm text-ink-muted">
-            No clips yet — start the buffer and press{" "}
-            <kbd className="mx-1 rounded-inner border border-line bg-elevated px-2 py-0.5 text-xs">
-              {config.saveClipHotkey}
-            </kbd>
+            {config.saveClipHotkey ? (
+              <>
+                No clips yet — start the buffer and press{" "}
+                <kbd className="mx-1 rounded-inner border border-line bg-elevated px-2 py-0.5 text-xs">
+                  {config.saveClipHotkey}
+                </kbd>
+              </>
+            ) : (
+              "No clips yet — start the buffer, then save one"
+            )}
           </Card>
         ) : (
           <div className="grid grid-cols-3 gap-4">

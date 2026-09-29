@@ -190,15 +190,14 @@ fn apply_hotkeys(
     let screenshot = screenshot.trim().to_string();
     let record = record.trim().to_string();
     let console = console.trim().to_string();
-    crate::parse_hotkey(&save_clip)?;
-    crate::parse_hotkey(&toggle_buffer)?;
-    crate::parse_hotkey(&screenshot)?;
-    crate::parse_hotkey(&record)?;
-    crate::parse_hotkey(&console)?;
-    // Every pair, not just the first two — with five assignments the clash can
-    // sit anywhere among them.
+    // Empty means unbound: that action then has no hotkey, only its buttons.
     let taken = [&save_clip, &toggle_buffer, &screenshot, &record, &console];
-    for (at, one) in taken.iter().enumerate() {
+    for one in taken.iter().filter(|one| !one.is_empty()) {
+        crate::parse_hotkey(one)?;
+    }
+    // Every pair, not just the first two — with five assignments the clash can
+    // sit anywhere among them. Two unbound ones do not clash.
+    for (at, one) in taken.iter().enumerate().filter(|(_, one)| !one.is_empty()) {
         if taken[at + 1..]
             .iter()
             .any(|other| one.eq_ignore_ascii_case(other))

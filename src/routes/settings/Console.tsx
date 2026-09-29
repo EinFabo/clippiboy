@@ -28,7 +28,11 @@ export function ConsoleTab() {
       <Card className="divide-y divide-line">
         <Row
           label="Open with the hotkey"
-          hint={`${config.consoleHotkey} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`}
+          hint={
+            config.consoleHotkey
+              ? `${config.consoleHotkey} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`
+              : "No hotkey set — assign one under Hotkeys, the console only opens with it."
+          }
         >
           <Toggle
             checked={config.consoleEnabled}

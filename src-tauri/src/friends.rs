@@ -678,7 +678,9 @@ fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
                 app,
                 BannerKind::Friend,
                 text.to_owned(),
-                Some(format!("{} to answer", overlay.console_hotkey)),
+                // Unbound, the console cannot be reached over the game either.
+                (!overlay.console_hotkey.is_empty())
+                    .then(|| format!("{} to answer", overlay.console_hotkey)),
                 None,
                 avatar,
             ),

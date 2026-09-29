@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
+import { IconClose } from "@/components/icons";
 import { api, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { Row } from "./shared";
@@ -132,6 +133,7 @@ const HARMLESS =
  * in a text field too. `F9` or `PrtSc` are harmless, a bare `S` is not.
  */
 function risky(value: string): boolean {
+  if (!value) return false;
   const keys = value.split("+");
   if (keys.some((key) => MODIFIERS.includes(key))) return false;
   return !HARMLESS.test(keys[0] ?? "");
@@ -252,7 +254,7 @@ function Hotkeys() {
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
         Click and press the key you want — with or without Ctrl, Alt, Shift and
-        the Windows key. Escape cancels.
+        the Windows key. Escape cancels, × unbinds.
       </p>
       {warn && (
         <p className="mt-2 text-xs text-ink-muted">
@@ -265,7 +267,8 @@ function Hotkeys() {
   );
 }
 
-/** Shows a combination and records a new one on click. */
+/** Shows a combination and records a new one on click. The × beside it
+    unbinds: an empty value is an action without a hotkey. */
 function HotkeyInput({
   value,
   busy,
@@ -319,28 +322,48 @@ function HotkeyInput({
   }, [recording, stop]);
 
   return (
-    <button
-      type="button"
-      disabled={busy}
-      onMouseDown={(event) => {
-        // Without this our own click would end recording again immediately.
-        event.stopPropagation();
-        setRecording((on) => !on);
-      }}
-      className={cn(
-        "flex items-center gap-1.5 rounded-pill border px-2 py-1.5 transition-colors duration-150",
-        "disabled:pointer-events-none disabled:opacity-40",
-        recording
-          ? "border-accent bg-accent/10"
-          : "border-transparent hover:border-line hover:bg-elevated",
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        disabled={busy}
+        onMouseDown={(event) => {
+          // Without this our own click would end recording again immediately.
+          event.stopPropagation();
+          setRecording((on) => !on);
+        }}
+        className={cn(
+          "flex items-center gap-1.5 rounded-pill border px-2 py-1.5 transition-colors duration-150",
+          "disabled:pointer-events-none disabled:opacity-40",
+          recording
+            ? "border-accent bg-accent/10"
+            : "border-transparent hover:border-line hover:bg-elevated",
+        )}
+      >
+        {recording ? (
+          <span className="px-1.5 text-[13px] text-accent">Press a key …</span>
+        ) : value ? (
+          <Hotkey value={value} />
+        ) : (
+          <span className="px-1.5 text-[13px] text-ink-faint">Not set</span>
+        )}
+      </button>
+      {value && !recording && (
+        <button
+          type="button"
+          disabled={busy}
+          title="Unbind"
+          aria-label="Unbind"
+          onClick={() => onChange("")}
+          className={cn(
+            "grid size-7 place-items-center rounded-pill text-ink-faint transition-colors duration-150",
+            "hover:bg-elevated hover:text-ink",
+            "disabled:pointer-events-none disabled:opacity-40",
+          )}
+        >
+          <IconClose className="size-3.5" />
+        </button>
       )}
-    >
-      {recording ? (
-        <span className="px-1.5 text-[13px] text-accent">Press a key …</span>
-      ) : (
-        <Hotkey value={value} />
-      )}
-    </button>
+    </div>
   );
 }
 

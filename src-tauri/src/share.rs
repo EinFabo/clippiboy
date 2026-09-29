@@ -590,7 +590,11 @@ fn offered(
         app,
         crate::overlay::BannerKind::Friend,
         format!("{friend_name} wants to send you a {what}"),
-        Some(format!("{} · {hotkey} to answer", megabytes(total))),
+        Some(if hotkey.is_empty() {
+            megabytes(total)
+        } else {
+            format!("{} · {hotkey} to answer", megabytes(total))
+        }),
         None,
         crate::friends::friend_avatar(app, from),
     );

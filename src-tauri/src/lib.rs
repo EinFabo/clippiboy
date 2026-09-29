@@ -698,7 +698,8 @@ pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut
 /// Register the global hotkeys (save, screenshot, recording, buffer on/off).
 ///
 /// Called at startup and after every change. Hence unregistering everything
-/// first: otherwise the old assignment would stay active as well.
+/// first: otherwise the old assignment would stay active as well. An empty
+/// assignment is an unbound action and is skipped.
 pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -711,36 +712,40 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     let mut failed: Vec<String> = Vec::new();
 
     let save = config.save_clip_hotkey.clone();
-    if let Err(err) = shortcuts.on_shortcut(save.as_str(), move |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            let app = app.clone();
-            // Muxing takes a moment — do not do it on the hotkey thread.
-            std::thread::spawn(move || {
-                let _ = save_clip_and_notify(&app);
-            });
+    if !save.is_empty() {
+        if let Err(err) = shortcuts.on_shortcut(save.as_str(), move |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                let app = app.clone();
+                // Muxing takes a moment — do not do it on the hotkey thread.
+                std::thread::spawn(move || {
+                    let _ = save_clip_and_notify(&app);
+                });
+            }
+        }) {
+            log::warn!("could not register hotkey '{save}': {err}");
+            failed.push(save);
         }
-    }) {
-        log::warn!("could not register hotkey '{save}': {err}");
-        failed.push(save);
     }
 
     let shot = config.screenshot_hotkey.clone();
-    if let Err(err) = shortcuts.on_shortcut(shot.as_str(), move |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            let app = app.clone();
-            // Reading the picture back off the GPU and writing the PNG takes a
-            // few hundred milliseconds — not on the hotkey thread.
-            std::thread::spawn(move || {
-                let _ = take_screenshot_and_notify(&app);
-            });
+    if !shot.is_empty() {
+        if let Err(err) = shortcuts.on_shortcut(shot.as_str(), move |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                let app = app.clone();
+                // Reading the picture back off the GPU and writing the PNG takes a
+                // few hundred milliseconds — not on the hotkey thread.
+                std::thread::spawn(move || {
+                    let _ = take_screenshot_and_notify(&app);
+                });
+            }
+        }) {
+            log::warn!("could not register hotkey '{shot}': {err}");
+            failed.push(shot);
         }
-    }) {
-        log::warn!("could not register hotkey '{shot}': {err}");
-        failed.push(shot);
     }
 
     let console = config.console_hotkey.clone();
-    if config.console_enabled {
+    if config.console_enabled && !console.is_empty() {
         if let Err(err) = shortcuts.on_shortcut(console.as_str(), move |app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
                 // Showing a window belongs on the main thread; the hotkey
@@ -755,25 +760,29 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     }
 
     let record = config.record_hotkey.clone();
-    if let Err(err) = shortcuts.on_shortcut(record.as_str(), move |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            let app = app.clone();
-            // Stopping writes the whole recording out — not on the hotkey thread.
-            std::thread::spawn(move || toggle_recording_and_notify(&app));
+    if !record.is_empty() {
+        if let Err(err) = shortcuts.on_shortcut(record.as_str(), move |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                let app = app.clone();
+                // Stopping writes the whole recording out — not on the hotkey thread.
+                std::thread::spawn(move || toggle_recording_and_notify(&app));
+            }
+        }) {
+            log::warn!("could not register hotkey '{record}': {err}");
+            failed.push(record);
         }
-    }) {
-        log::warn!("could not register hotkey '{record}': {err}");
-        failed.push(record);
     }
 
     let toggle = config.toggle_buffer_hotkey.clone();
-    if let Err(err) = shortcuts.on_shortcut(toggle.as_str(), move |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            toggle_buffer_and_notify(app);
+    if !toggle.is_empty() {
+        if let Err(err) = shortcuts.on_shortcut(toggle.as_str(), move |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                toggle_buffer_and_notify(app);
+            }
+        }) {
+            log::warn!("could not register hotkey '{toggle}': {err}");
+            failed.push(toggle);
         }
-    }) {
-        log::warn!("could not register hotkey '{toggle}': {err}");
-        failed.push(toggle);
     }
 
     match failed.len() {
