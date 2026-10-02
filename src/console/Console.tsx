@@ -252,18 +252,42 @@ export function Console() {
     noteTimer.current = window.setTimeout(() => setNote(null), 2600);
   }, []);
 
+  /** Ob die Konsole gerade weg ist. Dann liest sie bei Änderungen nichts nach —
+   *  jedes Öffnen lädt die Liste ohnehin neu (`begin`). */
+  const hidden = useRef(inTauri);
+  /** Die laufende Ladung, und ob währenddessen noch etwas geändert wurde.
+   *  `clearGame` über viele Clips schickt ein `clips-changed` je Clip; daraus
+   *  wird so eine Ladung plus höchstens eine danach, nicht eine je Clip. */
+  const loading = useRef(false);
+  const again = useRef(false);
+
   const loadClips = useCallback(async () => {
     if (!inTauri) return;
+    if (loading.current) {
+      again.current = true;
+      return;
+    }
+    loading.current = true;
     try {
-      // Die ganze Liste kommt ohnehin über die Brücke; die Zählung für den
-      // Statusblock kostet deshalb nichts extra und braucht kein Backend.
-      const all = await api.listClips();
-      setClips(all.slice(0, RECENT));
-      setToday(clipsToday(all));
+      do {
+        again.current = false;
+        // Die ganze Liste kommt ohnehin über die Brücke; die Zählung für den
+        // Statusblock kostet deshalb nichts extra und braucht kein Backend.
+        const all = await api.listClips();
+        setClips(all.slice(0, RECENT));
+        setToday(clipsToday(all));
+      } while (again.current);
     } catch (err) {
       say(String(err));
+    } finally {
+      loading.current = false;
     }
   }, [say]);
+
+  /** Nachlesen nach einer Änderung von außen — nur, solange man es sieht. */
+  const refreshClips = useCallback(() => {
+    if (!hidden.current) void loadClips();
+  }, [loadClips]);
 
   /** Die Blende ist durch — jetzt darf der Kern das Fenster verstecken. Zwei
    *  Bilder Abstand, damit das letzte, leere Bild auch auf dem Schirm war:
@@ -295,6 +319,7 @@ export function Console() {
   const close = useCallback(() => {
     if (!inTauri || closingRef.current) return;
     closingRef.current = true;
+    hidden.current = true;
     // An opening still waiting for the page's size (see `untilSized`) must not
     // start after this — its `begin()` would clear `closingRef` and bring the
     // console up after all.
@@ -323,10 +348,10 @@ export function Console() {
         // Im selben Zuhörer, damit beide Änderungen in einem Rendern landen.
         trendPush(e.payload);
       }),
-      listen<Clip>("clip-saved", () => void loadClips()),
+      listen<Clip>("clip-saved", () => refreshClips()),
       // Gelöscht oder geändert, egal in welchem Fenster — auch die eigenen
       // Änderungen kommen hierüber zurück, sonst bliebe die Liste alt.
-      events.onClipsChanged(() => void loadClips()),
+      events.onClipsChanged(() => refreshClips()),
       // Der Hotkey zum Schließen. Er geht über die Seite wie Escape, damit der
       // Weg hinaus gespielt wird, bevor der Kern das Fenster versteckt.
       listen("console-close-request", () => close()),
@@ -342,6 +367,7 @@ export function Console() {
           closeTimer.current = null;
         }
         closingRef.current = false;
+        hidden.current = true;
         // Auf `true`, nie auf `false`. Auf `false` ließ es die
         // Eingangs-Animation auf einem Fenster wieder anlaufen, das gerade
         // verschwindet — mitten in der Ausgangs-Animation sprang das Dock
@@ -381,6 +407,7 @@ export function Console() {
     /** Everything an opening resets and takes on — once the page has its size. */
     function begin(payload: OpenedPayload) {
       closingRef.current = false;
+      hidden.current = false;
       setClosing(false);
       setOpened((n) => n + 1);
       setPanel(null);
@@ -414,7 +441,7 @@ export function Console() {
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));
     };
-  }, [loadClips, trendPush, close]);
+  }, [loadClips, refreshClips, trendPush, close]);
 
   /** Open something above the dock — a panel, or the player. The window is the
    *  screen and never changes size, so this is nothing but state. */
@@ -713,6 +740,12 @@ export function Console() {
                         onClick={() =>
                           run("fav", async () => {
                             await api.setClipFavorite(clip.id, !clip.favorite);
+                            // Wie im Hauptfenster: mit dem Herz wandert die Datei
+                            // gleich in ihren Ordner. Nicht, solange sie hier
+                            // läuft — das Verschieben risse die Wiedergabe ab.
+                            // Spielt das Hauptfenster sie gerade, scheitert das
+                            // leise, und dessen Player holt es beim Schließen nach.
+                            if (playingId !== clip.id) await api.fileClip(clip.id);
                           })
                         }
                       >

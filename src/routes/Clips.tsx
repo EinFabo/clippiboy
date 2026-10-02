@@ -110,6 +110,12 @@ export function Clips({
    * holds the file.
    */
   const touched = useRef<Set<string>>(new Set());
+  /** The clip on screen in the player, by id — see the effect after `closePlayer`. */
+  const shownId = useRef<string | null>(null);
+  /** A clip the player is about to show, until list and position have caught up. */
+  const coming = useRef<string | null>(null);
+  /** Clips this window's own player deleted. */
+  const deletedHere = useRef<Set<string>>(new Set());
   /** Which clip is being renamed — both the click on the name and "Rename" in
       the right-click menu land here. */
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -269,6 +275,7 @@ export function Clips({
     setStartAt(undefined);
     setPlaylist(visible.map((clip) => clip.id));
     touched.current = new Set(visible[index] ? [visible[index].id] : []);
+    coming.current = visible[index]?.id ?? null;
     setOpen(index);
   };
 
@@ -295,6 +302,7 @@ export function Clips({
     // in seinen Spielordner einsortiert. Ohne diese Zeile wäre der Weg über die
     // Konsole der einzige, bei dem die Datei liegen bliebe.
     touched.current = new Set([focus.id]);
+    coming.current = focus.id;
     // Vor dem Öffnen, damit der Player die Stelle schon beim ersten Bild hat.
     setStartAt(focus.at);
     setOpen(list.findIndex((c) => c.id === focus.id));
@@ -305,6 +313,8 @@ export function Clips({
   const openIndex = (next: number) => {
     const clip = playing[next];
     if (clip) touched.current.add(clip.id);
+    shownId.current = clip?.id ?? null;
+    coming.current = null;
     setOpen(next);
   };
 
@@ -312,10 +322,54 @@ export function Clips({
       files of the clips that were viewed into their folder. */
   const closePlayer = () => {
     setOpen(null);
+    shownId.current = null;
+    coming.current = null;
     const seen = [...touched.current];
     touched.current = new Set();
-    for (const id of seen) void fileClip(id);
+    // Ein inzwischen gelöschter Clip hat keine Datei mehr zum Einsortieren.
+    const left = new Set(clips.map((c) => c.id));
+    for (const id of seen) if (left.has(id)) void fileClip(id);
   };
+
+  /** Deleting from the player here; it moves on to the neighbour by itself. */
+  const deleteFromPlayer = (id: string) => {
+    deletedHere.current.add(id);
+    void deleteClip(id);
+  };
+
+  // `open` ist nur eine Stelle in der Liste. Ändert sich die Liste von außen —
+  // die Konsole löscht, die Datenbank wird neu gelesen —, zeigte dieselbe Stelle
+  // still einen anderen Clip. Darum hält `shownId` den Clip selbst fest: steht
+  // er woanders, wandert `open` mit; ist er woanders gelöscht worden, geht der
+  // Player zu. Nur wenn dieser Player selbst gelöscht hat, rückt er zum
+  // Nachbarn — und der zählt dann als angesehen und wird beim Schließen
+  // einsortiert.
+  useEffect(() => {
+    if (open === null) return;
+    // Gerade geöffnet oder aus der Konsole übergeben: Liste und Stelle kommen
+    // erst mit einem der nächsten Rendern an. Bis dahin nichts schließen.
+    if (coming.current !== null) {
+      const at = playing.findIndex((c) => c.id === coming.current);
+      if (at === -1) return;
+      shownId.current = coming.current;
+      coming.current = null;
+      if (at !== open) setOpen(at);
+      return;
+    }
+    const was = shownId.current;
+    const at = was === null ? -1 : playing.findIndex((c) => c.id === was);
+    if (at === -1) {
+      if (was !== null && !deletedHere.current.has(was)) {
+        closePlayer();
+        return;
+      }
+      const now = playing[Math.min(open, playing.length - 1)];
+      shownId.current = now?.id ?? null;
+      if (now) touched.current.add(now.id);
+    } else if (at !== open) {
+      setOpen(at);
+    }
+  });
 
   /** Heart on or off — and take the file along right away. */
   const toggleFavorite = async (clip: Clip) => {
@@ -593,7 +647,7 @@ export function Clips({
             index={Math.min(open, playing.length - 1)}
             onIndexChange={openIndex}
             onClose={closePlayer}
-            onDelete={deleteClip}
+            onDelete={deleteFromPlayer}
             originOf={originOf}
           />
         ) : (
@@ -602,7 +656,7 @@ export function Clips({
             index={Math.min(open, playing.length - 1)}
             onIndexChange={openIndex}
             onClose={closePlayer}
-            onDelete={deleteClip}
+            onDelete={deleteFromPlayer}
             onOpenMixer={() => onNavigate("audio")}
             originOf={originOf}
             startAt={startAt}
