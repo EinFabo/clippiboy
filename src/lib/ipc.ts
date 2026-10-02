@@ -201,6 +201,14 @@ export const events = {
     listen<EngineStatus>("engine-status", (e) => cb(e.payload)),
   onClipSaved: (cb: (c: Clip) => void): Promise<UnlistenFn> =>
     listen<Clip>("clip-saved", (e) => cb(e.payload)),
+  /** A clip was deleted, from whichever window — every window keeps its own list. */
+  onClipDeleted: (cb: (id: string) => void): Promise<UnlistenFn> =>
+    listen<string>("clip-deleted", (e) => cb(e.payload)),
+  /**
+   * Clips changed in the database, from whichever window. No clip comes along:
+   * read the list back, a copy could be older than what this window has.
+   */
+  onClipsChanged: (cb: () => void): Promise<UnlistenFn> => listen("clips-changed", () => cb()),
   onClipProgress: (cb: (p: ClipProgress) => void): Promise<UnlistenFn> =>
     listen<ClipProgress>("clip-progress", (e) => cb(e.payload)),
   /** Writing a stopped recording out, 0 to 1; 1 means done, either way. */

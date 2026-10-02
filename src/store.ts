@@ -283,6 +283,21 @@ export const useEngine = create<EngineState>((set, get) => ({
           clips: [clip, ...st.clips.filter((c) => c.id !== clip.id)],
         })),
       );
+      // The console deletes, renames and hearts clips too; its changes land here.
+      await events.onClipDeleted((id) =>
+        set((st) => ({ clips: st.clips.filter((c) => c.id !== id) })),
+      );
+      // Only the newest read counts; an older one landing late would undo it.
+      let reads = 0;
+      await events.onClipsChanged(() => {
+        const ticket = ++reads;
+        api
+          .listClips()
+          .then((clips) => {
+            if (ticket === reads) set({ clips });
+          })
+          .catch(() => {});
+      });
       await events.onAudioErrors((sourceErrors) => set({ sourceErrors }));
       await events.onAudioWarnings((sourceWarnings) => set({ sourceWarnings }));
       await events.onAudioTaps((taps) => set({ taps }));

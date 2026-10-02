@@ -481,6 +481,19 @@ pub fn screenshot_edit(state: State<'_, AppState>, id: String) -> Result<ShotEdi
 #[tauri::command(async)]
 pub fn write_screenshot(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+    crop: Option<crate::shot::Rect>,
+    steps: Vec<Step>,
+    marks: String,
+) -> Result<Clip> {
+    let clip = edit_screenshot(&state, id, crop, steps, marks)?;
+    announce_change(&app);
+    Ok(clip)
+}
+
+fn edit_screenshot(
+    state: &State<'_, AppState>,
     id: String,
     crop: Option<crate::shot::Rect>,
     steps: Vec<Step>,
@@ -635,7 +648,8 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
 }
 
 #[tauri::command]
-pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
+pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
+    use tauri::Emitter;
     // The individual tracks and the original belong to the clip and serve no
     // purpose without it.
     stems::remove(&id);
@@ -657,6 +671,10 @@ pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
     if let Some(folder) = folder {
         crate::filing::prune(&folder, Path::new(&clip_dir));
     }
+    // Every window keeps its own list. Without this, a clip deleted in the
+    // console stays in the main window and opens as "File not found".
+    let _ = app.emit("clip-deleted", &id);
+    announce_change(&app);
     Ok(())
 }
 
@@ -666,13 +684,29 @@ pub fn delete_clip(state: State<'_, AppState>, id: String) -> Result<()> {
 /// the clip is no longer open in the player. Moving it out from under the
 /// playing video would tear the playback off.
 #[tauri::command]
-pub fn set_clip_favorite(state: State<'_, AppState>, id: String, favorite: bool) -> Result<Clip> {
-    with_library(&state, |lib| {
+pub fn set_clip_favorite(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+    favorite: bool,
+) -> Result<Clip> {
+    let clip = with_library(&state, |lib| {
         lib.set_favorite(&id, favorite).map_err(|e| e.to_string())?;
         lib.get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".into())
-    })
+    })?;
+    announce_change(&app);
+    Ok(clip)
+}
+
+/// Tell every window that clips changed. Each window keeps its own list, and
+/// the console renames and hearts clips too. No clip goes along on purpose:
+/// a copy taken now could arrive after a newer one, so every window reads the
+/// list back from the database instead.
+fn announce_change(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit("clips-changed", ());
 }
 
 /// Move a clip's file into the folder it belongs in.
@@ -682,9 +716,9 @@ pub fn set_clip_favorite(state: State<'_, AppState>, id: String, favorite: bool)
 /// (`filing::tidy`); the gallery is right in the meantime regardless, because it
 /// reads from the database.
 #[tauri::command]
-pub fn file_clip(state: State<'_, AppState>, id: String) -> Result<Clip> {
+pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
     let clip_dir = state.config_snapshot().clip_dir;
-    with_library(&state, |lib| {
+    let clip = with_library(&state, |lib| {
         let clip = lib
             .get(&id)
             .map_err(|e| e.to_string())?
@@ -703,7 +737,9 @@ pub fn file_clip(state: State<'_, AppState>, id: String) -> Result<Clip> {
                 Ok(clip)
             }
         }
-    })
+    })?;
+    announce_change(&app);
+    Ok(clip)
 }
 
 #[tauri::command]
@@ -857,6 +893,7 @@ pub fn clipboard_read_text() -> Result<String> {
 #[tauri::command]
 pub fn update_clip(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     id: String,
     title: Option<String>,
     description: Option<String>,
@@ -869,25 +906,34 @@ pub fn update_clip(
     };
     let (title, description, game) = (trimmed(title), trimmed(description), trimmed(game));
 
-    with_library(&state, |lib| {
+    let clip = with_library(&state, |lib| {
         lib.update_meta(&id, title.as_deref(), description.as_deref(), game.as_deref())
             .map_err(|e| e.to_string())?;
         lib.get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
-    })
+    })?;
+    announce_change(&app);
+    Ok(clip)
 }
 
 /// Replace a clip's tags. The library cleans them up (case, `#`, length), and
 /// the clip comes back as stored — the page then shows exactly what was kept.
 #[tauri::command]
-pub fn set_clip_tags(state: State<'_, AppState>, id: String, tags: Vec<String>) -> Result<Clip> {
-    with_library(&state, |lib| {
+pub fn set_clip_tags(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+    tags: Vec<String>,
+) -> Result<Clip> {
+    let clip = with_library(&state, |lib| {
         lib.set_tags(&id, &tags).map_err(|e| e.to_string())?;
         lib.get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
-    })
+    })?;
+    announce_change(&app);
+    Ok(clip)
 }
 
 /// Picture of the audio track for the timeline. Returns the path to the PNG.
@@ -977,18 +1023,24 @@ pub fn restore_clip_original(
 ///
 /// Not `async`: this deletes two files, it does not run ffmpeg.
 #[tauri::command]
-pub fn discard_clip_original(state: State<'_, AppState>, id: String) -> Result<Clip> {
+pub fn discard_clip_original(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Clip> {
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     edit::discard_original(&clip.id)?;
     // The record on the clip stays: it carries the offset the individual tracks
     // sit at, and a remix without it would run against the picture. What changed
     // is `original_available`, which the library reads off the disk.
-    with_library(&state, |lib| {
+    let clip = with_library(&state, |lib| {
         lib.get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
-    })
+    })?;
+    announce_change(&app);
+    Ok(clip)
 }
 
 /// Write a copy of a clip that comes in under a size.
@@ -1132,8 +1184,13 @@ pub fn trim_originals(state: State<'_, AppState>) -> Result<TrimOriginals> {
 /// Throw away the untouched recording of every trimmed clip. The trims stay;
 /// only undoing them is gone. Returns what was freed.
 #[tauri::command(async)]
-pub fn discard_all_originals(state: State<'_, AppState>) -> Result<TrimOriginals> {
-    Ok(edit::discard_all_originals(&originals_still_needed(&state)?))
+pub fn discard_all_originals(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<TrimOriginals> {
+    let freed = edit::discard_all_originals(&originals_still_needed(&state)?);
+    announce_change(&app);
+    Ok(freed)
 }
 
 /// The store folders of clips whose file is missing — a crash between moving
@@ -1217,7 +1274,7 @@ fn store(
         end_ms: applied.duration_ms,
         tracks,
     };
-    with_library(state, |lib| {
+    let stored = with_library(state, |lib| {
         lib.set_edit(&clip.id, Some(&edit)).map_err(|e| e.to_string())?;
         lib.set_original(&clip.id, applied.original.as_ref())
             .map_err(|e| e.to_string())?;
@@ -1226,7 +1283,9 @@ fn store(
         lib.get(&clip.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
-    })
+    })?;
+    announce_change(app);
+    Ok(stored)
 }
 
 /// Show any file in Explorer.

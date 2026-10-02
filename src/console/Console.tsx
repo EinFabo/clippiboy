@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, fileUrl, inTauri } from "@/lib/ipc";
+import { api, events, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
 import type { AudioSource, Clip, ConsoleStyle, EngineStatus, FriendUser } from "@/lib/types";
 import { cn } from "@/lib/cn";
@@ -324,6 +324,9 @@ export function Console() {
         trendPush(e.payload);
       }),
       listen<Clip>("clip-saved", () => void loadClips()),
+      // Gelöscht oder geändert, egal in welchem Fenster — auch die eigenen
+      // Änderungen kommen hierüber zurück, sonst bliebe die Liste alt.
+      events.onClipsChanged(() => void loadClips()),
       // Der Hotkey zum Schließen. Er geht über die Seite wie Escape, damit der
       // Weg hinaus gespielt wird, bevor der Kern das Fenster versteckt.
       listen("console-close-request", () => close()),
@@ -646,7 +649,6 @@ export function Console() {
                           description: clip.description,
                           game: clip.game,
                         });
-                        await loadClips();
                         say("Renamed");
                       });
                     }}
@@ -665,7 +667,6 @@ export function Console() {
                         setConfirming(null);
                         void run("delete", async () => {
                           await api.deleteClip(clip.id);
-                          await loadClips();
                           say("Deleted");
                         });
                       }}
@@ -712,7 +713,6 @@ export function Console() {
                         onClick={() =>
                           run("fav", async () => {
                             await api.setClipFavorite(clip.id, !clip.favorite);
-                            await loadClips();
                           })
                         }
                       >
@@ -898,7 +898,6 @@ export function Console() {
                   description: playing.description,
                   game: playing.game,
                 });
-                await loadClips();
                 say("Renamed");
               });
             }}
