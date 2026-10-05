@@ -28,7 +28,7 @@ use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http::Head
 
 use crate::state::AppState;
 
-const SERVER: &str = "https://api.clippiboy.com";
+pub(crate) const SERVER: &str = "https://api.clippiboy.com";
 const SOCKET: &str = "wss://api.clippiboy.com/ws";
 /// The server closes a connection after 100 s without a word.
 const PING_EVERY: Duration = Duration::from_secs(30);
@@ -119,6 +119,12 @@ pub struct Friends {
 }
 
 // --- Setup ---------------------------------------------------------------------
+
+/// The session token, if signed in — for the share links, which talk to the
+/// same server.
+pub(crate) fn token(app: &AppHandle) -> Option<String> {
+    app.try_state::<Friends>()?.token.lock().clone()
+}
 
 /// At program start: signed in last time? Then connect straight away.
 pub fn start(app: &AppHandle) {
@@ -715,7 +721,7 @@ fn client() -> &'static reqwest::Client {
 
 /// reqwest and the socket run on the rustls the updater brings along, without
 /// a crypto provider of their own — the same move `tools.rs` makes.
-fn install_crypto() {
+pub(crate) fn install_crypto() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }

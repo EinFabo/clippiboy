@@ -23,7 +23,7 @@
   <main id="main">
     <article class="legal">
       <h1>Privacy policy</h1>
-      <p class="small">Last updated: September 27, 2026</p>
+      <p class="small">Last updated: October 5, 2026</p>
 
       <section>
         <h2>In short</h2>
@@ -32,6 +32,7 @@
           <li>No tracking, no ads, no analytics, no cookies.</li>
           <li>Only the friends feature talks to our server, and only once you sign in with Discord for it.</li>
           <li>Clips sent to friends go straight from PC to PC and never touch our server.</li>
+          <li>Only a clip you share as a link is uploaded. It is deleted after five days.</li>
         </ul>
       </section>
 
@@ -80,8 +81,12 @@
         <p>A clip goes directly from your PC to your friend's PC, encrypted, using the iroh library. While the connection is set up, our server only passes on the request and the connection details of both devices and stores none of it. The clip itself never reaches our server.</p>
         <p>To set up connections, iroh uses public services run by n0, Inc. (USA). Devices register a random device ID and their relay server there. If no direct connection works, the data, still encrypted, travels through an n0 relay server. n0 sees IP addresses but not the content.</p>
 
+        <h3>Share links</h3>
+        <p>When you choose <em>Share as link</em> on a clip, the app uploads that clip, if needed shrunk to under 50 MB, together with its title, game, size and a preview picture. It is stored in Cloudflare R2 and anyone with the link can watch it at <strong>clippiboy.com/c/…</strong> for five days. After that, the clip and its picture are deleted automatically. You can delete a link earlier from the clip's menu. To keep the weekly limit, we keep a record of when you created a link (without the clip) for up to two weeks.</p>
+        <p>Links are not listed anywhere and are not indexed by search engines. To report a clip, write to <a href="mailto:privacy@clippiboy.com">privacy@clippiboy.com</a>.</p>
+
         <h3>Legal basis and deletion</h3>
-        <p>We process this data so the friends feature works the way you use it (Art. 6(1)(b) GDPR). It stays stored until you delete your account. In the app under <em>Settings → Friends → Delete account</em>, your account, sign-ins, friendships, blocks and online status are removed immediately.</p>
+        <p>We process this data so the friends feature works the way you use it (Art. 6(1)(b) GDPR). It stays stored until you delete your account. In the app under <em>Settings → Friends → Delete account</em>, your account, sign-ins, friendships, blocks, online status and share links are removed immediately.</p>
       </section>
 
       <section>

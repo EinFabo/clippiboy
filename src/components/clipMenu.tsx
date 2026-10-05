@@ -6,6 +6,7 @@ import {
   IconFolder,
   IconFriends,
   IconHeart,
+  IconLink,
   IconPaste,
   IconPencil,
   IconPlay,
@@ -16,6 +17,7 @@ import { useMenu, type MenuEntry, type MenuTrigger } from "@/components/ui/Menu"
 import { useEngine } from "@/store";
 import { api, inTauri } from "@/lib/ipc";
 import { useShare } from "@/lib/share";
+import { freeOn, timeLeft, useLinks } from "@/lib/links";
 import type { Clip } from "@/lib/types";
 
 /** What the calling site contributes on top. */
@@ -36,6 +38,55 @@ interface Options {
 }
 
 const icon = "h-4 w-4";
+
+/**
+ * "Share as link", or for a clip that has one, "Copy link" and "Delete link".
+ * Read from the store when the menu opens — a menu is a moment, it need not
+ * follow the store while open.
+ */
+function linkEntries(clip: Clip): MenuEntry[] {
+  const { links, signedIn, quota, uploads, create, remove } = useLinks.getState();
+  const link = links[clip.id];
+  if (link) {
+    return [
+      {
+        kind: "item",
+        label: `Copy share link · ${timeLeft(link)}`,
+        icon: <IconLink className={icon} />,
+        onSelect: () => void create(clip.id, clip.title ?? "Clip"),
+      },
+      {
+        kind: "item",
+        label: "Delete share link",
+        icon: <IconTrash className={icon} />,
+        onSelect: () => void remove(clip.id),
+      },
+    ];
+  }
+  const running = uploads[clip.id];
+  const busy = running && (running.stage === "shrinking" || running.stage === "uploading");
+  // Why it cannot be had, right in the label: a menu has no room for a hint.
+  const reason = !inTauri
+    ? null
+    : busy
+      ? "uploading…"
+      : !signedIn
+        ? "sign in on Friends first"
+        : quota && quota.used >= quota.limit
+          ? `none left until ${freeOn(quota) ?? "next week"}`
+          : quota?.full
+            ? "sharing is full right now"
+            : null;
+  return [
+    {
+      kind: "item",
+      label: reason ? `Share as link · ${reason}` : "Share as link (5 days)",
+      icon: <IconLink className={icon} />,
+      disabled: !inTauri || reason !== null,
+      onSelect: () => void create(clip.id, clip.title ?? "Clip"),
+    },
+  ];
+}
 
 /**
  * A clip's right-click menu — the same entries in the gallery as in the player,
@@ -124,6 +175,8 @@ export function useClipMenu() {
       disabled: !inTauri,
       onSelect: () => pickFriend(clip),
     });
+    // A link for anyone, five days long — clips only, the page is a player.
+    if (!clip.screenshot) entries.push(...linkEntries(clip));
     // Recordings only: a still is small already, and the arithmetic here is all
     // about length.
     if (!clip.screenshot && options.onExport) {

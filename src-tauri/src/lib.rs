@@ -15,6 +15,7 @@ pub mod export;
 pub mod filing;
 pub mod friends;
 pub mod game;
+pub mod links;
 pub mod share;
 pub mod gpu;
 pub mod logging;
@@ -1251,6 +1252,9 @@ pub fn run() {
             friends::friends_unblock,
             friends::friends_set_allow_requests,
             friends::friends_delete_account,
+            links::link_state,
+            links::link_create,
+            links::link_delete,
             share::share_state,
             share::share_send,
             share::share_accept,

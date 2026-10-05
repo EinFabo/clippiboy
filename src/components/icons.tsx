@@ -185,6 +185,14 @@ export const IconCopy = ({ className = base }: P) => (
   </svg>
 );
 
+/** Two chain links — a share link. */
+export const IconLink = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10 14a4.5 4.5 0 0 0 6.36 0l3.18-3.18a4.5 4.5 0 0 0-6.36-6.36L11.6 6.04" />
+    <path d="M14 10a4.5 4.5 0 0 0-6.36 0l-3.18 3.18a4.5 4.5 0 0 0 6.36 6.36l1.58-1.58" />
+  </svg>
+);
+
 /** Clipboard — paste. */
 export const IconPaste = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">

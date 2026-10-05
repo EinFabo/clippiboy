@@ -48,7 +48,7 @@ png = "0.17"
 # Fetching ffmpeg on first start (see `tools.rs`). All four already come in
 # with the updater plugin; the versions and TLS setup follow it, so nothing
 # new is built — reqwest gets its rustls from there as well.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 sha2 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate-flate2"] }

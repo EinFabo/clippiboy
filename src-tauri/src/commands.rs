@@ -1043,6 +1043,76 @@ pub fn discard_clip_original(
     Ok(clip)
 }
 
+/// The work of an export, without its notices: shrink a clip into `output`,
+/// reporting 0 to 1 along the way. Returns the bytes written. A share link
+/// shrinks through here too, and says what happened in its own words.
+pub(crate) fn shrink(
+    state: &State<'_, AppState>,
+    id: &str,
+    target_bytes: u64,
+    output: &std::path::Path,
+    on_progress: &impl Fn(f32),
+) -> Result<u64> {
+    let clip = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    refuse_still(&clip)?;
+
+    let source = std::path::PathBuf::from(&clip.path);
+    if !source.is_file() {
+        return Err("The clip file is no longer there.".into());
+    }
+    let output = output.to_path_buf();
+    if output == source {
+        return Err("An export cannot overwrite the clip it comes from.".into());
+    }
+
+    // The length off the file, not out of the database: the arithmetic hangs on
+    // it, and a row that drifted from its file would put the export over the
+    // limit it exists to stay under.
+    let duration_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(clip.duration_ms);
+    let recipe = crate::export::recipe(&crate::export::Target {
+        bytes: target_bytes,
+        duration_ms,
+        width: clip.width,
+        height: clip.height,
+    });
+    let (encoder, _) = encoder_for(state);
+    let args = crate::export::arguments(&source, &output, &recipe, clip.height, encoder);
+
+    match edit::run_with_progress(&args, duration_ms, on_progress) {
+        Ok(()) => {}
+        // The same fallback as a trim: a hardware encoder refuses often enough —
+        // busy sessions, driver trouble — and x264 is always there.
+        Err(err) if encoder != crate::model::EncoderId::X264 => {
+            log::warn!("export with {encoder:?} failed ({err}) — retrying with x264");
+            let _ = std::fs::remove_file(&output);
+            let args = crate::export::arguments(
+                &source,
+                &output,
+                &recipe,
+                clip.height,
+                crate::model::EncoderId::X264,
+            );
+            edit::run_with_progress(&args, duration_ms, on_progress).inspect_err(
+                |_| {
+                    let _ = std::fs::remove_file(&output);
+                },
+            )?;
+        }
+        Err(err) => {
+            // A half-written file looks like a finished one in the folder.
+            let _ = std::fs::remove_file(&output);
+            return Err(err);
+        }
+    }
+    let written = std::fs::metadata(&output).map(|meta| meta.len()).unwrap_or(0);
+    if written == 0 {
+        let _ = std::fs::remove_file(&output);
+        return Err("The export came out empty.".into());
+    }
+    Ok(written)
+}
+
 /// Write a copy of a clip that comes in under a size.
 ///
 /// The counterpart to everything else here: recording and trimming aim at a
@@ -1060,65 +1130,14 @@ pub fn export_clip(
     target_bytes: u64,
     output: String,
 ) -> Result<()> {
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    refuse_still(&clip)?;
-
-    let source = std::path::PathBuf::from(&clip.path);
-    if !source.is_file() {
-        return Err("The clip file is no longer there.".into());
-    }
-    let output = std::path::PathBuf::from(&output);
-    if output == source {
-        return Err("An export cannot overwrite the clip it comes from.".into());
-    }
-
-    // The length off the file, not out of the database: the arithmetic hangs on
-    // it, and a row that drifted from its file would put the export over the
-    // limit it exists to stay under.
-    let duration_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(clip.duration_ms);
-    let recipe = crate::export::recipe(&crate::export::Target {
-        bytes: target_bytes,
-        duration_ms,
-        width: clip.width,
-        height: clip.height,
-    });
-    let (encoder, _) = encoder_for(&state);
-    let args = crate::export::arguments(&source, &output, &recipe, clip.height, encoder);
-
-    match edit::run_with_progress(&args, duration_ms, &progress(&app, &id)) {
-        Ok(()) => {}
-        // The same fallback as a trim: a hardware encoder refuses often enough —
-        // busy sessions, driver trouble — and x264 is always there.
-        Err(err) if encoder != crate::model::EncoderId::X264 => {
-            log::warn!("export with {encoder:?} failed ({err}) — retrying with x264");
-            let _ = std::fs::remove_file(&output);
-            let args = crate::export::arguments(
-                &source,
-                &output,
-                &recipe,
-                clip.height,
-                crate::model::EncoderId::X264,
-            );
-            edit::run_with_progress(&args, duration_ms, &progress(&app, &id)).inspect_err(
-                |_| {
-                    let _ = std::fs::remove_file(&output);
-                },
-            )?;
-        }
-        Err(err) => {
-            // A half-written file looks like a finished one in the folder.
-            let _ = std::fs::remove_file(&output);
-            return Err(err);
-        }
-    }
+    let written = shrink(
+        &state,
+        &id,
+        target_bytes,
+        std::path::Path::new(&output),
+        &progress(&app, &id),
+    )?;
     progress(&app, &id)(1.0);
-
-    let written = std::fs::metadata(&output).map(|meta| meta.len()).unwrap_or(0);
-    if written == 0 {
-        let _ = std::fs::remove_file(&output);
-        return Err("The export came out empty.".into());
-    }
     if written > target_bytes {
         // Not an error: the file is there and usually only just over. Saying so
         // beats letting it be refused somewhere else without explanation.

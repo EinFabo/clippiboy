@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { UploadCard, useLinkUploads } from "./Links";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
 import { canReceive, useFriends } from "@/lib/friends";
@@ -260,10 +261,14 @@ export function Transfers() {
     for (const t of transfers) if (t.stage === "cancelled") void shareApi.dismiss(t.id);
   }, [transfers]);
   const shown = transfers.filter((t) => t.stage !== "cancelled");
-  if (shown.length === 0) return null;
+  const uploads = useLinkUploads();
+  if (shown.length === 0 && uploads.length === 0) return null;
 
   return (
     <div className="fixed right-6 bottom-6 z-40 flex w-[340px] flex-col gap-2">
+      {uploads.map((upload) => (
+        <UploadCard key={`link-${upload.clipId}`} upload={upload} />
+      ))}
       {shown.map((transfer) => (
         <TransferCard key={transfer.id} transfer={transfer} />
       ))}
