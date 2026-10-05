@@ -17,8 +17,11 @@ import {
   MAX_BYTES,
   MAX_POSTER_BYTES,
   newId,
+  PENDING_MS,
   quota,
+  TOTAL_BYTES,
   WEEK_MS,
+  WEEKLY_LIMIT,
 } from "./shares";
 
 export const PAGE_ORIGIN = "https://clippiboy.com";
@@ -37,20 +40,28 @@ interface ShareRow {
   deleted_at: number | null;
   tags: string;
   show_name: number;
+  pending: number;
 }
 
 const video = (id: string) => `${id}.mp4`;
 const poster = (id: string) => `${id}.jpg`;
 
+// What counts against the week and the bucket: finished shares, and uploads
+// still in time to finish. The `?` is when a pending one is given up.
+const COUNTS = "(pending = 0 OR created_at > ?)";
+const RECENT = `SELECT COUNT(*) FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`;
+const LIVE_BYTES = `SELECT COALESCE(SUM(bytes), 0) FROM shares WHERE deleted_at IS NULL AND ${COUNTS}`;
+
 async function recentOf(env: Env, me: string, now: number): Promise<number[]> {
-  const { results } = await env.DB.prepare("SELECT created_at FROM shares WHERE owner = ? AND created_at > ?")
-    .bind(me, now - WEEK_MS)
+  const { results } = await env.DB.prepare(`SELECT created_at FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`)
+    .bind(me, now - WEEK_MS, now - PENDING_MS)
     .all<{ created_at: number }>();
   return results.map((row) => row.created_at);
 }
 
-async function liveBytes(env: Env): Promise<number> {
-  const row = await env.DB.prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM shares WHERE deleted_at IS NULL")
+async function liveBytes(env: Env, now: number): Promise<number> {
+  const row = await env.DB.prepare(`SELECT COALESCE(SUM(bytes), 0) AS total FROM shares WHERE deleted_at IS NULL AND ${COUNTS}`)
+    .bind(now - PENDING_MS)
     .first<{ total: number }>();
   return row?.total ?? 0;
 }
@@ -58,7 +69,7 @@ async function liveBytes(env: Env): Promise<number> {
 async function live(env: Env, id: string, now: number): Promise<ShareRow | null> {
   if (!ID_PATTERN.test(id)) return null;
   const row = await env.DB.prepare("SELECT * FROM shares WHERE id = ?").bind(id).first<ShareRow>();
-  if (!row || row.deleted_at !== null || row.expires_at <= now) return null;
+  if (!row || row.pending || row.deleted_at !== null || row.expires_at <= now) return null;
   return row;
 }
 
@@ -81,7 +92,7 @@ const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, ta
 
 export async function shareQuota(env: Env, me: string): Promise<Response> {
   const now = Date.now();
-  return json(quota(await recentOf(env, me, now), await liveBytes(env)));
+  return json(quota(await recentOf(env, me, now), await liveBytes(env, now)));
 }
 
 /**
@@ -96,8 +107,9 @@ export async function createShare(request: Request, env: Env, me: string): Promi
   if (!Number.isFinite(bytes) || bytes <= 0 || !request.body) {
     throw new HttpError(411, "The clip needs a length.");
   }
-  const verdict = canUpload(await recentOf(env, me, now), bytes, await liveBytes(env));
-  if (!verdict.ok) {
+  const refuse = async () => {
+    const verdict = canUpload(await recentOf(env, me, now), bytes, await liveBytes(env, now));
+    if (verdict.ok) return null;
     if (verdict.reason === "too_big") {
       throw new HttpError(413, `Clips for links can be ${MAX_BYTES / 1024 / 1024} MB at most.`);
     }
@@ -105,7 +117,9 @@ export async function createShare(request: Request, env: Env, me: string): Promi
       return json({ error: "No links left this week.", reason: "quota", resetsAt: verdict.resetsAt }, 429);
     }
     return json({ error: "Sharing is full right now — try again later.", reason: "full" }, 507);
-  }
+  };
+  const refused = await refuse();
+  if (refused) return refused;
 
   const url = new URL(request.url);
   const text = (name: string, max: number) => (url.searchParams.get(name) ?? "").trim().slice(0, max);
@@ -113,13 +127,15 @@ export async function createShare(request: Request, env: Env, me: string): Promi
   const id = newId();
   const expiresAt = now + LIFETIME_MS;
 
-  // The row first: it is what counts against the week and the bucket, so two
-  // uploads at once cannot both slip under the ceiling unseen.
+  // The row first, pending: it is what counts against the week and the
+  // bucket. Inserted only if the limits still hold at that moment — the check
+  // above alone would let two uploads at once both slip through.
   const tags = JSON.stringify(cleanTags(url.searchParams.getAll("tag")));
   const showName = url.searchParams.get("name") === "1" ? 1 : 0;
-  await env.DB.prepare(
-    `INSERT INTO shares (id, owner, bytes, title, game, width, height, created_at, expires_at, tags, show_name)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  const inserted = await env.DB.prepare(
+    `INSERT INTO shares (id, owner, bytes, title, game, width, height, created_at, expires_at, tags, show_name, pending)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+     WHERE (${RECENT}) < ? AND (${LIVE_BYTES}) + ? <= ?`,
   )
     .bind(
       id,
@@ -133,8 +149,18 @@ export async function createShare(request: Request, env: Env, me: string): Promi
       expiresAt,
       tags,
       showName,
+      me,
+      now - WEEK_MS,
+      now - PENDING_MS,
+      WEEKLY_LIMIT,
+      now - PENDING_MS,
+      bytes,
+      TOTAL_BYTES,
     )
     .run();
+  if (!inserted.meta.changes) {
+    return (await refuse()) ?? json({ error: "Sharing is full right now — try again later.", reason: "full" }, 507);
+  }
   try {
     // A fixed-length stream: R2 needs the size up front, and a body that turns
     // out longer than it said is cut off rather than stored.
@@ -144,7 +170,9 @@ export async function createShare(request: Request, env: Env, me: string): Promi
       httpMetadata: { contentType: "video/mp4" },
     });
     await piping;
+    await env.DB.prepare("UPDATE shares SET pending = 0 WHERE id = ?").bind(id).run();
   } catch (err) {
+    await env.CLIPS.delete(video(id)).catch(() => {});
     await env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(id).run();
     console.error("upload", id, err);
     throw new HttpError(502, "The upload broke off. Try again.");
@@ -271,6 +299,15 @@ export async function sweep(env: Env): Promise<void> {
     await env.DB.batch(
       results.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)),
     );
+  }
+  // Uploads that broke off without their catch running: whatever reached R2
+  // goes, and the row with it — it never was a link.
+  const { results: stale } = await env.DB.prepare("SELECT id FROM shares WHERE pending = 1 AND created_at <= ? LIMIT 400")
+    .bind(now - PENDING_MS)
+    .all<{ id: string }>();
+  if (stale.length > 0) {
+    await env.CLIPS.delete(stale.flatMap((row) => [video(row.id), poster(row.id)]));
+    await env.DB.batch(stale.map((row) => env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(row.id)));
   }
   // A week to count against, plus a margin.
   await env.DB.prepare("DELETE FROM shares WHERE deleted_at IS NOT NULL AND created_at < ?")

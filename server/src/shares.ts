@@ -17,6 +17,10 @@ export const MAX_BYTES = 50 * 1024 * 1024;
     uploads in flight and the odd object the hourly sweep has not reached. */
 export const TOTAL_BYTES = 9 * 1024 * 1024 * 1024;
 export const LIFETIME_MS = 5 * DAY_MS;
+/** How long an upload may still be on its way. A pending share older than
+    this broke off: it stops counting and the sweep removes it. The app gives
+    up after 20 minutes. */
+export const PENDING_MS = 30 * 60 * 1000;
 /** A preview picture for Discord and the page. */
 export const MAX_POSTER_BYTES = 1024 * 1024;
 
@@ -70,8 +74,15 @@ const ID_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 export const ID_PATTERN = /^[a-hjkmnp-z2-9]{10}$/;
 
 export function newId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
-  return Array.from(bytes, (byte) => ID_ALPHABET[byte % ID_ALPHABET.length]).join("");
+  return randomCode(ID_ALPHABET, 10);
+}
+
+/** `length` characters drawn from `alphabet` — also the friend codes. Here,
+    not in util.ts, because this file is tested under plain Node and imports
+    nothing. */
+export function randomCode(alphabet: string, length: number): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(length));
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
 }
 
 /** "in 3 days", "in 5 hours", "in a few minutes" — for the page. */

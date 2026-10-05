@@ -324,8 +324,11 @@ impl Converter {
             },
             Some(stamp) => {
                 // Switched off: the canvas is a whole frame of memory doing
-                // nothing. Gone until the switch comes back on.
-                stamp.release();
+                // nothing. Gone until the switch comes back on — its cached
+                // input view holds the texture too, so the cache goes with it.
+                if stamp.release() {
+                    self.input_views.clear();
+                }
                 None
             }
             None => None,
@@ -458,11 +461,14 @@ impl Stamp {
         })
     }
 
-    fn release(&mut self) {
-        if self.canvas.is_some() {
-            unsafe { self.context.SetTarget(None) };
-            self.canvas = None;
+    /// Drops the canvas. `true` if there was one.
+    fn release(&mut self) -> bool {
+        if self.canvas.is_none() {
+            return false;
         }
+        unsafe { self.context.SetTarget(None) };
+        self.canvas = None;
+        true
     }
 
     /// A canvas the size and format of the frame, made anew when either changes.

@@ -317,6 +317,11 @@ async fn finish_sign_in(app: &AppHandle, code: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The server turned the session away — a share link heard it first.
+pub(crate) fn session_rejected(app: &AppHandle) {
+    sign_out_locally(app);
+}
+
 fn sign_out_locally(app: &AppHandle) {
     let friends = app.state::<Friends>();
     friends.generation.fetch_add(1, Ordering::SeqCst);

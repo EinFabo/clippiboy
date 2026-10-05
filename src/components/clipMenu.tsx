@@ -45,8 +45,16 @@ const icon = "h-4 w-4";
  * follow the store while open.
  */
 function linkEntries(clip: Clip): MenuEntry[] {
-  const { links, signedIn, quota, uploads, create, remove } = useLinks.getState();
-  const link = links[clip.id];
+  const { links, signedIn, quota: storedQuota, uploads, create, remove, refresh } = useLinks.getState();
+  // The store is only fetched on changes, and the app runs for days in the
+  // tray: a link may have run out and a used-up week reset since. Those count
+  // as gone here, and the store catches up for next time.
+  const now = Date.now();
+  const stored = links[clip.id];
+  const link = stored && stored.expiresAt > now ? stored : undefined;
+  const quotaStale = storedQuota?.resetsAt != null && storedQuota.resetsAt <= now;
+  const quota = quotaStale ? null : storedQuota;
+  if ((stored && !link) || quotaStale) void refresh();
   if (link) {
     return [
       {

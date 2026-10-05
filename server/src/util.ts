@@ -1,3 +1,5 @@
+import { randomCode } from "./shares";
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -46,8 +48,7 @@ export function sameText(a: string, b: string): boolean {
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 export function friendCode(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return Array.from(bytes, (byte) => CODE_ALPHABET[byte % CODE_ALPHABET.length]).join("");
+  return randomCode(CODE_ALPHABET, 8);
 }
 
 /** "k7qx-m2pd", "K7QX M2PD" → "K7QXM2PD", or null if it cannot be a code. */

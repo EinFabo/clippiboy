@@ -157,9 +157,13 @@ fn token(app: &AppHandle) -> Result<String, String> {
     crate::friends::token(app).ok_or_else(|| "Sign in with Discord to share links.".to_string())
 }
 
-/// The body as JSON, or the server's own words for what went wrong.
-async fn read(response: reqwest::Response) -> Result<serde_json::Value, String> {
+/// The body as JSON, or the server's own words for what went wrong. A 401
+/// means the session is gone: signed out here too, as the friends side does.
+async fn read(app: &AppHandle, response: reqwest::Response) -> Result<serde_json::Value, String> {
     let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        crate::friends::session_rejected(app);
+    }
     let text = response.text().await.map_err(|err| err.to_string())?;
     let value: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     if status.is_success() {
@@ -195,14 +199,14 @@ fn quota_message(resets_at: Option<i64>) -> String {
     }
 }
 
-async fn fetch_quota(token: &str) -> Result<Quota, String> {
+async fn fetch_quota(app: &AppHandle, token: &str) -> Result<Quota, String> {
     let response = client()
         .get(format!("{}/shares/quota", crate::friends::SERVER))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .map_err(|_| "The ClippiBoy server is not reachable right now.".to_string())?;
-    serde_json::from_value(read(response).await?).map_err(|err| err.to_string())
+    serde_json::from_value(read(app, response).await?).map_err(|err| err.to_string())
 }
 
 // --- Commands ---------------------------------------------------------------------
@@ -219,7 +223,7 @@ pub async fn link_state(app: AppHandle) -> Result<LinkState, String> {
     };
     Ok(LinkState {
         signed_in: true,
-        quota: fetch_quota(&token).await.ok(),
+        quota: fetch_quota(&app, &token).await.ok(),
         links,
     })
 }
@@ -283,7 +287,7 @@ async fn upload(
 ) -> Result<Link, String> {
     // Asked first: no point shrinking a clip for two minutes only to hear the
     // week is used up.
-    let quota = fetch_quota(token).await?;
+    let quota = fetch_quota(&report.app, token).await?;
     if quota.used >= quota.limit {
         return Err(quota_message(quota.resets_at));
     }
@@ -295,15 +299,31 @@ async fn upload(
     let size = std::fs::metadata(&source)
         .map_err(|_| "The clip file is no longer there.".to_string())?
         .len();
-    // Small enough already: the original goes, in full quality.
+    let temp = crate::config::data_dir()
+        .join("temp")
+        .join(format!("link-{}.mp4", clip.id));
+    let _ = std::fs::create_dir_all(temp.parent().unwrap());
+    // Small enough already: the original goes, in full quality — with its index
+    // moved to the front, which a saved clip leaves at the end (see muxer.rs).
+    // Without it a browser and Discord's player fetch the file's tail before
+    // the first frame. Should that copy fail, the clip goes as it is.
     let (file, temporary) = if size <= MAX_BYTES {
-        (source, None)
+        let moved = {
+            let (source, temp) = (source.clone(), temp.clone());
+            tokio::task::spawn_blocking(move || faststart(&source, &temp)).await
+        };
+        match moved {
+            Ok(Ok(())) if std::fs::metadata(&temp).is_ok_and(|meta| meta.len() <= MAX_BYTES) => {
+                (temp.clone(), Some(temp))
+            }
+            other => {
+                log::warn!("share link {}: sent without faststart: {other:?}", clip.id);
+                let _ = std::fs::remove_file(&temp);
+                (source, None)
+            }
+        }
     } else {
         report.emit("shrinking", 0.0, None);
-        let temp = crate::config::data_dir()
-            .join("temp")
-            .join(format!("link-{}.mp4", clip.id));
-        let _ = std::fs::create_dir_all(temp.parent().unwrap());
         let shrinking = {
             let report = report.clone();
             let temp = temp.clone();
@@ -344,6 +364,17 @@ async fn upload(
     Ok(link)
 }
 
+/// Copy the clip with its index at the front. Only the container changes.
+fn faststart(source: &std::path::Path, output: &std::path::Path) -> Result<(), String> {
+    let mut command = crate::muxer::ffmpeg();
+    command
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args(["-map", "0", "-c", "copy", "-movflags", "+faststart"])
+        .arg(output);
+    crate::muxer::run(&mut command, "preparing a clip for its link")
+}
+
 /// Stream the file up, reporting as the chunks leave.
 async fn send(
     token: &str,
@@ -358,8 +389,14 @@ async fn send(
         .config_snapshot()
         .friends
         .name_on_links;
-    let bytes = std::fs::read(file).map_err(|err| format!("Could not read the clip: {err}"))?;
-    let total = bytes.len();
+    let source = tokio::fs::File::open(file)
+        .await
+        .map_err(|err| format!("Could not read the clip: {err}"))?;
+    let total = source
+        .metadata()
+        .await
+        .map_err(|err| format!("Could not read the clip: {err}"))?
+        .len();
     let mut params = vec![
         ("title", title.to_owned()),
         ("width", clip.width.to_string()),
@@ -379,23 +416,25 @@ async fn send(
 
     const CHUNK: usize = 256 * 1024;
     report.emit("uploading", 0.0, None);
-    let chunks: Vec<Vec<u8>> = bytes.chunks(CHUNK).map(<[u8]>::to_vec).collect();
-    let mut sent = 0usize;
-    let stream = futures_util::stream::iter(chunks.into_iter().map(move |chunk| {
-        sent += chunk.len();
-        Ok::<_, std::io::Error>((chunk, sent))
-    }));
-    // Progress as reqwest pulls the next chunk — close enough to what has left.
-    let stream = {
-        use futures_util::StreamExt;
+    let app = report.app.clone();
+    // A chunk at a time off the disk: never the whole clip in memory.
+    let report = report.clone();
+    let stream = futures_util::stream::try_unfold((source, 0u64), move |(mut source, sent)| {
         let report = report.clone();
-        stream.map(move |item| {
-            item.map(|(chunk, sent)| {
-                report.emit("uploading", sent as f32 / total.max(1) as f32, None);
-                chunk
-            })
-        })
-    };
+        async move {
+            use tokio::io::AsyncReadExt;
+            let mut chunk = vec![0u8; CHUNK];
+            let read = source.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            chunk.truncate(read);
+            let sent = sent + read as u64;
+            // Progress as reqwest pulls the next chunk — close enough to what has left.
+            report.emit("uploading", sent as f32 / total.max(1) as f32, None);
+            Ok(Some((chunk, (source, sent))))
+        }
+    });
     let response = client()
         .post(url)
         .header("Authorization", format!("Bearer {token}"))
@@ -405,7 +444,7 @@ async fn send(
         .send()
         .await
         .map_err(|_| "The upload broke off. Check your connection and try again.".to_string())?;
-    serde_json::from_value(read(response).await?).map_err(|err| err.to_string())
+    serde_json::from_value(read(&app, response).await?).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -470,7 +509,7 @@ async fn take_down(app: &AppHandle, id: &str) -> Result<bool, String> {
         .map_err(|_| "The ClippiBoy server is not reachable right now.".to_string())?;
     // Gone already counts as deleted. Someone else's link answers 403.
     if response.status() != reqwest::StatusCode::NOT_FOUND {
-        read(response).await?;
+        read(app, response).await?;
     }
     change(|links| {
         links.remove(id);
