@@ -37,6 +37,22 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL};
 
 use crate::gpu::{GpuDevice, SendPtr};
 
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D_SIZE_U,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_MULTI_THREADED,
+    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+};
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11DeviceContext, ID3D11Multithread, D3D11_BIND_SHADER_RESOURCE,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
+
 /// How many NV12 textures are used in rotation.
 ///
 /// The encoder reads the texture where it lies — `mft::Transform::feed` wraps it
@@ -100,6 +116,9 @@ pub struct Converter {
     /// each one still pinned by the view that refers to it. Keyed on a raw
     /// pointer, the table has no way of noticing that by itself.
     source_size: (u32, u32),
+    /// Draws the watermark. `None` once it failed — the frames then go out
+    /// without it rather than not at all.
+    stamp: Option<Stamp>,
     width: u32,
     height: u32,
 }
@@ -159,6 +178,14 @@ impl Converter {
             )?);
         }
 
+        let stamp = match Stamp::new(gpu) {
+            Ok(stamp) => Some(stamp),
+            Err(err) => {
+                log::warn!("watermark unavailable, clips go without it: {err}");
+                None
+            }
+        };
+
         Ok(Self {
             video_device,
             video_context,
@@ -168,6 +195,7 @@ impl Converter {
             next_slot: 0,
             input_views: Vec::new(),
             source_size: (0, 0),
+            stamp,
             width,
             height,
         })
@@ -285,7 +313,18 @@ impl Converter {
             self.input_views.clear();
         }
 
-        let input = self.input_view(source)?;
+        let stamped = match self.stamp.as_mut() {
+            Some(stamp) if crate::watermark::enabled() => match stamp.draw(source) {
+                Ok(canvas) => canvas,
+                Err(err) => {
+                    log::warn!("watermark failed, going on without it: {err}");
+                    self.stamp = None;
+                    None
+                }
+            },
+            _ => None,
+        };
+        let input = self.input_view(stamped.as_ref().unwrap_or(source))?;
         let slot = self.next_slot;
         self.next_slot = (self.next_slot + 1) % self.slots.len();
 
@@ -321,6 +360,190 @@ impl Converter {
 
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+}
+
+/// Lays the watermark over a copy of the captured frame.
+///
+/// Not over the frame itself: that texture belongs to the capture's frame pool
+/// and goes back to it, and whatever is drawn on it would show up in the next
+/// frame that happens to land in the same texture. So the frame is copied into
+/// a canvas of our own first — one full-frame copy per frame, a fraction of a
+/// millisecond of memory bandwidth on any card that can encode.
+///
+/// Direct2D rather than a shader of our own: it brings alpha blending and a
+/// good downscale of the picture, and needs no shader compiler. The device was
+/// created with BGRA support, which is all it asks for.
+struct Stamp {
+    context: ID2D1DeviceContext,
+    d3d: ID3D11DeviceContext,
+    device: ID3D11Device,
+    /// Holds the device's lock across Direct2D's several calls, so the encoder
+    /// thread cannot change the pipeline state in between.
+    lock: ID3D11Multithread,
+    logo: ID2D1Bitmap1,
+    logo_size: (u32, u32),
+    canvas: Option<Canvas>,
+}
+
+struct Canvas {
+    texture: ID3D11Texture2D,
+    /// Set as the context's target once and never read again — held so it
+    /// lives exactly as long as the texture it draws into.
+    _target: ID2D1Bitmap1,
+    /// Width, height and format of the frames it was made for.
+    shape: (u32, u32, i32),
+}
+
+impl Stamp {
+    fn new(gpu: &GpuDevice) -> Result<Self, String> {
+        let (width, height, _) = crate::watermark::picture();
+        if *width == 0 {
+            return Err("no picture".into());
+        }
+        let factory: ID2D1Factory1 =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None) }
+                .map_err(|err| format!("Direct2D factory: {err}"))?;
+        let dxgi: IDXGIDevice = gpu
+            .device
+            .cast()
+            .map_err(|err| format!("IDXGIDevice: {err}"))?;
+        let device = unsafe { factory.CreateDevice(&dxgi) }
+            .map_err(|err| format!("Direct2D device: {err}"))?;
+        let context = unsafe { device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }
+            .map_err(|err| format!("Direct2D context: {err}"))?;
+
+        let pixels = crate::watermark::premultiplied_bgra();
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let logo = unsafe {
+            context.CreateBitmap(
+                D2D_SIZE_U {
+                    width: *width,
+                    height: *height,
+                },
+                Some(pixels.as_ptr().cast()),
+                width * 4,
+                &properties,
+            )
+        }
+        .map_err(|err| format!("watermark bitmap: {err}"))?;
+        let lock: ID3D11Multithread = gpu
+            .context
+            .cast()
+            .map_err(|err| format!("ID3D11Multithread: {err}"))?;
+
+        Ok(Self {
+            context,
+            d3d: gpu.context.clone(),
+            device: gpu.device.clone(),
+            lock,
+            logo,
+            logo_size: (*width, *height),
+            canvas: None,
+        })
+    }
+
+    /// A canvas the size and format of the frame, made anew when either changes.
+    fn canvas(&mut self, desc: &D3D11_TEXTURE2D_DESC) -> Result<&Canvas, String> {
+        let shape = (desc.Width, desc.Height, desc.Format.0);
+        let fits = self.canvas.as_ref().is_some_and(|canvas| canvas.shape == shape);
+        if !fits {
+            // Drop the old one first: the target bitmap points into the context.
+            unsafe { self.context.SetTarget(None) };
+            self.canvas = None;
+            let canvas_desc = D3D11_TEXTURE2D_DESC {
+                Width: desc.Width,
+                Height: desc.Height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: desc.Format,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut texture = None;
+            unsafe { self.device.CreateTexture2D(&canvas_desc, None, Some(&mut texture)) }
+                .map_err(|err| format!("watermark canvas: {err}"))?;
+            let texture = texture.ok_or_else(|| "watermark canvas missing".to_string())?;
+            let surface: IDXGISurface = texture
+                .cast()
+                .map_err(|err| format!("IDXGISurface: {err}"))?;
+            let properties = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: desc.Format,
+                    // The desktop's alpha is meaningless; the picture is opaque.
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                colorContext: std::mem::ManuallyDrop::new(None),
+            };
+            let target = unsafe { self.context.CreateBitmapFromDxgiSurface(&surface, Some(&properties)) }
+                .map_err(|err| format!("watermark target: {err}"))?;
+            unsafe { self.context.SetTarget(&target) };
+            self.canvas = Some(Canvas {
+                texture,
+                _target: target,
+                shape,
+            });
+        }
+        Ok(self.canvas.as_ref().unwrap())
+    }
+
+    /// The frame with the mark on it, or `None` when it is too small to carry
+    /// one — then the caller simply uses the frame as it is.
+    fn draw(&mut self, source: &ID3D11Texture2D) -> Result<Option<ID3D11Texture2D>, String> {
+        // The texture, not the content size: the video processor scales the
+        // whole texture, so that is the picture the corner is measured in.
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { source.GetDesc(&mut desc) };
+        let (logo_width, logo_height) = self.logo_size;
+        let Some(at) = crate::watermark::rect(desc.Width, desc.Height, logo_width, logo_height)
+        else {
+            return Ok(None);
+        };
+        unsafe { self.lock.Enter() };
+        let result = (|| {
+            let texture = self.canvas(&desc)?.texture.clone();
+            unsafe {
+                self.d3d.CopyResource(&texture, source);
+                self.context.BeginDraw();
+                self.context.DrawBitmap(
+                    &self.logo,
+                    Some(&D2D_RECT_F {
+                        left: at.x as f32,
+                        top: at.y as f32,
+                        right: (at.x + at.width) as f32,
+                        bottom: (at.y + at.height) as f32,
+                    }),
+                    crate::watermark::OPACITY,
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                    None,
+                    None,
+                );
+                self.context
+                    .EndDraw(None, None)
+                    .map_err(|err| format!("EndDraw: {err}"))?;
+            }
+            Ok(Some(texture))
+        })();
+        unsafe { self.lock.Leave() };
+        result
     }
 }
 

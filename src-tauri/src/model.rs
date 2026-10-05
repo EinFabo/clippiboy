@@ -504,6 +504,10 @@ pub struct AppConfig {
     /// Has it already been explained that closing leaves the app in the tray?
     #[serde(default)]
     pub tray_hint_shown: bool,
+    /// The "ClippiBoy" mark in the bottom-left corner of clips and screenshots.
+    /// On for configs written before it existed, too.
+    #[serde(default = "yes")]
+    pub watermark: bool,
     /// The local port for the Stream Deck plugin — see [`ControlConfig`].
     #[serde(default)]
     pub control: ControlConfig,

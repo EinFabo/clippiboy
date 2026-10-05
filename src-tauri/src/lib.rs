@@ -33,6 +33,7 @@ pub mod tint;
 pub mod tools;
 pub mod tray;
 pub mod updater;
+pub mod watermark;
 pub mod wgc;
 
 use std::time::Duration;

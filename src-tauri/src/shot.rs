@@ -583,7 +583,7 @@ fn transpose(from: &[u8], to: &mut [u8], width: usize, height: usize) {
 
 /// Decode a PNG keeping its alpha — the counterpart to `read_png`, which throws
 /// it away because a screenshot has none to keep.
-fn read_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+pub(crate) fn read_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(
         png::Transformations::EXPAND | png::Transformations::STRIP_16,

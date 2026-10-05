@@ -61,6 +61,7 @@ pub fn default_config() -> AppConfig {
         only_buffer_in_game: true,
         overlay: OverlayConfig::default(),
         tray_hint_shown: false,
+        watermark: true,
         control: ControlConfig::default(),
         accent_color: None,
         colors_unlocked: false,

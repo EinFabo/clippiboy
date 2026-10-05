@@ -217,6 +217,8 @@ export interface AppConfig {
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;
   trayHintShown: boolean;
+  /** The "ClippiBoy" mark in the bottom-left corner of clips and screenshots. */
+  watermark: boolean;
   control: ControlConfig;
   /** An accent of one's own as `#rrggbb`; `null` is the violet. */
   accentColor: string | null;

@@ -36,6 +36,15 @@ export function BehaviourTab() {
             onChange={(onlyBufferInGame) => patchConfig({ onlyBufferInGame })}
           />
         </Row>
+        <Row
+          label="Watermark"
+          hint="ClippiBoy logo in the bottom-left corner of new clips and screenshots"
+        >
+          <Toggle
+            checked={config.watermark}
+            onChange={(watermark) => patchConfig({ watermark })}
+          />
+        </Row>
         <Row label="Start with Windows" hint="Starts hidden in the tray">
           <Toggle
             checked={config.autoStartWithWindows}

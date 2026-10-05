@@ -114,6 +114,7 @@ export const mockConfig: AppConfig = {
     followActiveScreen: false,
   },
   trayHintShown: false,
+  watermark: true,
   control: { enabled: true, port: 47653, token: "mock-token" },
   accentColor: null,
   colorsUnlocked: false,

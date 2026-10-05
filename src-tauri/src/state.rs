@@ -270,6 +270,7 @@ impl AutoBuffer {
 impl AppState {
     pub fn new() -> Self {
         let config = config::load();
+        crate::watermark::set_enabled(config.watermark);
         let library = match Library::open() {
             Ok(lib) => Some(lib),
             Err(err) => {
@@ -368,6 +369,8 @@ impl AppState {
             let mut guard = self.config.lock();
             std::mem::replace(&mut *guard, next.clone())
         };
+        // Takes effect with the next frame, no restart.
+        crate::watermark::set_enabled(next.watermark);
         self.apply_audio();
         // A running buffer takes a new length right away — longer fills up from
         // here, shorter is cut down. Without this it kept the length it was
@@ -893,7 +896,7 @@ impl AppState {
             .clone()
             .unwrap_or_else(|| config.recording.clone());
 
-        let shot = crate::shot::grab(
+        let mut shot = crate::shot::grab(
             recording.target_kind,
             recording.target_id.as_deref(),
             recording.target_stable_id.as_deref(),
@@ -902,6 +905,9 @@ impl AppState {
         // Ein Bild ist ein Augenblick: es gehört zu dem Spiel, das jetzt läuft.
         let game = self.current_game.lock().clone();
         let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)?;
+        // Into the file itself, and so into the original the editor starts
+        // from — an edit carries it along instead of stamping it twice.
+        crate::watermark::stamp(&mut shot);
         shot.write_png(&path)?;
 
         let id = uuid::Uuid::new_v4().to_string();
