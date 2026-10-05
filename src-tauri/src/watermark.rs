@@ -21,8 +21,9 @@ const PICTURE: &[u8] = include_bytes!("../assets/watermark.png");
 /// How strongly the mark lies over the picture.
 pub const OPACITY: f32 = 0.65;
 /// The picture's height as a share of the frame's. The PNG carries some room
-/// for its shadow, so the logo itself ends up near 3 %.
-const HEIGHT_SHARE: f32 = 0.035;
+/// for its shadow, so the logo itself ends up near 6 %. (3 % was too small to
+/// read on a phone — Fabi, 2026-10-05.)
+const HEIGHT_SHARE: f32 = 0.07;
 /// Distance to the left and bottom edge, as a share of the frame's height —
 /// of the height for both, so the corner looks the same on an ultrawide.
 const MARGIN_SHARE: f32 = 0.015;
@@ -173,10 +174,10 @@ mod tests {
     #[test]
     fn full_hd_sits_in_the_bottom_left() {
         let at = rect(1920, 1080, 535, 152).unwrap();
-        assert_eq!(at.height, 38);
+        assert_eq!(at.height, 76);
         assert_eq!(at.x, 16);
         assert_eq!(at.y + at.height + at.x, 1080);
-        assert_eq!(at.width, 38 * 535 / 152);
+        assert_eq!(at.width, 76 * 535 / 152);
     }
 
     #[test]
@@ -185,7 +186,7 @@ mod tests {
         let qhd = rect(2560, 1440, 535, 152).unwrap();
         let uhd = rect(3840, 2160, 535, 152).unwrap();
         assert!(hd.height < qhd.height && qhd.height < uhd.height);
-        assert_eq!(uhd.height, 76);
+        assert_eq!(uhd.height, 151);
     }
 
     #[test]
@@ -195,7 +196,7 @@ mod tests {
 
     #[test]
     fn a_tiny_window_goes_without() {
-        assert_eq!(rect(320, 240, 535, 152), None);
+        assert_eq!(rect(160, 120, 535, 152), None);
         // Tall but narrow: the lettering would cover half of it.
         assert_eq!(rect(300, 1200, 535, 152), None);
     }

@@ -69,6 +69,8 @@ export function Setup() {
   const [withWindows, setWithWindows] = useState(false);
   const [watermark, setWatermark] = useState(true);
   const [busy, setBusy] = useState(false);
+  /** The clip length as it was on opening, to tell "left alone" from "changed". */
+  const [keptLength, setKeptLength] = useState("");
 
   // Fresh lists each time it opens: a screen or headset plugged in since start.
   // The choices of the last step start from what is configured now.
@@ -77,8 +79,13 @@ export function Setup() {
     setStep(0);
     void refreshTargets();
     void refreshSources();
-    const current = String(config.buffer.seconds);
+    // What a save really writes — a 3:00 buffer with 1:30 clips is a 1:30 clip.
+    const clip = config.buffer.clipSeconds === 0
+      ? config.buffer.seconds
+      : Math.min(config.buffer.clipSeconds, config.buffer.seconds);
+    const current = String(clip);
     setLength((LENGTHS as readonly string[]).includes(current) ? (current as Length) : "120");
+    setKeptLength(current);
     setAutoStart(config.setupDone ? config.buffer.autoStart : true);
     setWithWindows(config.autoStartWithWindows);
     setWatermark(config.watermark);
@@ -99,14 +106,22 @@ export function Setup() {
   const finish = async () => {
     setBusy(true);
     try {
+      // Left alone, buffer and clip length stay exactly as they were — run
+      // again from the settings, the setup must not undo a tuned buffer. A new
+      // length is the clip's; the buffer only grows if it is shorter.
+      const seconds = Number(length);
+      const buffer =
+        length === keptLength
+          ? { ...config.buffer, autoStart }
+          : {
+              ...config.buffer,
+              autoStart,
+              seconds: Math.max(config.buffer.seconds, seconds),
+              clipSeconds: seconds >= config.buffer.seconds ? 0 : seconds,
+            };
       await patchConfig({
         setupDone: true,
-        buffer: {
-          ...config.buffer,
-          autoStart,
-          seconds: Number(length),
-          clipSeconds: 0,
-        },
+        buffer,
         autoStartWithWindows: withWindows,
         watermark,
       });
