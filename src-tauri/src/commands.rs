@@ -428,6 +428,11 @@ pub struct ShotEdit {
     /// Its edges. Every mark and every crop is reckoned in these coordinates.
     pub original_width: u32,
     pub original_height: u32,
+    /// What lies under the watermark, and where, in the original's
+    /// coordinates. Set means: the finished picture gets the mark anew, and the
+    /// editor shows the grounds without it and the mark where it will land.
+    pub under_path: Option<String>,
+    pub under_rect: Option<crate::shot::Rect>,
 }
 
 #[tauri::command]
@@ -438,6 +443,7 @@ pub fn screenshot_edit(state: State<'_, AppState>, id: String) -> Result<ShotEdi
 
     let base = crate::shot::base_path(&id);
     let original = crate::shot::original_path(&id);
+    let under_rect = crate::shot::under_rect(&id);
     let text = |path: &std::path::Path| path.to_string_lossy().to_string();
 
     // Untouched so far: the clip's own file is both grounds at once.
@@ -462,6 +468,8 @@ pub fn screenshot_edit(state: State<'_, AppState>, id: String) -> Result<ShotEdi
         original_path: original.is_file().then(|| text(&original)),
         original_width,
         original_height,
+        under_rect,
+        under_path: under_rect.map(|_| text(&crate::shot::under_path(&id))),
     })
 }
 
@@ -520,7 +528,13 @@ fn edit_screenshot(
         return Ok(clip);
     }
 
-    let pristine = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
+    let mut pristine = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
+    // The original carries the watermark. Laid bare again here and stamped onto
+    // the finished picture at the end — wherever its corner then is.
+    let under = crate::shot::read_under(&clip.id);
+    if let Some((at, piece)) = &under {
+        pristine.paste(at.x, at.y, piece);
+    }
 
     // Clamped once, here, and from here on nobody asks for anything else. What
     // gets noted down has to be what was really cut — otherwise the note and
@@ -559,6 +573,9 @@ fn edit_screenshot(
     }
     if let Some(area) = crop {
         picture = picture.crop(area.x, area.y, area.width, area.height)?;
+    }
+    if under.is_some() {
+        crate::watermark::stamp_kept(&mut picture);
     }
 
     // The ground to draw on next time: the crop, but none of the marks.

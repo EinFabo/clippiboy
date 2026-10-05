@@ -508,6 +508,13 @@ export interface ShotEdit {
   originalPath: string | null;
   originalWidth: number;
   originalHeight: number;
+  /**
+   * What lies under the watermark, and where in the original. Set means the
+   * finished picture gets the mark anew wherever its corner ends up — the
+   * editor lays this piece over the grounds and shows the mark where it lands.
+   */
+  underPath: string | null;
+  underRect: ShotRect | null;
 }
 
 /** Payload of the `overlay-banner` event (overlay window only). */

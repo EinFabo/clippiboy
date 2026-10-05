@@ -78,6 +78,19 @@ impl Shot {
         })
     }
 
+    /// Lay another picture over this one, pixel for pixel, at `x`/`y`. What
+    /// would reach past the edge is left off.
+    pub fn paste(&mut self, x: u32, y: u32, piece: &Shot) {
+        let stride = self.width as usize * 3;
+        let columns = piece.width.min(self.width.saturating_sub(x)) as usize;
+        let rows = piece.height.min(self.height.saturating_sub(y)) as usize;
+        for row in 0..rows {
+            let from = row * piece.width as usize * 3;
+            let to = (y as usize + row) * stride + x as usize * 3;
+            self.rgb[to..to + columns * 3].copy_from_slice(&piece.rgb[from..from + columns * 3]);
+        }
+    }
+
     /// Lay a transparent layer over the picture.
     ///
     /// The annotations are drawn in the WebView — arrows, boxes, and above all
@@ -339,7 +352,50 @@ pub fn write_edit(clip_id: &str, edit: &Edit) -> Result<(), String> {
     std::fs::rename(&part, &path).map_err(|err| format!("could not note the edit: {err}"))
 }
 
+/// What lay under the watermark of a fresh screenshot — see `watermark::stamp`.
+///
+/// A small piece, a few hundred pixels wide, kept from the moment the picture is
+/// taken: the editor lays it back before it works on the picture and stamps the
+/// result anew, so the mark can be neither painted over nor cropped away. A
+/// screenshot without one (taken with the mark switched off, or before there
+/// was this) is edited as it is.
+pub fn under_path(clip_id: &str) -> std::path::PathBuf {
+    crate::edit::dir(clip_id).join("under.png")
+}
+
+/// Where that piece belongs.
+fn under_note_path(clip_id: &str) -> std::path::PathBuf {
+    crate::edit::dir(clip_id).join("under.json")
+}
+
+pub fn write_under(clip_id: &str, at: Rect, piece: &Shot) -> Result<(), String> {
+    std::fs::create_dir_all(crate::edit::dir(clip_id))
+        .map_err(|err| format!("could not create folder: {err}"))?;
+    piece.write_png(&under_path(clip_id))?;
+    let text = serde_json::to_string(&at).map_err(|err| err.to_string())?;
+    std::fs::write(under_note_path(clip_id), text).map_err(|err| err.to_string())
+}
+
+/// Where the piece sits, if the screenshot has one.
+pub fn under_rect(clip_id: &str) -> Option<Rect> {
+    if !under_path(clip_id).is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(under_note_path(clip_id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The piece and where it sits.
+pub fn read_under(clip_id: &str) -> Option<(Rect, Shot)> {
+    let at = under_rect(clip_id)?;
+    let piece = read_png(&under_path(clip_id)).ok()?;
+    Some((at, piece))
+}
+
 /// Clear the whole store away — the picture is its untouched self again.
+///
+/// Except for what lay under the watermark: the picture still carries the mark,
+/// and the next edit needs the piece again.
 pub fn forget(clip_id: &str) {
     let _ = std::fs::remove_file(edit_path(clip_id));
     let _ = std::fs::remove_file(base_path(clip_id));

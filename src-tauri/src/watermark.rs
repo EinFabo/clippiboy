@@ -85,15 +85,69 @@ pub fn picture() -> &'static (u32, u32, Vec<u8>) {
     })
 }
 
-/// Lay the mark into a screenshot, if it is switched on.
-pub fn stamp(shot: &mut Shot) {
-    if !enabled() {
-        return;
+/// Like [`rect`], but for a picture that has to keep its mark whatever was done
+/// to it — an edited screenshot. A crop down to a small piece or a narrow strip
+/// would otherwise lose it, and cropping the mark away is exactly what it must
+/// not allow. Below the legible size it stays at the smallest one, and a
+/// picture too small even for that gets it shrunk to fit. `None` only for a
+/// picture of a few pixels.
+pub fn rect_kept(frame_width: u32, frame_height: u32, picture_width: u32, picture_height: u32) -> Option<Rect> {
+    if let Some(at) = rect(frame_width, frame_height, picture_width, picture_height) {
+        return Some(at);
     }
+    if picture_width == 0 || picture_height == 0 {
+        return None;
+    }
+    let margin = (frame_height as f32 * MARGIN_SHARE).round() as u32;
+    let mut height = ((frame_height as f32 * HEIGHT_SHARE).round() as u32).max(MIN_HEIGHT);
+    let mut width = (height as u64 * picture_width as u64 / picture_height as u64) as u32;
+    let room_width = frame_width.saturating_sub(2 * margin);
+    let room_height = frame_height.saturating_sub(2 * margin);
+    if width > room_width {
+        width = room_width;
+        height = (width as u64 * picture_height as u64 / picture_width as u64) as u32;
+    }
+    if height > room_height {
+        height = room_height;
+        width = (height as u64 * picture_width as u64 / picture_height as u64) as u32;
+    }
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Rect {
+        x: margin,
+        y: frame_height - margin - height,
+        width,
+        height,
+    })
+}
+
+/// Lay the mark into a fresh screenshot, if it is switched on.
+///
+/// Hands back what lay under it, and where: the editor puts that back before it
+/// works on the picture and stamps the result anew (`stamp_kept`). Otherwise
+/// the mark could be painted over or cropped away.
+pub fn stamp(shot: &mut Shot) -> Option<(Rect, Shot)> {
+    if !enabled() {
+        return None;
+    }
+    let (picture_width, picture_height, _) = picture();
+    let at = rect(shot.width, shot.height, *picture_width, *picture_height)?;
+    let under = shot.crop(at.x, at.y, at.width, at.height).ok()?;
+    stamp_at(shot, at);
+    Some((at, under))
+}
+
+/// Lay the mark into an edited screenshot — always, see [`rect_kept`].
+pub fn stamp_kept(shot: &mut Shot) {
+    let (picture_width, picture_height, _) = picture();
+    if let Some(at) = rect_kept(shot.width, shot.height, *picture_width, *picture_height) {
+        stamp_at(shot, at);
+    }
+}
+
+fn stamp_at(shot: &mut Shot, at: Rect) {
     let (picture_width, picture_height, rgba) = picture();
-    let Some(at) = rect(shot.width, shot.height, *picture_width, *picture_height) else {
-        return;
-    };
     let scaled = scale(rgba, *picture_width, *picture_height, at.width, at.height);
     let stride = shot.width as usize * 3;
     for row in 0..at.height as usize {
@@ -208,8 +262,11 @@ mod tests {
             height: 1080,
             rgb: vec![10; 1920 * 1080 * 3],
         };
-        stamp(&mut shot);
-        let at = rect(1920, 1080, picture().0, picture().1).unwrap();
+        let (at, under) = stamp(&mut shot).unwrap();
+        assert_eq!(at, rect(1920, 1080, picture().0, picture().1).unwrap());
+        // What lay under it comes back untouched.
+        assert_eq!((under.width, under.height), (at.width, at.height));
+        assert!(under.rgb.iter().all(|&value| value == 10));
         // Top-right corner: nothing.
         assert_eq!(shot.rgb[(1919) * 3], 10);
         // Somewhere in the mark the picture got lighter.
@@ -217,5 +274,20 @@ mod tests {
             (at.x..at.x + at.width).any(|x| shot.rgb[((y * 1920 + x) * 3) as usize] > 40)
         });
         assert!(changed);
+    }
+
+    #[test]
+    fn an_edit_keeps_the_mark_however_small_the_crop() {
+        // Too small for the ordinary rule…
+        assert_eq!(rect(400, 150, 535, 152), None);
+        // …but an edited picture keeps it, at the smallest legible size.
+        let at = rect_kept(400, 150, 535, 152).unwrap();
+        assert_eq!(at.height, MIN_HEIGHT);
+        assert_eq!(at.y + at.height + at.x, 150);
+        // A narrow strip shrinks it until it fits.
+        let at = rect_kept(40, 300, 535, 152).unwrap();
+        assert!(at.x + at.width <= 40);
+        // Where the ordinary rule fits, both agree.
+        assert_eq!(rect_kept(1920, 1080, 535, 152), rect(1920, 1080, 535, 152));
     }
 }

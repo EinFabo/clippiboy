@@ -40,12 +40,24 @@ import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
 import { EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
-import { usePictureBox } from "@/lib/pictureBox";
+import {
+  PictureViewContext,
+  WHOLE,
+  boxFor,
+  clampView,
+  usePictureBox,
+  useStageSize,
+  type PictureView,
+} from "@/lib/pictureBox";
+import { WATERMARK_OPACITY, WATERMARK_SRC, markRect } from "@/lib/watermark";
 import { useEngine } from "@/store";
 import type { Clip, ShotEdit } from "@/lib/types";
 
 /** Has to match `cb-player-out` in styles/motion.css. */
 const LEAVE_MS = 200;
+
+/** As far as the wheel zooms in. */
+const MAX_ZOOM_STEP = 8;
 
 /** Below this a crop is a slip of the hand, not an intention. */
 const MIN_EDGE = 16;
@@ -182,6 +194,13 @@ export function ShotViewer({
 
   const frame = useRef<HTMLDivElement>(null);
   const goodbye = useRef<number | undefined>(undefined);
+  /** Zoomed in with the wheel, pushed aside by dragging — see `PictureView`. */
+  const [view, setView] = useState<PictureView>(WHOLE);
+  const stageSize = useStageSize(frame);
+  /** A drag that moves the zoomed picture, while it lasts. */
+  const pan = useRef<{ pointer: number; fromX: number; fromY: number; x: number; y: number } | null>(
+    null,
+  );
 
   /** Play the exit, then really go. Everything that closes goes through here. */
   const close = useCallback(() => {
@@ -348,6 +367,10 @@ export function ShotViewer({
   // the ground without the marks while drawing, the original while cropping.
   useEffect(() => setBroken(false), [mode, id, edit?.basePath, edit?.originalPath]);
 
+  // Each of those is another picture on the stage, and a zoom into one says
+  // nothing about where to look in the next.
+  useEffect(() => setView(WHOLE), [mode, id, edit]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // While a name is being typed the keys belong to the field.
@@ -424,6 +447,70 @@ export function ShotViewer({
           }
         : { src: clip.path, width: clip.width, height: clip.height };
   const source = inTauri ? `${fileUrl(ground.src)}?v=${clip.sizeBytes}` : null;
+
+  /** Where the picture sits on the stage right now, zoom included. */
+  const box = stageSize ? boxFor(stageSize, ground.width, ground.height, view) : null;
+
+  /**
+   * Zoom by `factor`, keeping the spot under the pointer where it is — the way
+   * every picture viewer does it, so the wheel walks into what you point at.
+   */
+  const zoomAt = (clientX: number, clientY: number, factor: number) => {
+    const stage = frame.current;
+    if (!stage || !stageSize) return;
+    const rect = stage.getBoundingClientRect();
+    const pointerX = clientX - rect.left;
+    const pointerY = clientY - rect.top;
+    setView((was) => {
+      const before = boxFor(stageSize, ground.width, ground.height, was);
+      const spotX = (pointerX - before.left) / before.scale;
+      const spotY = (pointerY - before.top) / before.scale;
+      const zoom = Math.min(Math.max(was.zoom * factor, 1), MAX_ZOOM_STEP);
+      const scale = (before.scale / was.zoom) * zoom;
+      return clampView(stageSize, ground.width, ground.height, {
+        zoom,
+        x: pointerX - spotX * scale - (stageSize.width - ground.width * scale) / 2,
+        y: pointerY - spotY * scale - (stageSize.height - ground.height * scale) / 2,
+      });
+    });
+  };
+
+  /** The middle button anywhere, the left one while only looking. */
+  const startPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // The middle button never draws, zoomed in or not.
+    if (event.button === 1) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if (view.zoom <= 1) return false;
+    if (event.button !== 1 && !(event.button === 0 && mode === "view")) return false;
+    // The zoom badge is a button, and a captured pointer would swallow its click.
+    if ((event.target as HTMLElement).closest("button")) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pan.current = {
+      pointer: event.pointerId,
+      fromX: event.clientX,
+      fromY: event.clientY,
+      x: view.x,
+      y: view.y,
+    };
+    return true;
+  };
+
+  /** The watermark the finished picture will carry — see `ShotEdit.underRect`. */
+  const under = edit?.underRect && edit.underPath && inTauri ? edit.underRect : null;
+  /** The frame the mark lands in, in the coordinates of the stage's picture. */
+  const finished: Rect | null = !under
+    ? null
+    : mode === "crop"
+      ? (sel && sel.width >= 1 && sel.height >= 1 ? sel : null) ??
+        edit?.crop ?? { x: 0, y: 0, ...full }
+      : mode === "draw"
+        ? { x: 0, y: 0, width: ground.width, height: ground.height }
+        : null;
+  const mark = finished && markRect(finished.width, finished.height);
 
   const edited = Boolean(edit?.crop) || shapes.length > 0;
 
@@ -619,7 +706,7 @@ export function ShotViewer({
         {/* Moves the window, as the player's bar does — see there. */}
         <header
           data-tauri-drag-region
-          className="flex shrink-0 items-center justify-between gap-6 px-8 pt-6 pb-4"
+          className="flex shrink-0 items-center justify-between gap-6 px-8 pt-12 pb-4"
         >
           <div
             data-tauri-drag-region
@@ -664,7 +751,39 @@ export function ShotViewer({
               mode === "view" &&
               clipMenu(event, clip, { onDelete: () => setAskingDelete(true) })
             }
-            className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-card bg-black"
+            onWheel={(event) => {
+              if (event.deltaY === 0) return;
+              zoomAt(event.clientX, event.clientY, Math.pow(1.0015, -event.deltaY));
+            }}
+            // Before the layers hear of it: a middle-button drag pans whatever
+            // tool is picked, and must not start a mark or a crop.
+            onPointerDownCapture={startPan}
+            onPointerMove={(event) => {
+              const drag = pan.current;
+              if (!drag || drag.pointer !== event.pointerId || !stageSize) return;
+              setView((was) =>
+                clampView(stageSize, ground.width, ground.height, {
+                  zoom: was.zoom,
+                  x: drag.x + event.clientX - drag.fromX,
+                  y: drag.y + event.clientY - drag.fromY,
+                }),
+              );
+            }}
+            onPointerUp={(event) => {
+              if (pan.current?.pointer === event.pointerId) pan.current = null;
+            }}
+            onPointerCancel={() => (pan.current = null)}
+            // The middle button would otherwise start the browser's autoscroll.
+            onMouseDown={(event) => event.button === 1 && event.preventDefault()}
+            onDoubleClick={(event) => {
+              if (mode !== "view") return;
+              if (view.zoom > 1) setView(WHOLE);
+              else zoomAt(event.clientX, event.clientY, 2.5);
+            }}
+            className={cn(
+              "relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-card bg-black",
+              mode === "view" && view.zoom > 1 && "cursor-grab active:cursor-grabbing",
+            )}
           >
             {broken || !source ? (
               <div className="grid h-full place-items-center px-8 text-center">
@@ -678,13 +797,40 @@ export function ShotViewer({
                 </div>
               </div>
             ) : (
-              <>
+              <PictureViewContext.Provider value={view}>
                 <img
                   src={source}
                   alt={clip.title ?? "Screenshot"}
                   onError={() => setBroken(true)}
-                  className="h-full w-full bg-black object-contain"
+                  draggable={false}
+                  className={cn(
+                    "bg-black object-contain select-none",
+                    box ? "absolute max-w-none" : "h-full w-full",
+                  )}
+                  style={
+                    box
+                      ? { left: box.left, top: box.top, width: box.width, height: box.height }
+                      : undefined
+                  }
                 />
+                {/* The grounds carry the old mark; this lays bare what was
+                    under it, so a stroke over the corner looks as it will. In
+                    the cropped ground it is already bare, and the piece merely
+                    lands on the same pixels again. */}
+                {under && box && mode !== "view" && (
+                  <img
+                    src={fileUrl(edit!.underPath!)}
+                    alt=""
+                    draggable={false}
+                    className="pointer-events-none absolute max-w-none select-none"
+                    style={{
+                      left: box.left + (under.x - (mode === "draw" ? origin.x : 0)) * box.scale,
+                      top: box.top + (under.y - (mode === "draw" ? origin.y : 0)) * box.scale,
+                      width: under.width * box.scale,
+                      height: under.height * box.scale,
+                    }}
+                  />
+                )}
                 {mode === "draw" && (
                   <AnnotateLayer
                     stage={frame}
@@ -708,7 +854,36 @@ export function ShotViewer({
                     onRect={setSel}
                   />
                 )}
-              </>
+                {/* Over everything, as it will lie over everything: no mark
+                    and no crop takes it off the finished picture. */}
+                {finished && mark && box && (
+                  <img
+                    src={WATERMARK_SRC}
+                    alt=""
+                    draggable={false}
+                    title="The watermark stays on the picture"
+                    className="pointer-events-none absolute max-w-none select-none"
+                    style={{
+                      left: box.left + (finished.x + mark.x) * box.scale,
+                      top: box.top + (finished.y + mark.y) * box.scale,
+                      width: mark.width * box.scale,
+                      height: mark.height * box.scale,
+                      opacity: WATERMARK_OPACITY,
+                    }}
+                  />
+                )}
+                {view.zoom > 1.01 && (
+                  <button
+                    onClick={() => setView(WHOLE)}
+                    title="Back to the whole picture"
+                    className="absolute right-3 bottom-3 rounded-pill bg-black/60 px-2.5 py-1
+                      font-mono text-xs text-ink tabular-nums backdrop-blur transition-colors
+                      hover:bg-black/80"
+                  >
+                    {Math.round(view.zoom * 100)} %
+                  </button>
+                )}
+              </PictureViewContext.Provider>
             )}
           </div>
 
@@ -1007,7 +1182,9 @@ export function ShotViewer({
           )}
 
           <span className="ml-auto text-xs text-ink-faint">
-            {editing ? "Save or discard first" : "←/→ next picture"}
+            {editing
+              ? "Save or discard first · wheel to zoom, middle button to move"
+              : "←/→ next picture · wheel to zoom"}
           </span>
 
           {/*

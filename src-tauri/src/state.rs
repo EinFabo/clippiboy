@@ -907,12 +907,24 @@ impl AppState {
         // Ein Bild ist ein Augenblick: es gehört zu dem Spiel, das jetzt läuft.
         let game = self.current_game.lock().clone();
         let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)?;
-        // Into the file itself, and so into the original the editor starts
-        // from — an edit carries it along instead of stamping it twice.
-        crate::watermark::stamp(&mut shot);
-        shot.write_png(&path)?;
-
+        // Into the file itself. What lay under it goes into the editor's store:
+        // an edit lays it back and stamps the result anew, so the mark can be
+        // neither painted over nor cropped away.
         let id = uuid::Uuid::new_v4().to_string();
+        let under = crate::watermark::stamp(&mut shot);
+        shot.write_png(&path)?;
+        if let Some((at, piece)) = under {
+            let at = crate::shot::Rect {
+                x: at.x,
+                y: at.y,
+                width: at.width,
+                height: at.height,
+            };
+            if let Err(err) = crate::shot::write_under(&id, at, &piece) {
+                log::warn!("could not keep what lies under the watermark: {err}");
+            }
+        }
+
         // A picture of its own, not the screenshot itself: `thumbs::migrate`
         // carries every thumbnail lying outside its folder into it, and would
         // take the original out of the user's clip folder along the way.

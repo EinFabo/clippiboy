@@ -160,6 +160,23 @@ export function BannerTab() {
         deliberately does not hook into the game process. Borderless fullscreen
         and windowed mode work.
       </p>
+
+      {/* Not in the setup and not among the everyday switches (Fabi,
+          2026-10-05): it stays on unless someone goes looking for it. */}
+      <div className="mt-10">
+        <SectionTitle title="Watermark" />
+      </div>
+      <Card className="divide-y divide-line">
+        <Row
+          label="Watermark"
+          hint="ClippiBoy logo in the bottom-left corner of new clips and screenshots"
+        >
+          <Toggle
+            checked={config.watermark}
+            onChange={(watermark) => patchConfig({ watermark })}
+          />
+        </Row>
+      </Card>
     </section>
   );
 }

@@ -68,7 +68,6 @@ export function Setup() {
   const [length, setLength] = useState<string>("120");
   const [autoStart, setAutoStart] = useState(true);
   const [withWindows, setWithWindows] = useState(false);
-  const [watermark, setWatermark] = useState(true);
   const [busy, setBusy] = useState(false);
   /** The clip length as it was on opening, to tell "left alone" from "changed". */
   const [keptLength, setKeptLength] = useState("");
@@ -90,7 +89,6 @@ export function Setup() {
     setKeptLength(current);
     setAutoStart(config.setupDone ? config.buffer.autoStart : true);
     setWithWindows(config.autoStartWithWindows);
-    setWatermark(config.watermark);
     // Only on opening — not every time the config changes underneath.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -125,7 +123,6 @@ export function Setup() {
         setupDone: true,
         buffer,
         autoStartWithWindows: withWindows,
-        watermark,
       });
       if (!useEngine.getState().bufferActive) await toggleBuffer();
       setSetupOpen(false);
@@ -278,9 +275,6 @@ export function Setup() {
                 </Row>
                 <Row label="Start with Windows" hint="Starts hidden in the tray">
                   <Toggle checked={withWindows} onChange={setWithWindows} />
-                </Row>
-                <Row label="Watermark" hint="ClippiBoy logo in the bottom-left corner of clips and screenshots">
-                  <Toggle checked={watermark} onChange={setWatermark} />
                 </Row>
               </Card>
               <p className="mt-5 rounded-inner border border-line bg-elevated px-4 py-3 text-sm">
