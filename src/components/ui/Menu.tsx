@@ -198,7 +198,7 @@ function Surface({
       onContextMenu={(event) => event.preventDefault()}
       style={{ left: at.x, top: at.y }}
       className={cn(
-        "fixed z-[60] min-w-[224px] py-1.5",
+        "fixed z-[75] min-w-[224px] py-1.5",
         "rounded-inner border border-line bg-elevated/95 backdrop-blur-xl",
         "shadow-[0_16px_48px_rgba(0,0,0,0.55)]",
         "origin-top-left transition-[opacity,transform] duration-100 ease-[var(--ease-out-soft)]",

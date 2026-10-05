@@ -26,11 +26,18 @@ function Ctrl({
   );
 }
 
+/**
+ * Above everything that covers the window — the player, the screenshot viewer,
+ * the dialogs. Those used to lie over it, and while a clip was open the window
+ * could be neither minimized nor maximized nor closed; a click up there landed
+ * on the player's backdrop and closed the clip instead. The full views leave
+ * the strip free for it (`pt-12` on their header).
+ */
 export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="fixed inset-x-0 top-0 z-50 flex h-10 items-center justify-between px-3"
+      className="fixed inset-x-0 top-0 z-[70] flex h-10 items-center justify-between px-3"
     >
       <div data-tauri-drag-region className="flex items-center gap-2 pl-1">
         {/* Inline rather than the file: it takes the accent colour. */}
@@ -51,7 +58,17 @@ export function TitleBar() {
         {/* close() rather than hide(): the Rust handler catches CloseRequested,
             hides the window and explains the tray the first time — that way ✕ and
             Alt+F4 behave the same. */}
-        <Ctrl label="Close" danger onClick={() => win().close()}>
+        <Ctrl
+          label="Close"
+          danger
+          onClick={() => {
+            // Into the tray, not gone — a clip left playing would go on
+            // sounding from nowhere. Minimizing leaves it running. The extra
+            // tracks follow the video's own pause (`useClipMix`).
+            for (const video of document.querySelectorAll("video")) video.pause();
+            void win().close();
+          }}
+        >
           <svg viewBox="0 0 12 12" className="h-3 w-3" stroke="currentColor" strokeWidth="1.2">
             <path d="M3 3l6 6M9 3l-6 6" />
           </svg>

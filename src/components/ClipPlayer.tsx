@@ -325,13 +325,19 @@ export function ClipPlayer({
   const fill = useRef<HTMLDivElement>(null);
   const knob = useRef<HTMLDivElement>(null);
   const clockLabel = useRef<HTMLSpanElement>(null);
+  // The same three again for the bar over the picture in fullscreen.
+  const fullFill = useRef<HTMLDivElement>(null);
+  const fullKnob = useRef<HTMLDivElement>(null);
+  const fullClock = useRef<HTMLSpanElement>(null);
 
   const paint = useCallback((seconds: number, total: number) => {
     const ratio = total > 0 ? Math.min(1, Math.max(0, seconds / total)) : 0;
     const percent = `${ratio * 100}%`;
-    if (fill.current) fill.current.style.width = percent;
-    if (knob.current) knob.current.style.left = percent;
-    if (clockLabel.current) clockLabel.current.textContent = clock(seconds);
+    for (const bar of [fill.current, fullFill.current]) if (bar) bar.style.width = percent;
+    for (const grip of [knob.current, fullKnob.current]) if (grip) grip.style.left = percent;
+    for (const label of [clockLabel.current, fullClock.current]) {
+      if (label) label.textContent = clock(seconds);
+    }
   }, []);
 
   // `timeupdate` fires only about four times a second — the bar would visibly
@@ -396,6 +402,31 @@ export function ClipPlayer({
     if (document.fullscreenElement) void document.exitFullscreen();
     else void frame.current?.requestFullscreen();
   }, []);
+
+  /**
+   * In fullscreen only the frame is left, and with it went the footer — no
+   * bar, no pause button. The frame carries its own then, which steps aside
+   * when the mouse rests while the clip plays, as in any player.
+   */
+  const [isFull, setIsFull] = useState(false);
+  const [chrome, setChrome] = useState(true);
+  const restTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const onChange = () => setIsFull(document.fullscreenElement === frame.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const wake = useCallback(() => {
+    setChrome(true);
+    clearTimeout(restTimer.current);
+    restTimer.current = window.setTimeout(() => setChrome(false), 2500);
+  }, []);
+  useEffect(() => {
+    wake();
+    return () => clearTimeout(restTimer.current);
+  }, [isFull, playing, wake]);
+  /** Shown while paused, or while the mouse is moving. */
+  const fullChrome = isFull && (chrome || !playing);
 
   /** Put the selection's start or end at the current position. */
   const mark = useCallback((which: "start" | "end") => {
@@ -614,7 +645,7 @@ export function ClipPlayer({
           stays out of it, like the ones in `TitleBar`. */}
       <header
         data-tauri-drag-region
-        className="flex shrink-0 items-center justify-between gap-6 px-8 pt-6 pb-4"
+        className="flex shrink-0 items-center justify-between gap-6 px-8 pt-12 pb-4"
       >
         <div
           data-tauri-drag-region
@@ -654,7 +685,11 @@ export function ClipPlayer({
               onExport: () => setExporting(true),
             })
           }
-          className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-card bg-black"
+          onMouseMove={isFull ? wake : undefined}
+          className={cn(
+            "relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-card bg-black",
+            isFull && !fullChrome && "cursor-none",
+          )}
         >
           {broken || !source ? (
             <div className="grid h-full place-items-center px-8 text-center">
@@ -756,6 +791,50 @@ export function ClipPlayer({
             progress={writeProgress}
             label={restoring ? "Restoring" : "Saving"}
           />
+
+          {isFull && (
+            <div
+              className={cn(
+                "absolute inset-x-0 bottom-0 flex items-center gap-4 bg-gradient-to-t",
+                "from-black/85 via-black/40 to-transparent px-8 pt-20 pb-7",
+                "transition-opacity duration-300",
+                fullChrome ? "opacity-100" : "pointer-events-none opacity-0",
+              )}
+            >
+              <PlayButton playing={playing} disabled={broken} onClick={toggle} />
+              <Scrubber
+                progress={progress}
+                fillRef={fullFill}
+                knobRef={fullKnob}
+                duration={duration}
+                trim={trim}
+                waveform={waveform}
+                onSeek={(ratio) => seekTo(ratio * duration)}
+                onTrim={setTrim}
+              />
+              <span className="shrink-0 font-mono text-xs text-ink-muted tabular-nums">
+                <span ref={fullClock}>{clock(time)}</span> / {clock(duration)}
+              </span>
+              <Volume
+                value={muted ? 0 : volume}
+                onChange={(v) => {
+                  setVolume(v);
+                  setMuted(v === 0);
+                }}
+                onToggleMute={() => setMuted((m) => !m)}
+              />
+              <button
+                aria-label="Exit fullscreen"
+                onClick={fullscreen}
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-pill text-ink-muted
+                  transition-colors hover:bg-white/10 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
 
         <ClipEditor
