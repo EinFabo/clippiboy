@@ -103,7 +103,7 @@ export function renderPage(d: PageData): string {
   const title = escapeHtml(d.title);
   const by = d.uploader ? ` by ${d.uploader.name}` : "";
   const description = `${d.game ? `${d.game} · ` : ""}Shared${by} with ClippiBoy · expires ${d.expires}`;
-  const ratio = d.width && d.height ? `${d.width} / ${d.height}` : "16 / 9";
+  const [w, h] = d.width && d.height ? [d.width, d.height] : [16, 9];
   const pills = [
     d.game ? `<span class="pill game">${escapeHtml(d.game)}</span>` : "",
     ...d.tags.map((tag) => `<span class="pill">${escapeHtml(tag)}</span>`),
@@ -130,7 +130,7 @@ ${d.width ? `<meta property="og:video:width" content="${d.width}"><meta property
 <meta name="twitter:card" content="summary_large_image">
 <style>
 ${baseCss(d.site)}
-.player{position:relative;aspect-ratio:${ratio};max-height:76vh;margin:0 auto;background:#000;border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 30px 80px -20px rgb(0 0 0/.7)}
+.player{position:relative;aspect-ratio:${w} / ${h};width:min(100%,calc(76vh * ${w} / ${h}));margin:0 auto;background:#000;border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 30px 80px -20px rgb(0 0 0/.7)}
 video{width:100%;height:100%;display:block;object-fit:contain;cursor:pointer}
 .veil{position:absolute;inset:0;display:grid;place-items:center;background:rgb(8 8 10/.35);transition:opacity .2s var(--soft)}
 .veil.off{opacity:0;pointer-events:none}
@@ -197,9 +197,12 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
   let started = false, idle;
   const wake = () => { player.classList.remove("idle"); clearTimeout(idle); if (!video.paused) idle = setTimeout(() => player.classList.add("idle"), 2500); };
   const show = (el, on) => el.classList.toggle("off", !on);
-  $("big").onclick = () => { started = true; show(start, false); video.play(); };
-  video.onclick = () => { if (!started) { started = true; show(start, false); } toggle(); };
-  $("play").onclick = toggle;
+  // Whatever starts the clip first lifts the veil: the big button, a click
+  // anywhere on the poster, the bar's own button, the keyboard.
+  const begin = () => { if (!started) { started = true; show(start, false); } };
+  start.onclick = () => { begin(); video.play(); };
+  video.onclick = () => { begin(); toggle(); };
+  $("play").onclick = () => { begin(); toggle(); };
   video.onplay = () => { player.classList.add("playing"); $("play").ariaLabel = "Pause"; wake(); };
   video.onpause = () => { player.classList.remove("playing"); $("play").ariaLabel = "Play"; wake(); };
   video.onwaiting = () => started && show(loading, true);
@@ -220,11 +223,19 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
   scrub.onpointerdown = (e) => { scrub.setPointerCapture(e.pointerId); scrub.classList.add("drag"); seekTo(e.clientX); scrub.onpointermove = (m) => seekTo(m.clientX); };
   scrub.onpointerup = () => { scrub.classList.remove("drag"); scrub.onpointermove = null; };
   $("mute").onclick = () => { video.muted = !video.muted; $("wave").style.opacity = video.muted ? 0 : 1; };
-  $("full").onclick = () => (document.fullscreenElement ? document.exitFullscreen() : player.requestFullscreen());
+  // The iPhone has no fullscreen for anything but the video itself.
+  $("full").onclick = () => {
+    if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else if (player.requestFullscreen) player.requestFullscreen();
+    else if (player.webkitRequestFullscreen) player.webkitRequestFullscreen();
+    else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+  };
   player.onpointermove = wake;
   document.onkeydown = (e) => {
     if (e.target.closest && e.target.closest("a,button")) return;
-    if (e.code === "Space" || e.key === "k") { e.preventDefault(); if (!started) { started = true; show(start, false); } toggle(); }
+    // Ctrl+F, Cmd+K and the like stay the browser's.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.code === "Space" || e.key === "k") { e.preventDefault(); begin(); toggle(); }
     else if (e.key === "ArrowRight") video.currentTime += 5;
     else if (e.key === "ArrowLeft") video.currentTime -= 5;
     else if (e.key === "f") $("full").onclick();
