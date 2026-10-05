@@ -34,6 +34,10 @@ pub struct Link {
     pub url: String,
     /// ms since the epoch.
     pub expires_at: i64,
+    /// The Discord account it was made with — only that one can delete it.
+    /// Missing on links from before this was kept.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +113,10 @@ fn now_ms() -> i64 {
 /// The live links, by clip id. Run-out ones drop off on the way.
 fn load() -> HashMap<String, Link> {
     let _guard = FILE.lock();
+    read_file()
+}
+
+fn read_file() -> HashMap<String, Link> {
     let mut links: HashMap<String, Link> = std::fs::read(path())
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -118,10 +126,12 @@ fn load() -> HashMap<String, Link> {
     links
 }
 
+/// Read, edit and write under one lock: two uploads finishing together must
+/// not write over each other's link.
 fn change(edit: impl FnOnce(&mut HashMap<String, Link>)) -> Result<(), String> {
-    let mut links = load();
-    edit(&mut links);
     let _guard = FILE.lock();
+    let mut links = read_file();
+    edit(&mut links);
     let json = serde_json::to_vec_pretty(&links).map_err(|err| err.to_string())?;
     std::fs::write(path(), json).map_err(|err| format!("Could not remember the link: {err}"))
 }
@@ -157,6 +167,9 @@ async fn read(response: reqwest::Response) -> Result<serde_json::Value, String> 
     }
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err("Sign in with Discord again to share links.".into());
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err("This link was made with another Discord account. Sign in with that one to delete it.".into());
     }
     if value.get("reason").and_then(|r| r.as_str()) == Some("quota") {
         let resets = value.get("resetsAt").and_then(|r| r.as_i64());
@@ -246,8 +259,12 @@ pub async fn link_create(app: AppHandle, id: String) -> Result<Link, String> {
     match &result {
         Ok(link) => {
             report.emit("done", 1.0, None);
+            let owned = Link {
+                owner: crate::friends::my_id(&app),
+                ..link.clone()
+            };
             let _ = change(|links| {
-                links.insert(id.clone(), link.clone());
+                links.insert(id.clone(), owned);
             });
             let _ = app.emit("links-changed", ());
             let _ = crate::clipboard::copy_text(&link.url);
@@ -393,26 +410,73 @@ async fn send(
 
 #[tauri::command]
 pub async fn link_delete(app: AppHandle, id: String) -> Result<(), String> {
-    let Some(link) = load().remove(&id) else {
-        return Ok(());
+    let result = take_down(&app, &id).await;
+    match &result {
+        Ok(true) => crate::notify(&app, "ok", "Link deleted"),
+        Ok(false) => {}
+        Err(err) => crate::notify(&app, "error", err.clone()),
+    }
+    result.map(|_| ())
+}
+
+/// A clip deleted from the library takes its link along: afterwards no menu
+/// is left to reach it from.
+pub fn clip_deleted(app: &AppHandle, id: &str) {
+    if !load().contains_key(id) {
+        return;
+    }
+    let app = app.clone();
+    let id = id.to_owned();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = take_down(&app, &id).await {
+            log::warn!("share link of deleted clip {id}: {err}");
+            // The entry has no clip to hang on any more.
+            let _ = change(|links| {
+                links.remove(&id);
+            });
+            let _ = app.emit("links-changed", ());
+            crate::notify(
+                &app,
+                "error",
+                format!("The clip is deleted, but its share link could not be taken down: {err} It expires on its own within 5 days."),
+            );
+        }
+    });
+}
+
+/// After the account is deleted, its links are gone from the server too.
+pub fn forget_all(app: &AppHandle) {
+    let _ = change(HashMap::clear);
+    let _ = app.emit("links-changed", ());
+}
+
+/// Delete a clip's link on the server and forget it. `false` when there was
+/// none to delete.
+async fn take_down(app: &AppHandle, id: &str) -> Result<bool, String> {
+    let Some(link) = load().remove(id) else {
+        return Ok(false);
     };
-    let token = token(&app)?;
+    let token = token(app).map_err(|_| "Sign in with Discord to delete the link.".to_string())?;
+    if let (Some(owner), Some(me)) = (&link.owner, crate::friends::my_id(app)) {
+        if *owner != me {
+            return Err("This link was made with another Discord account. Sign in with that one to delete it.".into());
+        }
+    }
     let response = client()
         .delete(format!("{}/shares/{}", crate::friends::SERVER, link.id))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .map_err(|_| "The ClippiBoy server is not reachable right now.".to_string())?;
-    // Gone already counts as deleted.
+    // Gone already counts as deleted. Someone else's link answers 403.
     if response.status() != reqwest::StatusCode::NOT_FOUND {
         read(response).await?;
     }
     change(|links| {
-        links.remove(&id);
+        links.remove(id);
     })?;
     let _ = app.emit("links-changed", ());
-    crate::notify(&app, "ok", "Link deleted");
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -683,9 +683,11 @@ impl AppState {
         } else if self.buffering_game.lock().is_some() {
             // Das Spiel ist zu. Sein Name bleibt am Puffer, solange dort noch
             // Spielbild liegen kann — danach stand er auf Clips vom Desktop.
+            // Eine laufende Aufnahme hält ihn bis zum Stopp: sie enthält das
+            // Spiel, egal wie lange es schon zu ist.
             let ended = *self.game_ended.lock().get_or_insert_with(std::time::Instant::now);
             let longest = self.config_snapshot().buffer.seconds;
-            if ended.elapsed() >= std::time::Duration::from_secs(longest.into()) {
+            if !self.is_recording() && ended.elapsed() >= std::time::Duration::from_secs(longest.into()) {
                 *self.buffering_game.lock() = None;
                 *self.game_ended.lock() = None;
             }

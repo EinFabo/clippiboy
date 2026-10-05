@@ -64,11 +64,18 @@ async function live(env: Env, id: string, now: number): Promise<ShareRow | null>
 
 async function owned(env: Env, me: string, id: string): Promise<ShareRow> {
   const row = ID_PATTERN.test(id)
-    ? await env.DB.prepare("SELECT * FROM shares WHERE id = ? AND owner = ?").bind(id, me).first<ShareRow>()
+    ? await env.DB.prepare("SELECT * FROM shares WHERE id = ?").bind(id).first<ShareRow>()
     : null;
   if (!row) throw new HttpError(404, "That link is gone.");
+  // Not a 404: the app would take that as "already deleted" and forget a link
+  // that is still up.
+  if (row.owner !== me) throw new HttpError(403, "That link belongs to another account.");
   return row;
 }
+
+// A deleted or run-out share keeps only what counts against the week and the
+// bucket — not what the clip was called, its game or its tags.
+const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0 WHERE id = ?";
 
 // --- For the app (signed in) --------------------------------------------------
 
@@ -158,7 +165,7 @@ export async function deleteShare(env: Env, me: string, id: string): Promise<Res
   const row = await owned(env, me, id);
   if (row.deleted_at === null) {
     await env.CLIPS.delete([video(id), poster(id)]);
-    await env.DB.prepare("UPDATE shares SET deleted_at = ? WHERE id = ?").bind(Date.now(), id).run();
+    await env.DB.prepare(TOMBSTONE).bind(Date.now(), id).run();
   }
   return json({ ok: true });
 }
@@ -262,7 +269,7 @@ export async function sweep(env: Env): Promise<void> {
     // R2 takes up to a thousand keys at once; two per clip.
     await env.CLIPS.delete(results.flatMap((row) => [video(row.id), poster(row.id)]));
     await env.DB.batch(
-      results.map((row) => env.DB.prepare("UPDATE shares SET deleted_at = ? WHERE id = ?").bind(now, row.id)),
+      results.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)),
     );
   }
   // A week to count against, plus a margin.

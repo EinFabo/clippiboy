@@ -64,7 +64,8 @@ export function Setup() {
   );
   const open = ready && (setupOpen || !config.setupDone);
   const [step, setStep] = useState(0);
-  const [length, setLength] = useState<Length>("120");
+  /** Seconds as text — a preset, or a length tuned in the settings. */
+  const [length, setLength] = useState<string>("120");
   const [autoStart, setAutoStart] = useState(true);
   const [withWindows, setWithWindows] = useState(false);
   const [watermark, setWatermark] = useState(true);
@@ -84,7 +85,8 @@ export function Setup() {
       ? config.buffer.seconds
       : Math.min(config.buffer.clipSeconds, config.buffer.seconds);
     const current = String(clip);
-    setLength((LENGTHS as readonly string[]).includes(current) ? (current as Length) : "120");
+    // A length tuned in the settings stays as it is until a preset is picked.
+    setLength(current);
     setKeptLength(current);
     setAutoStart(config.setupDone ? config.buffer.autoStart : true);
     setWithWindows(config.autoStartWithWindows);
@@ -257,9 +259,16 @@ export function Setup() {
                 }
               />
               <Card className="mt-4 divide-y divide-line">
-                <Row label="Clip length" hint="Saving a clip keeps this much of what just happened">
-                  <Segmented
-                    value={length}
+                <Row
+                  label="Clip length"
+                  hint={
+                    isPreset(length)
+                      ? "Saving a clip keeps this much of what just happened"
+                      : `Now ${clock(Number(length))}, set in the settings. Saving a clip keeps this much of what just happened`
+                  }
+                >
+                  <Segmented<Length>
+                    value={isPreset(length) ? length : null}
                     options={LENGTHS.map((key) => ({ key, label: LENGTH_LABELS[key] }))}
                     onChange={setLength}
                   />
@@ -310,6 +319,10 @@ export function Setup() {
     </div>,
     document.body,
   );
+}
+
+function isPreset(length: string): length is Length {
+  return (LENGTHS as readonly string[]).includes(length);
 }
 
 /** "1:30", "3:00". */

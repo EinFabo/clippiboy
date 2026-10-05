@@ -179,7 +179,9 @@ footer{margin-top:22px;font-size:12px;color:var(--faint)}footer a{color:var(--mu
     if (!video.paused) requestAnimationFrame(paint);
   };
   video.addEventListener("play", () => requestAnimationFrame(paint));
-  video.ontimeupdate = paint;
+  // While playing, the rAF loop above paints; timeupdate only covers the
+  // paused case (a seek), or every update would start another loop.
+  video.ontimeupdate = () => { if (video.paused) paint(); };
   video.onprogress = () => { const b = video.buffered; if (b.length && video.duration) buf.style.width = (b.end(b.length - 1) / video.duration) * 100 + "%"; };
   const seekTo = (x) => { const r = scrub.getBoundingClientRect(); if (video.duration) { video.currentTime = Math.min(Math.max((x - r.left) / r.width, 0), 1) * video.duration; paint(); } };
   scrub.onpointerdown = (e) => { scrub.setPointerCapture(e.pointerId); scrub.classList.add("drag"); seekTo(e.clientX); scrub.onpointermove = (m) => seekTo(m.clientX); };

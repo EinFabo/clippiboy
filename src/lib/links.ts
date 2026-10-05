@@ -85,6 +85,9 @@ export const useLinks = create<LinksStore>((set, get) => ({
   async remove(id) {
     try {
       await linkApi.remove(id);
+    } catch (err) {
+      // The core already showed it as a notice.
+      console.error("link delete", err);
     } finally {
       void get().refresh();
     }

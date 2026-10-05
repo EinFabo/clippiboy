@@ -126,6 +126,13 @@ pub(crate) fn token(app: &AppHandle) -> Option<String> {
     app.try_state::<Friends>()?.token.lock().clone()
 }
 
+/// The signed-in Discord account's id.
+pub(crate) fn my_id(app: &AppHandle) -> Option<String> {
+    let friends = app.try_state::<Friends>()?;
+    let view = friends.view.lock();
+    view.me.as_ref().map(|me| me.user.id.clone())
+}
+
 /// At program start: signed in last time? Then connect straight away.
 pub fn start(app: &AppHandle) {
     app.manage(Friends::default());
@@ -270,6 +277,8 @@ pub async fn friends_set_allow_requests(app: AppHandle, allow: bool) -> Result<(
 pub async fn friends_delete_account(app: AppHandle) -> Result<(), String> {
     request(&app, reqwest::Method::DELETE, "/me", None).await?;
     sign_out_locally(&app);
+    // The server took the account's share links along.
+    crate::links::forget_all(&app);
     Ok(())
 }
 

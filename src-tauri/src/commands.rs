@@ -674,6 +674,7 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // Every window keeps its own list. Without this, a clip deleted in the
     // console stays in the main window and opens as "File not found".
     let _ = app.emit("clip-deleted", &id);
+    crate::links::clip_deleted(&app, &id);
     announce_change(&app);
     Ok(())
 }
