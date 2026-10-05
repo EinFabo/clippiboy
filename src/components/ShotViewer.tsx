@@ -603,6 +603,7 @@ export function ShotViewer({
   // Hung under <body> for the same reason as the player — see the note there.
   return createPortal(
     <div
+      data-fullview
       className={cn(
         "fixed inset-0 z-50 bg-black/80 backdrop-blur-xl",
         leaving ? "cb-backdrop-out" : "cb-backdrop-in",

@@ -266,8 +266,10 @@ export function Transfers() {
 
   // Above the player and the dialogs (z-50, portals later in the DOM): a link
   // shared from the player's menu shows its progress there too. Below menus.
+  // Over a full view (player, screenshot, setup) it moves up, clear of the
+  // controls those keep in their bottom-right corner.
   return (
-    <div className="fixed right-6 bottom-6 z-[55] flex w-[340px] flex-col gap-2">
+    <div className="fixed right-6 bottom-6 z-[55] flex w-[340px] flex-col gap-2 [body:has([data-fullview])_&]:bottom-36">
       {uploads.map((upload) => (
         <UploadCard key={`link-${upload.clipId}`} upload={upload} />
       ))}

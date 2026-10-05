@@ -592,6 +592,7 @@ export function ClipPlayer({
   // start below the nav bar instead of covering the window.
   return createPortal(
     <div
+      data-fullview
       className={cn(
         "fixed inset-0 z-50 bg-black/80 backdrop-blur-xl",
         leaving ? "cb-backdrop-out" : "cb-backdrop-in",

@@ -195,7 +195,8 @@ export function Console() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   // Deleting takes the clip's share link down too — said in the question.
-  const [confirmingLink, setConfirmingLink] = useState(false);
+  // The clip the answer is about: a late one for another clip changes nothing.
+  const [linkedClip, setLinkedClip] = useState<string | null>(null);
   /** Die Kachel, über der gerade die Freundeliste zum Senden liegt. */
   const [sendFor, setSendFor] = useState<string | null>(null);
   useEffect(() => {
@@ -692,7 +693,7 @@ export function Console() {
                   {confirming === clip.id ? (
                     <ConfirmDelete
                       origin="left"
-                      question={confirmingLink ? "Delete with its link?" : undefined}
+                      question={linkedClip === clip.id ? "Delete with its link?" : undefined}
                       onConfirm={() => {
                         setConfirming(null);
                         void run("delete", async () => {
@@ -764,8 +765,13 @@ export function Console() {
                         label="Delete"
                         onClick={() => {
                           setConfirming(clip.id);
-                          setConfirmingLink(false);
-                          if (inTauri) void api.linkExists(clip.id).then(setConfirmingLink).catch(() => {});
+                          setLinkedClip(null);
+                          if (inTauri) {
+                            void api
+                              .linkExists(clip.id)
+                              .then((has) => has && setLinkedClip(clip.id))
+                              .catch(() => {});
+                          }
                         }}
                         danger
                       >

@@ -345,7 +345,9 @@ pub fn friend_tag(name: &str) -> String {
 /// A tag made by `friend_tag`. A hand-made "with …" counts too — better one
 /// tag too few on a public page than a friend's name too many.
 pub fn is_friend_tag(tag: &str) -> bool {
-    tag.starts_with("with ")
+    // Any case: `clean_tags` keeps the first spelling of a tag, so a friend
+    // tag can live on as a hand-typed "With Luca".
+    tag.get(..5).is_some_and(|start| start.eq_ignore_ascii_case("with "))
 }
 
 pub fn clean_tags(tags: &[String]) -> Vec<String> {
@@ -405,6 +407,15 @@ fn decode_original(raw: Option<String>) -> Option<ClipOriginal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_friend_tag_is_known_in_any_case() {
+        assert!(is_friend_tag(&friend_tag("Luca")));
+        assert!(is_friend_tag("With Luca"));
+        assert!(!is_friend_tag("without"));
+        assert!(!is_friend_tag("wit"));
+        assert!(!is_friend_tag("ẞwith x"));
+    }
 
     fn clip(id: &str, created_at: i64) -> Clip {
         Clip {

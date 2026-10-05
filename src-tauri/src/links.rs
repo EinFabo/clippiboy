@@ -97,13 +97,26 @@ impl Reporter {
 
 // --- Uploads on their way -----------------------------------------------------------
 
-/// Clips being uploaded right now, and whether the clip was deleted meanwhile.
-/// One upload per clip: a second click would race the first through the same
-/// temp file and spend a second link of the week.
-static UPLOADS: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+/// One clip on its way up. Deleting the clip sets `deleted` and wakes
+/// `cancel`, which breaks the upload off.
+struct Upload {
+    deleted: bool,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// Clips being uploaded right now. One upload per clip: a second click would
+/// race the first through the same temp file and spend a second link of the
+/// week.
+static UPLOADS: Mutex<Option<HashMap<String, Upload>>> = Mutex::new(None);
+
+/// What `link_create` answers for a clip deleted while it went up.
+const DELETED: &str = "The clip was deleted.";
 
 /// Holds a clip's place in `UPLOADS` until the upload ends, however it ends.
-struct Uploading(String);
+struct Uploading {
+    id: String,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+}
 
 impl Uploading {
     fn begin(id: &str) -> Option<Self> {
@@ -112,8 +125,18 @@ impl Uploading {
         if uploads.contains_key(id) {
             return None;
         }
-        uploads.insert(id.to_owned(), false);
-        Some(Self(id.to_owned()))
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        uploads.insert(
+            id.to_owned(),
+            Upload {
+                deleted: false,
+                cancel: cancel.clone(),
+            },
+        );
+        Some(Self {
+            id: id.to_owned(),
+            cancel,
+        })
     }
 
     /// Was the clip deleted while it went up?
@@ -121,15 +144,37 @@ impl Uploading {
         UPLOADS
             .lock()
             .as_ref()
-            .and_then(|uploads| uploads.get(&self.0).copied())
-            .unwrap_or(false)
+            .and_then(|uploads| uploads.get(&self.id))
+            .is_some_and(|upload| upload.deleted)
+    }
+
+    /// Resolves once the clip is deleted. `notify_one` keeps a permit, so a
+    /// deletion before anyone waits is not missed.
+    async fn cancelled(&self) {
+        self.cancel.notified().await;
+    }
+
+    /// Run `keep` unless the clip was deleted — both under the lock that
+    /// `clip_deleted` takes, so a deletion lands either before (and `keep` is
+    /// skipped) or after (and finds the link `keep` stored).
+    fn finish(&self, keep: impl FnOnce()) -> bool {
+        let uploads = UPLOADS.lock();
+        if uploads
+            .as_ref()
+            .and_then(|uploads| uploads.get(&self.id))
+            .is_some_and(|upload| upload.deleted)
+        {
+            return false;
+        }
+        keep();
+        true
     }
 }
 
 impl Drop for Uploading {
     fn drop(&mut self) {
         if let Some(uploads) = UPLOADS.lock().as_mut() {
-            uploads.remove(&self.0);
+            uploads.remove(&self.id);
         }
     }
 }
@@ -317,26 +362,38 @@ pub async fn link_create(app: AppHandle, id: String) -> Result<Link, String> {
     // Busy from the first moment: the quota question and the faststart copy
     // come before any byte goes up, and the menu must not offer a second try.
     report.emit("uploading", 0.0, None);
-    let result = upload(&token, &clip, &title, &report).await;
-    if let (Ok(link), true) = (&result, uploading.deleted()) {
-        // Deleted while it went up: no menu is left to reach the link from,
-        // so it comes down again instead of going on the clipboard.
-        if let Err(err) = delete_remote(&app, &token, &link.id).await {
-            log::warn!("share link of deleted clip {id}: {err}");
-        }
-        report.emit("failed", 0.0, Some("The clip was deleted.".into()));
-        return Err("The clip was deleted.".into());
-    }
-    match &result {
+    let result = upload(&token, &clip, &title, &report, &uploading).await;
+    let stored = match &result {
         Ok(link) => {
-            report.emit("done", 1.0, None);
             let owned = Link {
                 owner: crate::friends::my_id(&app),
                 ..link.clone()
             };
-            let _ = change(|links| {
-                links.insert(id.clone(), owned);
-            });
+            uploading.finish(|| {
+                let _ = change(|links| {
+                    links.insert(id.clone(), owned);
+                });
+            })
+        }
+        Err(_) => false,
+    };
+    if let (Ok(link), false) = (&result, stored) {
+        // Deleted just as it landed: no menu is left to reach the link from,
+        // so it comes down again instead of going on the clipboard.
+        if let Err(err) = delete_remote(&app, &token, &link.id).await {
+            log::warn!("share link of deleted clip {id}: {err}");
+            crate::notify(
+                &app,
+                "error",
+                format!("The clip is deleted, but its share link could not be taken down: {err} It expires on its own within 5 days."),
+            );
+        }
+        report.emit("failed", 0.0, Some(DELETED.into()));
+        return Err(DELETED.into());
+    }
+    match &result {
+        Ok(link) => {
+            report.emit("done", 1.0, None);
             let _ = app.emit("links-changed", ());
             let _ = crate::clipboard::copy_text(&link.url);
             crate::notify(&app, "ok", "Link copied — it expires in 5 days");
@@ -351,6 +408,7 @@ async fn upload(
     clip: &crate::model::Clip,
     title: &str,
     report: &Reporter,
+    uploading: &Uploading,
 ) -> Result<Link, String> {
     // Asked first: no point shrinking a clip for two minutes only to hear the
     // week is used up.
@@ -408,7 +466,17 @@ async fn upload(
         (temp.clone(), Some(temp))
     };
 
-    let result = send(token, clip, title, &file, report).await;
+    // Deleted while it was being shrunk: nothing goes up. Deleted while it
+    // goes up: the request is dropped, the server's catch removes the
+    // half-stored clip and its row, and the week keeps its link.
+    let result = if uploading.deleted() {
+        Err(DELETED.to_string())
+    } else {
+        tokio::select! {
+            sent = send(token, clip, title, &file, report) => sent,
+            () = uploading.cancelled() => Err(DELETED.to_string()),
+        }
+    };
     if let Some(temp) = temporary {
         let _ = std::fs::remove_file(temp);
     }
@@ -530,9 +598,11 @@ pub async fn link_delete(app: AppHandle, id: String) -> Result<(), String> {
 /// A clip deleted from the library takes its link along: afterwards no menu
 /// is left to reach it from.
 pub fn clip_deleted(app: &AppHandle, id: &str) {
-    // Still on its way up: `link_create` takes it down once it lands.
-    if let Some(deleted) = UPLOADS.lock().as_mut().and_then(|uploads| uploads.get_mut(id)) {
-        *deleted = true;
+    // Still on its way up: the upload breaks off, or `link_create` takes the
+    // link down should it land in the same moment.
+    if let Some(upload) = UPLOADS.lock().as_mut().and_then(|uploads| uploads.get_mut(id)) {
+        upload.deleted = true;
+        upload.cancel.notify_one();
     }
     if !load().contains_key(id) {
         return;

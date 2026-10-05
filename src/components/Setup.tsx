@@ -149,7 +149,7 @@ export function Setup() {
     : null;
 
   return createPortal(
-    <div className="fixed inset-x-0 bottom-0 top-10 z-[45] overflow-y-auto bg-base">
+    <div data-fullview className="fixed inset-x-0 bottom-0 top-10 z-[45] overflow-y-auto bg-base">
       <div
         className="pointer-events-none absolute inset-x-0 top-0 h-[420px] opacity-90"
         style={{ background: "var(--hero-gradient)" }}
