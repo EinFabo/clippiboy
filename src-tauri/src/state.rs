@@ -71,6 +71,9 @@ pub struct AppState {
     /// It is remembered because when saving via the button ClippiBoy itself is
     /// in the foreground, and the snapshot would be empty then.
     pub buffering_game: Mutex<Option<String>>,
+    /// When the game in `buffering_game` was closed. Its name stays on clips
+    /// only as long as a clip can still hold its footage — see `assigned_game`.
+    game_ended: Mutex<Option<std::time::Instant>>,
     /// Only once "Quit" was chosen in the tray may the process exit — otherwise
     /// the ✕ just hides the window.
     pub quitting: std::sync::atomic::AtomicBool,
@@ -324,6 +327,7 @@ impl AppState {
             logged_game: Mutex::new(None),
             source_notes: Mutex::new(std::collections::HashMap::new()),
             buffering_game: Mutex::new(None),
+            game_ended: Mutex::new(None),
             quitting: std::sync::atomic::AtomicBool::new(false),
             auto: AutoBuffer::default(),
             lifecycle: Mutex::new(()),
@@ -577,6 +581,15 @@ impl AppState {
         }
     }
 
+    /// The game a capture covering the last `window` belongs to.
+    fn game_for(&self, window: std::time::Duration) -> Option<String> {
+        // One lock at a time, see `launch_pipeline`.
+        let current = self.current_game.lock().clone();
+        let buffering = self.buffering_game.lock().clone();
+        let ended_ago = self.game_ended.lock().map(|at| at.elapsed());
+        assigned_game(buffering, current, ended_ago, window)
+    }
+
     /// Called by the status tick: keep the foreground game up to date.
     ///
     /// While buffering, only a real detection overwrites the remembered name —
@@ -659,8 +672,20 @@ impl AppState {
         }
         let held = self.bound_game.lock().clone();
         *self.current_game.lock() = held.clone();
-        if held.is_some() && (self.status.lock().buffer_active || self.is_recording()) {
-            *self.buffering_game.lock() = held.clone();
+        if held.is_some() {
+            *self.game_ended.lock() = None;
+            if self.status.lock().buffer_active || self.is_recording() {
+                *self.buffering_game.lock() = held.clone();
+            }
+        } else if self.buffering_game.lock().is_some() {
+            // Das Spiel ist zu. Sein Name bleibt am Puffer, solange dort noch
+            // Spielbild liegen kann — danach stand er auf Clips vom Desktop.
+            let ended = *self.game_ended.lock().get_or_insert_with(std::time::Instant::now);
+            let longest = self.config_snapshot().buffer.seconds;
+            if ended.elapsed() >= std::time::Duration::from_secs(longest.into()) {
+                *self.buffering_game.lock() = None;
+                *self.game_ended.lock() = None;
+            }
         }
         // Am Spiel sitzt, wer das Spiel im Vordergrund hat — oder eins unserer
         // eigenen Fenster, während der Prozess noch läuft. Die Konsole *ist* der
@@ -812,8 +837,7 @@ impl AppState {
 
         // Not the snapshot but the game detected while buffering — when saving
         // via the button, ClippiBoy is in the foreground.
-        let buffering_game = self.buffering_game.lock().clone();
-        let game = buffering_game.or_else(|| self.current_game.lock().clone());
+        let game = self.game_for(std::time::Duration::from_secs(seconds.into()));
         let output = destination(&config.clip_dir, game.as_deref(), ClipKind::Clip)?;
 
         // The id already here: the muxer files the individual tracks under it,
@@ -875,8 +899,8 @@ impl AppState {
             recording.target_stable_id.as_deref(),
         )?;
 
-        let buffering_game = self.buffering_game.lock().clone();
-        let game = buffering_game.or_else(|| self.current_game.lock().clone());
+        // Ein Bild ist ein Augenblick: es gehört zu dem Spiel, das jetzt läuft.
+        let game = self.current_game.lock().clone();
         let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)?;
         shot.write_png(&path)?;
 
@@ -969,11 +993,9 @@ impl AppState {
             .lock()
             .clone()
             .unwrap_or_else(|| config.recording.clone());
-        let game = self
-            .buffering_game
-            .lock()
-            .clone()
-            .or_else(|| self.current_game.lock().clone());
+        // Die Aufnahme beginnt jetzt; ein länger geschlossenes Spiel hat darin
+        // nichts verloren.
+        let game = self.game_for(std::time::Duration::ZERO);
         let friends = match game.as_deref() {
             Some(game) if config.friends.tag_friends => friends_in(game),
             _ => Vec::new(),
@@ -1010,11 +1032,12 @@ impl AppState {
         // The assignment as it stands now, like a clip's: every source was
         // written on its own, so a ⧉ flipped half way applies to the whole.
         let separate = separate_tracks(&self.config_snapshot().sources);
-        let game = self
-            .buffering_game
-            .lock()
-            .clone()
-            .or_else(|| self.current_game.lock().clone());
+        // Ein Spiel, das während der Aufnahme lief, gehört zu ihr — eins, das
+        // schon vor ihrem Beginn geschlossen wurde, nicht.
+        let length = std::time::Duration::from_millis(
+            now_ms().saturating_sub(recorder.started_at()).max(0) as u64,
+        );
+        let game = self.game_for(length);
         let meta = match recorder.finish(separate, game) {
             Ok(meta) => meta,
             Err(err) => {
@@ -1127,6 +1150,27 @@ fn separate_tracks(sources: &[AudioSource]) -> Vec<String> {
         .collect()
 }
 
+/// The game a capture belongs to.
+///
+/// A running game wins. A closed one keeps the capture only if it ended inside
+/// the captured `window` — the clip still shows it then. Without this, a clip
+/// of the desktop half an hour later still carried the game's name, in the
+/// banner, the tag and the folder.
+fn assigned_game(
+    buffering: Option<String>,
+    current: Option<String>,
+    ended_ago: Option<std::time::Duration>,
+    window: std::time::Duration,
+) -> Option<String> {
+    if current.is_some() {
+        return current;
+    }
+    match ended_ago {
+        Some(ago) if ago >= window => None,
+        _ => buffering,
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1188,6 +1232,45 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn secs(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n)
+    }
+
+    #[test]
+    fn a_running_game_names_the_clip() {
+        let game = assigned_game(Some("Valorant".into()), Some("Valorant".into()), None, secs(90));
+        assert_eq!(game.as_deref(), Some("Valorant"));
+    }
+
+    #[test]
+    fn a_game_closed_inside_the_clip_still_names_it() {
+        let game = assigned_game(Some("Valorant".into()), None, Some(secs(30)), secs(90));
+        assert_eq!(game.as_deref(), Some("Valorant"));
+    }
+
+    #[test]
+    fn a_game_closed_before_the_clip_does_not() {
+        assert_eq!(assigned_game(Some("Valorant".into()), None, Some(secs(120)), secs(90)), None);
+    }
+
+    #[test]
+    fn alt_tab_keeps_the_game() {
+        // Im Hintergrund, aber der Prozess läuft: kein Ende gemerkt.
+        let game = assigned_game(Some("Valorant".into()), None, None, secs(90));
+        assert_eq!(game.as_deref(), Some("Valorant"));
+    }
+
+    #[test]
+    fn a_new_game_wins_over_the_closed_one() {
+        let game = assigned_game(Some("Valorant".into()), Some("CS2".into()), Some(secs(5)), secs(90));
+        assert_eq!(game.as_deref(), Some("CS2"));
+    }
+
+    #[test]
+    fn a_recording_starts_clean() {
+        assert_eq!(assigned_game(Some("Valorant".into()), None, Some(secs(1)), secs(0)), None);
+    }
 
     /// Hold the secure desktop up for a whole lock's worth of checks.
     fn hold_locked(auto: &AutoBuffer, active: bool) -> AutoAction {

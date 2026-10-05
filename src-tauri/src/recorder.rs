@@ -322,6 +322,11 @@ impl Recorder {
         index
     }
 
+    /// When the recording began, in ms since the epoch.
+    pub fn started_at(&self) -> i64 {
+        self.meta.lock().created_at
+    }
+
     /// Stop writing and settle the metadata. The folder is then complete and
     /// [`finalize`] can make the recording out of it.
     ///
