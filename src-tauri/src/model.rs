@@ -336,6 +336,8 @@ pub struct FriendsConfig {
     /// Friends playing the same game when a clip is saved go onto it as tags
     /// ("with Luca").
     pub tag_friends: bool,
+    /// Your Discord name and picture on the page of a share link.
+    pub name_on_links: bool,
 }
 
 impl Default for FriendsConfig {
@@ -352,6 +354,7 @@ impl Default for FriendsConfig {
             favorites: Vec::new(),
             accept_clips: AcceptClips::All,
             tag_friends: true,
+            name_on_links: true,
         }
     }
 }

@@ -250,8 +250,8 @@ pub async fn link_create(app: AppHandle, id: String) -> Result<Link, String> {
                 links.insert(id.clone(), link.clone());
             });
             let _ = app.emit("links-changed", ());
-            // The upload card says so; a toast on top would say it twice.
             let _ = crate::clipboard::copy_text(&link.url);
+            crate::notify(&app, "ok", "Link copied — it expires in 5 days");
         }
         Err(err) => report.emit("failed", 0.0, Some(err.clone())),
     }
@@ -335,6 +335,12 @@ async fn send(
     file: &std::path::Path,
     report: &Reporter,
 ) -> Result<Link, String> {
+    let name_on_links = report
+        .app
+        .state::<AppState>()
+        .config_snapshot()
+        .friends
+        .name_on_links;
     let bytes = std::fs::read(file).map_err(|err| format!("Could not read the clip: {err}"))?;
     let total = bytes.len();
     let mut params = vec![
@@ -344,6 +350,12 @@ async fn send(
     ];
     if let Some(game) = &clip.game {
         params.push(("game", game.clone()));
+    }
+    for tag in &clip.tags {
+        params.push(("tag", tag.clone()));
+    }
+    if name_on_links {
+        params.push(("name", "1".into()));
     }
     let url = reqwest::Url::parse_with_params(&format!("{}/shares", crate::friends::SERVER), &params)
         .map_err(|err| err.to_string())?;

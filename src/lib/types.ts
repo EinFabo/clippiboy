@@ -237,6 +237,8 @@ export interface AppConfig {
 export interface FriendsConfig {
   invisible: boolean;
   shareGame: boolean;
+  /** Discord name and picture on the page of a share link. */
+  nameOnLinks: boolean;
   notifyRequests: boolean;
   notifyOnline: boolean;
   notifyGames: boolean;

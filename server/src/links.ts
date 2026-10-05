@@ -5,10 +5,12 @@
 // one path — and the video itself comes straight from api.clippiboy.com, so the
 // big file never makes a second hop through the proxy.
 
-import { escapeHtml, HttpError, json } from "./util";
+import { HttpError, json } from "./util";
+import { renderPage } from "./page";
 import {
   byteRange,
   canUpload,
+  cleanTags,
   expiresIn,
   ID_PATTERN,
   LIFETIME_MS,
@@ -33,6 +35,8 @@ interface ShareRow {
   created_at: number;
   expires_at: number;
   deleted_at: number | null;
+  tags: string;
+  show_name: number;
 }
 
 const video = (id: string) => `${id}.mp4`;
@@ -75,7 +79,9 @@ export async function shareQuota(env: Env, me: string): Promise<Response> {
 
 /**
  * The clip as the request body, its description in the query:
- * `POST /shares?title=…&game=…&width=1920&height=1080`.
+ * `POST /shares?title=…&game=…&width=1920&height=1080&tag=…&tag=…&name=1`.
+ * `name=1` puts the uploader's Discord name on the page — taken from the
+ * account, never from the request.
  */
 export async function createShare(request: Request, env: Env, me: string): Promise<Response> {
   const now = Date.now();
@@ -102,11 +108,25 @@ export async function createShare(request: Request, env: Env, me: string): Promi
 
   // The row first: it is what counts against the week and the bucket, so two
   // uploads at once cannot both slip under the ceiling unseen.
+  const tags = JSON.stringify(cleanTags(url.searchParams.getAll("tag")));
+  const showName = url.searchParams.get("name") === "1" ? 1 : 0;
   await env.DB.prepare(
-    `INSERT INTO shares (id, owner, bytes, title, game, width, height, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO shares (id, owner, bytes, title, game, width, height, created_at, expires_at, tags, show_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(id, me, bytes, text("title", 120) || "Clip", text("game", 80) || null, size("width"), size("height"), now, expiresAt)
+    .bind(
+      id,
+      me,
+      bytes,
+      text("title", 120) || "Clip",
+      text("game", 80) || null,
+      size("width"),
+      size("height"),
+      now,
+      expiresAt,
+      tags,
+      showName,
+    )
     .run();
   try {
     // A fixed-length stream: R2 needs the size up front, and a body that turns
@@ -157,46 +177,31 @@ export async function sharePage(env: Env, id: string): Promise<Response> {
   const now = Date.now();
   const row = await live(env, id, now);
   if (!row) return gone();
-  const page = `${PAGE_ORIGIN}/c/${id}`;
-  const media = `${MEDIA_ORIGIN}/c/${video(id)}`;
-  const still = `${MEDIA_ORIGIN}/c/${poster(id)}`;
-  const title = escapeHtml(row.title);
-  const game = row.game ? escapeHtml(row.game) : null;
-  const description = `${game ? `${game} · ` : ""}Shared with ClippiBoy · expires ${expiresIn(row.expires_at, now)}`;
-  const size = row.width && row.height ? row.width / row.height : 16 / 9;
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title} · ClippiBoy</title>
-<meta name="robots" content="noindex">
-<meta name="theme-color" content="#8b5cf6">
-<meta property="og:type" content="video.other">
-<meta property="og:site_name" content="ClippiBoy">
-<meta property="og:title" content="${title}">
-<meta property="og:description" content="${escapeHtml(description)}">
-<meta property="og:url" content="${page}">
-<meta property="og:image" content="${still}">
-<meta property="og:video" content="${media}">
-<meta property="og:video:secure_url" content="${media}">
-<meta property="og:video:type" content="video/mp4">
-${row.width ? `<meta property="og:video:width" content="${row.width}"><meta property="og:video:height" content="${row.height}">` : ""}
-<meta name="twitter:card" content="summary_large_image">
-<style>
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#08080a radial-gradient(ellipse 80% 50% at 50% 0,#8b5cf633,transparent);color:#f4f4f5;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:1100px;margin:0 auto;padding:28px 16px 48px}
-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}
-.brand{color:#f4f4f5;text-decoration:none;font-weight:700;letter-spacing:-.01em}
-.get{background:#fff;color:#08080a;border-radius:999px;padding:9px 18px;text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap}
-.frame{aspect-ratio:${size};width:100%;max-height:75vh;background:#000;border:1px solid #26262c;border-radius:16px;overflow:hidden}
-video{width:100%;height:100%;display:block}
-h1{font-size:20px;margin:18px 0 2px;overflow-wrap:anywhere}p{color:#a1a1aa;margin:0}
-footer{margin-top:28px;font-size:12px;color:#71717a}footer a{color:#a1a1aa}
-</style></head><body><main>
-<header><a class="brand" href="${PAGE_ORIGIN}">ClippiBoy</a><a class="get" href="${PAGE_ORIGIN}">Get ClippiBoy</a></header>
-<div class="frame"><video src="${media}" poster="${still}" controls playsinline preload="metadata"></video></div>
-<h1>${title}</h1>
-<p>${escapeHtml(description)}</p>
-<footer>This clip deletes itself ${expiresIn(row.expires_at, now)}. Something wrong with it? <a href="mailto:privacy@clippiboy.com?subject=Clip%20${id}">Report it</a>.</footer>
-</main></body></html>`;
+  const uploader = row.show_name
+    ? await env.DB.prepare("SELECT display_name, avatar FROM users WHERE id = ?")
+        .bind(row.owner)
+        .first<{ display_name: string; avatar: string | null }>()
+    : null;
+  let tags: string[] = [];
+  try {
+    tags = JSON.parse(row.tags);
+  } catch {
+    // An unreadable list shows no tags rather than no page.
+  }
+  const html = renderPage({
+    id,
+    page: `${PAGE_ORIGIN}/c/${id}`,
+    media: `${MEDIA_ORIGIN}/c/${video(id)}`,
+    poster: `${MEDIA_ORIGIN}/c/${poster(id)}`,
+    title: row.title,
+    game: row.game,
+    tags,
+    uploader: uploader ? { name: uploader.display_name, avatar: uploader.avatar } : null,
+    expires: expiresIn(row.expires_at, now),
+    width: row.width,
+    height: row.height,
+    site: PAGE_ORIGIN,
+  });
   return new Response(html, {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
   });

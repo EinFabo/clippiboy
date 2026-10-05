@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   byteRange,
   canUpload,
+  cleanTags,
   expiresIn,
   ID_PATTERN,
   MAX_BYTES,
@@ -56,6 +57,7 @@ test("ids are ten unambiguous characters", () => {
 test("the page says how long is left", () => {
   const day = 24 * 60 * 60 * 1000;
   assert.equal(expiresIn(now + 5 * day, now), "in 5 days");
+  assert.equal(expiresIn(now + 5 * day - 60_000, now), "in 5 days");
   assert.equal(expiresIn(now + day + 5, now), "in 1 day");
   assert.equal(expiresIn(now + 3 * 60 * 60 * 1000, now), "in 3 hours");
   assert.equal(expiresIn(now + 60_000, now), "in a few minutes");
@@ -65,4 +67,10 @@ test("ranges come back as offset and length", () => {
   assert.deepEqual(byteRange({ offset: 100 }, 1000), { offset: 100, length: 900 });
   assert.deepEqual(byteRange({ offset: 0, length: 10 }, 1000), { offset: 0, length: 10 });
   assert.deepEqual(byteRange({ suffix: 50 }, 1000), { offset: 950, length: 50 });
+});
+
+test("tags are trimmed, unique and capped", () => {
+  assert.deepEqual(cleanTags([" ace ", "Ace", "", "clutch"]), ["ace", "clutch"]);
+  assert.equal(cleanTags(Array.from({ length: 30 }, (_, i) => `t${i}`)).length, 12);
+  assert.equal(cleanTags(["x".repeat(100)])[0].length, 40);
 });

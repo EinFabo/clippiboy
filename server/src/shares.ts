@@ -77,7 +77,8 @@ export function newId(): string {
 /** "in 3 days", "in 5 hours", "in a few minutes" — for the page. */
 export function expiresIn(expiresAt: number, now: number): string {
   const left = expiresAt - now;
-  const days = Math.floor(left / DAY_MS);
+  // Rounded, not cut: a link made a minute ago has five days, not four.
+  const days = Math.round(left / DAY_MS);
   if (days >= 2) return `in ${days} days`;
   if (days === 1) return "in 1 day";
   const hours = Math.floor(left / (60 * 60 * 1000));
@@ -97,4 +98,19 @@ export function byteRange(
   }
   const offset = range.offset ?? 0;
   return { offset, length: range.length ?? size - offset };
+}
+
+/** Tags as the page shows them: trimmed, no duplicates, a dozen at most. */
+export function cleanTags(raw: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tag of raw) {
+    const text = tag.trim().slice(0, 40);
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length === 12) break;
+  }
+  return out;
 }
