@@ -322,7 +322,13 @@ impl Converter {
                     None
                 }
             },
-            _ => None,
+            Some(stamp) => {
+                // Switched off: the canvas is a whole frame of memory doing
+                // nothing. Gone until the switch comes back on.
+                stamp.release();
+                None
+            }
+            None => None,
         };
         let input = self.input_view(stamped.as_ref().unwrap_or(source))?;
         let slot = self.next_slot;
@@ -450,6 +456,13 @@ impl Stamp {
             logo_size: (*width, *height),
             canvas: None,
         })
+    }
+
+    fn release(&mut self) {
+        if self.canvas.is_some() {
+            unsafe { self.context.SetTarget(None) };
+            self.canvas = None;
+        }
     }
 
     /// A canvas the size and format of the frame, made anew when either changes.

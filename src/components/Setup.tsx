@@ -215,14 +215,13 @@ export function Setup() {
 
           {name === "audio" && (
             <Step title="What should your clips sound like?" hint="Without an audio source your clips are silent.">
-              {config.sources.length === 0 ? (
-                <QuickSetup
-                  onAdd={upsertSource}
-                  onPick={() => setStep(step + 1)}
-                  pickLabel="Later, on the Audio page"
-                />
-              ) : (
-                <Card className="divide-y divide-line">
+              <QuickSetup
+                onAdd={upsertSource}
+                onPick={() => setStep(step + 1)}
+                pickLabel="Later, on the Audio page"
+              />
+              {config.sources.length > 0 && (
+                <Card className="mt-4 divide-y divide-line">
                   {config.sources.map((source) => (
                     <div key={source.id} className="flex items-center justify-between gap-4 px-5 py-3">
                       <p className="truncate text-sm">{source.label}</p>
@@ -249,7 +248,15 @@ export function Setup() {
 
           {name === "ready" && (
             <Step title="Almost done" hint="How long a clip reaches back, and how ClippiBoy starts.">
-              <Card className="divide-y divide-line">
+              <BufferExplainer
+                clip={Number(length)}
+                buffer={
+                  length === keptLength
+                    ? config.buffer.seconds
+                    : Math.max(config.buffer.seconds, Number(length))
+                }
+              />
+              <Card className="mt-4 divide-y divide-line">
                 <Row label="Clip length" hint="Saving a clip keeps this much of what just happened">
                   <Segmented
                     value={length}
@@ -302,6 +309,47 @@ export function Setup() {
       </div>
     </div>,
     document.body,
+  );
+}
+
+/** "1:30", "3:00". */
+function clock(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/**
+ * What the buffer is, in one sentence and one bar: the last minutes always
+ * ready, and the clip the latest part of them.
+ */
+function BufferExplainer({ clip, buffer }: { clip: number; buffer: number }) {
+  const share = Math.min(1, clip / buffer);
+  return (
+    <Card className="p-5">
+      <h3 className="text-sm font-semibold">How the buffer works</h3>
+      <p className="mt-1 text-xs text-ink-muted">
+        While the buffer runs, ClippiBoy keeps the last {clock(buffer)} of your screen and sound
+        in memory — nothing is written to disk. Press save and the last {clock(clip)} of it become
+        a clip, so the moment you just saw is never lost. Older footage simply rolls off.
+      </p>
+      <div className="mt-4">
+        <div className="mb-1.5 flex justify-between text-[11px] text-ink-faint tabular-nums">
+          <span>{clock(buffer)} ago</span>
+          <span>now</span>
+        </div>
+        <div className="flex h-7 overflow-hidden rounded-inner border border-line bg-elevated">
+          <div className="h-full" style={{ width: `${(1 - share) * 100}%` }} />
+          <div
+            className="grid h-full place-items-center bg-accent/30 text-[11px] font-medium text-ink transition-[width] duration-300"
+            style={{ width: `${share * 100}%` }}
+          >
+            your clip · {clock(clip)}
+          </div>
+        </div>
+        <p className="mt-2 text-[11px] text-ink-faint">
+          The buffer length itself can be changed later on the Recording page.
+        </p>
+      </div>
+    </Card>
   );
 }
 

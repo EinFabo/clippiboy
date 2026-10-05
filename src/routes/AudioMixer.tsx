@@ -486,8 +486,16 @@ export function QuickSetup({
   pickLabel?: string;
 }) {
   const devices = useEngine((s) => s.devices);
+  const sources = useEngine((s) => s.config.sources);
   const output = devices.find((d) => d.kind === "output" && d.isDefault);
   const input = devices.find((d) => d.kind === "input" && d.isDefault);
+  // The setup shows this with sources already there too: what is in the list
+  // already is marked, not added a second time.
+  const has = (type: "outputDevice" | "inputDevice", id: string | undefined) =>
+    id !== undefined &&
+    sources.some((s) => s.kind.type === type && "deviceId" in s.kind && s.kind.deviceId === id);
+  const outputAdded = has("outputDevice", output?.id);
+  const inputAdded = has("inputDevice", input?.id);
   const [withOutput, setWithOutput] = useState(true);
   const [withInput, setWithInput] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -496,10 +504,10 @@ export function QuickSetup({
     setBusy(true);
     try {
       // One after the other: each call writes the whole configuration.
-      if (withOutput && output) {
+      if (withOutput && output && !outputAdded) {
         await onAdd(newSource(output.name, { type: "outputDevice", deviceId: output.id }));
       }
-      if (withInput && input) {
+      if (withInput && input && !inputAdded) {
         await onAdd(newSource(input.name, { type: "inputDevice", deviceId: input.id }));
       }
     } finally {
@@ -510,6 +518,7 @@ export function QuickSetup({
   const rows: Array<{
     on: boolean;
     set: (on: boolean) => void;
+    added: boolean;
     icon: ReactNode;
     title: string;
     device: string;
@@ -517,6 +526,7 @@ export function QuickSetup({
     {
       on: withOutput,
       set: setWithOutput,
+      added: outputAdded,
       icon: <IconSpeaker className="h-4 w-4" />,
       title: "Desktop audio",
       device: output ? output.name : "",
@@ -527,19 +537,25 @@ export function QuickSetup({
     rows.push({
       on: withInput,
       set: setWithInput,
+      added: inputAdded,
       icon: <IconMic className="h-4 w-4" />,
       title: "Microphone",
       device: input.name,
     });
   }
-  const nothing = !(withOutput && output) && !(withInput && input);
+  const nothing =
+    !(withOutput && output && !outputAdded) && !(withInput && input && !inputAdded);
+  const allAdded = rows.length > 0 && rows.every((row) => row.added);
 
   return (
     <Card className="p-5">
       <h3 className="text-sm font-semibold">Quick setup</h3>
       <p className="mt-1 text-xs text-ink-muted">
-        No audio source yet, so your clips would be silent. Add what you hear and your
-        microphone — the devices Windows uses right now. You can change either later.
+        {sources.length === 0
+          ? "No audio source yet, so your clips would be silent. "
+          : ""}
+        Add what you hear and your microphone — the devices Windows uses right now. You can
+        change either later.
       </p>
       <div className="mt-4 grid gap-2">
         {rows.map((row) => (
@@ -554,7 +570,13 @@ export function QuickSetup({
                 <p className="truncate text-xs text-ink-faint">{row.device}</p>
               </div>
             </div>
-            <Toggle checked={row.on} onChange={row.set} />
+            {row.added ? (
+              <span className="shrink-0 rounded-pill bg-ok/15 px-2.5 py-0.5 text-[11px] font-medium text-ok">
+                Added
+              </span>
+            ) : (
+              <Toggle checked={row.on} onChange={row.set} />
+            )}
           </div>
         ))}
       </div>
@@ -563,7 +585,7 @@ export function QuickSetup({
           {pickLabel}
         </Button>
         <Button size="sm" variant="primary" disabled={busy || nothing} onClick={() => void add()}>
-          {busy ? "Adding…" : "Add"}
+          {busy ? "Adding…" : allAdded ? "All added" : "Add"}
         </Button>
       </div>
     </Card>
