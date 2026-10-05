@@ -52,7 +52,18 @@ const COUNTS = "(pending = 0 OR created_at > ?)";
 const RECENT = `SELECT COUNT(*) FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`;
 const LIVE_BYTES = `SELECT COALESCE(SUM(bytes), 0) FROM shares WHERE deleted_at IS NULL AND ${COUNTS}`;
 
+// For testing: accounts listed in the secret QUICK_LINKS_FOR (ids, comma
+// separated) get links that last five minutes and no weekly limit. Unset, it
+// changes nothing. `wrangler secret delete QUICK_LINKS_FOR` ends it.
+const QUICK_LIFETIME_MS = 5 * 60 * 1000;
+
+function quick(env: Env, me: string): boolean {
+  const list = (env as Env & { QUICK_LINKS_FOR?: string }).QUICK_LINKS_FOR ?? "";
+  return list.split(",").some((id) => id.trim() === me);
+}
+
 async function recentOf(env: Env, me: string, now: number): Promise<number[]> {
+  if (quick(env, me)) return [];
   const { results } = await env.DB.prepare(`SELECT created_at FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`)
     .bind(me, now - WEEK_MS, now - PENDING_MS)
     .all<{ created_at: number }>();
@@ -125,7 +136,7 @@ export async function createShare(request: Request, env: Env, me: string): Promi
   const text = (name: string, max: number) => (url.searchParams.get(name) ?? "").trim().slice(0, max);
   const size = (name: string) => Math.max(0, Math.min(16384, Math.round(Number(url.searchParams.get(name)) || 0)));
   const id = newId();
-  const expiresAt = now + LIFETIME_MS;
+  const expiresAt = now + (quick(env, me) ? QUICK_LIFETIME_MS : LIFETIME_MS);
 
   // The row first, pending: it is what counts against the week and the
   // bucket. Inserted only if the limits still hold at that moment — the check
@@ -152,7 +163,7 @@ export async function createShare(request: Request, env: Env, me: string): Promi
       me,
       now - WEEK_MS,
       now - PENDING_MS,
-      WEEKLY_LIMIT,
+      quick(env, me) ? Number.MAX_SAFE_INTEGER : WEEKLY_LIMIT,
       now - PENDING_MS,
       bytes,
       TOTAL_BYTES,
