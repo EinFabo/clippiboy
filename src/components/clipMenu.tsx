@@ -48,13 +48,13 @@ function linkEntries(clip: Clip): MenuEntry[] {
   const { links, signedIn, quota: storedQuota, uploads, create, remove, refresh } = useLinks.getState();
   // The store is only fetched on changes, and the app runs for days in the
   // tray: a link may have run out and a used-up week reset since. Those count
-  // as gone here, and the store catches up for next time.
+  // as gone here, and every opening asks the server again for next time.
   const now = Date.now();
   const stored = links[clip.id];
   const link = stored && stored.expiresAt > now ? stored : undefined;
   const quotaStale = storedQuota?.resetsAt != null && storedQuota.resetsAt <= now;
   const quota = quotaStale ? null : storedQuota;
-  if ((stored && !link) || quotaStale) void refresh();
+  void refresh();
   if (link) {
     return [
       {
@@ -85,12 +85,15 @@ function linkEntries(clip: Clip): MenuEntry[] {
           : quota?.full
             ? "sharing is full right now"
             : null;
+  // A used-up week stays clickable: what the store knows may be old, and the
+  // upload asks the server before it shrinks anything.
+  const usedUp = quota !== null && quota.used >= quota.limit;
   return [
     {
       kind: "item",
       label: reason ? `Share as link · ${reason}` : "Share as link (5 days)",
       icon: <IconLink className={icon} />,
-      disabled: !inTauri || reason !== null,
+      disabled: !inTauri || (reason !== null && !usedUp),
       onSelect: () => void create(clip.id, clip.title ?? "Clip"),
     },
   ];
