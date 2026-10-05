@@ -126,10 +126,71 @@ export function cleanTags(raw: string[]): string[] {
   return out;
 }
 
-/** An MP4 starts with its `ftyp` box: four bytes of size, then the name.
-    Anything else is not a clip, whatever it calls itself. */
-export function looksLikeMp4(head: Uint8Array): boolean {
-  return head.length >= 8 && head[4] === 0x66 && head[5] === 0x74 && head[6] === 0x79 && head[7] === 0x70;
+/**
+ * Follows an MP4's top-level boxes as the upload streams past: `ftyp` first,
+ * every box with a sane length and a readable name, a `moov` somewhere, and
+ * the last box ending exactly where the file does. A file with a few bytes of
+ * `ftyp` glued in front, or anything hung on behind, fails.
+ *
+ * What it cannot rule out is a payload inside a box — only re-encoding could.
+ * The page and the file are served as video with `nosniff`, which is what
+ * keeps such a file a (broken) video.
+ */
+export class Mp4Boxes {
+  private header: number[] = [];
+  /** Bytes still to pass in the current box's body. */
+  private skip = 0;
+  /** The current box runs to the end of the file (size 0). */
+  private toEnd = false;
+  private boxes = 0;
+  private moov = false;
+  private bad = false;
+
+  /** False as soon as the file cannot be an MP4. */
+  push(chunk: Uint8Array): boolean {
+    let i = 0;
+    while (!this.bad && i < chunk.length) {
+      if (this.toEnd) return true;
+      if (this.skip > 0) {
+        const step = Math.min(this.skip, chunk.length - i);
+        this.skip -= step;
+        i += step;
+        continue;
+      }
+      this.header.push(chunk[i++]);
+      this.readHeader();
+    }
+    return !this.bad;
+  }
+
+  /** At the end of the upload: was it a whole MP4? */
+  end(): boolean {
+    return !this.bad && this.header.length === 0 && (this.skip === 0 || this.toEnd) && this.moov;
+  }
+
+  private readHeader(): void {
+    const h = this.header;
+    if (h.length < 8) return;
+    const size32 = ((h[0] << 24) >>> 0) + (h[1] << 16) + (h[2] << 8) + h[3];
+    if (size32 === 1 && h.length < 16) return;
+    const type = String.fromCharCode(h[4], h[5], h[6], h[7]);
+    const size = size32 === 1 ? (h[8] * 2 ** 24 + (h[9] << 16) + (h[10] << 8) + h[11]) * 2 ** 32 + ((h[12] << 24) >>> 0) + (h[13] << 16) + (h[14] << 8) + h[15] : size32;
+    const first = this.boxes === 0;
+    this.boxes++;
+    if (!/^[\x20-\x7e]{4}$/.test(type) || (first && (type !== "ftyp" || size < 16 || size > 1024))) {
+      this.bad = true;
+      return;
+    }
+    if (type === "moov") this.moov = true;
+    if (size === 0) {
+      this.toEnd = true;
+    } else if (size < h.length || size > MAX_BYTES) {
+      this.bad = true;
+    } else {
+      this.skip = size - h.length;
+    }
+    this.header = [];
+  }
 }
 
 /** The app's thumbnails are JPEGs, and nothing else goes up as a poster. */

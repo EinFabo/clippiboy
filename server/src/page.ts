@@ -203,7 +203,7 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
   start.onclick = () => { begin(); video.play(); };
   video.onclick = () => { begin(); toggle(); };
   $("play").onclick = () => { begin(); toggle(); };
-  video.onplay = () => { player.classList.add("playing"); $("play").ariaLabel = "Pause"; wake(); };
+  video.onplay = () => { begin(); player.classList.add("playing"); $("play").ariaLabel = "Pause"; wake(); };
   video.onpause = () => { player.classList.remove("playing"); $("play").ariaLabel = "Play"; wake(); };
   video.onwaiting = () => started && show(loading, true);
   video.onplaying = video.oncanplay = video.onseeked = () => show(loading, false);

@@ -7,7 +7,7 @@ import {
   expiresIn,
   ID_PATTERN,
   looksLikeJpeg,
-  looksLikeMp4,
+  Mp4Boxes,
   MAX_BYTES,
   newId,
   quota,
@@ -77,12 +77,33 @@ test("tags are trimmed, unique and capped", () => {
   assert.equal(cleanTags(["x".repeat(100)])[0].length, 40);
 });
 
-test("only an MP4 passes as a clip", () => {
-  const mp4 = new Uint8Array([0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
-  assert.equal(looksLikeMp4(mp4), true);
-  assert.equal(looksLikeMp4(new TextEncoder().encode("MZ\x90\0\x03\0\0\0")), false);
-  assert.equal(looksLikeMp4(new Uint8Array([0x50, 0x4b, 3, 4, 0, 0, 0, 0])), false);
-  assert.equal(looksLikeMp4(mp4.subarray(0, 6)), false);
+const box = (type: string, body: number[] = []) => {
+  const size = 8 + body.length;
+  return [size >>> 24, (size >> 16) & 255, (size >> 8) & 255, size & 255, ...Array.from(type, (c) => c.charCodeAt(0)), ...body];
+};
+const walk = (bytes: number[], chunk = 3) => {
+  const boxes = new Mp4Boxes();
+  for (let i = 0; i < bytes.length; i += chunk) if (!boxes.push(new Uint8Array(bytes.slice(i, i + chunk)))) return false;
+  return boxes.end();
+};
+const ftyp = box("ftyp", Array.from("isom\0\0\0\0isommp41", (c) => c.charCodeAt(0)));
+
+test("a whole MP4 passes, in any chunking", () => {
+  const file = [...ftyp, ...box("moov", [1, 2, 3]), ...box("mdat", new Array(50).fill(7))];
+  assert.equal(walk(file, 1), true);
+  assert.equal(walk(file, 1000), true);
+});
+
+test("an ftyp glued in front of something else fails", () => {
+  const zip = [0x50, 0x4b, 3, 4, ...new Array(40).fill(0)];
+  assert.equal(walk([0, 0, 0, 8, 0x66, 0x74, 0x79, 0x70, ...zip]), false);
+  assert.equal(walk([...ftyp, ...zip]), false);
+});
+
+test("an MP4 with something hung on behind, or without moov, fails", () => {
+  assert.equal(walk([...ftyp, ...box("moov"), ...box("mdat", [1]), 0x50, 0x4b]), false);
+  assert.equal(walk([...ftyp, ...box("mdat", [1, 2])]), false);
+  assert.equal(walk([0x4d, 0x5a, 0x90, 0, 3, 0, 0, 0]), false);
 });
 
 test("only a JPEG passes as a poster", () => {

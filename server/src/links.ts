@@ -15,9 +15,9 @@ import {
   ID_PATTERN,
   LIFETIME_MS,
   looksLikeJpeg,
-  looksLikeMp4,
   MAX_BYTES,
   MAX_POSTER_BYTES,
+  Mp4Boxes,
   newId,
   PENDING_MS,
   quota,
@@ -92,37 +92,21 @@ async function liveBytesCached(env: Env, now: number): Promise<number> {
   return total;
 }
 
-/** Passes the upload on, but fails it unless it starts like an MP4. */
+/** Passes the upload on, but fails it the moment it stops being an MP4. */
 function onlyMp4(): { stream: TransformStream<Uint8Array, Uint8Array>; refused: () => boolean } {
-  let head = new Uint8Array(0);
-  let checked = false;
+  const boxes = new Mp4Boxes();
   let refused = false;
+  const refuse = () => {
+    refused = true;
+    throw new Error("not an mp4");
+  };
   const stream = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      if (checked) {
-        controller.enqueue(chunk);
-        return;
-      }
-      const joined = new Uint8Array(head.length + chunk.length);
-      joined.set(head);
-      joined.set(chunk, head.length);
-      if (joined.length < 8) {
-        head = joined;
-        return;
-      }
-      if (!looksLikeMp4(joined)) {
-        refused = true;
-        throw new Error("not an mp4");
-      }
-      checked = true;
-      head = new Uint8Array(0);
-      controller.enqueue(joined);
+      if (!boxes.push(chunk)) refuse();
+      controller.enqueue(chunk);
     },
     flush() {
-      if (!checked) {
-        refused = true;
-        throw new Error("not an mp4");
-      }
+      if (!boxes.end()) refuse();
     },
   });
   return { stream, refused: () => refused };
@@ -230,11 +214,12 @@ export async function createShare(request: Request, env: Env, me: string): Promi
     // A fixed-length stream: R2 needs the size up front, and a body that turns
     // out longer than it said is cut off rather than stored.
     const sized = new FixedLengthStream(bytes);
-    const piping = request.body.pipeThrough(mp4.stream).pipeTo(sized.writable);
-    await env.CLIPS.put(video(id), sized.readable, {
-      httpMetadata: { contentType: "video/mp4" },
-    });
-    await piping;
+    // Together: when the check refuses, both fail, and an unwatched one would
+    // end up in the log as an unhandled rejection.
+    await Promise.all([
+      env.CLIPS.put(video(id), sized.readable, { httpMetadata: { contentType: "video/mp4" } }),
+      request.body.pipeThrough(mp4.stream).pipeTo(sized.writable),
+    ]);
   } catch (err) {
     await env.CLIPS.delete(video(id)).catch(() => {});
     await env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(id).run();
@@ -243,10 +228,13 @@ export async function createShare(request: Request, env: Env, me: string): Promi
     throw new HttpError(502, "The upload broke off. Try again.");
   }
   // The row may have gone while the clip was on its way — the account was
-  // deleted, or the upload outlasted PENDING_MS and the sweep gave up on it.
-  // Then the file would sit in R2 uncounted and the app would get a dead link.
-  const finished = await env.DB.prepare("UPDATE shares SET pending = 0 WHERE id = ? AND pending = 1 AND deleted_at IS NULL")
-    .bind(id)
+  // deleted — or the upload outlasted PENDING_MS. From then on it no longer
+  // counted against the week or the bucket and the sweep may be taking it
+  // down: it must not turn into a link, however close the sweep is.
+  const finished = await env.DB.prepare(
+    "UPDATE shares SET pending = 0 WHERE id = ? AND pending = 1 AND deleted_at IS NULL AND created_at > ?",
+  )
+    .bind(id, Date.now() - PENDING_MS)
     .run();
   if (!finished.meta.changes) {
     await env.CLIPS.delete(video(id)).catch(() => {});
