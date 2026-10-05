@@ -508,6 +508,10 @@ pub struct AppConfig {
     /// On for configs written before it existed, too.
     #[serde(default = "yes")]
     pub watermark: bool,
+    /// Whether the setup on first start has been gone through or skipped. A
+    /// config from before it existed belongs to someone already set up.
+    #[serde(default = "yes")]
+    pub setup_done: bool,
     /// The local port for the Stream Deck plugin — see [`ControlConfig`].
     #[serde(default)]
     pub control: ControlConfig,

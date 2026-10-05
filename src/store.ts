@@ -76,10 +76,14 @@ interface EngineState {
   /** The open tab in the settings. Here rather than in the page, so it is still
       standing when you come back from another page. */
   settingsTab: SettingsTab;
+  /** The setup asked for again from the settings; on first start the config's
+      `setupDone` opens it by itself. */
+  setupOpen: boolean;
 
   init: () => Promise<void>;
   setUpdate: (update: UpdateInfo | null) => void;
   setSettingsTab: (tab: SettingsTab) => void;
+  setSetupOpen: (open: boolean) => void;
   /**
    * Download and install `update`. Only comes back if that failed — on
    * success Windows quits the app and starts the installer.
@@ -182,6 +186,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   ffmpeg: { state: "checking" },
   lastError: null,
   settingsTab: "hotkeys",
+  setupOpen: false,
 
   setUpdate(update) {
     set({ update });
@@ -189,6 +194,10 @@ export const useEngine = create<EngineState>((set, get) => ({
 
   setSettingsTab(settingsTab) {
     set({ settingsTab });
+  },
+
+  setSetupOpen(setupOpen) {
+    set({ setupOpen });
   },
 
   async installUpdate() {

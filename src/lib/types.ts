@@ -219,6 +219,8 @@ export interface AppConfig {
   trayHintShown: boolean;
   /** The "ClippiBoy" mark in the bottom-left corner of clips and screenshots. */
   watermark: boolean;
+  /** The setup on first start was gone through or skipped. */
+  setupDone: boolean;
   control: ControlConfig;
   /** An accent of one's own as `#rrggbb`; `null` is the violet. */
   accentColor: string | null;

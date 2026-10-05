@@ -509,7 +509,7 @@ function Row({
   );
 }
 
-function TargetCard({
+export function TargetCard({
   target,
   picked,
   onPick,

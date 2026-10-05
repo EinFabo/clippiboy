@@ -10,6 +10,7 @@ import { ClipPicker, SharePicker, Transfers } from "./components/Share";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { FfmpegNotice } from "./components/FfmpegNotice";
 import { TextMenu } from "./components/TextMenu";
+import { Setup } from "./components/Setup";
 import { MenuProvider } from "./components/ui/Menu";
 import { Dashboard } from "./routes/Dashboard";
 import { Clips } from "./routes/Clips";
@@ -88,6 +89,7 @@ export default function App() {
         <Transfers />
         <SharePicker />
         <ClipPicker />
+        <Setup />
         {/* Takes the WebView's own menu away and gives text fields one in the
             program's style. */}
         <TextMenu />

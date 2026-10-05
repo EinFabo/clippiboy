@@ -7,11 +7,24 @@ import { UpdateProgressBar, updateProgressText } from "@/components/UpdateProgre
 import { Row } from "./shared";
 
 export function AboutTab() {
+  const setSetupOpen = useEngine((s) => s.setSetupOpen);
   return (
-    <section>
-      <SectionTitle title="Version" />
-      <Updates />
-    </section>
+    <>
+      <section>
+        <SectionTitle title="Version" />
+        <Updates />
+      </section>
+      <section>
+        <SectionTitle title="Setup" />
+        <Card>
+          <Row label="Run setup again" hint="Screen, audio, hotkeys and buffer, step by step">
+            <Button size="sm" onClick={() => setSetupOpen(true)}>
+              Start
+            </Button>
+          </Row>
+        </Card>
+      </section>
+    </>
   );
 }
 

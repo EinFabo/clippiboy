@@ -476,12 +476,14 @@ export function AudioMixer() {
  * warning the moment it is done is the wrong first impression. Game audio is
  * left out on purpose: the output already carries it.
  */
-function QuickSetup({
+export function QuickSetup({
   onAdd,
   onPick,
+  pickLabel = "Pick sources myself",
 }: {
   onAdd: (source: AudioSource) => Promise<void>;
   onPick: () => void;
+  pickLabel?: string;
 }) {
   const devices = useEngine((s) => s.devices);
   const output = devices.find((d) => d.kind === "output" && d.isDefault);
@@ -558,7 +560,7 @@ function QuickSetup({
       </div>
       <div className="mt-4 flex items-center justify-end gap-2">
         <Button size="sm" variant="ghost" onClick={onPick}>
-          Pick sources myself
+          {pickLabel}
         </Button>
         <Button size="sm" variant="primary" disabled={busy || nothing} onClick={() => void add()}>
           {busy ? "Adding…" : "Add"}

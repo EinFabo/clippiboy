@@ -59,7 +59,7 @@ const KEY_LABELS: Record<string, string> = {
 
 /** What is printed on the key. The numpad follows a pattern, the rest is in
     {@link KEY_LABELS}; everything else is already called what it is called. */
-function keyLabel(key: string): string {
+export function keyLabel(key: string): string {
   const numpad = /^Numpad([0-9])$/.exec(key);
   if (numpad) return `Num ${numpad[1]}`;
   return KEY_LABELS[key] ?? key;
@@ -139,7 +139,7 @@ function risky(value: string): boolean {
   return !HARMLESS.test(keys[0] ?? "");
 }
 
-function Hotkeys() {
+export function Hotkeys() {
   const { config, setHotkeys } = useEngine(
     useShallow((s) => ({ config: s.config, setHotkeys: s.setHotkeys })),
   );
