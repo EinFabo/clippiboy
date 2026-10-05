@@ -14,6 +14,8 @@ import {
   expiresIn,
   ID_PATTERN,
   LIFETIME_MS,
+  looksLikeJpeg,
+  looksLikeMp4,
   MAX_BYTES,
   MAX_POSTER_BYTES,
   newId,
@@ -77,6 +79,55 @@ async function liveBytes(env: Env, now: number): Promise<number> {
   return row?.total ?? 0;
 }
 
+// The menu in every running app asks for the quota, and summing the bucket
+// reads every live row. For that answer a few minutes old is close enough —
+// an upload sums afresh, inside its INSERT.
+const BUCKET_TTL_MS = 5 * 60 * 1000;
+let bucket: { total: number; at: number } | null = null;
+
+async function liveBytesCached(env: Env, now: number): Promise<number> {
+  if (bucket && now - bucket.at < BUCKET_TTL_MS) return bucket.total;
+  const total = await liveBytes(env, now);
+  bucket = { total, at: now };
+  return total;
+}
+
+/** Passes the upload on, but fails it unless it starts like an MP4. */
+function onlyMp4(): { stream: TransformStream<Uint8Array, Uint8Array>; refused: () => boolean } {
+  let head = new Uint8Array(0);
+  let checked = false;
+  let refused = false;
+  const stream = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (checked) {
+        controller.enqueue(chunk);
+        return;
+      }
+      const joined = new Uint8Array(head.length + chunk.length);
+      joined.set(head);
+      joined.set(chunk, head.length);
+      if (joined.length < 8) {
+        head = joined;
+        return;
+      }
+      if (!looksLikeMp4(joined)) {
+        refused = true;
+        throw new Error("not an mp4");
+      }
+      checked = true;
+      head = new Uint8Array(0);
+      controller.enqueue(joined);
+    },
+    flush() {
+      if (!checked) {
+        refused = true;
+        throw new Error("not an mp4");
+      }
+    },
+  });
+  return { stream, refused: () => refused };
+}
+
 async function live(env: Env, id: string, now: number): Promise<ShareRow | null> {
   if (!ID_PATTERN.test(id)) return null;
   const row = await env.DB.prepare("SELECT * FROM shares WHERE id = ?").bind(id).first<ShareRow>();
@@ -103,7 +154,7 @@ const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, ta
 
 export async function shareQuota(env: Env, me: string): Promise<Response> {
   const now = Date.now();
-  return json(quota(await recentOf(env, me, now), await liveBytes(env, now)));
+  return json(quota(await recentOf(env, me, now), await liveBytesCached(env, now)));
 }
 
 /**
@@ -172,21 +223,34 @@ export async function createShare(request: Request, env: Env, me: string): Promi
   if (!inserted.meta.changes) {
     return (await refuse()) ?? json({ error: "Sharing is full right now — try again later.", reason: "full" }, 507);
   }
+  // Only clips: without this check the link would host any file under our
+  // domain for five days.
+  const mp4 = onlyMp4();
   try {
     // A fixed-length stream: R2 needs the size up front, and a body that turns
     // out longer than it said is cut off rather than stored.
     const sized = new FixedLengthStream(bytes);
-    const piping = request.body.pipeTo(sized.writable);
+    const piping = request.body.pipeThrough(mp4.stream).pipeTo(sized.writable);
     await env.CLIPS.put(video(id), sized.readable, {
       httpMetadata: { contentType: "video/mp4" },
     });
     await piping;
-    await env.DB.prepare("UPDATE shares SET pending = 0 WHERE id = ?").bind(id).run();
   } catch (err) {
     await env.CLIPS.delete(video(id)).catch(() => {});
     await env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(id).run();
+    if (mp4.refused()) throw new HttpError(415, "Only clips can be shared as links.");
     console.error("upload", id, err);
     throw new HttpError(502, "The upload broke off. Try again.");
+  }
+  // The row may have gone while the clip was on its way — the account was
+  // deleted, or the upload outlasted PENDING_MS and the sweep gave up on it.
+  // Then the file would sit in R2 uncounted and the app would get a dead link.
+  const finished = await env.DB.prepare("UPDATE shares SET pending = 0 WHERE id = ? AND pending = 1 AND deleted_at IS NULL")
+    .bind(id)
+    .run();
+  if (!finished.meta.changes) {
+    await env.CLIPS.delete(video(id)).catch(() => {});
+    throw new HttpError(410, "The upload took too long. Try again.");
   }
   return json({ id, url: `${PAGE_ORIGIN}/c/${id}`, expiresAt });
 }
@@ -194,8 +258,17 @@ export async function createShare(request: Request, env: Env, me: string): Promi
 export async function putPoster(request: Request, env: Env, me: string, id: string): Promise<Response> {
   const row = await owned(env, me, id);
   if (row.deleted_at !== null) throw new HttpError(404, "That link is gone.");
+  // The length before the body: reading first would hold whatever was sent
+  // in memory, and a big enough one takes the Worker down for everyone.
+  const length = Number(request.headers.get("Content-Length"));
+  if (!request.body || !Number.isFinite(length) || length <= 0 || length > MAX_POSTER_BYTES) {
+    throw new HttpError(413, "Poster too large.");
+  }
   const data = await request.arrayBuffer();
   if (data.byteLength === 0 || data.byteLength > MAX_POSTER_BYTES) throw new HttpError(413, "Poster too large.");
+  if (!looksLikeJpeg(new Uint8Array(data, 0, Math.min(3, data.byteLength)))) {
+    throw new HttpError(415, "The poster has to be a JPEG.");
+  }
   await env.CLIPS.put(poster(id), data, { httpMetadata: { contentType: "image/jpeg" } });
   return json({ ok: true });
 }

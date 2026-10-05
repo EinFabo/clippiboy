@@ -125,3 +125,14 @@ export function cleanTags(raw: string[]): string[] {
   }
   return out;
 }
+
+/** An MP4 starts with its `ftyp` box: four bytes of size, then the name.
+    Anything else is not a clip, whatever it calls itself. */
+export function looksLikeMp4(head: Uint8Array): boolean {
+  return head.length >= 8 && head[4] === 0x66 && head[5] === 0x74 && head[6] === 0x79 && head[7] === 0x70;
+}
+
+/** The app's thumbnails are JPEGs, and nothing else goes up as a poster. */
+export function looksLikeJpeg(head: Uint8Array): boolean {
+  return head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+}

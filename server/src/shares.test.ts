@@ -6,6 +6,8 @@ import {
   cleanTags,
   expiresIn,
   ID_PATTERN,
+  looksLikeJpeg,
+  looksLikeMp4,
   MAX_BYTES,
   newId,
   quota,
@@ -73,4 +75,17 @@ test("tags are trimmed, unique and capped", () => {
   assert.deepEqual(cleanTags([" ace ", "Ace", "", "clutch"]), ["ace", "clutch"]);
   assert.equal(cleanTags(Array.from({ length: 30 }, (_, i) => `t${i}`)).length, 12);
   assert.equal(cleanTags(["x".repeat(100)])[0].length, 40);
+});
+
+test("only an MP4 passes as a clip", () => {
+  const mp4 = new Uint8Array([0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+  assert.equal(looksLikeMp4(mp4), true);
+  assert.equal(looksLikeMp4(new TextEncoder().encode("MZ\x90\0\x03\0\0\0")), false);
+  assert.equal(looksLikeMp4(new Uint8Array([0x50, 0x4b, 3, 4, 0, 0, 0, 0])), false);
+  assert.equal(looksLikeMp4(mp4.subarray(0, 6)), false);
+});
+
+test("only a JPEG passes as a poster", () => {
+  assert.equal(looksLikeJpeg(new Uint8Array([0xff, 0xd8, 0xff, 0xe0])), true);
+  assert.equal(looksLikeJpeg(new Uint8Array([0x89, 0x50, 0x4e, 0x47])), false);
 });
