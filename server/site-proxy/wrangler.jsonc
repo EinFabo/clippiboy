@@ -10,5 +10,8 @@
     { "pattern": "clippiboy.com", "custom_domain": true },
     { "pattern": "www.clippiboy.com", "custom_domain": true }
   ],
-  "workers_dev": false
+  "workers_dev": false,
+  // Share links (clippiboy.com/c/<id>) are pages of the friends server. A
+  // service binding, because one Worker cannot fetch another on the same zone.
+  "services": [{ "binding": "API", "service": "clippiboy-friends" }]
 }

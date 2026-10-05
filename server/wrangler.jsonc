@@ -23,6 +23,10 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Share links: the clips themselves, five days each. The hourly sweep
+  // deletes them; a lifecycle rule on the bucket (6 days) is the safety net.
+  "r2_buckets": [{ "binding": "CLIPS", "bucket_name": "clippiboy-clips" }],
+  "triggers": { "crons": ["17 * * * *"] },
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]
   },

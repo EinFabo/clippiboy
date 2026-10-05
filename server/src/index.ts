@@ -13,6 +13,7 @@ import {
   type User,
 } from "./db";
 import { base64url, body, escapeHtml, HttpError, json, normalizeCode, randomToken, sameText, sha256 } from "./util";
+import { createShare, deleteShare, deleteSharesOf, putPoster, shareFile, sharePage, shareQuota, sweep } from "./links";
 
 export { Hub } from "./hub";
 
@@ -29,6 +30,9 @@ export default {
       return json({ error: "Something went wrong on the server." }, 500);
     }
   },
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(sweep(env));
+  },
 } satisfies ExportedHandler<Env>;
 
 async function route(request: Request, env: Env): Promise<Response> {
@@ -41,7 +45,23 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/auth/callback" && method === "GET") return authCallback(request, url, env);
   if (path === "/auth/exchange" && method === "POST") return authExchange(request, env);
 
+  // Share links are for anyone who has the link.
+  const shared = path.match(/^\/c\/([a-z0-9]+)(?:\.(mp4|jpg))?$/);
+  if (shared && (method === "GET" || method === "HEAD")) {
+    const [, id, kind] = shared;
+    return kind ? shareFile(request, env, id, kind as "mp4" | "jpg") : sharePage(env, id);
+  }
+
   const me = await authenticate(request, env.DB);
+
+  if (path === "/shares/quota" && method === "GET") return shareQuota(env, me);
+  if (path === "/shares" && method === "POST") return createShare(request, env, me);
+  const share = path.match(/^\/shares\/([a-z0-9]+)(\/poster)?$/);
+  if (share) {
+    const [, id, isPoster] = share;
+    if (isPoster && method === "PUT") return putPoster(request, env, me, id);
+    if (!isPoster && method === "DELETE") return deleteShare(env, me, id);
+  }
 
   if (path === "/ws" && method === "GET") {
     const headers = new Headers(request.headers);
@@ -344,6 +364,7 @@ async function blockUser(env: Env, me: string, other: string) {
 
 async function deleteAccount(env: Env, me: string): Promise<Response> {
   const related = await relatedIds(env.DB, me);
+  await deleteSharesOf(env, me);
   // Cascades to sessions, friendships and blocks.
   await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(me).run();
   await notify(env, ...related);

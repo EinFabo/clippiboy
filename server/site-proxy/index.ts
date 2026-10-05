@@ -1,8 +1,12 @@
 const ORIGIN = "https://einfabo.github.io/clippiboy";
 const HOME = "https://clippiboy.com";
 
+interface Env {
+  API: Fetcher;
+}
+
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     // One address: www goes to the bare domain.
     if (url.hostname !== "clippiboy.com") {
@@ -10,6 +14,10 @@ export default {
     }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+    }
+    // A share link's page; the video on it loads from api.clippiboy.com directly.
+    if (/^\/c\/[a-z0-9]+$/.test(url.pathname)) {
+      return env.API.fetch(request);
     }
     const upstream = await fetch(`${ORIGIN}${url.pathname}${url.search}`, {
       method: request.method,
