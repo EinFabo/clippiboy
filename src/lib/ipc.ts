@@ -34,6 +34,8 @@ export function fileUrl(path: string | null): string | undefined {
 
 export const api = {
   listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
+  /** Whether a clip has a live share link (deleting the clip takes it down). */
+  linkExists: (id: string) => invoke<boolean>("link_exists", { id }),
   listAudioProcesses: () => invoke<AudioProcess[]>("list_audio_processes"),
   listCaptureTargets: () => invoke<CaptureTarget[]>("list_capture_targets"),
   listEncoders: () => invoke<EncoderInfo[]>("list_encoders"),

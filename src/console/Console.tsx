@@ -194,6 +194,8 @@ export function Console() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  // Deleting takes the clip's share link down too — said in the question.
+  const [confirmingLink, setConfirmingLink] = useState(false);
   /** Die Kachel, über der gerade die Freundeliste zum Senden liegt. */
   const [sendFor, setSendFor] = useState<string | null>(null);
   useEffect(() => {
@@ -690,6 +692,7 @@ export function Console() {
                   {confirming === clip.id ? (
                     <ConfirmDelete
                       origin="left"
+                      question={confirmingLink ? "Delete with its link?" : undefined}
                       onConfirm={() => {
                         setConfirming(null);
                         void run("delete", async () => {
@@ -757,7 +760,15 @@ export function Console() {
                       <Tool label="Rename" onClick={() => setRenaming(clip.id)}>
                         <IconPencil className="h-4 w-4" />
                       </Tool>
-                      <Tool label="Delete" onClick={() => setConfirming(clip.id)} danger>
+                      <Tool
+                        label="Delete"
+                        onClick={() => {
+                          setConfirming(clip.id);
+                          setConfirmingLink(false);
+                          if (inTauri) void api.linkExists(clip.id).then(setConfirmingLink).catch(() => {});
+                        }}
+                        danger
+                      >
                         <IconTrash className="h-4 w-4" />
                       </Tool>
                     </>

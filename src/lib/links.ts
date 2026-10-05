@@ -101,12 +101,17 @@ export const useLinks = create<LinksStore>((set, get) => ({
   },
 }));
 
-/** "5 days left", "1 day left", "a few hours left". */
+/** "5 days left", "1 day left", "5 hours left" — rounded like the server's
+    page and toast, so a fresh link says five days here too. */
 export function timeLeft(link: Link): string {
-  const days = Math.floor((link.expiresAt - Date.now()) / 86_400_000);
+  const left = link.expiresAt - Date.now();
+  const days = Math.round(left / 86_400_000);
   if (days >= 2) return `${days} days left`;
   if (days === 1) return "1 day left";
-  return "a few hours left";
+  const hours = Math.floor(left / 3_600_000);
+  if (hours >= 2) return `${hours} hours left`;
+  if (hours === 1) return "1 hour left";
+  return "a few minutes left";
 }
 
 /** The weekday a used-up week frees its next link, "Fri". */

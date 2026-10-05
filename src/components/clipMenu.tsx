@@ -86,8 +86,9 @@ function linkEntries(clip: Clip): MenuEntry[] {
             ? "sharing is full right now"
             : null;
   // A used-up week stays clickable: what the store knows may be old, and the
-  // upload asks the server before it shrinks anything.
-  const usedUp = quota !== null && quota.used >= quota.limit;
+  // upload asks the server before it shrinks anything. Not while this clip is
+  // on its way up — its own pending upload is what used the week up.
+  const usedUp = !busy && quota !== null && quota.used >= quota.limit;
   return [
     {
       kind: "item",

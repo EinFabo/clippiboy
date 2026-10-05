@@ -226,15 +226,20 @@ async fn read(app: &AppHandle, response: reqwest::Response) -> Result<serde_json
 }
 
 fn quota_message(resets_at: Option<i64>) -> String {
-    match resets_at.map(|at| (at - now_ms()).max(0) / 3_600_000) {
-        Some(hours) if hours >= 24 => format!(
-            "All links for this week are used — the next one is free in {} days.",
-            (hours + 23) / 24
-        ),
-        Some(hours) if hours >= 1 => {
-            format!("All links for this week are used — the next one is free in {hours} hours.")
-        }
-        _ => "All links for this week are used — the next one is free shortly.".into(),
+    let when = match resets_at.map(|at| (at - now_ms()).max(0) / 3_600_000) {
+        Some(hours) if hours >= 24 => plural((hours + 23) / 24, "day"),
+        Some(hours) if hours >= 1 => plural(hours, "hour"),
+        _ => return "All links for this week are used — the next one is free shortly.".into(),
+    };
+    format!("All links for this week are used — the next one is free in {when}.")
+}
+
+/// "1 day", "2 days".
+fn plural(count: i64, unit: &str) -> String {
+    if count == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{count} {unit}s")
     }
 }
 
@@ -265,6 +270,13 @@ pub async fn link_state(app: AppHandle) -> Result<LinkState, String> {
         quota: fetch_quota(&app, &token).await.ok(),
         links,
     })
+}
+
+/// Whether a clip has a live link — for the console, which keeps no link
+/// store and must not ask the server each time.
+#[tauri::command]
+pub fn link_exists(id: String) -> bool {
+    load().contains_key(&id)
 }
 
 /// Upload a clip and put its link on the clipboard. An existing live link is
@@ -570,20 +582,6 @@ async fn take_down(app: &AppHandle, id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_quota_message_counts_in_days_then_hours() {
-        let in_days = quota_message(Some(now_ms() + 50 * 3_600_000));
-        assert!(in_days.contains("in 3 days"), "{in_days}");
-        let in_hours = quota_message(Some(now_ms() + 5 * 3_600_000 + 60_000));
-        assert!(in_hours.contains("in 5 hours"), "{in_hours}");
-        assert!(quota_message(None).contains("shortly"));
-    }
-}
-
 /// Delete a link on the server. Gone already counts as deleted; someone
 /// else's link answers 403.
 async fn delete_remote(app: &AppHandle, token: &str, link_id: &str) -> Result<(), String> {
@@ -597,4 +595,23 @@ async fn delete_remote(app: &AppHandle, token: &str, link_id: &str) -> Result<()
         read(app, response).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_quota_message_counts_in_days_then_hours() {
+        let in_days = quota_message(Some(now_ms() + 50 * 3_600_000));
+        assert!(in_days.contains("in 3 days"), "{in_days}");
+        let in_hours = quota_message(Some(now_ms() + 5 * 3_600_000 + 60_000));
+        assert!(in_hours.contains("in 5 hours"), "{in_hours}");
+        assert!(quota_message(None).contains("shortly"));
+        let one_day = quota_message(Some(now_ms() + 24 * 3_600_000 + 60_000));
+        assert!(one_day.contains("in 1 day."), "{one_day}");
+        let one_hour = quota_message(Some(now_ms() + 3_600_000 + 60_000));
+        assert!(one_hour.contains("in 1 hour."), "{one_hour}");
+        assert_eq!(plural(1, "day"), "1 day");
+    }
 }

@@ -6,6 +6,7 @@ import { ClipEditor, type Trim } from "@/components/ClipEditor";
 import { SaveVeil, type SaveVeilHandle } from "@/components/ui/BusyVeil";
 import { ExportDialog } from "@/components/ExportDialog";
 import { useClipMenu } from "@/components/clipMenu";
+import { useLinks } from "@/lib/links";
 import { IconTrash } from "@/components/icons";
 import { HeartBurst } from "@/components/ui/HeartBurst";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
@@ -119,6 +120,7 @@ export function ClipPlayer({
    * everything else that asks in this app.
    */
   const [askingDelete, setAskingDelete] = useState(false);
+  const links = useLinks((s) => s.links);
   const [exporting, setExporting] = useState(false);
   // Counts the video element's restarts. Serves as a `key`: after saving, the
   // player gets a fresh element rather than one whose source we pulled out from
@@ -850,7 +852,8 @@ export function ClipPlayer({
           </Button>
           {askingDelete ? (
             <ConfirmDelete
-              question="Delete clip?"
+              // Its share link goes along, as in the gallery.
+              question={links[clip.id] ? "Delete with its link?" : "Delete clip?"}
               onConfirm={removeClip}
               onCancel={() => setAskingDelete(false)}
             />

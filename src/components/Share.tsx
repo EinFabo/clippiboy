@@ -264,8 +264,10 @@ export function Transfers() {
   const uploads = useLinkUploads();
   if (shown.length === 0 && uploads.length === 0) return null;
 
+  // Above the player and the dialogs (z-50, portals later in the DOM): a link
+  // shared from the player's menu shows its progress there too. Below menus.
   return (
-    <div className="fixed right-6 bottom-6 z-40 flex w-[340px] flex-col gap-2">
+    <div className="fixed right-6 bottom-6 z-[55] flex w-[340px] flex-col gap-2">
       {uploads.map((upload) => (
         <UploadCard key={`link-${upload.clipId}`} upload={upload} />
       ))}

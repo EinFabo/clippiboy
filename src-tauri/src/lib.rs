@@ -1253,6 +1253,7 @@ pub fn run() {
             friends::friends_set_allow_requests,
             friends::friends_delete_account,
             links::link_state,
+            links::link_exists,
             links::link_create,
             links::link_delete,
             share::share_state,
