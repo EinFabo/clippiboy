@@ -126,4 +126,14 @@ if (inTauri) {
     if (event.payload.signedIn !== useLinks.getState().signedIn) void useLinks.getState().refresh();
   });
   void useLinks.getState().refresh();
+  // A link runs out on its own, with no event to say so: dropped here within
+  // the minute, so the tile's pill and the menu let go of it. The server is
+  // asked again now and then, for a week that has reset meanwhile.
+  window.setInterval(() => {
+    const { links } = useLinks.getState();
+    const now = Date.now();
+    const live = Object.fromEntries(Object.entries(links).filter(([, link]) => link.expiresAt > now));
+    if (Object.keys(live).length !== Object.keys(links).length) useLinks.setState({ links: live });
+  }, 30_000);
+  window.setInterval(() => void useLinks.getState().refresh(), 10 * 60_000);
 }

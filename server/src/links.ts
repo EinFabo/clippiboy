@@ -6,7 +6,7 @@
 // big file never makes a second hop through the proxy.
 
 import { HttpError, json } from "./util";
-import { renderPage } from "./page";
+import { renderGone, renderPage } from "./page";
 import {
   byteRange,
   canUpload,
@@ -286,12 +286,10 @@ export async function shareFile(request: Request, env: Env, id: string, kind: "m
 }
 
 function gone(): Response {
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clip expired · ClippiBoy</title><meta name="robots" content="noindex">
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08080a;color:#f4f4f5;font:16px/1.5 system-ui,sans-serif;padding:16px}
-main{background:#121215;border:1px solid #26262c;border-radius:20px;padding:32px 36px;max-width:380px;text-align:center}
-h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;margin:0}a{display:inline-block;margin-top:20px;background:#fff;color:#08080a;border-radius:999px;padding:10px 20px;text-decoration:none;font-weight:600}</style></head>
-<body><main><h1>This clip has expired</h1><p>Links from ClippiBoy last five days.</p><a href="${PAGE_ORIGIN}">Get ClippiBoy</a></main></body></html>`;
-  return new Response(html, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  return new Response(renderGone(PAGE_ORIGIN), {
+    status: 410,
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
 }
 
 // --- Hourly -----------------------------------------------------------------------

@@ -47,6 +47,58 @@ ${busy ? `<path class="arc" d="${ARC}" pathLength="100" fill="none" stroke="url(
 </svg>`;
 }
 
+/** What the clip page and the expired page share: tokens, header, buttons. */
+function baseCss(site: string): string {
+  return `@font-face{font-family:"Inter";src:url("${site}/fonts/inter.woff2") format("woff2");font-weight:100 900;font-display:swap}
+:root{color-scheme:dark;--base:#08080a;--surface:#121215;--elevated:#1a1a1f;--hover:#22222a;--line:#26262c;--ink:#fff;--muted:#8a8a96;--faint:#5c5c68;--accent:#8b5cf6;--bright:#a78bfa;--soft:cubic-bezier(.2,.8,.2,1)}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--base);color:var(--ink);font:15px/1.5 "Inter",system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.hero{position:absolute;inset:0 0 auto;height:420px;background:linear-gradient(180deg,#7c3aed 0%,#4c1d95 22%,#2a1b6b 48%,#08080a 100%);opacity:.9;pointer-events:none}
+main{position:relative;max-width:1100px;margin:0 auto;padding:20px 16px 56px}
+header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}
+.brand{display:flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none;font-weight:650;font-size:17px;letter-spacing:-.01em}
+.brand svg{width:32px;height:32px}
+.btn{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#000;border-radius:999px;padding:0 20px;height:40px;text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap;transition:background .15s}
+.btn:hover{background:rgb(255 255 255/.88)}
+.cta{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;margin-top:32px;padding:20px 22px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,rgb(139 92 246/.12),transparent 60%),var(--surface)}
+.cta p{margin:0;color:var(--muted);font-size:14px;max-width:560px}.cta strong{color:var(--ink)}
+footer{margin-top:22px;font-size:12px;color:var(--faint)}footer a{color:var(--muted)}`;
+}
+
+/** The page head both pages start with. */
+function head(site: string, title: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#8b5cf6">
+<link rel="icon" href="${site}/img/logo.svg" type="image/svg+xml">
+<link rel="preload" href="${site}/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>`;
+}
+
+const CTA_TEXT =
+  "<strong>Clipped with ClippiBoy</strong> — it keeps the last minutes of your game, so you can save the best moment after it happened. Free for Windows.";
+
+/** A link that ran out or was deleted: the clip's frame, empty, in the same look. */
+export function renderGone(site: string): string {
+  return `${head(site, "Clip expired · ClippiBoy")}
+<meta property="og:site_name" content="ClippiBoy">
+<meta property="og:title" content="This clip has expired">
+<meta property="og:description" content="Links from ClippiBoy last five days.">
+<style>
+${baseCss(site)}
+.gone{position:relative;aspect-ratio:16/9;max-height:70vh;margin:0 auto;display:grid;place-items:center;text-align:center;padding:24px;background:radial-gradient(ellipse at 50% 40%,rgb(139 92 246/.14),transparent 65%),var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:0 30px 80px -20px rgb(0 0 0/.7)}
+.gone svg{width:84px;height:84px;opacity:.55;filter:grayscale(.35)}
+.gone h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:18px 0 6px}
+.gone p{margin:0;color:var(--muted);font-size:14px;max-width:420px}
+@media (max-width:560px){.gone{aspect-ratio:auto;padding:48px 20px;border-radius:14px}.gone h1{font-size:20px}}
+</style></head><body><div class="hero"></div><main>
+<header><a class="brand" href="${site}">${logo("mark", false)}ClippiBoy</a><a class="btn" href="${site}">Get ClippiBoy</a></header>
+<div class="gone"><div>${logo("faded", false)}<h1>This clip has expired</h1><p>Links from ClippiBoy last five days, or less if the clip was deleted. Ask whoever sent it for a new one.</p></div></div>
+<div class="cta"><p>${CTA_TEXT}</p><a class="btn" href="${site}">Get ClippiBoy</a></div>
+</main></body></html>`;
+}
+
 export function renderPage(d: PageData): string {
   const title = escapeHtml(d.title);
   const by = d.uploader ? ` by ${d.uploader.name}` : "";
@@ -64,13 +116,7 @@ export function renderPage(d: PageData): string {
       }<span>Shared by <strong>${escapeHtml(d.uploader.name)}</strong></span></div>`
     : "";
 
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title} · ClippiBoy</title>
-<meta name="robots" content="noindex">
-<meta name="theme-color" content="#8b5cf6">
-<link rel="icon" href="${d.site}/img/logo.svg" type="image/svg+xml">
-<link rel="preload" href="${d.site}/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
+  return `${head(d.site, `${title} · ClippiBoy`)}
 <meta property="og:type" content="video.other">
 <meta property="og:site_name" content="ClippiBoy">
 <meta property="og:title" content="${title}">
@@ -83,17 +129,7 @@ export function renderPage(d: PageData): string {
 ${d.width ? `<meta property="og:video:width" content="${d.width}"><meta property="og:video:height" content="${d.height}">` : ""}
 <meta name="twitter:card" content="summary_large_image">
 <style>
-@font-face{font-family:"Inter";src:url("${d.site}/fonts/inter.woff2") format("woff2");font-weight:100 900;font-display:swap}
-:root{color-scheme:dark;--base:#08080a;--surface:#121215;--elevated:#1a1a1f;--hover:#22222a;--line:#26262c;--ink:#fff;--muted:#8a8a96;--faint:#5c5c68;--accent:#8b5cf6;--bright:#a78bfa;--soft:cubic-bezier(.2,.8,.2,1)}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;background:var(--base);color:var(--ink);font:15px/1.5 "Inter",system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
-.hero{position:absolute;inset:0 0 auto;height:420px;background:linear-gradient(180deg,#7c3aed 0%,#4c1d95 22%,#2a1b6b 48%,#08080a 100%);opacity:.9;pointer-events:none}
-main{position:relative;max-width:1100px;margin:0 auto;padding:20px 16px 56px}
-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}
-.brand{display:flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none;font-weight:650;font-size:17px;letter-spacing:-.01em}
-.brand svg{width:32px;height:32px}
-.btn{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#000;border-radius:999px;padding:0 20px;height:40px;text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap;transition:background .15s}
-.btn:hover{background:rgb(255 255 255/.88)}
+${baseCss(d.site)}
 .player{position:relative;aspect-ratio:${ratio};max-height:76vh;margin:0 auto;background:#000;border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 30px 80px -20px rgb(0 0 0/.7)}
 video{width:100%;height:100%;display:block;object-fit:contain;cursor:pointer}
 .veil{position:absolute;inset:0;display:grid;place-items:center;background:rgb(8 8 10/.35);transition:opacity .2s var(--soft)}
@@ -131,9 +167,6 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
 .by strong{color:var(--ink);font-weight:600}
 .expires{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:13px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:6px 13px;white-space:nowrap}
 .expires svg{width:14px;height:14px}
-.cta{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;margin-top:32px;padding:20px 22px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,rgb(139 92 246/.12),transparent 60%),var(--surface)}
-.cta p{margin:0;color:var(--muted);font-size:14px;max-width:560px}.cta strong{color:var(--ink)}
-footer{margin-top:22px;font-size:12px;color:var(--faint)}footer a{color:var(--muted)}
 @media (max-width:560px){h1{font-size:20px}.player{border-radius:14px}.time .total{display:none}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.loader .arc{animation-duration:3s}}
 </style></head><body><div class="hero"></div><main>
@@ -151,7 +184,7 @@ footer{margin-top:22px;font-size:12px;color:var(--faint)}footer a{color:var(--mu
 </div></div>
 <div class="info"><div><h1>${title}</h1>${pills ? `<div class="pills">${pills}</div>` : ""}${uploader}</div>
 <span class="expires"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Expires ${escapeHtml(d.expires)}</span></div>
-<div class="cta"><p><strong>Clipped with ClippiBoy</strong> — it keeps the last minutes of your game, so you can save the best moment after it happened. Free for Windows.</p><a class="btn" href="${d.site}">Get ClippiBoy</a></div>
+<div class="cta"><p>${CTA_TEXT}</p><a class="btn" href="${d.site}">Get ClippiBoy</a></div>
 <footer>This clip deletes itself ${escapeHtml(d.expires)}. Something wrong with it? <a href="mailto:privacy@clippiboy.com?subject=Clip%20${d.id}">Report it</a>.</footer>
 </main>
 <script>

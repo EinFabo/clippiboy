@@ -6,12 +6,14 @@ import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
 import { ShotViewer } from "@/components/ShotViewer";
 import { useClipMenu } from "@/components/clipMenu";
+import { timeLeft, useLinks } from "@/lib/links";
 import {
   IconCamera,
   IconCheck,
   IconClose,
   IconFolder,
   IconHeart,
+  IconLink,
   IconRecord,
   IconScissors,
   IconSearch,
@@ -125,6 +127,8 @@ export function Clips({
    * place on the tile.
    */
   const [confirming, setConfirming] = useState<string | null>(null);
+  /** Clips with a live share link — a pill on the tile says so. */
+  const links = useLinks((s) => s.links);
   // Throwing the untouched recording away cannot be undone either, so it asks
   // in the same place and the same way as deleting does.
   const [discarding, setDiscarding] = useState<string | null>(null);
@@ -511,6 +515,11 @@ export function Clips({
                           <IconScissors className="h-3 w-3" />
                         </Pill>
                       )}
+                      {links[clip.id] && (
+                        <Pill title={`Shared as a link · ${timeLeft(links[clip.id])}`}>
+                          <IconLink className="h-3 w-3" />
+                        </Pill>
+                      )}
                       {/* A still has no length. The camera says what the
                           duration would have said on a clip. */}
                       {clip.screenshot ? (
@@ -566,6 +575,8 @@ export function Clips({
                   {confirming === clip.id ? (
                     <ConfirmDelete
                       origin="right"
+                      // Its share link goes along — worth saying before, not after.
+                      question={links[clip.id] ? "Delete with its link?" : undefined}
                       onConfirm={() => {
                         setConfirming(null);
                         void deleteClip(clip.id);
