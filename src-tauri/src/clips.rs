@@ -342,6 +342,12 @@ pub fn friend_tag(name: &str) -> String {
     format!("with {name}")
 }
 
+/// A tag made by `friend_tag`. A hand-made "with …" counts too — better one
+/// tag too few on a public page than a friend's name too many.
+pub fn is_friend_tag(tag: &str) -> bool {
+    tag.starts_with("with ")
+}
+
 pub fn clean_tags(tags: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();

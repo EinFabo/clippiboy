@@ -95,6 +95,45 @@ impl Reporter {
     }
 }
 
+// --- Uploads on their way -----------------------------------------------------------
+
+/// Clips being uploaded right now, and whether the clip was deleted meanwhile.
+/// One upload per clip: a second click would race the first through the same
+/// temp file and spend a second link of the week.
+static UPLOADS: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+
+/// Holds a clip's place in `UPLOADS` until the upload ends, however it ends.
+struct Uploading(String);
+
+impl Uploading {
+    fn begin(id: &str) -> Option<Self> {
+        let mut uploads = UPLOADS.lock();
+        let uploads = uploads.get_or_insert_with(HashMap::new);
+        if uploads.contains_key(id) {
+            return None;
+        }
+        uploads.insert(id.to_owned(), false);
+        Some(Self(id.to_owned()))
+    }
+
+    /// Was the clip deleted while it went up?
+    fn deleted(&self) -> bool {
+        UPLOADS
+            .lock()
+            .as_ref()
+            .and_then(|uploads| uploads.get(&self.0).copied())
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for Uploading {
+    fn drop(&mut self) {
+        if let Some(uploads) = UPLOADS.lock().as_mut() {
+            uploads.remove(&self.0);
+        }
+    }
+}
+
 // --- The list on disk -------------------------------------------------------------
 
 static FILE: Mutex<()> = Mutex::new(());
@@ -247,6 +286,10 @@ pub async fn link_create(app: AppHandle, id: String) -> Result<Link, String> {
     if clip.screenshot {
         return Err("Only clips can be shared as a link.".into());
     }
+    // The card of the running upload already shows it; no second one.
+    let Some(uploading) = Uploading::begin(&id) else {
+        return Err("This clip is already on its way up.".into());
+    };
     let title = clip.title.clone().unwrap_or_else(|| {
         PathBuf::from(&clip.path)
             .file_stem()
@@ -259,7 +302,19 @@ pub async fn link_create(app: AppHandle, id: String) -> Result<Link, String> {
         clip_id: id.clone(),
         title: title.clone(),
     };
+    // Busy from the first moment: the quota question and the faststart copy
+    // come before any byte goes up, and the menu must not offer a second try.
+    report.emit("uploading", 0.0, None);
     let result = upload(&token, &clip, &title, &report).await;
+    if let (Ok(link), true) = (&result, uploading.deleted()) {
+        // Deleted while it went up: no menu is left to reach the link from,
+        // so it comes down again instead of going on the clipboard.
+        if let Err(err) = delete_remote(&app, &token, &link.id).await {
+            log::warn!("share link of deleted clip {id}: {err}");
+        }
+        report.emit("failed", 0.0, Some("The clip was deleted.".into()));
+        return Err("The clip was deleted.".into());
+    }
     match &result {
         Ok(link) => {
             report.emit("done", 1.0, None);
@@ -405,7 +460,9 @@ async fn send(
     if let Some(game) = &clip.game {
         params.push(("game", game.clone()));
     }
-    for tag in &clip.tags {
+    // Not the friend tags ("with Luca"): who played along stays among
+    // friends, a link is public.
+    for tag in clip.tags.iter().filter(|tag| !crate::clips::is_friend_tag(tag)) {
         params.push(("tag", tag.clone()));
     }
     if name_on_links {
@@ -461,6 +518,10 @@ pub async fn link_delete(app: AppHandle, id: String) -> Result<(), String> {
 /// A clip deleted from the library takes its link along: afterwards no menu
 /// is left to reach it from.
 pub fn clip_deleted(app: &AppHandle, id: &str) {
+    // Still on its way up: `link_create` takes it down once it lands.
+    if let Some(deleted) = UPLOADS.lock().as_mut().and_then(|uploads| uploads.get_mut(id)) {
+        *deleted = true;
+    }
     if !load().contains_key(id) {
         return;
     }
@@ -501,16 +562,7 @@ async fn take_down(app: &AppHandle, id: &str) -> Result<bool, String> {
             return Err("This link was made with another Discord account. Sign in with that one to delete it.".into());
         }
     }
-    let response = client()
-        .delete(format!("{}/shares/{}", crate::friends::SERVER, link.id))
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .map_err(|_| "The ClippiBoy server is not reachable right now.".to_string())?;
-    // Gone already counts as deleted. Someone else's link answers 403.
-    if response.status() != reqwest::StatusCode::NOT_FOUND {
-        read(app, response).await?;
-    }
+    delete_remote(app, &token, &link.id).await?;
     change(|links| {
         links.remove(id);
     })?;
@@ -530,4 +582,19 @@ mod tests {
         assert!(in_hours.contains("in 5 hours"), "{in_hours}");
         assert!(quota_message(None).contains("shortly"));
     }
+}
+
+/// Delete a link on the server. Gone already counts as deleted; someone
+/// else's link answers 403.
+async fn delete_remote(app: &AppHandle, token: &str, link_id: &str) -> Result<(), String> {
+    let response = client()
+        .delete(format!("{}/shares/{}", crate::friends::SERVER, link_id))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|_| "The ClippiBoy server is not reachable right now.".to_string())?;
+    if response.status() != reqwest::StatusCode::NOT_FOUND {
+        read(app, response).await?;
+    }
+    Ok(())
 }
