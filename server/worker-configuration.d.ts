@@ -6,6 +6,7 @@ interface __BaseEnv_Env {
 	DB: D1Database;
 	DISCORD_CLIENT_ID: "1553530949491236894";
 	HUB: DurableObjectNamespace<import("./src/index").Hub>;
+	REPORT_LIMIT: RateLimit;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

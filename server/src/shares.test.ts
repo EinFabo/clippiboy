@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   byteRange,
   canUpload,
+  cleanReport,
   cleanTags,
   expiresIn,
   ID_PATTERN,
@@ -13,6 +14,7 @@ import {
   quota,
   TOTAL_BYTES,
   WEEK_MS,
+  weekStart,
 } from "./shares.ts";
 
 const MB = 1024 * 1024;
@@ -109,4 +111,20 @@ test("an MP4 with something hung on behind, or without moov, fails", () => {
 test("only a JPEG passes as a poster", () => {
   assert.equal(looksLikeJpeg(new Uint8Array([0xff, 0xd8, 0xff, 0xe0])), true);
   assert.equal(looksLikeJpeg(new Uint8Array([0x89, 0x50, 0x4e, 0x47])), false);
+});
+
+test("the week starts seven days back, or at a reset if that came later", () => {
+  assert.equal(weekStart(now, 0), now - WEEK_MS);
+  assert.equal(weekStart(now, now - 1_000), now - 1_000);
+  assert.equal(weekStart(now, now - 2 * WEEK_MS), now - WEEK_MS);
+});
+
+test("a report needs a known reason and keeps a short note at most", () => {
+  assert.deepEqual(cleanReport({ reason: "spam" }), { reason: "spam", note: null });
+  assert.deepEqual(cleanReport({ reason: "other", note: "  stolen clip  " }), { reason: "other", note: "stolen clip" });
+  assert.equal(cleanReport({ reason: "other", note: "x".repeat(500) })!.note!.length, 300);
+  assert.deepEqual(cleanReport({ reason: "nsfw", note: "   " }), { reason: "nsfw", note: null });
+  assert.equal(cleanReport({ reason: "boring" }), null);
+  assert.equal(cleanReport({ reason: 5 }), null);
+  assert.equal(cleanReport(null), null);
 });

@@ -10,7 +10,9 @@ import { renderGone, renderPage } from "./page";
 import {
   byteRange,
   canUpload,
+  cleanReport,
   cleanTags,
+  MAX_OPEN_REPORTS,
   expiresIn,
   ID_PATTERN,
   LIFETIME_MS,
@@ -21,9 +23,11 @@ import {
   newId,
   PENDING_MS,
   quota,
+  REPORT_KEEP_MS,
   TOTAL_BYTES,
   WEEK_MS,
   WEEKLY_LIMIT,
+  weekStart,
 } from "./shares";
 
 export const PAGE_ORIGIN = "https://clippiboy.com";
@@ -64,10 +68,30 @@ function quick(env: Env, me: string): boolean {
   return list.split(",").some((id) => id.trim() === me);
 }
 
-async function recentOf(env: Env, me: string, now: number): Promise<number[]> {
-  if (quick(env, me)) return [];
+/** What moderation says about an account's links. */
+interface Standing {
+  banned: boolean;
+  /** No weekly limit — the size and bucket limits still hold. */
+  unlimited: boolean;
+  /** Links made before this no longer count against the week. */
+  resetAt: number;
+}
+
+async function standingOf(env: Env, me: string): Promise<Standing> {
+  const row = await env.DB.prepare("SELECT banned_at, unlimited_links, links_reset_at FROM users WHERE id = ?")
+    .bind(me)
+    .first<{ banned_at: number | null; unlimited_links: number; links_reset_at: number }>();
+  return {
+    banned: row?.banned_at != null,
+    unlimited: row?.unlimited_links === 1 || quick(env, me),
+    resetAt: row?.links_reset_at ?? 0,
+  };
+}
+
+async function recentOf(env: Env, me: string, now: number, standing: Standing): Promise<number[]> {
+  if (standing.unlimited) return [];
   const { results } = await env.DB.prepare(`SELECT created_at FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`)
-    .bind(me, now - WEEK_MS, now - PENDING_MS)
+    .bind(me, weekStart(now, standing.resetAt), now - PENDING_MS)
     .all<{ created_at: number }>();
   return results.map((row) => row.created_at);
 }
@@ -138,7 +162,8 @@ const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, ta
 
 export async function shareQuota(env: Env, me: string): Promise<Response> {
   const now = Date.now();
-  return json(quota(await recentOf(env, me, now), await liveBytesCached(env, now)));
+  const standing = await standingOf(env, me);
+  return json(quota(await recentOf(env, me, now, standing), await liveBytesCached(env, now)));
 }
 
 /**
@@ -153,8 +178,10 @@ export async function createShare(request: Request, env: Env, me: string): Promi
   if (!Number.isFinite(bytes) || bytes <= 0 || !request.body) {
     throw new HttpError(411, "The clip needs a length.");
   }
+  const standing = await standingOf(env, me);
+  if (standing.banned) throw new HttpError(403, "This account is suspended.");
   const refuse = async () => {
-    const verdict = canUpload(await recentOf(env, me, now), bytes, await liveBytes(env, now));
+    const verdict = canUpload(await recentOf(env, me, now, standing), bytes, await liveBytes(env, now));
     if (verdict.ok) return null;
     if (verdict.reason === "too_big") {
       throw new HttpError(413, `Clips for links can be ${MAX_BYTES / 1024 / 1024} MB at most.`);
@@ -196,9 +223,9 @@ export async function createShare(request: Request, env: Env, me: string): Promi
       tags,
       showName,
       me,
-      now - WEEK_MS,
+      weekStart(now, standing.resetAt),
       now - PENDING_MS,
-      quick(env, me) ? Number.MAX_SAFE_INTEGER : WEEKLY_LIMIT,
+      standing.unlimited ? Number.MAX_SAFE_INTEGER : WEEKLY_LIMIT,
       now - PENDING_MS,
       bytes,
       TOTAL_BYTES,
@@ -280,6 +307,38 @@ export async function deleteSharesOf(env: Env, me: string): Promise<void> {
 
 // --- For everyone ---------------------------------------------------------------
 
+/**
+ * `POST /c/<id>/report` from the share page, `{reason, note?}` sent as plain
+ * text so the browser needs no preflight. Who reported is not kept; the rate
+ * limit goes by address without storing it.
+ */
+export async function reportShare(request: Request, env: Env, id: string): Promise<Response> {
+  const cors = { "Access-Control-Allow-Origin": PAGE_ORIGIN };
+  const answer = (body: unknown, status = 200) => Response.json(body, { status, headers: cors });
+  const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (!(await env.REPORT_LIMIT.limit({ key: address })).success) {
+    return answer({ error: "Too many reports — try again in a minute." }, 429);
+  }
+  let raw: unknown = null;
+  try {
+    raw = JSON.parse((await request.text()).slice(0, 2048));
+  } catch {
+    // Not JSON: refused below.
+  }
+  const report = cleanReport(raw);
+  if (!report) return answer({ error: "Pick a reason." }, 400);
+  if (!(await live(env, id, Date.now()))) return answer({ error: "That clip is gone." }, 404);
+  await env.DB.prepare(
+    `INSERT INTO reports (id, share_id, reason, note, created_at)
+     SELECT ?, ?, ?, ?, ?
+     WHERE (SELECT COUNT(*) FROM reports WHERE share_id = ? AND status = 'open') < ?`,
+  )
+    .bind(newId(), id, report.reason, report.note, Date.now(), id, MAX_OPEN_REPORTS)
+    .run();
+  // Over the cap it is quietly dropped: the clip is waiting for review anyway.
+  return answer({ ok: true });
+}
+
 export async function sharePage(env: Env, id: string): Promise<Response> {
   const now = Date.now();
   const row = await live(env, id, now);
@@ -300,6 +359,7 @@ export async function sharePage(env: Env, id: string): Promise<Response> {
     page: `${PAGE_ORIGIN}/c/${id}`,
     media: `${MEDIA_ORIGIN}/c/${video(id)}`,
     poster: `${MEDIA_ORIGIN}/c/${poster(id)}`,
+    report: `${MEDIA_ORIGIN}/c/${id}/report`,
     title: row.title,
     game: row.game,
     tags,
@@ -383,4 +443,6 @@ export async function sweep(env: Env): Promise<void> {
   await env.DB.prepare("DELETE FROM shares WHERE deleted_at IS NOT NULL AND created_at < ?")
     .bind(now - 2 * WEEK_MS)
     .run();
+  // Reports are for reviewing, not for keeping.
+  await env.DB.prepare("DELETE FROM reports WHERE created_at < ?").bind(now - REPORT_KEEP_MS).run();
 }

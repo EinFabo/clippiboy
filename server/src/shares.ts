@@ -57,6 +57,12 @@ export function quota(recent: number[], liveBytes: number): Quota {
   };
 }
 
+/** Where a person's week begins: seven days back, unless their limit was
+    reset since — links from before a reset no longer count. */
+export function weekStart(now: number, resetAt: number): number {
+  return Math.max(now - WEEK_MS, resetAt);
+}
+
 /** May this person upload `bytes` now? The cheap checks first. */
 export function canUpload(recent: number[], bytes: number, liveBytes: number): Verdict {
   if (bytes > MAX_BYTES) return { ok: false, reason: "too_big" };
@@ -124,6 +130,23 @@ export function cleanTags(raw: string[]): string[] {
     if (out.length === 12) break;
   }
   return out;
+}
+
+/** Why someone may report a clip — the same list the page offers. */
+export const REPORT_REASONS = ["nsfw", "violence", "hate", "spam", "other"] as const;
+export type ReportReason = (typeof REPORT_REASONS)[number];
+/** Open reports one clip may collect; more say nothing new. */
+export const MAX_OPEN_REPORTS = 20;
+/** Reports go after this, handled or not — a clip lives five days anyway. */
+export const REPORT_KEEP_MS = 30 * DAY_MS;
+
+/** A report as the page sent it, or null if it is not one. */
+export function cleanReport(raw: unknown): { reason: ReportReason; note: string | null } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { reason, note } = raw as { reason?: unknown; note?: unknown };
+  if (typeof reason !== "string" || !(REPORT_REASONS as readonly string[]).includes(reason)) return null;
+  const text = typeof note === "string" ? note.trim().slice(0, 300) : "";
+  return { reason: reason as ReportReason, note: text || null };
 }
 
 /**

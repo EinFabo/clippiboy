@@ -174,11 +174,11 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
-  /** The account is gone: drop every connection and forget the presence. */
-  async closeAll(): Promise<void> {
+  /** The account is gone or suspended: drop every connection and forget the presence. */
+  async closeAll(reason = "account deleted"): Promise<void> {
     for (const ws of this.ctx.getWebSockets()) {
       try {
-        ws.close(4001, "account deleted");
+        ws.close(4001, reason);
       } catch {
         // Already closed.
       }

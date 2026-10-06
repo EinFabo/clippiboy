@@ -13,7 +13,17 @@ import {
   type User,
 } from "./db";
 import { base64url, body, escapeHtml, HttpError, json, normalizeCode, randomToken, sameText, sha256 } from "./util";
-import { createShare, deleteShare, deleteSharesOf, putPoster, shareFile, sharePage, shareQuota, sweep } from "./links";
+import {
+  createShare,
+  deleteShare,
+  deleteSharesOf,
+  putPoster,
+  reportShare,
+  shareFile,
+  sharePage,
+  shareQuota,
+  sweep,
+} from "./links";
 
 export { Hub } from "./hub";
 
@@ -51,6 +61,8 @@ async function route(request: Request, env: Env): Promise<Response> {
     const [, id, kind] = shared;
     return kind ? shareFile(request, env, id, kind as "mp4" | "jpg") : sharePage(env, id);
   }
+  const reported = path.match(/^\/c\/([a-z0-9]+)\/report$/);
+  if (reported && method === "POST") return reportShare(request, env, reported[1]);
 
   const me = await authenticate(request, env.DB);
 
@@ -179,6 +191,8 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
   });
   if (!userResponse.ok) return page("Discord said no", "Could not read your Discord profile.");
   const userId = await upsertDiscordUser(env.DB, (await userResponse.json()) as DiscordUser);
+  const banned = await env.DB.prepare("SELECT 1 FROM users WHERE id = ? AND banned_at IS NOT NULL").bind(userId).first();
+  if (banned) return page("Account suspended", "This ClippiBoy account has been suspended.");
 
   const oneTime = randomToken(24);
   await env.DB.prepare("UPDATE logins SET code = ?, user_id = ? WHERE state = ?").bind(oneTime, userId, state).run();

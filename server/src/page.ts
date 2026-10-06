@@ -14,6 +14,8 @@ export interface PageData {
   page: string;
   media: string;
   poster: string;
+  /** Where the report form posts to. */
+  report: string;
   title: string;
   game: string | null;
   tags: string[];
@@ -167,6 +169,22 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
 .by strong{color:var(--ink);font-weight:600}
 .expires{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:13px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:6px 13px;white-space:nowrap}
 .expires svg{width:14px;height:14px}
+.linkish{background:none;border:0;padding:0;font:inherit;color:var(--muted);text-decoration:underline;cursor:pointer}
+dialog{width:min(420px,calc(100vw - 32px));padding:24px;border:1px solid var(--line);border-radius:20px;background:var(--surface);color:var(--ink);box-shadow:0 30px 80px -20px rgb(0 0 0/.8)}
+dialog::backdrop{background:rgb(8 8 10/.7);backdrop-filter:blur(4px)}
+dialog h2{font-size:18px;font-weight:650;margin:0 0 4px}dialog p{margin:0 0 16px;color:var(--muted);font-size:13px}
+.reasons{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.reasons label{cursor:pointer}.reasons input{position:absolute;opacity:0;pointer-events:none}
+.reasons span{display:inline-block;border:1px solid var(--line);background:var(--elevated);color:var(--muted);border-radius:999px;padding:6px 13px;font-size:13px;font-weight:500;transition:background .15s,color .15s,border-color .15s}
+.reasons input:checked+span{color:var(--ink);background:rgb(139 92 246/.22);border-color:rgb(167 139 250/.5)}
+.reasons input:focus-visible+span{outline:2px solid var(--bright);outline-offset:2px}
+dialog textarea{width:100%;min-height:72px;resize:vertical;border:1px solid var(--line);border-radius:12px;background:var(--base);color:var(--ink);font:inherit;font-size:13px;padding:10px 12px}
+dialog textarea:focus{outline:none;border-color:var(--accent)}
+.actions{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:16px}
+.actions .msg{flex:1;font-size:12px;color:var(--muted)}
+.ghost{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:999px;height:40px;padding:0 18px;font:inherit;font-size:14px;font-weight:600;cursor:pointer}
+.ghost:hover{color:var(--ink);background:var(--hover)}
+button.btn{border:0;font:inherit;font-size:14px;font-weight:600;cursor:pointer}button.btn:disabled{opacity:.5;cursor:default}
 @media (max-width:560px){h1{font-size:20px}.player{border-radius:14px}.time .total{display:none}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.loader .arc{animation-duration:3s}}
 </style></head><body><div class="hero"></div><main>
@@ -185,8 +203,20 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
 <div class="info"><div><h1>${title}</h1>${pills ? `<div class="pills">${pills}</div>` : ""}${uploader}</div>
 <span class="expires"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Expires ${escapeHtml(d.expires)}</span></div>
 <div class="cta"><p>${CTA_TEXT}</p><a class="btn" href="${d.site}">Get ClippiBoy</a></div>
-<footer>This clip deletes itself ${escapeHtml(d.expires)}. Something wrong with it? <a href="mailto:privacy@clippiboy.com?subject=Clip%20${d.id}">Report it</a>.</footer>
+<footer>This clip deletes itself ${escapeHtml(d.expires)}. Something wrong with it? <button class="linkish" id="report" type="button">Report it</button>.</footer>
 </main>
+<dialog id="reporting"><form id="report-form">
+<h2>Report this clip</h2><p>We'll take a look. Your report doesn't include who you are.</p>
+<div class="reasons" role="radiogroup" aria-label="Reason">
+<label><input type="radio" name="reason" value="nsfw" required><span>Sexual content</span></label>
+<label><input type="radio" name="reason" value="violence"><span>Violence or gore</span></label>
+<label><input type="radio" name="reason" value="hate"><span>Hate or harassment</span></label>
+<label><input type="radio" name="reason" value="spam"><span>Spam or scam</span></label>
+<label><input type="radio" name="reason" value="other"><span>Something else</span></label>
+</div>
+<textarea name="note" maxlength="300" placeholder="Anything we should know? (optional)"></textarea>
+<div class="actions"><span class="msg" id="report-msg" aria-live="polite"></span><button class="ghost" type="button" id="report-cancel">Cancel</button><button class="btn" type="submit" id="report-send">Send report</button></div>
+</form></dialog>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -231,7 +261,28 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
     else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
   };
   player.onpointermove = wake;
+  const dialog = $("reporting"), form = $("report-form"), msg = $("report-msg"), send = $("report-send");
+  $("report").onclick = () => { msg.textContent = ""; send.disabled = false; dialog.showModal(); };
+  $("report-cancel").onclick = () => dialog.close();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const data = new FormData(form);
+    send.disabled = true;
+    msg.textContent = "Sending…";
+    try {
+      // Plain text, so the browser sends it without asking first.
+      const res = await fetch(${JSON.stringify(d.report)}, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ reason: data.get("reason"), note: data.get("note") }) });
+      const answer = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(answer.error || "Could not send the report.");
+      msg.textContent = "Thanks — we'll take a look.";
+      setTimeout(() => { dialog.close(); form.reset(); }, 1600);
+    } catch (err) {
+      msg.textContent = err.message || "Could not send the report.";
+      send.disabled = false;
+    }
+  };
   document.onkeydown = (e) => {
+    if (dialog.open) return;
     if (e.target.closest && e.target.closest("a,button")) return;
     // Ctrl+F, Cmd+K and the like stay the browser's.
     if (e.ctrlKey || e.metaKey || e.altKey) return;
