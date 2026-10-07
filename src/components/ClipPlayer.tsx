@@ -22,6 +22,7 @@ import { useEngine } from "@/store";
 import { api, events, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
 import { useClipMix } from "@/lib/useClipMix";
+import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
 import type { Clip, ClipEdit } from "@/lib/types";
 
@@ -272,6 +273,16 @@ export function ClipPlayer({
     [clips.length, index, onIndexChange],
   );
 
+  // Into the tray while saving: the fresh element must not pick playback back
+  // up out of sight.
+  useEffect(
+    () =>
+      onHidden(() => {
+        if (resumeAt.current) resumeAt.current.playing = false;
+      }),
+    [],
+  );
+
   // Reset everything when switching clips.
   useEffect(() => {
     setBroken(false);
@@ -425,8 +436,12 @@ export function ClipPlayer({
     wake();
     return () => clearTimeout(restTimer.current);
   }, [isFull, playing, wake]);
-  /** Shown while paused, or while the mouse is moving. */
-  const fullChrome = isFull && (chrome || !playing);
+  /** The pointer is on the bar: resting there is aiming, not leaving it alone. */
+  const [onBar, setOnBar] = useState(false);
+  // The bar unmounts with the fullscreen and never reports the pointer leaving.
+  useEffect(() => setOnBar(false), [isFull]);
+  /** Shown while paused, while the mouse is moving, or while it is on the bar. */
+  const fullChrome = isFull && (chrome || !playing || onBar);
 
   /** Put the selection's start or end at the current position. */
   const mark = useCallback((which: "start" | "end") => {
@@ -443,9 +458,11 @@ export function ClipPlayer({
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       // In text fields, space and letters stay what they are.
+      // Sliders are not text: the volume keeps the focus after a drag, and
+      // would otherwise swallow every shortcut.
       const target = event.target;
       if (
-        target instanceof HTMLInputElement ||
+        (target instanceof HTMLInputElement && target.type !== "range") ||
         target instanceof HTMLTextAreaElement
       ) {
         return;
@@ -482,6 +499,7 @@ export function ClipPlayer({
       const handler = handlers[event.key] ?? handlers[event.key.toLowerCase()];
       if (!handler) return;
       event.preventDefault();
+      if (document.fullscreenElement) wake();
       handler();
     }
     window.addEventListener("keydown", onKey);
@@ -498,6 +516,7 @@ export function ClipPlayer({
     exporting,
     trim.start,
     trim.end,
+    wake,
   ]);
 
   const base = clip ? fileUrl(clip.path) : undefined;
@@ -710,7 +729,10 @@ export function ClipPlayer({
               src={source}
               autoPlay
               className="h-full w-full bg-black object-contain"
-              onClick={toggle}
+              // With the bar gone, a click is someone reaching for it — the mouse
+              // rested on a button, or the bar was still fading out. It brings
+              // the bar back instead of pausing behind it.
+              onClick={() => (isFull && !fullChrome ? wake() : toggle())}
               onDoubleClick={fullscreen}
               onPlay={() => setPlaying(true)}
               // On pause React takes the position back over — otherwise it would
@@ -756,6 +778,9 @@ export function ClipPlayer({
                   // the first thing you see is what was cut away.
                   element.currentTime = restored.start;
                 }
+                // `autoPlay` would start it in the tray; a pause before playback
+                // begins clears that.
+                if (isHidden()) element.pause();
               }}
               onEnded={(e) => {
                 setPlaying(false);
@@ -800,6 +825,11 @@ export function ClipPlayer({
                 "transition-opacity duration-300",
                 fullChrome ? "opacity-100" : "pointer-events-none opacity-0",
               )}
+              onPointerEnter={() => setOnBar(true)}
+              onPointerLeave={() => {
+                setOnBar(false);
+                wake();
+              }}
             >
               <PlayButton playing={playing} disabled={broken} onClick={toggle} />
               <Scrubber

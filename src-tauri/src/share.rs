@@ -390,6 +390,7 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
                 );
                 let _ = app.emit("clip-saved", clip);
                 crate::notify(&app, "ok", format!("{what} from {name} received"));
+                crate::sounds::play(&app, crate::model::SoundKind::ClipReceived);
             }
             Err(err) if cancel_flag(&app, &id).load(Ordering::SeqCst) => {
                 log::info!("share: receive of {id} called off: {err}");
@@ -586,6 +587,7 @@ fn offered(
     // Over the game too: the banner cannot be clicked, so it says where the
     // answer goes — the console has the buttons.
     let hotkey = app.state::<AppState>().config_snapshot().console_hotkey;
+    crate::sounds::play(app, crate::model::SoundKind::ClipReceived);
     crate::overlay::show_friend(
         app,
         crate::overlay::BannerKind::Friend,

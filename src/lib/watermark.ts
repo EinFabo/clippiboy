@@ -37,11 +37,13 @@ export function markRect(frameWidth: number, frameHeight: number): MarkRect | nu
   if (height >= MIN_HEIGHT && width + 2 * margin <= Math.floor(frameWidth / 2)) {
     return { x: margin, y: frameHeight - margin - height, width, height };
   }
-  // Otherwise kept at any price — smallest legible, shrunk to fit.
+  // Otherwise kept at any price — smallest legible, shrunk to fit. The margin
+  // from the shorter side, as in the core.
+  const keptMargin = Math.round(Math.min(frameWidth, frameHeight) * MARGIN_SHARE);
   height = Math.max(height, MIN_HEIGHT);
   width = widthFor(height);
-  const roomWidth = Math.max(frameWidth - 2 * margin, 0);
-  const roomHeight = Math.max(frameHeight - 2 * margin, 0);
+  const roomWidth = Math.max(frameWidth - 2 * keptMargin, 0);
+  const roomHeight = Math.max(frameHeight - 2 * keptMargin, 0);
   if (width > roomWidth) {
     width = roomWidth;
     height = heightFor(width);
@@ -51,5 +53,5 @@ export function markRect(frameWidth: number, frameHeight: number): MarkRect | nu
     width = widthFor(height);
   }
   if (width === 0 || height === 0) return null;
-  return { x: margin, y: frameHeight - margin - height, width, height };
+  return { x: keptMargin, y: frameHeight - keptMargin - height, width, height };
 }

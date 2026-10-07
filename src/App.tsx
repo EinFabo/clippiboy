@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useEngine } from "./store";
 import { inTauri } from "./lib/ipc";
+// Pausiert einen Clip, sobald das Fenster in den Tray geht.
+import "./lib/hidden";
 import type { FocusClip } from "./lib/types";
 import { TitleBar } from "./components/TitleBar";
 import { NavBar, type Route } from "./components/NavBar";

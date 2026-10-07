@@ -678,11 +678,15 @@ fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
     let in_front = app
         .get_webview_window("main")
         .is_some_and(|window| window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false));
+    let hushed_in_game = !config.notify_while_playing && app.state::<Friends>().game.lock().is_some();
+    if matches!(kind, Alert::Online) && !hushed_in_game {
+        crate::sounds::play(app, crate::model::SoundKind::FriendOnline);
+    }
     if in_front {
         crate::notify(app, "ok", text);
         return;
     }
-    if !config.notify_while_playing && app.state::<Friends>().game.lock().is_some() {
+    if hushed_in_game {
         return;
     }
     // Our own banner, in game and on the desktop alike — not Windows'. A toast

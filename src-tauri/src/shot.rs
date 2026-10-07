@@ -81,6 +81,9 @@ impl Shot {
     /// Lay another picture over this one, pixel for pixel, at `x`/`y`. What
     /// would reach past the edge is left off.
     pub fn paste(&mut self, x: u32, y: u32, piece: &Shot) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
         let stride = self.width as usize * 3;
         let columns = piece.width.min(self.width.saturating_sub(x)) as usize;
         let rows = piece.height.min(self.height.saturating_sub(y)) as usize;
@@ -368,28 +371,59 @@ fn under_note_path(clip_id: &str) -> std::path::PathBuf {
     crate::edit::dir(clip_id).join("under.json")
 }
 
-pub fn write_under(clip_id: &str, at: Rect, piece: &Shot) -> Result<(), String> {
+/// `under.json`: where the piece sits, and how big the picture was it came out
+/// of. Notes from 0.8.1 carry only the rectangle.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnderNote {
+    #[serde(flatten)]
+    at: Rect,
+    #[serde(default)]
+    picture: Option<(u32, u32)>,
+}
+
+pub fn write_under(
+    clip_id: &str,
+    at: Rect,
+    piece: &Shot,
+    picture: (u32, u32),
+) -> Result<(), String> {
     std::fs::create_dir_all(crate::edit::dir(clip_id))
         .map_err(|err| format!("could not create folder: {err}"))?;
     piece.write_png(&under_path(clip_id))?;
-    let text = serde_json::to_string(&at).map_err(|err| err.to_string())?;
+    let note = UnderNote {
+        at,
+        picture: Some(picture),
+    };
+    let text = serde_json::to_string(&note).map_err(|err| err.to_string())?;
     std::fs::write(under_note_path(clip_id), text).map_err(|err| err.to_string())
 }
 
-/// Where the piece sits, if the screenshot has one.
-pub fn under_rect(clip_id: &str) -> Option<Rect> {
+/// Where the piece sits in a picture of size `picture`, if it belongs there.
+///
+/// A picture cropped outside ClippiBoy (the Photos app, say) is no longer the
+/// one the piece came out of: laid back, it would land beside the mark — or,
+/// past the right edge, nowhere at all. Such a picture is edited as it is.
+pub fn under_rect(clip_id: &str, picture: (u32, u32)) -> Option<Rect> {
     if !under_path(clip_id).is_file() {
         return None;
     }
     let text = std::fs::read_to_string(under_note_path(clip_id)).ok()?;
-    serde_json::from_str(&text).ok()
+    let note: UnderNote = serde_json::from_str(&text).ok()?;
+    if note.picture.is_some_and(|size| size != picture) {
+        return None;
+    }
+    let at = note.at;
+    let inside = at.x as u64 + at.width as u64 <= picture.0 as u64
+        && at.y as u64 + at.height as u64 <= picture.1 as u64;
+    inside.then_some(at)
 }
 
-/// The piece and where it sits.
-pub fn read_under(clip_id: &str) -> Option<(Rect, Shot)> {
-    let at = under_rect(clip_id)?;
+/// The piece and where it sits — see [under_rect].
+pub fn read_under(clip_id: &str, picture: (u32, u32)) -> Option<(Rect, Shot)> {
+    let at = under_rect(clip_id, picture)?;
     let piece = read_png(&under_path(clip_id)).ok()?;
-    Some((at, piece))
+    (piece.width == at.width && piece.height == at.height).then_some((at, piece))
 }
 
 /// Clear the whole store away — the picture is its untouched self again.

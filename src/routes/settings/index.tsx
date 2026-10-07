@@ -6,6 +6,7 @@ import { Segmented } from "@/components/ui/Controls";
 import { HotkeysTab } from "./Hotkeys";
 import { BehaviourTab } from "./Behaviour";
 import { BannerTab } from "./Banner";
+import { SoundsTab } from "./Sounds";
 import { ConsoleTab } from "./Console";
 import { StorageTab } from "./Storage";
 import { FriendsTab } from "./Friends";
@@ -17,6 +18,7 @@ const tabs: Array<{ key: SettingsTab; label: string; page: () => React.ReactNode
   { key: "hotkeys", label: "Hotkeys", page: HotkeysTab },
   { key: "behaviour", label: "Behaviour", page: BehaviourTab },
   { key: "banner", label: "Banner", page: BannerTab },
+  { key: "sounds", label: "Sounds", page: SoundsTab },
   { key: "console", label: "Console", page: ConsoleTab },
   { key: "storage", label: "Storage", page: StorageTab },
   { key: "friends", label: "Friends", page: FriendsTab },

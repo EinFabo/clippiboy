@@ -27,6 +27,7 @@ pub mod pipeline;
 pub mod recorder;
 pub mod preview;
 pub mod shot;
+pub mod sounds;
 pub mod state;
 pub mod stems;
 pub mod thumbs;
@@ -42,6 +43,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 
 use overlay::BannerKind;
+use model::SoundKind;
 use state::AppState;
 
 /// Message to the UI (toast).
@@ -125,6 +127,7 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
             tag_friends(app, &state, &mut clip);
             let _ = app.emit("clip-saved", clip.clone());
             notify(app, "ok", format!("Clip saved · {seconds} s"));
+            sounds::play(app, SoundKind::ClipSaved);
             overlay::show_with_thumb(
                 app,
                 BannerKind::Clip,
@@ -136,6 +139,7 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
         }
         Err(err) => {
             notify(app, "error", err.clone());
+            sounds::play(app, SoundKind::Error);
             overlay::show(app, BannerKind::Error, "Clip failed", Some(err.clone()));
             Err(err)
         }
@@ -170,6 +174,7 @@ pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip,
             tag_friends(app, &state, &mut clip);
             let _ = app.emit("clip-saved", clip.clone());
             notify(app, "ok", "Screenshot saved".to_string());
+            sounds::play(app, SoundKind::Screenshot);
             overlay::show_with_thumb(
                 app,
                 BannerKind::Screenshot,
@@ -181,6 +186,7 @@ pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip,
         }
         Err(err) => {
             notify(app, "error", err.clone());
+            sounds::play(app, SoundKind::Error);
             overlay::show(app, BannerKind::Error, "Screenshot failed", Some(err.clone()));
             Err(err)
         }
@@ -203,6 +209,7 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
         Ok(()) => {
             overlay::set_recording(app, true);
             notify(app, "ok", "Recording started");
+            sounds::play(app, SoundKind::RecordingStarted);
             overlay::show(
                 app,
                 BannerKind::Recording,
@@ -213,6 +220,7 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
         }
         Err(err) => {
             notify(app, "error", err.clone());
+            sounds::play(app, SoundKind::Error);
             overlay::show(app, BannerKind::Error, "Recording will not start", Some(err));
         }
     }
@@ -239,6 +247,7 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
             let _ = app.emit("clip-saved", clip.clone());
             let length = format::duration(clip.duration_ms);
             notify(app, "ok", format!("Recording saved · {length}"));
+            sounds::play(app, SoundKind::RecordingSaved);
             overlay::show_with_thumb(
                 app,
                 BannerKind::Recording,
@@ -250,6 +259,7 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
         }
         Err(err) => {
             notify(app, "error", err.clone());
+            sounds::play(app, SoundKind::Error);
             overlay::show(app, BannerKind::Error, "Recording failed", Some(err.clone()));
             Err(err)
         }
@@ -287,7 +297,19 @@ fn recording_progress(app: &tauri::AppHandle, share: f32) {
     let _ = app.emit("recording-progress", share);
 }
 
-mod format {
+pub(crate) mod format {
+    /// `1.4 GB` or `830 MB`, as the UI writes it.
+    pub fn size(bytes: u64) -> String {
+        const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const MB: f64 = 1024.0 * 1024.0;
+        let bytes = bytes as f64;
+        if bytes >= GB {
+            format!("{:.1} GB", bytes / GB)
+        } else {
+            format!("{:.0} MB", bytes / MB)
+        }
+    }
+
     /// `1:02:03` or `2:03`.
     pub fn duration(ms: u64) -> String {
         let total = ms / 1000;
@@ -321,6 +343,7 @@ pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
     match state.start_pipeline() {
         Ok(()) => {
             notify(app, "ok", "Replay buffer running");
+            sounds::play(app, SoundKind::BufferOn);
             let seconds = state.config_snapshot().buffer.seconds;
             overlay::show(
                 app,
@@ -335,6 +358,7 @@ pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
         }
         Err(err) => {
             notify(app, "error", err.clone());
+            sounds::play(app, SoundKind::Error);
             overlay::show(app, BannerKind::Error, "Buffer will not start", Some(err));
         }
     }
@@ -410,6 +434,7 @@ pub fn stop_buffer_and_notify(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     state.stop_pipeline();
     notify(app, "ok", "Replay buffer stopped");
+    sounds::play(app, SoundKind::BufferOff);
     overlay::show(app, BannerKind::BufferOff, "Replay buffer off", None);
 }
 
@@ -578,6 +603,7 @@ fn watch_screen(app: &tauri::AppHandle) {
                 }
                 Err(err) => {
                     notify(&app, "error", err.clone());
+                    sounds::play(&app, SoundKind::Error);
                     overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
                 }
             }
@@ -833,6 +859,67 @@ fn refresh_free_bytes(state: &AppState) {
         .store(free, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Below this much free room a recording does not start at all.
+pub const RECORDING_MIN_START_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// What has to stay free beyond the recording itself: stopping writes the
+/// finished file next to the working folder before that is cleared away, so it
+/// needs about the recording's size once more.
+const RECORDING_SPARE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Keep a running recording from filling the drive.
+///
+/// Asked every ten seconds, right after the free room is read. Once the room
+/// would no longer hold the finished file twice over, a banner says so; once it
+/// would hardly hold it once, the recording is stopped — later, the stop itself
+/// would fail for want of room, and the recording would only come back on the
+/// next start.
+fn guard_recording_room(app: &tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    static STOPPING: AtomicBool = AtomicBool::new(false);
+
+    let state = app.state::<AppState>();
+    if !state.is_recording() {
+        WARNED.store(false, Ordering::Relaxed);
+        return;
+    }
+    let free = state.free_bytes.load(Ordering::Relaxed);
+    if free == 0 {
+        return;
+    }
+    let needed = state.status_snapshot().recording_bytes;
+    if free < needed + RECORDING_SPARE_BYTES {
+        if STOPPING.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        log::warn!("recording stopped: {free} bytes free, about {needed} needed to save it");
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let saved = stop_recording_and_notify(&app);
+            if saved.is_ok() {
+                overlay::show(
+                    &app,
+                    BannerKind::Error,
+                    "Recording stopped",
+                    Some("The clip drive is almost full — it was saved while it still fit".into()),
+                );
+            }
+            STOPPING.store(false, Ordering::Relaxed);
+        });
+    } else if free < 2 * needed + RECORDING_MIN_START_BYTES && !WARNED.swap(true, Ordering::Relaxed) {
+        sounds::play(app, SoundKind::Error);
+        overlay::show(
+            app,
+            BannerKind::Error,
+            "Clip drive filling up",
+            Some(format!(
+                "{} left — saving the recording needs as much again",
+                format::size(free)
+            )),
+        );
+    }
+}
+
 /// Sends levels (20 Hz) and status data (1 Hz) to the UI.
 fn spawn_ui_updates(app: &tauri::AppHandle) {
     let handle = app.clone();
@@ -900,6 +987,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 // alle paar Minuten —, und öfter zu fragen hieße, öfter auf
                 // einem Netzlaufwerk stehen zu bleiben.
                 refresh_free_bytes(&state);
+                guard_recording_room(&handle);
             }
             // Every 2 s, look which game is running in the foreground.
             if tick % 40 == 0 {
@@ -943,6 +1031,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     .and_then(|shared| shared.take_unseen_error());
                 if let Some(err) = trouble {
                     notify(&handle, "error", err.clone());
+                    sounds::play(&handle, SoundKind::Error);
                     overlay::show(&handle, BannerKind::Error, "Recording disrupted", Some(err));
                 }
                 // The recording cannot write any more — a full disk, most
@@ -1030,6 +1119,8 @@ fn allow_existing_clip_dirs(app: &tauri::AppHandle) {
 /// Hide the window instead of closing it — the app lives on in the tray.
 fn hide_to_tray(window: &tauri::Window) {
     let _ = window.hide();
+    // A clip left playing would go on sounding from nowhere (`src/lib/hidden.ts`).
+    let _ = window.emit("main-hidden", ());
 
     let app = window.app_handle();
     let state = app.state::<AppState>();
@@ -1175,8 +1266,8 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Applies to Alt+F4 and the taskbar's window list; the ✕ in our own
-            // title bar hides the window directly.
+            // The ✕ in our own title bar, Alt+F4 and the taskbar's window list
+            // all end up here.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
@@ -1191,6 +1282,7 @@ pub fn run() {
             commands::list_encoders,
             commands::get_config,
             commands::set_config,
+            commands::preview_sound,
             commands::set_clip_favorite,
             commands::file_clip,
             commands::copy_clip_file,

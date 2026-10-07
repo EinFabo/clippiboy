@@ -98,7 +98,9 @@ pub fn rect_kept(frame_width: u32, frame_height: u32, picture_width: u32, pictur
     if picture_width == 0 || picture_height == 0 {
         return None;
     }
-    let margin = (frame_height as f32 * MARGIN_SHARE).round() as u32;
+    // From the shorter side: a tall narrow strip would otherwise have margins
+    // wider than itself and no room left for the mark.
+    let margin = (frame_width.min(frame_height) as f32 * MARGIN_SHARE).round() as u32;
     let mut height = ((frame_height as f32 * HEIGHT_SHARE).round() as u32).max(MIN_HEIGHT);
     let mut width = (height as u64 * picture_width as u64 / picture_height as u64) as u32;
     let room_width = frame_width.saturating_sub(2 * margin);
@@ -289,5 +291,14 @@ mod tests {
         assert!(at.x + at.width <= 40);
         // Where the ordinary rule fits, both agree.
         assert_eq!(rect_kept(1920, 1080, 535, 152), rect(1920, 1080, 535, 152));
+    }
+
+    #[test]
+    fn a_tall_strip_keeps_a_mark_across_its_width() {
+        // Margins from the height used to eat the whole width of the strip.
+        let at = rect_kept(32, 1080, 535, 152).unwrap();
+        assert!(at.width >= 30 && at.x + at.width <= 32);
+        let at = rect_kept(40, 1080, 535, 152).unwrap();
+        assert!(at.width >= 38);
     }
 }

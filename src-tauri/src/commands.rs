@@ -39,6 +39,13 @@ pub fn list_encoders() -> Vec<EncoderInfo> {
     encode::list_encoders()
 }
 
+/// The settings' "listen" button: the sound at the level being set, whether or
+/// not it is switched on.
+#[tauri::command]
+pub fn preview_sound(kind: crate::model::SoundKind, volume: f32) {
+    crate::sounds::play_at(kind, volume);
+}
+
 #[tauri::command]
 pub fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config_snapshot()
@@ -443,7 +450,6 @@ pub fn screenshot_edit(state: State<'_, AppState>, id: String) -> Result<ShotEdi
 
     let base = crate::shot::base_path(&id);
     let original = crate::shot::original_path(&id);
-    let under_rect = crate::shot::under_rect(&id);
     let text = |path: &std::path::Path| path.to_string_lossy().to_string();
 
     // Untouched so far: the clip's own file is both grounds at once.
@@ -452,6 +458,7 @@ pub fn screenshot_edit(state: State<'_, AppState>, id: String) -> Result<ShotEdi
     } else {
         (clip.width, clip.height)
     };
+    let under_rect = crate::shot::under_rect(&id, (original_width, original_height));
 
     Ok(ShotEdit {
         crop: edit.crop,
@@ -531,7 +538,7 @@ fn edit_screenshot(
     let mut pristine = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
     // The original carries the watermark. Laid bare again here and stamped onto
     // the finished picture at the end — wherever its corner then is.
-    let under = crate::shot::read_under(&clip.id);
+    let under = crate::shot::read_under(&clip.id, (pristine.width, pristine.height));
     if let Some((at, piece)) = &under {
         pristine.paste(at.x, at.y, piece);
     }
@@ -1202,9 +1209,15 @@ pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     // unlike the cache it does not come and go — it gets a row of its own.
     let tools_bytes = local.as_ref().map(|dir| dir_bytes(&dir.join("ffmpeg"))).unwrap_or(0);
     let cache_bytes = local.as_ref().map(|dir| dir_bytes(dir)).unwrap_or(0).saturating_sub(tools_bytes);
+    // One store for both: a trimmed clip leaves its `video.mp4` there, a
+    // screenshot its pictures. Only the first is what the row and "Clear all
+    // trims" speak of.
+    let store_bytes = dir_bytes(&edit::root());
+    let originals_bytes = edit::trim_originals(&Default::default()).bytes;
     Ok(StorageUsage {
         clips_bytes,
-        originals_bytes: dir_bytes(&edit::root()),
+        originals_bytes,
+        shot_edits_bytes: store_bytes.saturating_sub(originals_bytes),
         tracks_bytes: dir_bytes(&crate::stems::root()),
         thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
         cache_bytes,

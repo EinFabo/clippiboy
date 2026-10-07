@@ -146,7 +146,10 @@ function Surface({
     // A click **inside** the menu must not close it before the entry has fired —
     // otherwise the button would vanish from under the cursor and `click` would
     // never arrive.
-    const onDown = (event: MouseEvent) => {
+    // `pointerdown` in the capture phase, not `mousedown`: a stage that pans
+    // calls preventDefault and stopPropagation on the pointer, and the mouse
+    // event then never comes.
+    const onDown = (event: PointerEvent) => {
       if (box.current?.contains(event.target as Node)) return;
       onClose();
     };
@@ -173,14 +176,14 @@ function Surface({
       }
     };
 
-    window.addEventListener("mousedown", onDown);
+    window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("blur", onClose);
     window.addEventListener("resize", onClose);
     window.addEventListener("keydown", onKey, true);
     // In the capture phase, otherwise we miss scrolling in the gallery.
     window.addEventListener("scroll", onScroll, true);
     return () => {
-      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("pointerdown", onDown, true);
       window.removeEventListener("blur", onClose);
       window.removeEventListener("resize", onClose);
       window.removeEventListener("keydown", onKey, true);

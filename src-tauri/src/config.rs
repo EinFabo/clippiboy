@@ -70,6 +70,7 @@ pub fn default_config() -> AppConfig {
         accent_color_2: None,
         rgb_speed: crate::model::RgbSpeed::default(),
         friends: crate::model::FriendsConfig::default(),
+        sounds: crate::model::SoundConfig::default(),
     }
 }
 

@@ -73,6 +73,11 @@ function UsageCard({ usage }: { usage: StorageUsage }) {
       "One per trimmed clip, so the trim can be undone. \u201cFree up space\u201d in the clip menu releases one, \u201cClear all trims\u201d below all of them.",
     ],
     [
+      "Screenshot edits",
+      usage.shotEditsBytes,
+      "What an edit can go back to, and what lies under the watermark.",
+    ],
+    [
       "Individual audio tracks",
       usage.tracksBytes,
       "Kept so the mix can still be changed after the fact.",

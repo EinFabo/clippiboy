@@ -535,6 +535,91 @@ pub struct AppConfig {
     /// Privacy and notices for the friends list — see [`FriendsConfig`].
     #[serde(default)]
     pub friends: FriendsConfig,
+    /// The notification sounds — see [`SoundConfig`].
+    #[serde(default)]
+    pub sounds: SoundConfig,
+}
+
+/// One notification's sound: on or off, and how loud against the others.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundSetting {
+    pub on: bool,
+    /// 0 to 1, multiplied with [`SoundConfig::volume`].
+    pub volume: f32,
+}
+
+impl Default for SoundSetting {
+    fn default() -> Self {
+        Self { on: true, volume: 1.0 }
+    }
+}
+
+/// The sounds that go with the notifications (`sounds.rs`). One switch and
+/// one level for all of them, and each its own on top.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SoundConfig {
+    pub enabled: bool,
+    pub volume: f32,
+    pub clip_saved: SoundSetting,
+    pub screenshot: SoundSetting,
+    pub recording_started: SoundSetting,
+    pub recording_saved: SoundSetting,
+    pub buffer_on: SoundSetting,
+    pub buffer_off: SoundSetting,
+    pub friend_online: SoundSetting,
+    pub clip_received: SoundSetting,
+    pub error: SoundSetting,
+}
+
+impl Default for SoundConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            volume: 0.5,
+            clip_saved: SoundSetting::default(),
+            screenshot: SoundSetting::default(),
+            recording_started: SoundSetting::default(),
+            recording_saved: SoundSetting::default(),
+            buffer_on: SoundSetting::default(),
+            buffer_off: SoundSetting::default(),
+            friend_online: SoundSetting::default(),
+            clip_received: SoundSetting::default(),
+            error: SoundSetting::default(),
+        }
+    }
+}
+
+/// Which notification a sound belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SoundKind {
+    ClipSaved,
+    Screenshot,
+    RecordingStarted,
+    RecordingSaved,
+    BufferOn,
+    BufferOff,
+    FriendOnline,
+    ClipReceived,
+    Error,
+}
+
+impl SoundConfig {
+    pub fn setting(&self, kind: SoundKind) -> SoundSetting {
+        match kind {
+            SoundKind::ClipSaved => self.clip_saved,
+            SoundKind::Screenshot => self.screenshot,
+            SoundKind::RecordingStarted => self.recording_started,
+            SoundKind::RecordingSaved => self.recording_saved,
+            SoundKind::BufferOn => self.buffer_on,
+            SoundKind::BufferOff => self.buffer_off,
+            SoundKind::FriendOnline => self.friend_online,
+            SoundKind::ClipReceived => self.clip_received,
+            SoundKind::Error => self.error,
+        }
+    }
 }
 
 impl AppConfig {
@@ -720,7 +805,11 @@ pub struct TrackMix {
 pub struct StorageUsage {
     /// The clips, screenshots and recordings themselves, wherever they lie.
     pub clips_bytes: u64,
+    /// The untouched recordings of trimmed clips — what "Clear all trims" frees.
     pub originals_bytes: u64,
+    /// Everything else in the same store: an edited screenshot's untouched
+    /// picture and marks, and what lies under every screenshot's watermark.
+    pub shot_edits_bytes: u64,
     pub tracks_bytes: u64,
     pub thumbs_bytes: u64,
     /// The web views' own folders (WebView2 cache and storage).

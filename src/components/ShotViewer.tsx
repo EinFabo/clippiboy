@@ -448,6 +448,19 @@ export function ShotViewer({
         : { src: clip.path, width: clip.width, height: clip.height };
   const source = inTauri ? `${fileUrl(ground.src)}?v=${clip.sizeBytes}` : null;
 
+  // The window changed size: a view panned to a corner of the big stage would
+  // leave the smaller one mostly black.
+  useEffect(() => {
+    if (!stageSize) return;
+    setView((was) => {
+      const kept = clampView(stageSize, ground.width, ground.height, was);
+      return kept.zoom === was.zoom && kept.x === was.x && kept.y === was.y ? was : kept;
+    });
+  }, [stageSize, ground.width, ground.height]);
+
+  /** When the badge last reset the zoom — see the stage's double-click. */
+  const badgeReset = useRef(0);
+
   /** Where the picture sits on the stage right now, zoom included. */
   const box = stageSize ? boxFor(stageSize, ground.width, ground.height, view) : null;
 
@@ -465,7 +478,11 @@ export function ShotViewer({
       const before = boxFor(stageSize, ground.width, ground.height, was);
       const spotX = (pointerX - before.left) / before.scale;
       const spotY = (pointerY - before.top) / before.scale;
-      const zoom = Math.min(Math.max(was.zoom * factor, 1), MAX_ZOOM_STEP);
+      let zoom = Math.min(Math.max(was.zoom * factor, 1), MAX_ZOOM_STEP);
+      // Wheel steps in and out again never multiply back to exactly 1 — and a
+      // view at 1.0000000000000002 counts as zoomed for panning and the
+      // double-click, though the badge already hides.
+      if (zoom < 1.01) zoom = 1;
       const scale = (before.scale / was.zoom) * zoom;
       return clampView(stageSize, ground.width, ground.height, {
         zoom,
@@ -753,7 +770,12 @@ export function ShotViewer({
             }
             onWheel={(event) => {
               if (event.deltaY === 0) return;
-              zoomAt(event.clientX, event.clientY, Math.pow(1.0015, -event.deltaY));
+              // Windows can be set to scroll by lines or a whole page per notch;
+              // in pixels it would then barely move.
+              const pixels =
+                event.deltaY *
+                (event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? stageSize?.height ?? 800 : 1);
+              zoomAt(event.clientX, event.clientY, Math.pow(1.0015, -pixels));
             }}
             // Before the layers hear of it: a middle-button drag pans whatever
             // tool is picked, and must not start a mark or a crop.
@@ -761,6 +783,11 @@ export function ShotViewer({
             onPointerMove={(event) => {
               const drag = pan.current;
               if (!drag || drag.pointer !== event.pointerId || !stageSize) return;
+              // Let go somewhere the stage never heard of it (Alt+Tab mid-drag).
+              if (event.buttons === 0) {
+                pan.current = null;
+                return;
+              }
               setView((was) =>
                 clampView(stageSize, ground.width, ground.height, {
                   zoom: was.zoom,
@@ -773,10 +800,22 @@ export function ShotViewer({
               if (pan.current?.pointer === event.pointerId) pan.current = null;
             }}
             onPointerCancel={() => (pan.current = null)}
+            onLostPointerCapture={() => (pan.current = null)}
+            // Zoomed in, typing at the edge makes Chromium scroll the stage to
+            // the caret. Nothing here reckons with a scrolled stage — the
+            // picture moves by the view alone.
+            onScroll={(event) => {
+              event.currentTarget.scrollTop = 0;
+              event.currentTarget.scrollLeft = 0;
+            }}
             // The middle button would otherwise start the browser's autoscroll.
             onMouseDown={(event) => event.button === 1 && event.preventDefault()}
             onDoubleClick={(event) => {
               if (mode !== "view") return;
+              // The badge's reset took the first click; the badge is gone, and
+              // the double-click lands here. It meant "whole picture", not
+              // "zoom in again".
+              if (performance.now() - badgeReset.current < 600) return;
               if (view.zoom > 1) setView(WHOLE);
               else zoomAt(event.clientX, event.clientY, 2.5);
             }}
@@ -817,19 +856,26 @@ export function ShotViewer({
                     under it, so a stroke over the corner looks as it will. In
                     the cropped ground it is already bare, and the piece merely
                     lands on the same pixels again. */}
+                {/* Inside the picture's box: cropped, the piece may lie partly
+                    or wholly outside it, and must not float in the black. */}
                 {under && box && mode !== "view" && (
-                  <img
-                    src={fileUrl(edit!.underPath!)}
-                    alt=""
-                    draggable={false}
-                    className="pointer-events-none absolute max-w-none select-none"
-                    style={{
-                      left: box.left + (under.x - (mode === "draw" ? origin.x : 0)) * box.scale,
-                      top: box.top + (under.y - (mode === "draw" ? origin.y : 0)) * box.scale,
-                      width: under.width * box.scale,
-                      height: under.height * box.scale,
-                    }}
-                  />
+                  <div
+                    className="pointer-events-none absolute overflow-hidden"
+                    style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
+                  >
+                    <img
+                      src={fileUrl(edit!.underPath!)}
+                      alt=""
+                      draggable={false}
+                      className="absolute max-w-none select-none"
+                      style={{
+                        left: (under.x - (mode === "draw" ? origin.x : 0)) * box.scale,
+                        top: (under.y - (mode === "draw" ? origin.y : 0)) * box.scale,
+                        width: under.width * box.scale,
+                        height: under.height * box.scale,
+                      }}
+                    />
+                  </div>
                 )}
                 {mode === "draw" && (
                   <AnnotateLayer
@@ -874,7 +920,10 @@ export function ShotViewer({
                 )}
                 {view.zoom > 1.01 && (
                   <button
-                    onClick={() => setView(WHOLE)}
+                    onClick={() => {
+                      badgeReset.current = performance.now();
+                      setView(WHOLE);
+                    }}
                     title="Back to the whole picture"
                     className="absolute right-3 bottom-3 rounded-pill bg-black/60 px-2.5 py-1
                       font-mono text-xs text-ink tabular-nums backdrop-blur transition-colors
@@ -1372,8 +1421,9 @@ function CropLayer({
             width: percent(rect.width, width),
             height: percent(rect.height, height),
             // Everything outside the selection goes dark. One shadow instead of
-            // four panels — it can never leave a seam.
-            boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.62)",
+            // four panels — it can never leave a seam. As wide as the picture:
+            // zoomed in, that is far beyond any fixed number.
+            boxShadow: `0 0 0 ${Math.ceil(Math.max(box.width, box.height))}px rgba(0, 0, 0, 0.62)`,
             outline: "1px solid rgba(255, 255, 255, 0.9)",
           }}
           onPointerDown={(event) => onDown(event, "move")}

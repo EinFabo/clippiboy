@@ -56,19 +56,10 @@ export function TitleBar() {
           </svg>
         </Ctrl>
         {/* close() rather than hide(): the Rust handler catches CloseRequested,
-            hides the window and explains the tray the first time — that way ✕ and
-            Alt+F4 behave the same. */}
-        <Ctrl
-          label="Close"
-          danger
-          onClick={() => {
-            // Into the tray, not gone — a clip left playing would go on
-            // sounding from nowhere. Minimizing leaves it running. The extra
-            // tracks follow the video's own pause (`useClipMix`).
-            for (const video of document.querySelectorAll("video")) video.pause();
-            void win().close();
-          }}
-        >
+            hides the window, pauses a playing clip (`lib/hidden.ts`) and explains
+            the tray the first time — that way ✕, Alt+F4 and the taskbar behave
+            the same. Minimizing leaves a clip running. */}
+        <Ctrl label="Close" danger onClick={() => void win().close()}>
           <svg viewBox="0 0 12 12" className="h-3 w-3" stroke="currentColor" strokeWidth="1.2">
             <path d="M3 3l6 6M9 3l-6 6" />
           </svg>

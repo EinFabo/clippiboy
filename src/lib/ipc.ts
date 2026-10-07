@@ -21,6 +21,7 @@ import type {
   ShotEdit,
   ShotRect,
   ShotStep,
+  SoundKind,
 } from "./types";
 
 /** Is the app running inside the Tauri container? (Plain browser Vite has no IPC.) */
@@ -44,6 +45,8 @@ export const api = {
   /** The logo as RGBA pixels, square, for the tray and the task bar. */
   setLogoIcon: (rgba: number[], size: number) => invoke<void>("set_logo_icon", { rgba, size }),
   setConfig: (config: AppConfig) => invoke<void>("set_config", { config }),
+  /** Play a notification sound at `volume` (0–1), switched on or not. */
+  previewSound: (kind: SoundKind, volume: number) => invoke<void>("preview_sound", { kind, volume }),
   /** Throws when a combination is invalid or already taken. */
   /** All four at once — the core only accepts them together. */
   setHotkeys: (

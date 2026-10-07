@@ -136,6 +136,19 @@ export const mockConfig: AppConfig = {
     acceptClips: "all",
     tagFriends: true,
   },
+  sounds: {
+    enabled: true,
+    volume: 0.5,
+    clipSaved: { on: true, volume: 1 },
+    screenshot: { on: true, volume: 1 },
+    recordingStarted: { on: true, volume: 1 },
+    recordingSaved: { on: true, volume: 1 },
+    bufferOn: { on: true, volume: 1 },
+    bufferOff: { on: true, volume: 1 },
+    friendOnline: { on: true, volume: 1 },
+    clipReceived: { on: true, volume: 1 },
+    error: { on: true, volume: 1 },
+  },
 };
 
 export const mockClips: Clip[] = [

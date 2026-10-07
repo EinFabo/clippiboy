@@ -231,7 +231,31 @@ export interface AppConfig {
   accentColor2: string | null;
   rgbSpeed: RgbSpeed;
   friends: FriendsConfig;
+  sounds: SoundConfig;
 }
+
+/** One notification's sound. `volume` is 0–1, on top of `SoundConfig.volume`. */
+export interface SoundSetting {
+  on: boolean;
+  volume: number;
+}
+
+/** The notification sounds (`sounds.rs`). */
+export interface SoundConfig {
+  enabled: boolean;
+  volume: number;
+  clipSaved: SoundSetting;
+  screenshot: SoundSetting;
+  recordingStarted: SoundSetting;
+  recordingSaved: SoundSetting;
+  bufferOn: SoundSetting;
+  bufferOff: SoundSetting;
+  friendOnline: SoundSetting;
+  clipReceived: SoundSetting;
+  error: SoundSetting;
+}
+
+export type SoundKind = Exclude<keyof SoundConfig, "enabled" | "volume">;
 
 /** What friends see of you, and what you hear about them. */
 export interface FriendsConfig {
@@ -434,6 +458,7 @@ export interface StorageUsage {
   /** The clips, screenshots and recordings themselves. */
   clipsBytes: number;
   originalsBytes: number;
+  shotEditsBytes: number;
   tracksBytes: number;
   thumbsBytes: number;
   /** The web views' own folders. */

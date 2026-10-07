@@ -912,6 +912,7 @@ impl AppState {
         // neither painted over nor cropped away.
         let id = uuid::Uuid::new_v4().to_string();
         let under = crate::watermark::stamp(&mut shot);
+        let size = (shot.width, shot.height);
         shot.write_png(&path)?;
         if let Some((at, piece)) = under {
             let at = crate::shot::Rect {
@@ -920,7 +921,7 @@ impl AppState {
                 width: at.width,
                 height: at.height,
             };
-            if let Err(err) = crate::shot::write_under(&id, at, &piece) {
+            if let Err(err) = crate::shot::write_under(&id, at, &piece, size) {
                 log::warn!("could not keep what lies under the watermark: {err}");
             }
         }
@@ -975,6 +976,15 @@ impl AppState {
         }
         if !crate::tools::is_ready() && !crate::muxer::available() {
             return Err(crate::tools::not_ready_reason());
+        }
+        // Read off the status thread's last look, not asked here: on a lost
+        // network drive the question stalls (`disk.rs`). 0 means not known yet.
+        let free = self.free_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        if free != 0 && free < crate::RECORDING_MIN_START_BYTES {
+            return Err(format!(
+                "Only {} left on the clip drive.",
+                crate::format::size(free)
+            ));
         }
         let started_here = self.pipeline.lock().is_none();
         if started_here {

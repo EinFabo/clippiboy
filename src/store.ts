@@ -24,6 +24,7 @@ export type SettingsTab =
   | "hotkeys"
   | "behaviour"
   | "banner"
+  | "sounds"
   | "console"
   | "storage"
   | "friends"
