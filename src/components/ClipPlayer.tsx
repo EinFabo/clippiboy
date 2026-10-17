@@ -113,6 +113,15 @@ export function ClipPlayer({
   const [waveform, setWaveform] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  /**
+   * A save or an undo is writing this clip. Paging, closing and deleting wait
+   * for it: the result used to land on whichever clip was shown by then — a
+   * "Saved" and a frozen frame on the next one — and closing let the gallery
+   * move the file the job was writing. A ref, so the callbacks below see it
+   * without being rebuilt.
+   */
+  const writing = useRef(false);
+  writing.current = saving || restoring;
   const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   /**
@@ -160,6 +169,7 @@ export function ClipPlayer({
 
   /** Play the exit, then really go. Everything that closes goes through here. */
   const close = useCallback(() => {
+    if (writing.current) return;
     if (prefersReducedMotion()) {
       onClose();
       return;
@@ -258,7 +268,7 @@ export function ClipPlayer({
   /** Delete and move on within the player — if the last clip is gone, there is
       nothing left to show. */
   const removeClip = useCallback(() => {
-    if (!clip) return;
+    if (!clip || writing.current) return;
     setAskingDelete(false);
     onDelete(clip.id);
     if (clips.length <= 1) close();
@@ -267,6 +277,7 @@ export function ClipPlayer({
 
   const step = useCallback(
     (delta: number) => {
+      if (writing.current) return;
       const next = index + delta;
       if (next >= 0 && next < clips.length) onIndexChange(next);
     },
@@ -532,10 +543,18 @@ export function ClipPlayer({
     endMs: Math.round(trim.end * 1000),
     tracks: mix.toRequest(),
   };
+  // A clip without sound has no tracks and can still be trimmed — only the
+  // trim is compared then. A list that could not be read is something else:
+  // saving would send no levels and reset the stored mix, so nothing counts as
+  // changed until it can be read.
+  const saved = savedEdit(clip?.edit ?? null, duration, current.tracks);
   const dirty =
     duration > 0 &&
-    mix.tracks.length > 0 &&
-    !sameEdit(current, savedEdit(clip?.edit ?? null, duration, current.tracks));
+    !mix.loading &&
+    !mix.failed &&
+    (mix.tracks.length > 0
+      ? !sameEdit(current, saved)
+      : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }));
 
   /**
    * Write the mix into the file.
@@ -874,6 +893,7 @@ export function ClipPlayer({
           mix={mix.mix}
           mixTouched={mix.touched}
           loadingTracks={mix.loading}
+          tracksFailed={mix.failed}
           onTrack={mix.setTrack}
           onResetMix={mix.reset}
           trim={trim}
@@ -972,6 +992,7 @@ export function ClipPlayer({
               size="sm"
               variant="danger"
               icon={<IconTrash className="h-4 w-4" />}
+              disabled={saving || restoring}
               onClick={() => setAskingDelete(true)}
             >
               Delete
@@ -984,7 +1005,11 @@ export function ClipPlayer({
           </span>
 
           <div className="flex items-center gap-1">
-            <Step label="Previous clip" disabled={index === 0} onClick={() => step(-1)}>
+            <Step
+              label="Previous clip"
+              disabled={saving || restoring || index === 0}
+              onClick={() => step(-1)}
+            >
               ‹
             </Step>
             <span className="w-16 text-center text-xs text-ink-muted tabular-nums">
@@ -992,7 +1017,7 @@ export function ClipPlayer({
             </span>
             <Step
               label="Next clip"
-              disabled={index >= clips.length - 1}
+              disabled={saving || restoring || index >= clips.length - 1}
               onClick={() => step(1)}
             >
               ›

@@ -115,6 +115,8 @@ export function useClipMix(
   const [tracks, setTracks] = useState<ClipTrack[]>([]);
   const [mix, setMix] = useState<Record<number, TrackState>>({});
   const [loading, setLoading] = useState(false);
+  /** The track list could not be read — not the same as a clip without sound. */
+  const [failed, setFailed] = useState(false);
   const elements = useRef(new Map<number, HTMLAudioElement>());
   const graph = useRef<Graph | null>(null);
   /** Is the graph up? Only as state does the volume effect notice. */
@@ -141,6 +143,7 @@ export function useClipMix(
   useEffect(() => {
     setTracks([]);
     setMix({});
+    setFailed(false);
     setGraphMode("try");
     if (!clipId) return;
 
@@ -160,7 +163,7 @@ export function useClipMix(
         setMix(initialMix(list, saved.current));
       })
       // Without a track list the player stays usable, only the mixer is missing.
-      .catch(() => undefined)
+      .catch(() => !cancelled && setFailed(true))
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
@@ -404,5 +407,5 @@ export function useClipMix(
     (state) => state.muted || state.solo || state.gainDb !== 0,
   );
 
-  return { tracks, mix, loading, setTrack, reset, toRequest, touched, separate };
+  return { tracks, mix, loading, failed, setTrack, reset, toRequest, touched, separate };
 }

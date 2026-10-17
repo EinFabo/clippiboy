@@ -275,6 +275,14 @@ body,
   pointer-events: none;
 }
 
+/* The live dot's ring runs forever, and the window only hides — the page stays
+   up behind it all session, from app start, over the game. Paused while the
+   console is away. Only the ring: pausing everything here would also freeze
+   the dock's way out at its first frame. */
+.cb-ui[data-leaving="true"] .cb-live-ring {
+  animation-play-state: paused;
+}
+
 /* Es kommt von unten herein, von dort, wo es auch steht — eine Bewegung, keine
    zwei: das Maß der Größe bleibt bei 1, sonst wackelt die Schrift darin, und
    der Weg ist lang genug, dass man ihn als Auffahren liest. */

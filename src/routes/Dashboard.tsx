@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, Pill, SectionTitle } from "@/components/ui/Card";
@@ -45,6 +45,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     saveClip,
     takeScreenshot,
     deleteClip,
+    fileClip,
     recording,
     recordingSeconds,
     recordingBytes,
@@ -64,6 +65,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
       saveClip: s.saveClip,
       takeScreenshot: s.takeScreenshot,
       deleteClip: s.deleteClip,
+      fileClip: s.fileClip,
       recording: s.recording,
       recordingSeconds: s.recordingSeconds,
       recordingBytes: s.recordingBytes,
@@ -74,13 +76,34 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     })),
   );
   const saving = recordingSaving || recordingProgress !== null;
-  const [playing, setPlaying] = useState<number | null>(null);
   // Recordings only. The player below is the video one, and "Latest clips" says
   // what it shows — screenshots have their own place in the gallery.
   const recent = useMemo(
     () => clips.filter((clip) => !clip.screenshot && !clip.recording).slice(0, 3),
     [clips],
   );
+  /**
+   * The player's clips, by id, as they stood when it opened — and the one on
+   * screen. By position, as before, a clip saved meanwhile (hotkey, console,
+   * a friend's) pushed the list along: the same index named another clip, and
+   * the trim and mix set on the one being watched were gone.
+   */
+  const [playing, setPlaying] = useState<{
+    ids: string[];
+    shown: string;
+    /** Opened in the player — filed when it closes, as the gallery does. */
+    seen: string[];
+  } | null>(null);
+  const playlist = useMemo(
+    () =>
+      (playing?.ids ?? []).flatMap((id) => clips.find((clip) => clip.id === id) ?? []),
+    [playing, clips],
+  );
+  const shownIndex = playlist.findIndex((clip) => clip.id === playing?.shown);
+  // Deleted elsewhere (the console, say): nothing left to show.
+  useEffect(() => {
+    if (playing && shownIndex < 0) setPlaying(null);
+  }, [playing, shownIndex]);
 
   return (
     <div className="space-y-12">
@@ -223,11 +246,13 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </Card>
         ) : (
           <div className="grid grid-cols-3 gap-4">
-            {recent.map((clip, index) => (
+            {recent.map((clip) => (
               <Card
                 key={clip.id}
                 interactive
-                onClick={() => setPlaying(index)}
+                onClick={() =>
+                  setPlaying({ ids: recent.map((c) => c.id), shown: clip.id, seen: [clip.id] })
+                }
                 className="cursor-pointer overflow-hidden"
               >
                 <div className="relative aspect-video bg-gradient-to-br from-accent-deep/40 to-black">
@@ -268,13 +293,31 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         )}
       </section>
 
-      {playing !== null && recent.length > 0 && (
+      {playing !== null && shownIndex >= 0 && (
         <ClipPlayer
-          clips={recent}
-          index={Math.min(playing, recent.length - 1)}
-          onIndexChange={setPlaying}
-          onClose={() => setPlaying(null)}
-          onDelete={deleteClip}
+          clips={playlist}
+          index={shownIndex}
+          // Read off the ids in the update, not off this render's list: a
+          // delete right before has already taken its id out.
+          onIndexChange={(index) =>
+            setPlaying((was) => {
+              const shown = was?.ids[index];
+              return was && shown ? { ...was, shown, seen: [...was.seen, shown] } : was;
+            })
+          }
+          onClose={() => {
+            // A heart set in the player moves the file into the favourites —
+            // once the player has let go of it, as in the gallery. From here
+            // that never happened, and the file stayed where it was.
+            for (const id of new Set(playing.seen)) {
+              if (clips.some((clip) => clip.id === id)) void fileClip(id);
+            }
+            setPlaying(null);
+          }}
+          onDelete={(id) => {
+            setPlaying((was) => was && { ...was, ids: was.ids.filter((other) => other !== id) });
+            void deleteClip(id);
+          }}
           onOpenMixer={() => onNavigate("audio")}
         />
       )}

@@ -23,6 +23,8 @@ interface Props {
   /** Is anything on the tracks set to something other than neutral? */
   mixTouched: boolean;
   loadingTracks: boolean;
+  /** The track list could not be read. */
+  tracksFailed: boolean;
   onTrack: (index: number, patch: Partial<TrackState>) => void;
   onResetMix: () => void;
   trim: Trim;
@@ -63,6 +65,7 @@ export function ClipEditor({
   mix,
   mixTouched,
   loadingTracks,
+  tracksFailed,
   onTrack,
   onResetMix,
   trim,
@@ -120,7 +123,20 @@ export function ClipEditor({
             />
           ))}
 
-          {!loadingTracks && !separateTracks && (
+          {tracksFailed && (
+            <p className="text-xs leading-relaxed text-warn">
+              The audio tracks could not be read, so this clip cannot be saved
+              right now. If ffmpeg is still downloading, open it again in a moment.
+            </p>
+          )}
+
+          {!loadingTracks && !tracksFailed && tracks.length === 0 && (
+            <p className="text-xs leading-relaxed text-ink-muted">
+              This clip has no sound — only the trim applies.
+            </p>
+          )}
+
+          {!loadingTracks && !tracksFailed && !separateTracks && tracks.length > 0 && (
             <div className="space-y-2 rounded-inner bg-elevated p-3">
               <p className="text-xs leading-relaxed text-ink-muted">
                 This clip carries a single audio track — nothing in it can be
