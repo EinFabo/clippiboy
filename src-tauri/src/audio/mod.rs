@@ -198,10 +198,21 @@ impl Leftovers {
 
         let mut out: Vec<(u32, String)> = Vec::new();
         let mut spoken_for: Vec<u32> = taken.to_vec();
+        // The other way round too: a tap on an application *above* one another
+        // source records takes that one in as well. Launchers start the game as
+        // their child — Steam, Battle.net, the Riot Client — and they hold
+        // sessions of their own, so the launcher came up as a leftover, was
+        // tapped with its whole tree, and the game landed in the clip twice:
+        // muting the game track left it playing in the mix. Such a root is
+        // skipped; its other children are roots of their own and get picked up
+        // one by one. Only `taken` needs this — leftovers go shallowest first,
+        // so nothing chosen below can sit under a later one.
+        let above_taken: Vec<u32> = taken.iter().flat_map(|pid| ancestors(*pid, tree)).collect();
         for root in roots {
             // A tap covers the target and its children, so anything below an
             // application another source records is already in the clip.
             let covered = spoken_for.contains(&root)
+                || above_taken.contains(&root)
                 || ancestors(root, tree)
                     .iter()
                     .any(|parent| spoken_for.contains(parent));
@@ -286,7 +297,9 @@ pub fn resolve(
     let mut taken: Vec<u32> = vec![std::process::id()];
     for source in enabled() {
         match &source.kind {
-            SourceKind::Game => taken.extend(game_pid),
+            // The application, not the one process: a game that runs as
+            // several processes of the same exe is all of them.
+            SourceKind::Game => taken.extend(game_pid.map(|pid| app_root(pid, tree))),
             // The live pid, not the stored one — otherwise a rebound source
             // would be tapped here and recorded by the leftovers as well.
             SourceKind::Process {
@@ -326,7 +339,7 @@ pub fn resolve(
         };
 
         match &source.kind {
-            SourceKind::Game => out.extend(game_pid.map(include)),
+            SourceKind::Game => out.extend(game_pid.map(|pid| include(app_root(pid, tree)))),
             SourceKind::OutputDevice { .. } if leftovers_mode => out.extend(leftovers()),
             // Only ever read from an old configuration; `config::migrate_sources`
             // turns it into a plain output device before it gets here.
@@ -977,6 +990,28 @@ mod tests {
             &ledger("spk"),
         );
         assert_eq!(pids_of(&streams, "rest"), vec![33264]);
+    }
+
+    /// Steam started the game, and Steam holds sessions of its own. Tapped
+    /// with its tree, it would bring the game into the leftovers a second time.
+    #[test]
+    fn a_launcher_above_the_game_is_not_tapped_with_it() {
+        let processes = tree(&[
+            (33264, 0, "steam.exe"),
+            (12604, 33264, "steamwebhelper.exe"),
+            (5000, 33264, "cs2.exe"),
+        ]);
+        let sources = vec![of_kind("game", SourceKind::Game), of_kind("rest", leftovers("spk"))];
+        let streams = resolve(
+            &sources,
+            Some(5000),
+            &playing(&[("spk", &idle(&[33264, 12604, 5000]))]),
+            &processes,
+            &ledger("spk"),
+        );
+        assert_eq!(pids_of(&streams, "game"), vec![5000]);
+        // Steam's helper is still recorded, on its own; Steam itself is not.
+        assert_eq!(pids_of(&streams, "rest"), vec![12604]);
     }
 
     /// Playing a clip back while the buffer runs must not end up in the next
