@@ -128,6 +128,10 @@ fn write_note(clip_id: &str, original: &ClipOriginal) -> Result<(), String> {
 /// Clear away everything belonging to a clip. The note first, then the video —
 /// as long as the note is there the original counts as alive.
 pub fn remove(clip_id: &str) {
+    // An empty id names the store itself, with every clip's original in it.
+    if sanitize(clip_id).is_empty() {
+        return;
+    }
     let _ = std::fs::remove_file(note_path(clip_id));
     let _ = std::fs::remove_file(video_path(clip_id));
     let _ = std::fs::remove_dir_all(dir(clip_id));
@@ -525,10 +529,19 @@ fn run(
 /// Only then is the file copied and the source removed afterwards; that costs
 /// the time a copy of a few hundred megabytes takes, but it is the only way
 /// across.
+///
+/// The copy goes to a `.part` beside the target and is renamed onto it only
+/// once complete. Copied straight onto the target, a crash halfway left a
+/// truncated file under the real name — for the originals store a "recording"
+/// with no index that `repair` took at its word.
 fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {
-            std::fs::copy(from, to)?;
+            let part = to.with_extension("part");
+            if let Err(err) = std::fs::copy(from, &part).and_then(|_| std::fs::rename(&part, to)) {
+                let _ = std::fs::remove_file(&part);
+                return Err(err);
+            }
             // From here on the copy is the one that counts. If the source will
             // not go, it stays behind as a leftover — annoying, not fatal, and
             // above all not a reason to fail the move.
@@ -590,7 +603,18 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
     if let Err(err) = replace_file(temp, target) {
         if first_cut {
             // Back to the start: better an untrimmed clip than none at all.
-            let _ = move_across(&archive, target);
+            if let Err(back) = move_across(&archive, target) {
+                // The recording is now only in the store. Note, archive and
+                // the new file all stay where they are: `repair` puts the
+                // recording back on the next start. Clearing the store here,
+                // as it used to, deleted the clip's only copy.
+                log::error!(
+                    "clip '{}': the recording could not go back ({back}) — it stays in the \
+                     originals store until the next start",
+                    clip.id
+                );
+                return Err(err);
+            }
             let _ = std::fs::remove_file(note_path(&clip.id));
             let _ = std::fs::remove_dir_all(dir(&clip.id));
         }
@@ -972,10 +996,23 @@ pub fn repair(library: &crate::clips::Library) {
                 }
             }
 
-            // Swapped, but the database never got its turn.
+            // Swapped, but the database never got its turn — or not swapped
+            // at all: the recording was copied into the store across drives
+            // and the process died before the original was removed. Then the
+            // clip file is still the whole recording, and recording a trim
+            // that never happened would put every track off by its start.
             (true, Some(note), true) if clip.original.is_none() => {
-                log::info!("original of '{}' recorded after the fact", clip.id);
-                let _ = library.set_original(&clip.id, Some(&note));
+                // Only a measured length may clear the store: the database
+                // length is the old one in both cases.
+                let whole = probe_duration_ms(target)
+                    .is_some_and(|actual| is_the_whole_recording(Some(&note), actual));
+                if whole {
+                    log::info!("'{}' was never trimmed — the store's copy is cleared away", clip.id);
+                    remove(&clip.id);
+                } else {
+                    log::info!("original of '{}' recorded after the fact", clip.id);
+                    let _ = library.set_original(&clip.id, Some(&note));
+                }
             }
 
             // Recording without a note. If the database still knows where the
@@ -1074,6 +1111,16 @@ mod tests {
         // the recording, and a copy of it would sit at the wrong offset.
         let trimmed = ClipOriginal { duration_ms: 60_000, start_ms: 10_000, end_ms: 40_000 };
         assert!(!audio_untouched(&plain_clip(None, Some(trimmed))));
+    }
+
+    #[test]
+    fn an_empty_id_names_the_whole_store() {
+        // Why `remove` and `stems::remove` refuse an id that sanitises to
+        // nothing: its folder is the store with every clip in it. Not called
+        // here — on a regression the test would delete the real store.
+        assert_eq!(dir(""), root());
+        assert_eq!(stems::dir(""), stems::root());
+        assert!(sanitize("").is_empty());
     }
 
     #[test]

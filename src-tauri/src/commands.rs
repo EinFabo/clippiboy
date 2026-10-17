@@ -685,22 +685,29 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
 #[tauri::command]
 pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri::Emitter;
+    let clip_dir = state.config_snapshot().clip_dir;
+    // The clip first, and the stores by its stored id. The stores are named
+    // after a sanitised id, so an id that is empty or spelled differently
+    // named the whole store — every clip's tracks and originals went with it.
+    let clip = with_library(&state, |lib| {
+        let clip = lib.get(&id).map_err(|e| e.to_string())?;
+        if let Some(clip) = &clip {
+            lib.delete(&clip.id).map_err(|e| e.to_string())?;
+        }
+        Ok(clip)
+    })?;
+    // Already gone (deleted from another window): nothing left to clear.
+    let Some(clip) = clip else {
+        return Ok(());
+    };
+    let folder = std::path::PathBuf::from(&clip.path).parent().map(Path::to_path_buf);
     // The individual tracks and the original belong to the clip and serve no
     // purpose without it.
-    stems::remove(&id);
-    edit::remove(&id);
+    stems::remove(&clip.id);
+    edit::remove(&clip.id);
     // The thumbnail too, even when none is recorded in the database.
-    crate::thumbs::remove(&id);
+    crate::thumbs::remove(&clip.id);
 
-    let clip_dir = state.config_snapshot().clip_dir;
-    let folder = with_library(&state, |lib| {
-        let folder = lib
-            .get(&id)
-            .map_err(|e| e.to_string())?
-            .and_then(|clip| std::path::PathBuf::from(clip.path).parent().map(Path::to_path_buf));
-        lib.delete(&id).map_err(|e| e.to_string())?;
-        Ok(folder)
-    })?;
     // If that was the last clip of its game, an empty folder would otherwise be
     // left standing.
     if let Some(folder) = folder {

@@ -144,6 +144,10 @@ fn read_index(clip_id: &str) -> Option<Vec<Entry>> {
 
 /// Clear away everything belonging to a clip.
 pub fn remove(clip_id: &str) {
+    // An empty id names the store itself, with every clip's tracks in it.
+    if sanitize(clip_id).is_empty() {
+        return;
+    }
     let _ = std::fs::remove_dir_all(dir(clip_id));
 }
 
