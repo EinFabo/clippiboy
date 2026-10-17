@@ -213,12 +213,10 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
             overlay::set_recording(app, true);
             notify(app, "ok", "Recording started");
             sounds::play(app, SoundKind::RecordingStarted);
-            overlay::show(
-                app,
-                BannerKind::Recording,
-                "Recording",
-                state.current_game.lock().clone(),
-            );
+            // Own statement, so the guard is gone before `overlay::show` waits
+            // on the main thread, which may itself want `current_game`.
+            let game = state.current_game.lock().clone();
+            overlay::show(app, BannerKind::Recording, "Recording", game);
             report_audio_trouble(app);
         }
         Err(err) => {
@@ -349,15 +347,12 @@ pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
             notify(app, "ok", "Replay buffer running");
             sounds::play(app, SoundKind::BufferOn);
             let seconds = state.config_snapshot().buffer.seconds;
-            overlay::show(
-                app,
-                BannerKind::Buffer,
-                "Replay buffer running",
-                Some(match state.current_game.lock().as_ref() {
-                    Some(game) => format!("{game} · last {seconds} s"),
-                    None => format!("Keeping the last {seconds} s"),
-                }),
-            );
+            // Same as in `start_recording_and_notify`: no guard across the banner.
+            let detail = match state.current_game.lock().as_ref() {
+                Some(game) => format!("{game} · last {seconds} s"),
+                None => format!("Keeping the last {seconds} s"),
+            };
+            overlay::show(app, BannerKind::Buffer, "Replay buffer running", Some(detail));
             report_audio_trouble(app);
         }
         Err(err) => {
