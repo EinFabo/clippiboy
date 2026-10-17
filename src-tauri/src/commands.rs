@@ -586,16 +586,31 @@ fn edit_screenshot(
         crate::watermark::stamp_kept(&mut picture);
     }
 
-    // The ground to draw on next time: the crop, but none of the marks.
+    // The ground to draw on next time: the crop, but none of the marks. Under
+    // a temporary name until the picture itself is in place — that is the
+    // write most likely to fail (the file open somewhere), and the sidecars
+    // committed before it described an edit the picture did not have.
+    let base = crate::shot::base_path(&clip.id);
+    let base_part = base.with_extension("png.part");
+    if let Some(shot) = &ground {
+        shot.write_png(&base_part)?;
+    }
+    let written = match write_picture(&state, &clip, &picture) {
+        Ok(written) => written,
+        Err(err) => {
+            let _ = std::fs::remove_file(&base_part);
+            return Err(err);
+        }
+    };
     match &ground {
-        Some(shot) => shot.write_png(&crate::shot::base_path(&clip.id))?,
+        Some(_) => std::fs::rename(&base_part, &base)
+            .map_err(|err| format!("could not keep the picture to draw on: {err}"))?,
         None => {
-            let _ = std::fs::remove_file(crate::shot::base_path(&clip.id));
+            let _ = std::fs::remove_file(&base);
         }
     }
-
     crate::shot::write_edit(&id, &crate::shot::Edit { crop, marks })?;
-    write_picture(&state, &clip, &picture)
+    Ok(written)
 }
 
 /// Put the untouched picture aside, once.
@@ -613,10 +628,16 @@ fn keep_original(clip: &Clip) -> Result<()> {
             .map_err(|err| format!("could not create folder: {err}"))?;
     }
     // Copied, not moved: the clip folder may sit on another drive than the
-    // store, and the file has to stay where it is anyway.
-    std::fs::copy(&clip.path, &original)
-        .map_err(|err| format!("Could not save the original ({err}).").into())
-        .map(|_| ())
+    // store, and the file has to stay where it is anyway. To a `.part` first:
+    // `has_original` only asks whether the file is there, and a copy cut off
+    // halfway would count as the untouched picture from then on.
+    let part = original.with_extension("png.part");
+    std::fs::copy(&clip.path, &part)
+        .and_then(|_| std::fs::rename(&part, &original))
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&part);
+            format!("Could not save the original ({err}).")
+        })
 }
 
 /// Write a picture over a screenshot's file and record what changed.

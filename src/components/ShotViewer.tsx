@@ -166,6 +166,11 @@ export function ShotViewer({
   const [ratio, setRatio] = useState<string>("Free");
   const [sel, setSel] = useState<Rect | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Why the stored edit could not be read — the tools stay off until it is. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [askingRemoveAll, setAskingRemoveAll] = useState(false);
+  /** The picture on screen, for a save that finishes after it changed. */
+  const shownId = useRef<string | undefined>(undefined);
   /**
    * What has been done to this picture so far, as the core keeps it.
    *
@@ -315,6 +320,7 @@ export function ShotViewer({
   );
 
   const id = clip?.id;
+  shownId.current = id;
   const pictureWidth = clip?.width ?? 1920;
 
   // Everything about the previous picture says nothing about this one.
@@ -332,6 +338,8 @@ export function ShotViewer({
     setAskingDiscard(false);
     setSelected(null);
     setEdit(null);
+    setLoadError(null);
+    setAskingRemoveAll(false);
     // The defaults are reckoned from the picture: a stroke that reads well on
     // 4K is a bar on 1080p. Provisional — the edges that count are the
     // original's, and those only arrive with the store below.
@@ -353,7 +361,9 @@ export function ShotViewer({
         // pinned to the left and the reading beside it disagreeing with it.
         setStyles(defaultStyles(loaded.originalWidth ?? pictureWidth));
       })
-      .catch(() => {});
+      // Not swallowed: without the stored edit the tools would draw on the
+      // finished picture, and saving would drop its crop and marks.
+      .catch((err) => current && setLoadError(String(err)));
     return () => {
       current = false;
     };
@@ -376,6 +386,9 @@ export function ShotViewer({
       // While a name is being typed the keys belong to the field.
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      // A save is running: it rebuilds the marks and the picture under them
+      // when it is done, and closing or paging now would land it elsewhere.
+      if (busy) return;
       if (event.key === "Escape") {
         if (askingDelete || askingDiscard) return; // the question takes it
         // One step at a time: Escape leaves the crop, and only the next one
@@ -416,7 +429,7 @@ export function ShotViewer({
   // them through `tryLeaveEditing`. Without them Escape would keep asking a
   // closure from an earlier render whether anything is unsaved, and act on its
   // stale answer — which is the very loss this is meant to prevent.
-  }, [askingDelete, askingDiscard, close, edit, mode, selected, step, undo, unsaved]);
+  }, [askingDelete, askingDiscard, busy, close, edit, mode, selected, step, undo, unsaved]);
 
   if (!clip) return null;
 
@@ -582,6 +595,17 @@ export function ShotViewer({
     else leaveEditing();
   };
 
+  /**
+   * The ✕ in the header. It closed straight away, and unsaved marks went with
+   * it without the question Escape asks. While a save runs it waits: the save
+   * writes into the file the gallery moves away on close.
+   */
+  const requestClose = () => {
+    if (busy) return;
+    if (editing && unsaved) setAskingDiscard(true);
+    else close();
+  };
+
   const pickTool = (next: Tool) => {
     setTool(next);
     setMode("draw");
@@ -602,6 +626,9 @@ export function ShotViewer({
    * kept in its coordinates, so a changed crop leaves them where they were.
    */
   const write = async (crop: Rect | null, marks: Shape[]) => {
+    // Without the stored edit the origin and the edges are guesses.
+    if (inTauri && !edit) return;
+    const savedId = clip.id;
     setBusy(true);
     try {
       // From the ground they were drawn on into the original's coordinates.
@@ -630,6 +657,9 @@ export function ShotViewer({
       // Read back rather than guessed: the crop may have moved the marks into
       // another frame of reference, and the core is the one that knows.
       const loaded = await api.screenshotEdit(clip.id);
+      // Another picture by now: its own load has run, this one's marks are
+      // not for it.
+      if (shownId.current !== savedId) return;
       setEdit(loaded);
       resetShapes(readMarks(loaded));
       setUnsaved(false);
@@ -690,6 +720,8 @@ export function ShotViewer({
 
   /** The editor is open — the picture underneath must not change now. */
   const editing = mode !== "view";
+  /** The stored edit is in — before that, tools would draw on the wrong ground. */
+  const ready = !inTauri || edit !== null;
 
   const dropSelected = () => {
     if (selected === null) return;
@@ -748,7 +780,8 @@ export function ShotViewer({
           </div>
           <button
             aria-label="Close viewer"
-            onClick={close}
+            onClick={requestClose}
+            disabled={busy}
             className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
               text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
           >
@@ -878,6 +911,9 @@ export function ShotViewer({
                   </div>
                 )}
                 {mode === "draw" && (
+                  // Inert while saving: marks drawn now were thrown away when
+                  // the save put back what it had written.
+                  <div className={cn("contents", busy && "pointer-events-none")}>
                   <AnnotateLayer
                     stage={frame}
                     width={ground.width}
@@ -889,6 +925,7 @@ export function ShotViewer({
                     selected={selected}
                     onSelect={setSelected}
                   />
+                  </div>
                 )}
                 {mode === "crop" && (
                   <CropLayer
@@ -948,12 +985,18 @@ export function ShotViewer({
               onToggle={() => setOpen((was) => ({ ...was, annotate: !was.annotate }))}
               badge={shapes.length > 0 ? String(shapes.length) : undefined}
             >
+              {loadError && (
+                <p className="mb-2 text-xs text-warn">
+                  This picture's edits could not be read, so it cannot be edited right now:{" "}
+                  {loadError}
+                </p>
+              )}
               <div className="grid grid-cols-4 gap-1.5">
                 {TOOLS.map(([key, label]) => (
                   <PanelButton
                     key={key}
                     active={mode === "draw" && tool === key}
-                    disabled={!inTauri || broken}
+                    disabled={!inTauri || broken || !ready}
                     onClick={() => pickTool(key)}
                   >
                     {label}
@@ -1092,16 +1135,30 @@ export function ShotViewer({
                     )}
                   </div>
                   {/* Only the marks go — the crop is kept apart from them. */}
-                  {edit?.marks && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={() => write(edit?.crop ?? null, [])}
-                    >
-                      Remove all marks
-                    </Button>
-                  )}
+                  {edit?.marks &&
+                    (askingRemoveAll ? (
+                      <ConfirmDelete
+                        question="Remove every mark from the picture?"
+                        confirmLabel="Remove them"
+                        confirmTitle="Saves the picture without its marks"
+                        cancelLabel="Keep them"
+                        cancelTitle="Leave the marks as they are"
+                        onConfirm={() => {
+                          setAskingRemoveAll(false);
+                          void write(edit?.crop ?? null, []);
+                        }}
+                        onCancel={() => setAskingRemoveAll(false)}
+                      />
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => setAskingRemoveAll(true)}
+                      >
+                        Remove all marks
+                      </Button>
+                    ))}
                   <p className="text-xs text-ink-faint">
                     {tool === "blur"
                       ? "Drag over what should not be readable. What you see here is what lands in the file. For passwords and addresses, a filled box hides more than any blur."
@@ -1126,7 +1183,7 @@ export function ShotViewer({
                   <PanelButton
                     key={preset}
                     active={mode === "crop" && ratio === preset}
-                    disabled={!inTauri || broken}
+                    disabled={!inTauri || broken || !ready}
                     onClick={() => pickPreset(preset)}
                   >
                     {preset}
@@ -1224,6 +1281,7 @@ export function ShotViewer({
               size="sm"
               variant="danger"
               icon={<IconTrash className="h-4 w-4" />}
+              disabled={busy}
               onClick={() => setAskingDelete(true)}
             >
               Delete
@@ -1246,7 +1304,7 @@ export function ShotViewer({
           <div className="flex items-center gap-1">
             <Step
               label="Previous"
-              disabled={editing || index === 0}
+              disabled={editing || busy || index === 0}
               onClick={() => step(-1)}
             >
               ‹
@@ -1256,7 +1314,7 @@ export function ShotViewer({
             </span>
             <Step
               label="Next"
-              disabled={editing || index >= clips.length - 1}
+              disabled={editing || busy || index >= clips.length - 1}
               onClick={() => step(1)}
             >
               ›
