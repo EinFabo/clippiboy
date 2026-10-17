@@ -519,6 +519,43 @@ mod tests {
         assert_eq!(read(b"POST /v1/buffer HTTP/1.1\r\nContent-Length: 50\r\n\r\n{}").unwrap_err().0, 400);
     }
 
+    /// Over a real socket, as the attack came: the server side reads with the
+    /// port's timeout and has to let go on its own.
+    fn served(send: &'static [u8], hold: Duration) -> (Result<Request, (u16, &'static str)>, Duration) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(send).unwrap();
+            // Keeps the connection open without sending more.
+            std::thread::sleep(hold);
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+        let started = std::time::Instant::now();
+        let outcome = read_request(&mut stream);
+        let took = started.elapsed();
+        client.join().unwrap();
+        (outcome, took)
+    }
+
+    #[test]
+    fn a_huge_declared_body_is_turned_away_at_once_over_a_socket() {
+        let (outcome, took) = served(
+            b"POST /v1/clip HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\n",
+            Duration::from_secs(3),
+        );
+        assert_eq!(outcome.unwrap_err().0, 413);
+        assert!(took < Duration::from_millis(500), "waited {took:?} for a body that never comes");
+    }
+
+    #[test]
+    fn a_client_that_stalls_is_let_go_after_the_timeout() {
+        let (outcome, took) = served(b"GET /v1/status HTTP/1.1\r\nX-Cl", Duration::from_secs(4));
+        assert_eq!(outcome.unwrap_err().0, 408);
+        assert!(took >= READ_TIMEOUT && took < READ_TIMEOUT * 2, "took {took:?}");
+    }
+
     #[test]
     fn the_token_has_to_match_whole() {
         assert!(equals("abc", "abc"));

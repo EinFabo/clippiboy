@@ -70,7 +70,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   if (path === "/" && method === "GET") return new Response("ClippiBoy friends server");
   if (path === "/auth/start" && method === "GET") {
-    if (!(await underLimit(request, env))) return page("Too many sign-ins", "Wait a minute, then try again from ClippiBoy.");
+    if (!(await underLimit(request, env, "auth"))) return page("Too many sign-ins", "Wait a minute, then try again from ClippiBoy.");
     return authStart(url, env);
   }
   if (path === "/auth/callback" && method === "GET") return authCallback(request, url, env);
@@ -87,7 +87,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   // Anonymous on purpose: a ping never carries the account.
   if (path === "/t/ping" && method === "POST") {
-    if (!(await underLimit(request, env))) return json({ error: "Too many pings." }, 429);
+    if (!(await underLimit(request, env, "ping"))) return json({ error: "Too many pings." }, 429);
     return handlePing(request, env);
   }
 
@@ -145,10 +145,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   throw new HttpError(404, "Not found.");
 }
 
-/** Within the per-address limit for routes that write without a sign-in? */
-async function underLimit(request: Request, env: Env): Promise<boolean> {
+/**
+ * Within the per-address limit for routes that write without a sign-in? Each
+ * route counts on its own, so a flood of pings cannot lock the same address
+ * out of signing in.
+ */
+async function underLimit(request: Request, env: Env, route: "auth" | "ping"): Promise<boolean> {
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  return (await env.ANON_LIMIT.limit({ key: address })).success;
+  return (await env.ANON_LIMIT.limit({ key: `${route}:${address}` })).success;
 }
 
 // --- Login --------------------------------------------------------------------
