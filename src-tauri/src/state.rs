@@ -153,7 +153,15 @@ pub struct AutoBuffer {
     /// Was the buffer stopped because the screen locked? Then it comes back on
     /// unlock — whoever had started it.
     for_lock: std::sync::atomic::AtomicBool,
+    /// Automatic starts that failed in a row.
+    failures: std::sync::atomic::AtomicU32,
+    /// Checks still to sit out before the next automatic start.
+    wait: std::sync::atomic::AtomicU32,
 }
+
+/// Automatic starts that may fail in a row before the automation gives up
+/// until the game ends or the user starts the buffer by hand.
+const MAX_START_FAILURES: u32 = 5;
 
 /// What the automation should do next.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -185,7 +193,7 @@ impl AutoBuffer {
         use std::sync::atomic::Ordering::SeqCst;
         if game_present {
             self.missing.store(0, SeqCst);
-            if !buffer_active && !self.suppressed.load(SeqCst) {
+            if !buffer_active && !self.suppressed.load(SeqCst) && self.may_try() {
                 self.started.store(true, SeqCst);
                 return AutoAction::Start;
             }
@@ -196,8 +204,9 @@ impl AutoBuffer {
             return AutoAction::Nothing;
         }
         // The game really has ended: a new one may start the buffer again, even
-        // if the user switched it off in between.
+        // if the user switched it off in between — or the automation gave up.
         self.suppressed.store(false, SeqCst);
+        self.start_succeeded();
         if buffer_active && self.started.swap(false, SeqCst) {
             AutoAction::Stop
         } else {
@@ -230,7 +239,11 @@ impl AutoBuffer {
         }
 
         self.locked.store(0, SeqCst);
-        if self.for_lock.swap(false, SeqCst) && !buffer_active {
+        if !self.for_lock.load(SeqCst) || (!buffer_active && !self.may_try()) {
+            return AutoAction::Nothing;
+        }
+        self.for_lock.store(false, SeqCst);
+        if !buffer_active {
             AutoAction::Start
         } else {
             AutoAction::Nothing
@@ -245,11 +258,50 @@ impl AutoBuffer {
     /// happened until the next start of ClippiBoy.
     pub fn poll_always(&self, buffer_active: bool) -> AutoAction {
         use std::sync::atomic::Ordering::SeqCst;
-        if buffer_active || self.suppressed.load(SeqCst) {
+        if buffer_active || self.suppressed.load(SeqCst) || !self.may_try() {
             return AutoAction::Nothing;
         }
         self.started.store(true, SeqCst);
         AutoAction::Start
+    }
+
+    /// Is the automation past its back-off? Counts one check down if not.
+    fn may_try(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.wait
+            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+            .is_err()
+    }
+
+    /// An automatic start failed. It used to be tried again on the very next
+    /// check, every two seconds, each time with the error sound and a banner
+    /// that never got to go away — for as long as the game ran. Now the gap
+    /// doubles each time, and after [`MAX_START_FAILURES`] the automation
+    /// stops trying. Returns whether it just gave up.
+    pub fn start_failed(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let failures = self.failures.fetch_add(1, SeqCst) + 1;
+        if failures >= MAX_START_FAILURES {
+            self.suppressed.store(true, SeqCst);
+            self.started.store(false, SeqCst);
+            self.failures.store(0, SeqCst);
+            self.wait.store(0, SeqCst);
+            return true;
+        }
+        self.wait.store(1 << failures, SeqCst);
+        false
+    }
+
+    /// Automatic starts that have failed in a row so far.
+    pub fn start_failures(&self) -> u32 {
+        self.failures.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A start went through: the next failure counts from the beginning.
+    pub fn start_succeeded(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.failures.store(0, SeqCst);
+        self.wait.store(0, SeqCst);
     }
 
     /// The user started the buffer themselves.
@@ -257,6 +309,7 @@ impl AutoBuffer {
         use std::sync::atomic::Ordering::SeqCst;
         self.started.store(false, SeqCst);
         self.suppressed.store(false, SeqCst);
+        self.start_succeeded();
     }
 
     /// The user stopped the buffer themselves.
@@ -1371,6 +1424,41 @@ mod tests {
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
         assert_eq!(auto.poll_lock(false, false), AutoAction::Start);
         assert_eq!(auto.poll_lock(false, false), AutoAction::Nothing);
+    }
+
+    #[test]
+    fn a_start_that_keeps_failing_backs_off_and_then_gives_up() {
+        let auto = AutoBuffer::default();
+        let mut starts = 0;
+        let mut gave_up = false;
+        // Two minutes of checks with a game running and a buffer that never
+        // comes up.
+        for _ in 0..60 {
+            if auto.poll(true, false) == AutoAction::Start {
+                starts += 1;
+                gave_up |= auto.start_failed();
+            }
+        }
+        assert!(gave_up, "still trying after {starts} starts");
+        assert_eq!(starts, MAX_START_FAILURES, "not every check, not forever");
+        // The game ends: the next one gets a fresh go.
+        for _ in 0..GRACE_POLLS {
+            auto.poll(false, false);
+        }
+        assert_eq!(auto.poll(true, false), AutoAction::Start);
+    }
+
+    #[test]
+    fn a_start_that_worked_resets_the_back_off() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_always(false), AutoAction::Start);
+        auto.start_failed();
+        // Sits out two checks, then tries again.
+        assert_eq!(auto.poll_always(false), AutoAction::Nothing);
+        assert_eq!(auto.poll_always(false), AutoAction::Nothing);
+        assert_eq!(auto.poll_always(false), AutoAction::Start);
+        auto.start_succeeded();
+        assert_eq!(auto.start_failures(), 0);
     }
 
     /// Locking twice in a row asks twice — the flag from the first lock must not

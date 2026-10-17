@@ -341,26 +341,55 @@ pub fn toggle_buffer_and_notify(app: &tauri::AppHandle) {
 
 /// Start the buffer and report the result.
 pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
+    match app.state::<AppState>().start_pipeline() {
+        Ok(()) => buffer_started(app),
+        Err(err) => buffer_failed(app, err),
+    }
+}
+
+/// The automation's start. Reports a failure once, not on every retry — see
+/// `AutoBuffer::start_failed`.
+fn auto_start_buffer(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     match state.start_pipeline() {
         Ok(()) => {
-            notify(app, "ok", "Replay buffer running");
-            sounds::play(app, SoundKind::BufferOn);
-            let seconds = state.config_snapshot().buffer.seconds;
-            // Same as in `start_recording_and_notify`: no guard across the banner.
-            let detail = match state.current_game.lock().as_ref() {
-                Some(game) => format!("{game} · last {seconds} s"),
-                None => format!("Keeping the last {seconds} s"),
-            };
-            overlay::show(app, BannerKind::Buffer, "Replay buffer running", Some(detail));
-            report_audio_trouble(app);
+            state.auto.start_succeeded();
+            buffer_started(app);
         }
         Err(err) => {
-            notify(app, "error", err.clone());
-            sounds::play(app, SoundKind::Error);
-            overlay::show(app, BannerKind::Error, "Buffer will not start", Some(err));
+            let first = state.auto.start_failures() == 0;
+            if state.auto.start_failed() {
+                buffer_failed(
+                    app,
+                    format!("{err} — stopped trying. Start it by hand once that is sorted."),
+                );
+            } else if first {
+                buffer_failed(app, err);
+            } else {
+                log::warn!("buffer: automatic start failed again: {err}");
+            }
         }
     }
+}
+
+fn buffer_started(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    notify(app, "ok", "Replay buffer running");
+    sounds::play(app, SoundKind::BufferOn);
+    let seconds = state.config_snapshot().buffer.seconds;
+    // Same as in `start_recording_and_notify`: no guard across the banner.
+    let detail = match state.current_game.lock().as_ref() {
+        Some(game) => format!("{game} · last {seconds} s"),
+        None => format!("Keeping the last {seconds} s"),
+    };
+    overlay::show(app, BannerKind::Buffer, "Replay buffer running", Some(detail));
+    report_audio_trouble(app);
+}
+
+fn buffer_failed(app: &tauri::AppHandle, err: String) {
+    notify(app, "error", err.clone());
+    sounds::play(app, SoundKind::Error);
+    overlay::show(app, BannerKind::Error, "Buffer will not start", Some(err));
 }
 
 /// Say what is wrong with the sound, at the moment recording starts.
@@ -653,7 +682,7 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     // and stopping waits, if need be, for a save in progress.
     let app = app.clone();
     std::thread::spawn(move || match action {
-        state::AutoAction::Start => start_buffer_and_notify(&app),
+        state::AutoAction::Start => auto_start_buffer(&app),
         state::AutoAction::Stop => stop_buffer_and_notify(&app),
         state::AutoAction::Nothing => {}
     });
@@ -807,7 +836,12 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     if !toggle.is_empty() {
         if let Err(err) = shortcuts.on_shortcut(toggle.as_str(), move |app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
-                toggle_buffer_and_notify(app);
+                // On a thread of its own, like every other hotkey. The handler
+                // runs on the main thread, and starting or stopping the capture
+                // there froze every window until it was done — and gave a
+                // worker waiting on the main thread the chance to deadlock.
+                let app = app.clone();
+                std::thread::spawn(move || toggle_buffer_and_notify(&app));
             }
         }) {
             log::warn!("could not register hotkey '{toggle}': {err}");
