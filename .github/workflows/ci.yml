@@ -1,0 +1,61 @@
+# The checks every push to main and every pull request has to pass. Until now
+# nothing ran them: a change that broke the build or a test only showed up when
+# the release workflow failed, or not at all.
+#
+# Deliberately no clippy `-D warnings` or `cargo fmt --check` yet — the tree has
+# warnings today, and a gate that is red from the start teaches everyone to
+# ignore it. Those come once the warnings are gone.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    # Most of the core only compiles on Windows (capture, audio, encoder).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # Type check and bundle; tauri-build also wants `dist` to exist.
+      - run: npm ci
+      - run: npm run build
+      - name: Unit tests
+        working-directory: src-tauri
+        run: cargo test --locked --lib
+
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
