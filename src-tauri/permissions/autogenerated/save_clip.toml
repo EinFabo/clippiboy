@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-clip"
+description = "Enables the save_clip command without any pre-configured scope."
+commands.allow = ["save_clip"]
+
+[[permission]]
+identifier = "deny-save-clip"
+description = "Denies the save_clip command without any pre-configured scope."
+commands.deny = ["save_clip"]

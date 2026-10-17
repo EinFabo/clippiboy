@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-default-clip-dir"
+description = "Enables the default_clip_dir command without any pre-configured scope."
+commands.allow = ["default_clip_dir"]
+
+[[permission]]
+identifier = "deny-default-clip-dir"
+description = "Denies the default_clip_dir command without any pre-configured scope."
+commands.deny = ["default_clip_dir"]

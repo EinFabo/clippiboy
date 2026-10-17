@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-encoders"
+description = "Enables the list_encoders command without any pre-configured scope."
+commands.allow = ["list_encoders"]
+
+[[permission]]
+identifier = "deny-list-encoders"
+description = "Denies the list_encoders command without any pre-configured scope."
+commands.deny = ["list_encoders"]

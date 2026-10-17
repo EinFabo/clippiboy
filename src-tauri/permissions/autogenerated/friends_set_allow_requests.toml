@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friends-set-allow-requests"
+description = "Enables the friends_set_allow_requests command without any pre-configured scope."
+commands.allow = ["friends_set_allow_requests"]
+
+[[permission]]
+identifier = "deny-friends-set-allow-requests"
+description = "Denies the friends_set_allow_requests command without any pre-configured scope."
+commands.deny = ["friends_set_allow_requests"]

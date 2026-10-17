@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reveal-clip"
+description = "Enables the reveal_clip command without any pre-configured scope."
+commands.allow = ["reveal_clip"]
+
+[[permission]]
+identifier = "deny-reveal-clip"
+description = "Denies the reveal_clip command without any pre-configured scope."
+commands.deny = ["reveal_clip"]

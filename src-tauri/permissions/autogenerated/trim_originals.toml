@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trim-originals"
+description = "Enables the trim_originals command without any pre-configured scope."
+commands.allow = ["trim_originals"]
+
+[[permission]]
+identifier = "deny-trim-originals"
+description = "Denies the trim_originals command without any pre-configured scope."
+commands.deny = ["trim_originals"]

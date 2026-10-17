@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-usage-set-heard"
+description = "Enables the usage_set_heard command without any pre-configured scope."
+commands.allow = ["usage_set_heard"]
+
+[[permission]]
+identifier = "deny-usage-set-heard"
+description = "Denies the usage_set_heard command without any pre-configured scope."
+commands.deny = ["usage_set_heard"]

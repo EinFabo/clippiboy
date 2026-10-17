@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-clips"
+description = "Enables the list_clips command without any pre-configured scope."
+commands.allow = ["list_clips"]
+
+[[permission]]
+identifier = "deny-list-clips"
+description = "Denies the list_clips command without any pre-configured scope."
+commands.deny = ["list_clips"]

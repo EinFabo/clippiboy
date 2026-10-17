@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-usage-source"
+description = "Enables the usage_source command without any pre-configured scope."
+commands.allow = ["usage_source"]
+
+[[permission]]
+identifier = "deny-usage-source"
+description = "Denies the usage_source command without any pre-configured scope."
+commands.deny = ["usage_source"]

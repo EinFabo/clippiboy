@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-clip-original"
+description = "Enables the discard_clip_original command without any pre-configured scope."
+commands.allow = ["discard_clip_original"]
+
+[[permission]]
+identifier = "deny-discard-clip-original"
+description = "Denies the discard_clip_original command without any pre-configured scope."
+commands.deny = ["discard_clip_original"]

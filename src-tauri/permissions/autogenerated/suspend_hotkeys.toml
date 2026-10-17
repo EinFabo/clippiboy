@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-suspend-hotkeys"
+description = "Enables the suspend_hotkeys command without any pre-configured scope."
+commands.allow = ["suspend_hotkeys"]
+
+[[permission]]
+identifier = "deny-suspend-hotkeys"
+description = "Denies the suspend_hotkeys command without any pre-configured scope."
+commands.deny = ["suspend_hotkeys"]

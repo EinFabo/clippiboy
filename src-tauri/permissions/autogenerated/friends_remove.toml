@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friends-remove"
+description = "Enables the friends_remove command without any pre-configured scope."
+commands.allow = ["friends_remove"]
+
+[[permission]]
+identifier = "deny-friends-remove"
+description = "Denies the friends_remove command without any pre-configured scope."
+commands.deny = ["friends_remove"]

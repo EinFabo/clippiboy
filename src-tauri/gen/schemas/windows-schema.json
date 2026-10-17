@@ -345,6 +345,978 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the add_audio_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-add-audio-source",
+          "markdownDescription": "Enables the add_audio_source command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the app_version command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-app-version",
+          "markdownDescription": "Enables the app_version command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the apply_clip_edit command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-apply-clip-edit",
+          "markdownDescription": "Enables the apply_clip_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the check_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-update",
+          "markdownDescription": "Enables the check_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clip_tracks command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clip-tracks",
+          "markdownDescription": "Enables the clip_tracks command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clip_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clip-waveform",
+          "markdownDescription": "Enables the clip_waveform command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clipboard_read_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clipboard-read-text",
+          "markdownDescription": "Enables the clipboard_read_text command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clipboard_write_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clipboard-write-text",
+          "markdownDescription": "Enables the clipboard_write_text command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the close_console command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-close-console",
+          "markdownDescription": "Enables the close_console command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the copy_clip_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-clip-file",
+          "markdownDescription": "Enables the copy_clip_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the copy_clip_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-clip-image",
+          "markdownDescription": "Enables the copy_clip_image command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the default_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-default-clip-dir",
+          "markdownDescription": "Enables the default_clip_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the delete_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-clip",
+          "markdownDescription": "Enables the delete_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the discard_all_originals command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-discard-all-originals",
+          "markdownDescription": "Enables the discard_all_originals command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the discard_clip_original command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-discard-clip-original",
+          "markdownDescription": "Enables the discard_clip_original command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the engine_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-engine-status",
+          "markdownDescription": "Enables the engine_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the export_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-export-clip",
+          "markdownDescription": "Enables the export_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the export_for_discord command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-export-for-discord",
+          "markdownDescription": "Enables the export_for_discord command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the ffmpeg_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-ffmpeg-status",
+          "markdownDescription": "Enables the ffmpeg_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the file_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-file-clip",
+          "markdownDescription": "Enables the file_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-accept",
+          "markdownDescription": "Enables the friends_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_block command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-block",
+          "markdownDescription": "Enables the friends_block command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_cancel_sign_in command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-cancel-sign-in",
+          "markdownDescription": "Enables the friends_cancel_sign_in command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_delete_account command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-delete-account",
+          "markdownDescription": "Enables the friends_delete_account command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_refresh command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-refresh",
+          "markdownDescription": "Enables the friends_refresh command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-remove",
+          "markdownDescription": "Enables the friends_remove command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-request",
+          "markdownDescription": "Enables the friends_request command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_set_allow_requests command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-set-allow-requests",
+          "markdownDescription": "Enables the friends_set_allow_requests command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_sign_in command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-sign-in",
+          "markdownDescription": "Enables the friends_sign_in command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_sign_out command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-sign-out",
+          "markdownDescription": "Enables the friends_sign_out command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-state",
+          "markdownDescription": "Enables the friends_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the friends_unblock command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-unblock",
+          "markdownDescription": "Enables the friends_unblock command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-config",
+          "markdownDescription": "Enables the get_config command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the install_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-install-update",
+          "markdownDescription": "Enables the install_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the link_create command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-link-create",
+          "markdownDescription": "Enables the link_create command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the link_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-link-delete",
+          "markdownDescription": "Enables the link_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the link_exists command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-link-exists",
+          "markdownDescription": "Enables the link_exists command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the link_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-link-state",
+          "markdownDescription": "Enables the link_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_audio_devices command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-audio-devices",
+          "markdownDescription": "Enables the list_audio_devices command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_audio_processes command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-audio-processes",
+          "markdownDescription": "Enables the list_audio_processes command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_capture_targets command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-capture-targets",
+          "markdownDescription": "Enables the list_capture_targets command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_clips command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-clips",
+          "markdownDescription": "Enables the list_clips command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_encoders command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-encoders",
+          "markdownDescription": "Enables the list_encoders command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-clip",
+          "markdownDescription": "Enables the open_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pending_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pending-update",
+          "markdownDescription": "Enables the pending_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the preview_sound command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-preview-sound",
+          "markdownDescription": "Enables the preview_sound command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the regenerate_control_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-regenerate-control-token",
+          "markdownDescription": "Enables the regenerate_control_token command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the remove_audio_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-remove-audio-source",
+          "markdownDescription": "Enables the remove_audio_source command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the restore_clip_original command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-restore-clip-original",
+          "markdownDescription": "Enables the restore_clip_original command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the resume_hotkeys command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-resume-hotkeys",
+          "markdownDescription": "Enables the resume_hotkeys command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the retry_ffmpeg command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-retry-ffmpeg",
+          "markdownDescription": "Enables the retry_ffmpeg command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reveal_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reveal-clip",
+          "markdownDescription": "Enables the reveal_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reveal_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reveal-path",
+          "markdownDescription": "Enables the reveal_path command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-clip",
+          "markdownDescription": "Enables the save_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the screenshot_edit command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-screenshot-edit",
+          "markdownDescription": "Enables the screenshot_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-clip-dir",
+          "markdownDescription": "Enables the set_clip_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_clip_favorite command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-clip-favorite",
+          "markdownDescription": "Enables the set_clip_favorite command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_clip_tags command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-clip-tags",
+          "markdownDescription": "Enables the set_clip_tags command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-config",
+          "markdownDescription": "Enables the set_config command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_hotkeys command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-hotkeys",
+          "markdownDescription": "Enables the set_hotkeys command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_logo_icon command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-logo-icon",
+          "markdownDescription": "Enables the set_logo_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-accept",
+          "markdownDescription": "Enables the share_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-cancel",
+          "markdownDescription": "Enables the share_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-clear",
+          "markdownDescription": "Enables the share_clear command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_decline command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-decline",
+          "markdownDescription": "Enables the share_decline command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_dismiss command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-dismiss",
+          "markdownDescription": "Enables the share_dismiss command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-send",
+          "markdownDescription": "Enables the share_send command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-state",
+          "markdownDescription": "Enables the share_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the show_clip_in_app command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-show-clip-in-app",
+          "markdownDescription": "Enables the show_clip_in_app command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_buffer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-buffer",
+          "markdownDescription": "Enables the start_buffer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop_buffer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-stop-buffer",
+          "markdownDescription": "Enables the stop_buffer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the storage_usage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-storage-usage",
+          "markdownDescription": "Enables the storage_usage command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the suspend_hotkeys command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-suspend-hotkeys",
+          "markdownDescription": "Enables the suspend_hotkeys command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the take_screenshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-take-screenshot",
+          "markdownDescription": "Enables the take_screenshot command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the toggle_recording command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-toggle-recording",
+          "markdownDescription": "Enables the toggle_recording command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the trim_originals command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-trim-originals",
+          "markdownDescription": "Enables the trim_originals command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_audio_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-audio-source",
+          "markdownDescription": "Enables the update_audio_source command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-clip",
+          "markdownDescription": "Enables the update_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the usage_set_heard command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-usage-set-heard",
+          "markdownDescription": "Enables the usage_set_heard command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the usage_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-usage-source",
+          "markdownDescription": "Enables the usage_source command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the write_screenshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-write-screenshot",
+          "markdownDescription": "Enables the write_screenshot command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the add_audio_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-add-audio-source",
+          "markdownDescription": "Denies the add_audio_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the app_version command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-app-version",
+          "markdownDescription": "Denies the app_version command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the apply_clip_edit command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-apply-clip-edit",
+          "markdownDescription": "Denies the apply_clip_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-update",
+          "markdownDescription": "Denies the check_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clip_tracks command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clip-tracks",
+          "markdownDescription": "Denies the clip_tracks command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clip_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clip-waveform",
+          "markdownDescription": "Denies the clip_waveform command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clipboard_read_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clipboard-read-text",
+          "markdownDescription": "Denies the clipboard_read_text command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clipboard_write_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clipboard-write-text",
+          "markdownDescription": "Denies the clipboard_write_text command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the close_console command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-close-console",
+          "markdownDescription": "Denies the close_console command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_clip_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-clip-file",
+          "markdownDescription": "Denies the copy_clip_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_clip_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-clip-image",
+          "markdownDescription": "Denies the copy_clip_image command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the default_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-default-clip-dir",
+          "markdownDescription": "Denies the default_clip_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-clip",
+          "markdownDescription": "Denies the delete_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the discard_all_originals command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-discard-all-originals",
+          "markdownDescription": "Denies the discard_all_originals command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the discard_clip_original command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-discard-clip-original",
+          "markdownDescription": "Denies the discard_clip_original command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the engine_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-engine-status",
+          "markdownDescription": "Denies the engine_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the export_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-export-clip",
+          "markdownDescription": "Denies the export_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the export_for_discord command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-export-for-discord",
+          "markdownDescription": "Denies the export_for_discord command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ffmpeg_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-ffmpeg-status",
+          "markdownDescription": "Denies the ffmpeg_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the file_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-file-clip",
+          "markdownDescription": "Denies the file_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-accept",
+          "markdownDescription": "Denies the friends_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_block command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-block",
+          "markdownDescription": "Denies the friends_block command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_cancel_sign_in command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-cancel-sign-in",
+          "markdownDescription": "Denies the friends_cancel_sign_in command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_delete_account command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-delete-account",
+          "markdownDescription": "Denies the friends_delete_account command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_refresh command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-refresh",
+          "markdownDescription": "Denies the friends_refresh command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-remove",
+          "markdownDescription": "Denies the friends_remove command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-request",
+          "markdownDescription": "Denies the friends_request command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_set_allow_requests command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-set-allow-requests",
+          "markdownDescription": "Denies the friends_set_allow_requests command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_sign_in command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-sign-in",
+          "markdownDescription": "Denies the friends_sign_in command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_sign_out command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-sign-out",
+          "markdownDescription": "Denies the friends_sign_out command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-state",
+          "markdownDescription": "Denies the friends_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_unblock command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-unblock",
+          "markdownDescription": "Denies the friends_unblock command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-config",
+          "markdownDescription": "Denies the get_config command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the install_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-install-update",
+          "markdownDescription": "Denies the install_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the link_create command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-link-create",
+          "markdownDescription": "Denies the link_create command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the link_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-link-delete",
+          "markdownDescription": "Denies the link_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the link_exists command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-link-exists",
+          "markdownDescription": "Denies the link_exists command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the link_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-link-state",
+          "markdownDescription": "Denies the link_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_audio_devices command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-audio-devices",
+          "markdownDescription": "Denies the list_audio_devices command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_audio_processes command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-audio-processes",
+          "markdownDescription": "Denies the list_audio_processes command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_capture_targets command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-capture-targets",
+          "markdownDescription": "Denies the list_capture_targets command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_clips command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-clips",
+          "markdownDescription": "Denies the list_clips command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_encoders command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-encoders",
+          "markdownDescription": "Denies the list_encoders command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-clip",
+          "markdownDescription": "Denies the open_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pending_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pending-update",
+          "markdownDescription": "Denies the pending_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the preview_sound command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-preview-sound",
+          "markdownDescription": "Denies the preview_sound command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the regenerate_control_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-regenerate-control-token",
+          "markdownDescription": "Denies the regenerate_control_token command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the remove_audio_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-remove-audio-source",
+          "markdownDescription": "Denies the remove_audio_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the restore_clip_original command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-restore-clip-original",
+          "markdownDescription": "Denies the restore_clip_original command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the resume_hotkeys command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-resume-hotkeys",
+          "markdownDescription": "Denies the resume_hotkeys command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the retry_ffmpeg command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-retry-ffmpeg",
+          "markdownDescription": "Denies the retry_ffmpeg command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reveal_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reveal-clip",
+          "markdownDescription": "Denies the reveal_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reveal_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reveal-path",
+          "markdownDescription": "Denies the reveal_path command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-clip",
+          "markdownDescription": "Denies the save_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the screenshot_edit command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-screenshot-edit",
+          "markdownDescription": "Denies the screenshot_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-clip-dir",
+          "markdownDescription": "Denies the set_clip_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_clip_favorite command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-clip-favorite",
+          "markdownDescription": "Denies the set_clip_favorite command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_clip_tags command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-clip-tags",
+          "markdownDescription": "Denies the set_clip_tags command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-config",
+          "markdownDescription": "Denies the set_config command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_hotkeys command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-hotkeys",
+          "markdownDescription": "Denies the set_hotkeys command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_logo_icon command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-logo-icon",
+          "markdownDescription": "Denies the set_logo_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-accept",
+          "markdownDescription": "Denies the share_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-cancel",
+          "markdownDescription": "Denies the share_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-clear",
+          "markdownDescription": "Denies the share_clear command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_decline command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-decline",
+          "markdownDescription": "Denies the share_decline command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_dismiss command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-dismiss",
+          "markdownDescription": "Denies the share_dismiss command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-send",
+          "markdownDescription": "Denies the share_send command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-state",
+          "markdownDescription": "Denies the share_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the show_clip_in_app command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-show-clip-in-app",
+          "markdownDescription": "Denies the show_clip_in_app command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_buffer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-buffer",
+          "markdownDescription": "Denies the start_buffer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop_buffer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-stop-buffer",
+          "markdownDescription": "Denies the stop_buffer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the storage_usage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-storage-usage",
+          "markdownDescription": "Denies the storage_usage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the suspend_hotkeys command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-suspend-hotkeys",
+          "markdownDescription": "Denies the suspend_hotkeys command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the take_screenshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-take-screenshot",
+          "markdownDescription": "Denies the take_screenshot command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the toggle_recording command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-toggle-recording",
+          "markdownDescription": "Denies the toggle_recording command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the trim_originals command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-trim-originals",
+          "markdownDescription": "Denies the trim_originals command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_audio_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-audio-source",
+          "markdownDescription": "Denies the update_audio_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-clip",
+          "markdownDescription": "Denies the update_clip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the usage_set_heard command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-usage-set-heard",
+          "markdownDescription": "Denies the usage_set_heard command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the usage_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-usage-source",
+          "markdownDescription": "Denies the usage_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the write_screenshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-write-screenshot",
+          "markdownDescription": "Denies the write_screenshot command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
           "type": "string",
           "const": "autostart:default",

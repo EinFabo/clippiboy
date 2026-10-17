@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-show-clip-in-app"
+description = "Enables the show_clip_in_app command without any pre-configured scope."
+commands.allow = ["show_clip_in_app"]
+
+[[permission]]
+identifier = "deny-show-clip-in-app"
+description = "Denies the show_clip_in_app command without any pre-configured scope."
+commands.deny = ["show_clip_in_app"]

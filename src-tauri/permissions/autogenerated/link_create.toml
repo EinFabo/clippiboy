@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-link-create"
+description = "Enables the link_create command without any pre-configured scope."
+commands.allow = ["link_create"]
+
+[[permission]]
+identifier = "deny-link-create"
+description = "Denies the link_create command without any pre-configured scope."
+commands.deny = ["link_create"]

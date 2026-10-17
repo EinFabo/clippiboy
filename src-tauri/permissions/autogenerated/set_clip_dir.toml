@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-clip-dir"
+description = "Enables the set_clip_dir command without any pre-configured scope."
+commands.allow = ["set_clip_dir"]
+
+[[permission]]
+identifier = "deny-set-clip-dir"
+description = "Denies the set_clip_dir command without any pre-configured scope."
+commands.deny = ["set_clip_dir"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-regenerate-control-token"
+description = "Enables the regenerate_control_token command without any pre-configured scope."
+commands.allow = ["regenerate_control_token"]
+
+[[permission]]
+identifier = "deny-regenerate-control-token"
+description = "Denies the regenerate_control_token command without any pre-configured scope."
+commands.deny = ["regenerate_control_token"]

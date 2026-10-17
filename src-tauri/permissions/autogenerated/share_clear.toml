@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-share-clear"
+description = "Enables the share_clear command without any pre-configured scope."
+commands.allow = ["share_clear"]
+
+[[permission]]
+identifier = "deny-share-clear"
+description = "Denies the share_clear command without any pre-configured scope."
+commands.deny = ["share_clear"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-audio-source"
+description = "Enables the add_audio_source command without any pre-configured scope."
+commands.allow = ["add_audio_source"]
+
+[[permission]]
+identifier = "deny-add-audio-source"
+description = "Denies the add_audio_source command without any pre-configured scope."
+commands.deny = ["add_audio_source"]

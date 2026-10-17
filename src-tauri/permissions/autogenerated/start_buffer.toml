@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-buffer"
+description = "Enables the start_buffer command without any pre-configured scope."
+commands.allow = ["start_buffer"]
+
+[[permission]]
+identifier = "deny-start-buffer"
+description = "Denies the start_buffer command without any pre-configured scope."
+commands.deny = ["start_buffer"]

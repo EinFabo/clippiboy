@@ -2,6 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "overlay",
   "description": "The banner over the game — only listens, controls nothing",
-  "windows": ["overlay"],
-  "permissions": ["core:event:default"]
+  "windows": [
+    "overlay"
+  ],
+  "permissions": [
+    "core:event:default",
+    "allow-get-config"
+  ]
 }

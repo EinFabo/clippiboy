@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ffmpeg-status"
+description = "Enables the ffmpeg_status command without any pre-configured scope."
+commands.allow = ["ffmpeg_status"]
+
+[[permission]]
+identifier = "deny-ffmpeg-status"
+description = "Denies the ffmpeg_status command without any pre-configured scope."
+commands.deny = ["ffmpeg_status"]

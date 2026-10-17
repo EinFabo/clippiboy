@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-clip"
+description = "Enables the update_clip command without any pre-configured scope."
+commands.allow = ["update_clip"]
+
+[[permission]]
+identifier = "deny-update-clip"
+description = "Denies the update_clip command without any pre-configured scope."
+commands.deny = ["update_clip"]

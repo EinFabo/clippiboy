@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friends-sign-in"
+description = "Enables the friends_sign_in command without any pre-configured scope."
+commands.allow = ["friends_sign_in"]
+
+[[permission]]
+identifier = "deny-friends-sign-in"
+description = "Denies the friends_sign_in command without any pre-configured scope."
+commands.deny = ["friends_sign_in"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-screenshot-edit"
+description = "Enables the screenshot_edit command without any pre-configured scope."
+commands.allow = ["screenshot_edit"]
+
+[[permission]]
+identifier = "deny-screenshot-edit"
+description = "Denies the screenshot_edit command without any pre-configured scope."
+commands.deny = ["screenshot_edit"]

@@ -2,11 +2,35 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "console",
   "description": "The console over the game — it is operated, unlike the banner",
-  "windows": ["console"],
+  "windows": [
+    "console"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-show",
-    "core:window:allow-set-focus"
+    "core:window:allow-set-focus",
+    "allow-get-config",
+    "allow-engine-status",
+    "allow-close-console",
+    "allow-copy-clip-file",
+    "allow-delete-clip",
+    "allow-export-for-discord",
+    "allow-file-clip",
+    "allow-list-clips",
+    "allow-save-clip",
+    "allow-set-clip-favorite",
+    "allow-show-clip-in-app",
+    "allow-take-screenshot",
+    "allow-toggle-recording",
+    "allow-update-audio-source",
+    "allow-update-clip",
+    "allow-friends-state",
+    "allow-friends-accept",
+    "allow-friends-remove",
+    "allow-share-state",
+    "allow-share-accept",
+    "allow-share-decline",
+    "allow-share-send"
   ]
 }

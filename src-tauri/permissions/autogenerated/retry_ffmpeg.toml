@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-retry-ffmpeg"
+description = "Enables the retry_ffmpeg command without any pre-configured scope."
+commands.allow = ["retry_ffmpeg"]
+
+[[permission]]
+identifier = "deny-retry-ffmpeg"
+description = "Denies the retry_ffmpeg command without any pre-configured scope."
+commands.deny = ["retry_ffmpeg"]

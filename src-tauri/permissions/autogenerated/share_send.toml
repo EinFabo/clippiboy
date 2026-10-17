@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-share-send"
+description = "Enables the share_send command without any pre-configured scope."
+commands.allow = ["share_send"]
+
+[[permission]]
+identifier = "deny-share-send"
+description = "Denies the share_send command without any pre-configured scope."
+commands.deny = ["share_send"]

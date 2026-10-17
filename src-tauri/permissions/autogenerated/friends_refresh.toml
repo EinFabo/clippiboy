@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friends-refresh"
+description = "Enables the friends_refresh command without any pre-configured scope."
+commands.allow = ["friends_refresh"]
+
+[[permission]]
+identifier = "deny-friends-refresh"
+description = "Denies the friends_refresh command without any pre-configured scope."
+commands.deny = ["friends_refresh"]

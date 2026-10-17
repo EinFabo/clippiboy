@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-all-originals"
+description = "Enables the discard_all_originals command without any pre-configured scope."
+commands.allow = ["discard_all_originals"]
+
+[[permission]]
+identifier = "deny-discard-all-originals"
+description = "Denies the discard_all_originals command without any pre-configured scope."
+commands.deny = ["discard_all_originals"]

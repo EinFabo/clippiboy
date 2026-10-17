@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clip-waveform"
+description = "Enables the clip_waveform command without any pre-configured scope."
+commands.allow = ["clip_waveform"]
+
+[[permission]]
+identifier = "deny-clip-waveform"
+description = "Denies the clip_waveform command without any pre-configured scope."
+commands.deny = ["clip_waveform"]
