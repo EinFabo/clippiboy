@@ -11,6 +11,7 @@
 //! the keyframe before it, and the timestamps follow from the constant frame
 //! rate.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -92,7 +93,6 @@ pub struct ClipRequest {
     /// are filed by it.
     pub clip_id: String,
     pub output: PathBuf,
-    pub temp_dir: PathBuf,
 }
 
 /// One audio input for [`encode`].
@@ -117,7 +117,6 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         return Err("The replay buffer is still empty.".into());
     }
 
-    std::fs::create_dir_all(&request.temp_dir).map_err(|e| e.to_string())?;
     if let Some(parent) = request.output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -125,20 +124,33 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // Derived from the target clip and therefore unique per save: two concurrent
     // saves must not write each other's intermediate files out from under them.
     let stem = sanitize(&request.output.file_stem().unwrap_or_default().to_string_lossy());
+    // Beside the clip, named like the `.part.mp4` it is written as: on the
+    // drive the free space was checked for. In the app data folder they went
+    // to C: whatever drive the clips are on — a buffer's worth per save.
+    let scratch = |name: &str| {
+        request
+            .output
+            .with_file_name(format!("{stem}_{}.part.{name}", sanitize(&request.clip_id)))
+    };
 
-    // Video packets as a raw H.264 elementary stream.
-    let video_path = request.temp_dir.join(format!("clip_{stem}.h264"));
-    let mut stream: Vec<u8> = Vec::with_capacity(
-        snapshot.packets.iter().map(|p| p.data.len()).sum::<usize>()
-            + snapshot.sequence_header.len(),
-    );
-    // Prepend SPS/PPS. Most encoders send them before every IDR anyway — any
-    // decoder skips a duplicate, but they must not be missing entirely.
-    stream.extend_from_slice(&snapshot.sequence_header);
-    for packet in &snapshot.packets {
-        stream.extend_from_slice(&packet.data);
+    // Video packets as a raw H.264 elementary stream, straight into the file:
+    // gathered in one buffer first, a long buffer at a high bitrate cost its
+    // own size in memory a second time, for the whole save.
+    let video_path = scratch("h264");
+    let write_video = || -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&video_path)?);
+        // Prepend SPS/PPS. Most encoders send them before every IDR anyway —
+        // any decoder skips a duplicate, but they must not be missing entirely.
+        out.write_all(&snapshot.sequence_header)?;
+        for packet in &snapshot.packets {
+            out.write_all(&packet.data)?;
+        }
+        out.flush()
+    };
+    if let Err(err) = write_video() {
+        let _ = std::fs::remove_file(&video_path);
+        return Err(err.to_string());
     }
-    std::fs::write(&video_path, &stream).map_err(|e| e.to_string())?;
 
     // Audio tracks as WAV, cut to the same QPC as the first frame.
     //
@@ -148,11 +160,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // recording — so a ⧉ flipped during the recording applies to the whole clip
     // and not just to the seconds after it.
     let mut wavs: Vec<AudioInput> = Vec::new();
-    let wav_path = |name: &str| {
-        request
-            .temp_dir
-            .join(format!("track_{stem}_{}.wav", sanitize(name)))
-    };
+    let wav_path = |name: &str| scratch(&format!("{}.wav", sanitize(name)));
 
     let mut into_mix: Vec<&pipeline::TrackRing> = Vec::new();
     let mut own: Vec<&Arc<pipeline::TrackRing>> = Vec::new();
@@ -358,8 +366,8 @@ pub fn encode(
     // nobody ever comes back to clear it away. The clip only takes its real name
     // once it is whole.
     //
-    // Beside it, not in `temp_dir`: the clip folder may sit on another drive, and
-    // a rename across volumes is not a rename.
+    // Beside it, like the intermediate files: the clip folder may sit on
+    // another drive, and a rename across volumes is not a rename.
     //
     // Named off the clip id, not off the file name: `with_extension` cuts at the
     // last dot, so two clips named `a.b.mp4` and `a.c.mp4` would both want to be

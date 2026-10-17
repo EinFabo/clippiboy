@@ -256,24 +256,26 @@ pub fn write_mix_wav(
 
 /// PCM into a WAV file — 16 bit, [`CHANNELS`] channels, [`SAMPLE_RATE`].
 fn write_wav(path: &Path, data: &[i16]) -> std::io::Result<()> {
+    use std::io::Write;
     let byte_len = (data.len() * 2) as u32;
-    let mut out = Vec::with_capacity(byte_len as usize + 44);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + byte_len).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&(CHANNELS as u16).to_le_bytes());
-    out.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-    out.extend_from_slice(&(SAMPLE_RATE * CHANNELS as u32 * 2).to_le_bytes());
-    out.extend_from_slice(&((CHANNELS * 2) as u16).to_le_bytes());
-    out.extend_from_slice(&16u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&byte_len.to_le_bytes());
+    // Through a buffered file rather than a copy of the whole window in memory.
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+    out.write_all(b"RIFF")?;
+    out.write_all(&(36 + byte_len).to_le_bytes())?;
+    out.write_all(b"WAVEfmt ")?;
+    out.write_all(&16u32.to_le_bytes())?;
+    out.write_all(&1u16.to_le_bytes())?; // PCM
+    out.write_all(&(CHANNELS as u16).to_le_bytes())?;
+    out.write_all(&SAMPLE_RATE.to_le_bytes())?;
+    out.write_all(&(SAMPLE_RATE * CHANNELS as u32 * 2).to_le_bytes())?;
+    out.write_all(&((CHANNELS * 2) as u16).to_le_bytes())?;
+    out.write_all(&16u16.to_le_bytes())?;
+    out.write_all(b"data")?;
+    out.write_all(&byte_len.to_le_bytes())?;
     for sample in data {
-        out.extend_from_slice(&sample.to_le_bytes());
+        out.write_all(&sample.to_le_bytes())?;
     }
-    std::fs::write(path, out)
+    out.flush()
 }
 
 /// State shared by capture, encoder and mixer.

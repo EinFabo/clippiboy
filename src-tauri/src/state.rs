@@ -858,7 +858,6 @@ impl AppState {
             snapshot,
             clip_id: id.clone(),
             output,
-            temp_dir: config::data_dir().join("temp"),
         })?;
 
         Ok(Clip {

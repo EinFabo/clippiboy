@@ -107,6 +107,8 @@ pub struct Converter {
     processor: ID3D11VideoProcessor,
     slots: Vec<Slot>,
     next_slot: usize,
+    /// The slot written last, for [`Self::convert`]'s `reuse`.
+    last_slot: Option<usize>,
     /// Input views keyed by the source texture's raw pointer. The frame pool has
     /// only two textures, so the table stays tiny — and calling
     /// `CreateVideoProcessorInputView` afresh for every frame would be waste.
@@ -193,6 +195,7 @@ impl Converter {
             processor,
             slots,
             next_slot: 0,
+            last_slot: None,
             input_views: Vec::new(),
             source_size: (0, 0),
             stamp,
@@ -297,10 +300,14 @@ impl Converter {
     /// Runs **synchronously in the capture callback**, while the source texture is
     /// still valid — that is the difference from the old route, which only passed
     /// the pointer along and read from it later.
+    ///
+    /// `reuse`: write into the slot written last instead of the next one —
+    /// see [`Latest::submit`].
     pub fn convert(
         &mut self,
         source: &ID3D11Texture2D,
         source_size: (u32, u32),
+        reuse: bool,
     ) -> Result<usize, String> {
         // A new size means `wgc` has recreated the frame pool and every texture
         // the table refers to is gone. The views keep those textures alive, which
@@ -334,8 +341,15 @@ impl Converter {
             None => None,
         };
         let input = self.input_view(stamped.as_ref().unwrap_or(source))?;
-        let slot = self.next_slot;
-        self.next_slot = (self.next_slot + 1) % self.slots.len();
+        let slot = match self.last_slot.filter(|_| reuse) {
+            Some(slot) => slot,
+            None => {
+                let slot = self.next_slot;
+                self.next_slot = (self.next_slot + 1) % self.slots.len();
+                slot
+            }
+        };
+        self.last_slot = Some(slot);
 
         let stream = D3D11_VIDEO_PROCESSOR_STREAM {
             Enable: TRUE,
@@ -351,14 +365,21 @@ impl Converter {
             ppFutureSurfacesRight: std::ptr::null_mut(),
         };
 
+        let streams = [stream];
         let result = unsafe {
             self.video_context.VideoProcessorBlt(
                 &self.processor,
                 &self.slots[slot].output_view,
                 0,
-                &[stream],
+                &streams,
             )
         };
+        // `ManuallyDrop` keeps the view's reference from being released with
+        // the struct — so every frame added one to a cached view, and the
+        // views (with their textures and device) could never be freed. Handed
+        // back here, on the error path too.
+        let [stream] = streams;
+        drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
         result.map_err(|err| format!("VideoProcessorBlt: {err}"))?;
         Ok(slot)
     }
@@ -608,6 +629,8 @@ pub struct Latest {
     /// stutter looks like from the outside. Nothing counted this before, so a
     /// clock that never kept its beat looked exactly like one that did.
     pub overruns: AtomicU64,
+    /// The generation the clock picked up last.
+    taken: AtomicU64,
     /// Ticks the clock skipped because it was too far behind to catch up.
     /// Each one is a frame the clip does not have.
     pub skipped: AtomicU64,
@@ -626,6 +649,7 @@ impl Latest {
             encoder: Mutex::new(None),
             overruns: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
+            taken: AtomicU64::new(u64::MAX),
             running: AtomicBool::new(true),
         })
     }
@@ -677,10 +701,22 @@ impl Latest {
             return Ok(());
         }
 
-        let slot = self.converter.lock().convert(source, source_size)?;
+        // One slot per tick, not one per captured frame. A monitor at 144 Hz
+        // or more converts several times between two ticks, and rotating on
+        // each of them lapped the ring and wrote over textures still queued
+        // for the encoder — the guard above counts jobs, and only holds if
+        // the rotation keeps pace with them. As long as the clock has not
+        // picked up the frame converted last, no job points at its slot, so
+        // the next frame goes into the same one. Decided under the converter
+        // lock, which the clock takes too when it picks a frame up.
+        let mut converter = self.converter.lock();
+        let reuse = self.slot.load(Ordering::Acquire) != u64::MAX
+            && self.taken.load(Ordering::Acquire) != self.generation.load(Ordering::Acquire);
+        let slot = converter.convert(source, source_size, reuse)?;
         self.slot_qpc.store(qpc_100ns, Ordering::Relaxed);
         self.slot.store(slot as u64, Ordering::Release);
         self.generation.fetch_add(1, Ordering::Release);
+        drop(converter);
         Ok(())
     }
 
@@ -731,8 +767,12 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
             }
         }
 
+        // Under the converter lock, so `Latest::submit` sees the frame as
+        // taken before it could write into its slot again.
+        let converter = latest.converter.lock();
         let generation = latest.generation.load(Ordering::Acquire);
         let slot = latest.slot.load(Ordering::Acquire);
+        latest.taken.store(generation, Ordering::Release);
         index += 1;
 
         if slot == u64::MAX {
@@ -748,7 +788,6 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
         // With a still picture WGC delivers nothing — then the last slot goes out
         // again so the stream does not stall.
         let pts = (index as i64 - 1) * 10_000_000 / fps as i64;
-        let converter = latest.converter.lock();
         let texture = SendPtr(converter.texture(slot as usize).clone());
         drop(converter);
         sink.on_frame(&texture, pts, duplicate);
