@@ -159,6 +159,13 @@ struct TrackOffer {
 
 /// More would be a strange clip, or not a clip at all.
 const MAX_TRACKS: usize = 16;
+/// Largest clip or recording an offer may announce. A long 4K recording
+/// stays well under it; anything above is not a clip.
+const MAX_OFFER_BYTES: u64 = 64 << 30;
+/// Largest single track an offer may announce.
+const MAX_TRACK_BYTES: u64 = 2 << 30;
+/// Left free on a drive after a download, so receiving never fills it.
+const SPACE_MARGIN: u64 = 512 << 20;
 
 /// The handshake, passed through the friends server as the body of a relay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -562,7 +569,19 @@ fn offered(
     if meta.tracks.len() > MAX_TRACKS || meta.tracks.iter().any(|track| track.sha256.len() != 64) {
         meta.tracks.clear();
     }
-    let total = size + meta.tracks.iter().map(|track| track.size).sum::<u64>();
+    // Added up with checks: the release build has no overflow checks, and a
+    // track of 2^64 − 1 bytes wrapped the sum round to the clip's own size —
+    // the banner said "1 MB", and the download wrote until the disk was full.
+    let total = meta
+        .tracks
+        .iter()
+        .try_fold(size, |sum, track| sum.checked_add(track.size))
+        .filter(|_| size <= MAX_OFFER_BYTES && meta.tracks.iter().all(|track| track.size <= MAX_TRACK_BYTES));
+    let Some(total) = total else {
+        log::warn!("share: offer {id} from {from} with sizes that cannot be right — refused");
+        crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false });
+        return;
+    };
     let transfer = Transfer {
         id: id.clone(),
         direction: Direction::In,
@@ -640,6 +659,15 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     let what = noun(meta.screenshot, meta.recording);
     let dir = crate::filing::dir_for(Path::new(&config.clip_dir), meta.game.as_deref(), false, kind);
     std::fs::create_dir_all(&dir).map_err(|err| format!("Could not create the folder: {err}"))?;
+    // Room for it first, on both drives: the clip goes to the clip folder,
+    // its tracks to the app data folder.
+    let tracks_size: u64 = meta.tracks.iter().map(|track| track.size).sum();
+    let short = |at: &Path, need: u64| {
+        crate::disk::free_bytes(at).is_some_and(|free| free < need.saturating_add(SPACE_MARGIN))
+    };
+    if short(&dir, size) || short(&crate::config::data_dir(), tracks_size) {
+        return Err(format!("Not enough free space for this {what} ({}).", megabytes(size + tracks_size)));
+    }
     let target = crate::filing::free_name(&dir, &safe_file_name(&meta.file_name));
     let part = target.with_extension(format!(
         "{}.part",
@@ -793,7 +821,7 @@ async fn fetch(
     let mut header = [0u8; 8];
     recv.read_exact(&mut header).await.map_err(net)?;
     let rest = u64::from_be_bytes(header);
-    if offset + rest != size {
+    if offset.checked_add(rest) != Some(size) {
         return Err("they offered a different file".into());
     }
     let mut file = open_part(part, offset).map_err(|err| format!("Could not write the file: {err}"))?;
@@ -809,6 +837,8 @@ async fn fetch(
             Some(n) => n,
             None => break,
         };
+        // Never past the size that was agreed on, whatever the other side sends.
+        let n = n.min((size - moved) as usize);
         file.write_all(&buf[..n]).map_err(|err| format!("Could not write the file: {err}"))?;
         moved += n as u64;
         if last_emit.elapsed() >= EMIT_EVERY {
