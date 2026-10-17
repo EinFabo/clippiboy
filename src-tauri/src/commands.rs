@@ -79,6 +79,11 @@ pub fn set_config(
         config.recording.target_stable_id = previous.recording.target_stable_id.clone();
         crate::notify(&app, "error", "Stop the recording before changing the source.");
     }
+    // The folder is granted to the player recursively; an empty one or a whole
+    // drive would open everything on it. The dialog never offers those.
+    if !usable_clip_dir(&config.clip_dir) {
+        config.clip_dir = previous.clip_dir.clone();
+    }
     crate::config::keep_once_flags(&mut config, &previous);
     config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
     config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
@@ -276,8 +281,8 @@ pub fn set_clip_dir(
     dir: String,
 ) -> Result<AppConfig> {
     let dir = dir.trim();
-    if dir.is_empty() {
-        return Err("No folder selected.".into());
+    if !usable_clip_dir(dir) {
+        return Err("Pick a folder for the clips, not a whole drive.".into());
     }
     let path = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&path)
@@ -293,6 +298,29 @@ pub fn set_clip_dir(
     // Without the grant the player will not play anything that lands here.
     crate::allow_clip_dir(&app, &next.clip_dir);
     Ok(next)
+}
+
+/// A clip folder that may be granted: absolute, and not a whole drive.
+fn usable_clip_dir(dir: &str) -> bool {
+    let path = Path::new(dir.trim());
+    path.is_absolute() && path.parent().is_some()
+}
+
+/// Where an export may go: a local `.mp4` the save dialog could have chosen.
+///
+/// The path comes from the window, and ffmpeg writes wherever it is told with
+/// `-y` — over any file, to a `\\server` share (handing it the user's Windows
+/// sign-in) or to a URL. Only a drive path with the clip's extension passes.
+fn export_target(output: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(output.trim());
+    let text = path.to_string_lossy();
+    let drive = text.as_bytes().get(1) == Some(&b':') && text.as_bytes()[0].is_ascii_alphabetic();
+    let unc = text.starts_with("\\\\") || text.starts_with("//");
+    let mp4 = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+    if !path.is_absolute() || unc || !mp4 || (cfg!(windows) && !drive) {
+        return Err("Export to a .mp4 file on a local drive.".into());
+    }
+    Ok(path)
 }
 
 /// The suggested clip folder — the starting point of the folder dialog and the
@@ -1204,11 +1232,12 @@ pub fn export_clip(
     target_bytes: u64,
     output: String,
 ) -> Result<()> {
+    let output = export_target(&output)?;
     let written = shrink(
         &state,
         &id,
         target_bytes,
-        std::path::Path::new(&output),
+        &output,
         &progress(&app, &id),
     )?;
     progress(&app, &id)(1.0);
@@ -1480,4 +1509,28 @@ pub fn ffmpeg_status() -> crate::tools::Status {
 #[tauri::command]
 pub fn retry_ffmpeg() {
     crate::tools::retry()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_goes_only_to_a_local_mp4() {
+        let local = if cfg!(windows) { r"C:\Users\me\Videos\clip.mp4" } else { "/home/me/clip.mp4" };
+        assert!(export_target(local).is_ok());
+        assert!(export_target("clip.mp4").is_err(), "relative");
+        assert!(export_target(r"\\server\share\clip.mp4").is_err(), "UNC");
+        assert!(export_target("//server/share/clip.mp4").is_err(), "UNC");
+        assert!(export_target(&local.replace(".mp4", ".exe")).is_err(), "extension");
+    }
+
+    #[test]
+    fn a_whole_drive_is_no_clip_folder() {
+        let (root, folder) = if cfg!(windows) { (r"C:\", r"C:\Videos\ClippiBoy") } else { ("/", "/home/me/clips") };
+        assert!(usable_clip_dir(folder));
+        assert!(!usable_clip_dir(root));
+        assert!(!usable_clip_dir(""));
+        assert!(!usable_clip_dir("clips"));
+    }
 }
