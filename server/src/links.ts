@@ -138,7 +138,12 @@ function onlyMp4(): { stream: TransformStream<Uint8Array, Uint8Array>; refused: 
 
 async function live(env: Env, id: string, now: number): Promise<ShareRow | null> {
   if (!ID_PATTERN.test(id)) return null;
-  const row = await env.DB.prepare("SELECT * FROM shares WHERE id = ?").bind(id).first<ShareRow>();
+  // A suspended account's links are down at once, not only after the cron.
+  const row = await env.DB.prepare(
+    "SELECT s.* FROM shares s JOIN users u ON u.id = s.owner WHERE s.id = ? AND u.banned_at IS NULL",
+  )
+    .bind(id)
+    .first<ShareRow>();
   if (!row || row.pending || row.deleted_at !== null || row.expires_at <= now) return null;
   return row;
 }
@@ -414,6 +419,28 @@ function gone(): Response {
 }
 
 // --- Hourly -----------------------------------------------------------------------
+
+/**
+ * Carry suspensions through: sign the account out everywhere, take its links
+ * down and drop its open connections, within the hour of `banned_at` being
+ * set.
+ */
+export async function applySuspensions(env: Env): Promise<void> {
+  const { results: banned } = await env.DB.prepare("SELECT id FROM users WHERE banned_at IS NOT NULL")
+    .all<{ id: string }>();
+  for (const { id } of banned) {
+    const { results: shares } = await env.DB.prepare("SELECT id FROM shares WHERE owner = ? AND deleted_at IS NULL")
+      .bind(id)
+      .all<{ id: string }>();
+    if (shares.length > 0) {
+      await env.CLIPS.delete(shares.flatMap((row) => [video(row.id), poster(row.id)]));
+      const now = Date.now();
+      await env.DB.batch(shares.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)));
+    }
+    await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
+    await env.HUB.getByName(id).closeAll("account suspended");
+  }
+}
 
 /** Delete what has run out, and forget rows that no longer count for anything. */
 export async function sweep(env: Env): Promise<void> {

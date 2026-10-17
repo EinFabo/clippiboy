@@ -29,7 +29,14 @@
   "triggers": { "crons": ["17 * * * *"] },
   // Reports from the share page: a few a minute per address, counted at the
   // edge, nothing stored.
-  "ratelimits": [{ "name": "REPORT_LIMIT", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } }],
+  "ratelimits": [
+    { "name": "REPORT_LIMIT", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } },
+    // Routes anyone may call that write to the database: the usage ping and
+    // the start of a sign-in. Without a limit one script could spend the
+    // database's daily writes and take sign-in, friends and links down for
+    // everybody. Counted per address at the edge, the address not stored.
+    { "name": "ANON_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }
+  ],
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]
   },

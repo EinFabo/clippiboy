@@ -14,6 +14,7 @@ import {
 } from "./db";
 import { base64url, body, escapeHtml, HttpError, json, normalizeCode, randomToken, sameText, sha256 } from "./util";
 import {
+  applySuspensions,
   createShare,
   deleteShare,
   deleteSharesOf,
@@ -42,7 +43,23 @@ export default {
     }
   },
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(Promise.all([sweep(env), sweepUsage(env)]));
+    // Each on its own: one failing must not cut the others short.
+    ctx.waitUntil(
+      Promise.allSettled([
+        sweep(env),
+        sweepUsage(env),
+        applySuspensions(env),
+        // Here rather than on every /auth/start: there it scanned the whole
+        // table each time, and a flood of starts made that quadratic. Rows a
+        // little past their time are harmless — callback and exchange check
+        // the age themselves.
+        env.DB.prepare("DELETE FROM logins WHERE created_at < ?").bind(Date.now() - LOGIN_TTL_MS).run(),
+      ]).then((outcomes) => {
+        for (const outcome of outcomes) {
+          if (outcome.status === "rejected") console.error("cron", outcome.reason);
+        }
+      }),
+    );
   },
 } satisfies ExportedHandler<Env>;
 
@@ -52,7 +69,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   const method = request.method;
 
   if (path === "/" && method === "GET") return new Response("ClippiBoy friends server");
-  if (path === "/auth/start" && method === "GET") return authStart(url, env);
+  if (path === "/auth/start" && method === "GET") {
+    if (!(await underLimit(request, env))) return page("Too many sign-ins", "Wait a minute, then try again from ClippiBoy.");
+    return authStart(url, env);
+  }
   if (path === "/auth/callback" && method === "GET") return authCallback(request, url, env);
   if (path === "/auth/exchange" && method === "POST") return authExchange(request, env);
 
@@ -66,7 +86,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (reported && method === "POST") return reportShare(request, env, reported[1]);
 
   // Anonymous on purpose: a ping never carries the account.
-  if (path === "/t/ping" && method === "POST") return handlePing(request, env);
+  if (path === "/t/ping" && method === "POST") {
+    if (!(await underLimit(request, env))) return json({ error: "Too many pings." }, 429);
+    return handlePing(request, env);
+  }
 
   const me = await authenticate(request, env.DB);
 
@@ -122,6 +145,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   throw new HttpError(404, "Not found.");
 }
 
+/** Within the per-address limit for routes that write without a sign-in? */
+async function underLimit(request: Request, env: Env): Promise<boolean> {
+  const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  return (await env.ANON_LIMIT.limit({ key: address })).success;
+}
+
 // --- Login --------------------------------------------------------------------
 //
 // The app opens /auth/start in the browser with the hash of a verifier it keeps.
@@ -136,7 +165,6 @@ async function authStart(url: URL, env: Env): Promise<Response> {
   if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new HttpError(400, "Missing challenge.");
   if (!env.DISCORD_CLIENT_ID) throw new HttpError(503, "Discord login is not configured yet.");
   const now = Date.now();
-  await env.DB.prepare("DELETE FROM logins WHERE created_at < ?").bind(now - LOGIN_TTL_MS).run();
   const state = randomToken(24);
   await env.DB.prepare("INSERT INTO logins (state, challenge, created_at) VALUES (?, ?, ?)")
     .bind(state, challenge, now)

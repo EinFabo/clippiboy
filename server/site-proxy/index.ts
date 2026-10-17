@@ -7,6 +7,7 @@ const HOME = "https://clippiboy.com";
 interface Env {
   API: Fetcher;
   DB: D1Database;
+  DOWNLOAD_LIMIT: RateLimit;
 }
 
 export default {
@@ -64,7 +65,12 @@ async function download(request: Request, env: Env, ctx: ExecutionContext, ref: 
     console.error(err);
     return Response.redirect(RELEASES, 302);
   }
-  if (request.method === "GET" && !isBot(request.headers.get("User-Agent"))) {
+  const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (
+    request.method === "GET" &&
+    !isBot(request.headers.get("User-Agent")) &&
+    (await env.DOWNLOAD_LIMIT.limit({ key: address })).success
+  ) {
     ctx.waitUntil(
       env.DB.prepare(
         "INSERT INTO downloads (day, ref, count) VALUES (?, ?, 1) ON CONFLICT(day, ref) DO UPDATE SET count = count + 1",

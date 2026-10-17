@@ -132,12 +132,22 @@ export async function authenticate(request: Request, db: D1Database): Promise<st
   if (!token) throw new HttpError(401, "Not signed in.");
   const hash = await tokenHash(token);
   const session = await db
-    .prepare("SELECT user_id, last_used FROM sessions WHERE token_hash = ?")
+    .prepare(
+      `SELECT s.user_id, s.last_used, u.banned_at FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.token_hash = ?`,
+    )
     .bind(hash)
-    .first<{ user_id: string; last_used: number }>();
+    .first<{ user_id: string; last_used: number; banned_at: number | null }>();
   const now = Date.now();
   if (!session || now - session.last_used > SESSION_IDLE_MS) {
     throw new HttpError(401, "Signed out — please sign in again.");
+  }
+  // A suspension used to stop only the next sign-in: a session already open
+  // kept friends, presence and relays going, and could even delete the
+  // account and with it the ban. A 401, not a 403 — on that the app signs
+  // out, and signing in again shows the suspension page.
+  if (session.banned_at !== null) {
+    throw new HttpError(401, "This account is suspended.");
   }
   // One write a day is enough to keep a session alive.
   if (now - session.last_used > TOUCH_EVERY_MS) {

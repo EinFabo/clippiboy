@@ -30,7 +30,10 @@ interface Attachment {
 
 /** Pings come every 30 s; three missed ones and the socket is gone. */
 const STALE_MS = 100_000;
-const SWEEP_MS = 60_000;
+/** How often a hub with open sockets wakes to look for dead ones. Every
+    minute cost an alarm per online user around the clock; STALE_MS still
+    decides what counts as dead. */
+const SWEEP_MS = 300_000;
 const PUBLISHED = "published";
 const LAST_SEEN = "lastSeen";
 /** A relayed message is a handshake, never a file: a few KB are plenty. */

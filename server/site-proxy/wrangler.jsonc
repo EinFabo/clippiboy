@@ -14,6 +14,10 @@
   // Share links (clippiboy.com/c/<id>) are pages of the friends server. A
   // service binding, because one Worker cannot fetch another on the same zone.
   "services": [{ "binding": "API", "service": "clippiboy-friends" }],
+  // Downloads counted per address and minute at most this often; the file is
+  // still served past it, only not counted. Without it any script could fill
+  // the counts — and the database's daily writes.
+  "ratelimits": [{ "name": "DOWNLOAD_LIMIT", "namespace_id": "1003", "simple": { "limit": 3, "period": 60 } }],
   // Downloads via clippiboy.com/get/<ref> are counted per link and day in the
   // friends server's database. Written here directly, so there is no public
   // route anyone could call to count.
