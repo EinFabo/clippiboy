@@ -122,7 +122,10 @@ export function range(tool: Tool, pictureWidth: number): [number, number, number
     case "text":
       return [base * 3, base * 24, base * 7];
     case "blur":
-      return [base, base * 12, base * 2];
+      // Measured against a deconvolution of UI text (about 14 px at 1080p):
+      // from a radius of about 0.7 × the text height not even the shape of a
+      // word comes back, at half of it a long one still can.
+      return [base * 2, base * 12, base * 3];
     default:
       return [Math.max(1, base * 0.4), base * 6, base];
   }
