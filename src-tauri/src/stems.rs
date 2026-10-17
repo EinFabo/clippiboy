@@ -158,7 +158,13 @@ pub fn remove(clip_id: &str) {
 /// extracted here — otherwise the store itself would be trimmed and the preview
 /// would run offset by the trim. [`crate::edit::source_path`] supplies the right
 /// path.
-pub fn tracks(clip_id: &str, source: &Path) -> Result<Vec<ClipTrack>, String> {
+///
+/// `keep_single`: a clip with one audio track gets that track stored too, as
+/// long as `source` still holds it as recorded ([`crate::edit::audio_untouched`]).
+/// Mixed from the clip file instead, every save put its gain on top of the last
+/// one and muting deleted the sound for good — the store is what the next save
+/// starts from again.
+pub fn tracks(clip_id: &str, source: &Path, keep_single: bool) -> Result<Vec<ClipTrack>, String> {
     if let Some(tracks) = from_index(clip_id) {
         return Ok(tracks);
     }
@@ -171,10 +177,10 @@ pub fn tracks(clip_id: &str, source: &Path) -> Result<Vec<ClipTrack>, String> {
     }
 
     let in_file = tracks_in_file(source)?;
-    if in_file.len() <= 1 {
-        // One track: the clip file's audio track *is* the original, a copy
-        // beside it would only be double the space. Without `previewPath` the
-        // player plays it straight out of the video.
+    if in_file.is_empty() || (in_file.len() == 1 && !keep_single) {
+        // No sound, or one track whose recorded level is gone from the file:
+        // without `previewPath` the player plays it straight out of the video,
+        // and saving mixes from there.
         return Ok(in_file);
     }
 
@@ -315,6 +321,11 @@ pub fn factor(db: f32) -> f32 {
     (crate::audio::gain_factor(db) * 1000.0).round() / 1000.0
 }
 
+/// Can a track at this level still be heard in the mix?
+pub fn audible(gain_db: f32) -> bool {
+    gain_db > SILENT_DB
+}
+
 /// Filter chain that sums the given inputs at their levels into **one** track
 /// under [`MIX_LABEL`].
 ///
@@ -327,7 +338,7 @@ pub fn factor(db: f32) -> f32 {
 pub fn mix_filter(inputs: &[(String, f32)]) -> Option<String> {
     let audible: Vec<&(String, f32)> = inputs
         .iter()
-        .filter(|(_, gain_db)| *gain_db > SILENT_DB)
+        .filter(|(_, gain_db)| audible(*gain_db))
         .collect();
     if audible.is_empty() {
         return None;

@@ -93,6 +93,22 @@ pub fn source_path(clip: &Clip) -> PathBuf {
     }
 }
 
+/// Does [`source_path`] still hold the audio as it was recorded?
+///
+/// Yes if the original is there. Otherwise the clip file is the source, and it
+/// is only untouched while nothing was trimmed and no mix was ever saved into it.
+pub fn audio_untouched(clip: &Clip) -> bool {
+    if has_original(&clip.id) {
+        return true;
+    }
+    clip.original.is_none()
+        && clip.edit.as_ref().is_none_or(|edit| {
+            edit.tracks
+                .iter()
+                .all(|track| !track.muted && track.gain_db.abs() < 0.05)
+        })
+}
+
 /// Is there a complete original for this clip? Only with note *and* video.
 pub fn has_original(clip_id: &str) -> bool {
     note_path(clip_id).is_file() && video_path(clip_id).is_file()
@@ -333,6 +349,9 @@ pub struct Applied {
     pub duration_ms: u64,
     pub size_bytes: u64,
     pub original: Option<ClipOriginal>,
+    /// The mix was applied to audio inside the clip file and now sits in it.
+    /// Stored as it was asked for, the next save would apply it a second time.
+    pub mix_baked: bool,
 }
 
 /// Rewrite the clip: apply the mix, carry out the trim, save the original.
@@ -399,15 +418,26 @@ fn run(
     // store yet they get pulled out of the untouched recording here — and that
     // stays reachable under `source_path` until the swap.
     let source = source_path(clip);
-    let list = match stems::tracks(&clip.id, &source) {
+    let keep_single = audio_untouched(clip);
+    let list = match stems::tracks(&clip.id, &source, keep_single) {
         Ok(list) => list,
         Err(err) if recoverable(&source) => {
             log::warn!("tracks unusable ({err}) — extracting them again");
             stems::remove(&clip.id);
-            stems::tracks(&clip.id, &source)?
+            stems::tracks(&clip.id, &source, keep_single)?
         }
         Err(err) => return Err(err),
     };
+    // The audio of a single track still sits in the clip file, with every
+    // earlier save's level already in it. Muting that would leave nothing to
+    // unmute from.
+    let in_file = !list.is_empty() && list.iter().all(|track| track.preview_path.is_none());
+    if in_file && stems::levels(&list, mix).iter().all(|gain| !stems::audible(*gain)) {
+        return Err(
+            "This clip keeps no separate copy of its sound, so muting it would delete it for good."
+                .into(),
+        );
+    }
 
     let video = match plan.video {
         VideoSource::Clip => target.clone(),
@@ -482,6 +512,7 @@ fn run(
         duration_ms,
         size_bytes: std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0),
         original,
+        mix_baked: in_file,
     })
 }
 
@@ -999,6 +1030,52 @@ mod tests {
 
     /// The most common case: only the sliders were moved. Then the video stays
     /// untouched and the file is rewritten in seconds.
+    fn plain_clip(edit: Option<ClipEdit>, original: Option<ClipOriginal>) -> Clip {
+        Clip {
+            // No originals folder exists under this id.
+            id: "audio-untouched-test-clip".into(),
+            path: "C:/clips/x.mp4".into(),
+            created_at: 0,
+            duration_ms: 30_000,
+            game: None,
+            width: 1920,
+            height: 1080,
+            size_bytes: 1,
+            thumb_path: None,
+            title: None,
+            description: None,
+            edit,
+            original,
+            original_available: false,
+            favorite: false,
+            screenshot: false,
+            recording: false,
+            tags: Vec::new(),
+        }
+    }
+
+    fn mixed(gain_db: f32, muted: bool) -> Option<ClipEdit> {
+        Some(ClipEdit {
+            start_ms: 0,
+            end_ms: 30_000,
+            tracks: vec![TrackMix { index: 0, gain_db, muted }],
+        })
+    }
+
+    #[test]
+    fn a_single_track_is_stored_only_while_the_file_holds_it_as_recorded() {
+        assert!(audio_untouched(&plain_clip(None, None)));
+        assert!(audio_untouched(&plain_clip(mixed(0.0, false), None)));
+        // A level or a mute saved into the file: what is in it is no longer
+        // the recording, and a copy of it would carry that level as its zero.
+        assert!(!audio_untouched(&plain_clip(mixed(-6.0, false), None)));
+        assert!(!audio_untouched(&plain_clip(mixed(0.0, true), None)));
+        // Trimmed, but the original is gone: the file starts somewhere inside
+        // the recording, and a copy of it would sit at the wrong offset.
+        let trimmed = ClipOriginal { duration_ms: 60_000, start_ms: 10_000, end_ms: 40_000 };
+        assert!(!audio_untouched(&plain_clip(None, Some(trimmed))));
+    }
+
     #[test]
     fn only_mixing_leaves_the_picture_alone() {
         let plan = plan(None, true, 30_000, Trim::whole(30_000));

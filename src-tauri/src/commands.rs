@@ -996,7 +996,7 @@ pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTra
     refuse_still(&clip)?;
     // From the untouched recording if the clip is trimmed — the individual
     // tracks are always in coordinates of the original.
-    stems::tracks(&clip.id, &edit::source_path(&clip))
+    stems::tracks(&clip.id, &edit::source_path(&clip), edit::audio_untouched(&clip))
 }
 
 /// Write the clip exactly as it stands in the editor: mix applied, trim
@@ -1332,6 +1332,19 @@ fn store(
         }
     };
 
+    // Baked into the file, the levels start over from there.
+    let tracks = if applied.mix_baked {
+        tracks
+            .into_iter()
+            .map(|track| TrackMix {
+                gain_db: 0.0,
+                muted: false,
+                ..track
+            })
+            .collect()
+    } else {
+        tracks
+    };
     // The trim now sits in the file — what is stored here is the full range of
     // the new file. Where that sits in the original is recorded alongside.
     let edit = ClipEdit {
