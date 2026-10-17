@@ -19,17 +19,17 @@ use crate::state::AppState;
 
 type Result<T> = std::result::Result<T, String>;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_audio_devices() -> Vec<AudioDevice> {
     devices::list_devices()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_audio_processes() -> Vec<AudioProcess> {
     devices::list_processes()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_capture_targets() -> Vec<CaptureTarget> {
     capture::list_targets()
 }
@@ -263,7 +263,7 @@ pub fn resume_hotkeys(app: tauri::AppHandle) {
 ///
 /// It is created right away, and written to once as well — a path that only
 /// blows up when the first clip is saved helps nobody.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_clip_dir(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
@@ -313,7 +313,7 @@ pub fn remove_audio_source(state: State<'_, AppState>, id: String) -> AppConfig 
     state.remove_source(&id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
     state.status_snapshot()
 }
@@ -703,7 +703,7 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
     with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri::Emitter;
     let clip_dir = state.config_snapshot().clip_dir;
@@ -779,7 +779,7 @@ fn announce_change(app: &tauri::AppHandle) {
 /// it is and the clip comes back unchanged. The next start catches it up
 /// (`filing::tidy`); the gallery is right in the meantime regardless, because it
 /// reads from the database.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
     let clip_dir = state.config_snapshot().clip_dir;
     let clip = with_library(&state, |lib| {
