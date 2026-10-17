@@ -638,13 +638,23 @@ fn write_picture(
     }
 
     let size_bytes = std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
-    if let Err(err) = crate::thumbs::make_still(&target, &clip.id) {
-        log::warn!("thumbnail not refreshed: {err}");
-    }
+    // The old thumbnail shows the picture from before this edit — with what was
+    // just blurred still readable. If no new one can be made, none is better.
+    let stale_thumb = match crate::thumbs::make_still(&target, &clip.id) {
+        Ok(_) => false,
+        Err(err) => {
+            log::warn!("thumbnail not refreshed, removed instead: {err}");
+            crate::thumbs::remove(&clip.id);
+            true
+        }
+    };
 
     with_library(state, |lib| {
         lib.set_picture(&clip.id, picture.width, picture.height, size_bytes)
             .map_err(|e| e.to_string())?;
+        if stale_thumb {
+            lib.set_thumb(&clip.id, None).map_err(|e| e.to_string())?;
+        }
         lib.get(&clip.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())

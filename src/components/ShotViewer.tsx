@@ -1104,7 +1104,7 @@ export function ShotViewer({
                   )}
                   <p className="text-xs text-ink-faint">
                     {tool === "blur"
-                      ? "Drag over what should not be readable. What you see here is what lands in the file."
+                      ? "Drag over what should not be readable. What you see here is what lands in the file. For passwords and addresses, a filled box hides more than any blur."
                       : tool === "text"
                         ? "Click and write — at the size and in the colour it will have. Enter makes a line, Escape is done, an empty text removes it again."
                         : "A finished mark stays selected — drag it, or pull its corners. Select picks up an older one, double-click a text to rewrite it. Nothing is written until you save."}

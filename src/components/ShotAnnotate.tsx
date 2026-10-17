@@ -1069,15 +1069,19 @@ function BlurPatch({
 /**
  * The radius CSS has to be given so the preview blurs as hard as the file.
  *
- * `blur()` is a Gaussian and takes a standard deviation. The core runs **one**
- * box pass of half-width `radius` per axis, and blurring is separable — so per
- * axis it is a single box, whose variance is `r·(r+1)/3`. Counting both passes
- * onto the same axis gives `2·r·(r+1)/3` and makes the preview a good 40 %
- * softer than what is written; for a redacted name that is exactly the wrong
- * direction to be wrong in.
+ * `blur()` is a Gaussian and takes a standard deviation. The core runs
+ * **three** box passes per axis (`pass_radius` in `shot.rs`): three boxes are
+ * close to a Gaussian, where one keeps enough of the letter strokes for a
+ * deconvolution to read small text again. Each pass has half-width `p`, chosen
+ * so the three together match one box of `radius` and rounded up; their
+ * variance per axis is `p·(p+1)`. Blurring is separable, so that is the whole
+ * variance — counting both axes onto one would make the preview softer than
+ * the file, for a redacted name exactly the wrong direction to be wrong in.
  */
 function sigmaOf(radius: number): number {
-  return Math.sqrt((radius * (radius + 1)) / 3);
+  const r = Math.max(1, radius);
+  const pass = Math.max(1, Math.ceil((Math.sqrt(1 + (4 * r * (r + 1)) / 3) - 1) / 2));
+  return Math.sqrt(pass * (pass + 1));
 }
 
 /**

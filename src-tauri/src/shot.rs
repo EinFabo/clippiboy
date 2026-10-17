@@ -122,16 +122,19 @@ impl Shot {
 
     /// Blur an area until nothing can be read in it any more.
     ///
-    /// One pass of a box blur across, one down. That is separable, so the cost
-    /// does not grow with the square of the radius — and with the sliding sum in
-    /// [`blur_rows`] it does not grow with the radius at all.
+    /// Three passes of a box blur across, three down — together close to a
+    /// Gaussian with the variance the preview's CSS `blur()` is given
+    /// ([`pass_radius`]). A single box looks just as smeared but keeps a good
+    /// part of the contrast at the scale of letter strokes, and with a known
+    /// kernel and the untouched pixels around it a deconvolution brings small
+    /// text back. Separable, so the cost does not grow with the square of the
+    /// radius — and with the sliding sum in [`blur_rows`] not with the radius
+    /// at all.
     ///
-    /// The copy reaches `radius` beyond the rectangle on every side. Without
-    /// that margin only pixels from inside the rectangle are averaged, and a
-    /// redaction barely wider than the word it covers keeps the shape of that
-    /// word — while the preview, which blurs the whole picture and clips
-    /// afterwards, shows it mixed into its surroundings. The margin is what
-    /// makes the two agree.
+    /// The copy reaches as far beyond the rectangle as the three passes do
+    /// together. Without that margin only pixels from inside the rectangle are
+    /// averaged, and a redaction barely wider than the word it covers keeps the
+    /// shape of that word — while the preview mixes it into its surroundings.
     ///
     /// `ellipse` blurs the same rectangle but only writes back what lies inside
     /// the oval — a face wants a round patch, and a rectangle around it points
@@ -149,19 +152,20 @@ impl Shot {
         let top = y.min(self.height.saturating_sub(1)) as usize;
         let w = (width as usize).min(self.width as usize - left);
         let h = (height as usize).min(self.height as usize - top);
-        let radius = radius.max(1) as usize;
+        let radius = pass_radius(radius);
         if w == 0 || h == 0 {
             return;
         }
 
         let stride = self.width as usize * 3;
 
-        // The area actually read: the rectangle plus a margin of `radius`,
-        // as far as the picture reaches.
-        let from_x = left.saturating_sub(radius);
-        let from_y = top.saturating_sub(radius);
-        let to_x = (left + w + radius).min(self.width as usize);
-        let to_y = (top + h + radius).min(self.height as usize);
+        // The area actually read: the rectangle plus the reach of all three
+        // passes, as far as the picture reaches.
+        let margin = BLUR_PASSES * radius;
+        let from_x = left.saturating_sub(margin);
+        let from_y = top.saturating_sub(margin);
+        let to_x = (left + w + margin).min(self.width as usize);
+        let to_y = (top + h + margin).min(self.height as usize);
         let (pw, ph) = (to_x - from_x, to_y - from_y);
         // Where the rectangle sits inside that copy.
         let (inset_x, inset_y) = (left - from_x, top - from_y);
@@ -175,14 +179,20 @@ impl Shot {
                 .copy_from_slice(&self.rgb[from..from + pw * 3]);
         }
 
-        let mut across = vec![0u8; patch.len()];
-        blur_rows(&patch, &mut across, pw, ph, radius);
+        let mut spare = vec![0u8; patch.len()];
+        for _ in 0..BLUR_PASSES {
+            blur_rows(&patch, &mut spare, pw, ph, radius);
+            std::mem::swap(&mut patch, &mut spare);
+        }
         // The same routine down the columns: transpose, run, transpose back.
         let mut turned = vec![0u8; patch.len()];
-        transpose(&across, &mut turned, pw, ph);
-        let mut done = vec![0u8; patch.len()];
-        blur_rows(&turned, &mut done, ph, pw, radius);
-        transpose(&done, &mut across, ph, pw);
+        transpose(&patch, &mut turned, pw, ph);
+        for _ in 0..BLUR_PASSES {
+            blur_rows(&turned, &mut spare, ph, pw, radius);
+            std::mem::swap(&mut turned, &mut spare);
+        }
+        let mut across = spare;
+        transpose(&turned, &mut across, ph, pw);
 
         // From the rectangle that was asked for, not from what is left of it
         // after clamping. A blur pulled over the edge of the picture would
@@ -624,6 +634,22 @@ fn read_back(
     }
 }
 
+/// Box passes per axis in [`Picture::blur`].
+const BLUR_PASSES: usize = 3;
+
+/// The half-width of each of the three box passes for a blur of `radius`.
+///
+/// `radius` is what the editor stores and what one box of that half-width
+/// would be, variance `r·(r+1)/3`. Three boxes of half-width `p` add up to
+/// `p·(p+1)`; solved for the same variance and rounded **up**, so the file is
+/// never softer than the preview — `sigmaOf` in `ShotAnnotate.tsx` takes the
+/// same formula and gives CSS exactly this variance.
+fn pass_radius(radius: u32) -> usize {
+    let r = radius.max(1) as f64;
+    let p = ((1.0 + 4.0 * r * (r + 1.0) / 3.0).sqrt() - 1.0) / 2.0;
+    (p.ceil() as usize).max(1)
+}
+
 /// One box blur pass along the rows.
 ///
 /// The window is carried from one pixel to the next — what enters on the right
@@ -747,6 +773,74 @@ mod tests {
                 assert_eq!(fast, slow, "{width}x{height}, radius {radius}");
             }
         }
+    }
+
+    #[test]
+    fn three_passes_are_never_softer_than_the_one_box_they_replace() {
+        for radius in 1..=96u32 {
+            let one = (radius * (radius + 1)) as f64 / 3.0;
+            let p = pass_radius(radius) as f64;
+            let three = p * (p + 1.0);
+            assert!(three >= one, "radius {radius}: {three} < {one}");
+            // Rounded up by one step at most, not doubled.
+            assert!((p - 1.0) * p < one.max(2.0), "radius {radius}: pass {p} is too wide");
+        }
+    }
+
+    /// Vertical stripes, a sine of `period` pixels between 28 and 228.
+    fn stripes(width: usize, height: usize, period: f64) -> Shot {
+        let mut rgb = vec![0u8; width * height * 3];
+        for row in 0..height {
+            for column in 0..width {
+                let wave = (column as f64 * std::f64::consts::TAU / period).sin();
+                let value = (128.0 + 100.0 * wave).round() as u8;
+                let at = (row * width + column) * 3;
+                rgb[at..at + 3].copy_from_slice(&[value; 3]);
+            }
+        }
+        Shot { width: width as u32, height: height as u32, rgb }
+    }
+
+    /// Highest minus lowest red value along the middle row, columns `from..to`.
+    fn swing(shot: &Shot, from: usize, to: usize) -> u8 {
+        let row = shot.height as usize / 2;
+        let values = (from..to).map(|column| shot.rgb[(row * shot.width as usize + column) * 3]);
+        values.clone().max().unwrap() - values.min().unwrap()
+    }
+
+    #[test]
+    fn letter_strokes_leave_no_contrast_behind_to_deconvolve() {
+        // Periods at the scale of letter strokes for each radius: short enough
+        // that a Gaussian of the preview's strength wipes them out, where a
+        // single box kept up to a fifth of their contrast.
+        for radius in [4u32, 8, 16] {
+            let sigma = {
+                let p = pass_radius(radius) as f64;
+                (p * (p + 1.0)).sqrt()
+            };
+            let mut period = 3.0;
+            while period <= 2.0 * sigma {
+                let mut shot = stripes(400, 60, period);
+                shot.blur(100, 0, 200, 60, radius, false);
+                let left = swing(&shot, 150, 250);
+                assert!(
+                    left <= 6,
+                    "radius {radius}, period {period:.1}: {left} of 200 left over"
+                );
+                period += 0.5;
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_box_did_leave_that_contrast_behind() {
+        // The yardstick for the test above: one box pass of radius 8 across,
+        // the way the file was blurred before.
+        let shot = stripes(400, 1, 11.9);
+        let mut one = vec![0u8; shot.rgb.len()];
+        blur_rows(&shot.rgb, &mut one, 400, 1, 8);
+        let one = Shot { width: 400, height: 1, rgb: one };
+        assert!(swing(&one, 150, 250) > 30);
     }
 
     fn split_picture() -> Shot {
