@@ -177,6 +177,12 @@ class Client {
 		} catch {
 			// ClippiBoy is not running, or is busy with something long. Either way
 			// the keys show a dash — this is not worth a log line twice a second.
+			// Read the handshake again next time: the app may have come back on
+			// another port (its own was taken), and the old one would stay dead.
+			// Not `forget()`: the pause between two reads of the file stays.
+			if (connection.source === "handshake") {
+				this.#connection = null;
+			}
 			return null;
 		}
 	}

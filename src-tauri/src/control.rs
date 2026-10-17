@@ -74,16 +74,25 @@ pub fn start(app: &tauri::AppHandle) {
 
     // Explicitly the loopback address, not `0.0.0.0`: this must not be a port
     // anybody else on the network can reach.
-    let listener = match TcpListener::bind(("127.0.0.1", port))
-        .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
-    {
+    //
+    // Taken, any free one instead: the plugin reads the port from the
+    // handshake file, not from the settings. WSL in mirrored networking mode
+    // reserves its whole range of ephemeral ports on Windows — 44620–48715 by
+    // default, with 47653 in the middle — and with the configured port alone
+    // the keys were dead whenever WSL ran.
+    let bound = TcpListener::bind(("127.0.0.1", port)).or_else(|err| {
+        log::warn!("control port {port} will not open ({err}) — taking a free one");
+        TcpListener::bind(("127.0.0.1", 0))
+    });
+    let listener = match bound.and_then(|listener| listener.set_nonblocking(true).map(|()| listener)) {
         Ok(listener) => listener,
         Err(err) => {
-            log::warn!("control port {port} will not open ({err}) — Stream Deck keys stay silent");
+            log::warn!("control port will not open ({err}) — Stream Deck keys stay silent");
             clear_handoff();
             return;
         }
     };
+    let port = listener.local_addr().map(|address| address.port()).unwrap_or(port);
 
     let stop = Arc::new(AtomicBool::new(false));
     let thread = {
@@ -269,12 +278,14 @@ fn write_response(stream: &mut impl Write, code: u16, body: &Value) -> std::io::
         _ => "Error",
     };
     let body = body.to_string();
-    write!(
-        stream,
+    // In one piece: `write!` straight onto the socket sent every fragment of
+    // the format as a packet of its own.
+    let response = format!(
         "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json; charset=utf-8\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
-    )?;
+    );
+    stream.write_all(response.as_bytes())?;
     stream.flush()
 }
 
