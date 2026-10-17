@@ -143,6 +143,40 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
     }
 }
 
+/// How much of one source channel goes to the left and to the right.
+///
+/// Keeping only the first two channels, as before, was right for stereo and
+/// dropped everything else — on a 5.1 or 7.1 device (virtual surround
+/// headsets, home cinema) that is the centre channel, where games put their
+/// dialogue. The layouts Windows uses for those devices all start
+/// front left, front right, centre, LFE, and then their surround pairs
+/// (`KSAUDIO_SPEAKER_5POINT1`, `…_5POINT1_SURROUND`, `…_7POINT1_SURROUND`);
+/// centre and surrounds go in at -3 dB as in the usual ITU stereo downmix, the
+/// LFE stays out. Quad has no centre: its back pair follows the fronts. Other
+/// odd counts keep the old rule, their layouts do not agree on where the
+/// centre sits.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn stereo_share(channels: usize, channel: usize) -> (f32, f32) {
+    const MINUS_3_DB: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    let surround = |index: usize| {
+        if index % 2 == 0 {
+            (MINUS_3_DB, 0.0)
+        } else {
+            (0.0, MINUS_3_DB)
+        }
+    };
+    match (channels, channel) {
+        (1, _) => (1.0, 1.0),
+        (_, 0) => (1.0, 0.0),
+        (_, 1) => (0.0, 1.0),
+        (4, extra) => surround(extra),
+        (6.., 2) => (MINUS_3_DB, MINUS_3_DB),
+        (6.., 3) => (0.0, 0.0),
+        (6.., extra) => surround(extra),
+        _ => (0.0, 0.0),
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use super::*;
@@ -277,14 +311,9 @@ mod win {
                     0.0
                 };
 
-                if src_channels == 1 {
-                    left = sample;
-                    right = sample;
-                } else if channel == 0 {
-                    left = sample;
-                } else if channel == 1 {
-                    right = sample;
-                }
+                let (to_left, to_right) = super::stereo_share(src_channels, channel);
+                left += sample * to_left;
+                right += sample * to_right;
             }
             stereo.push(left);
             stereo.push(right);
@@ -671,6 +700,24 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surround_folds_into_stereo_with_its_centre() {
+        // Stereo and mono stay exactly as they were.
+        assert_eq!(stereo_share(2, 0), (1.0, 0.0));
+        assert_eq!(stereo_share(2, 1), (0.0, 1.0));
+        assert_eq!(stereo_share(1, 0), (1.0, 1.0));
+        // 5.1 and 7.1: the dialogue in the centre reaches both sides.
+        for channels in [6, 8] {
+            let (l, r) = stereo_share(channels, 2);
+            assert!(l > 0.7 && r > 0.7, "{channels} channels: centre {l}/{r}");
+            assert_eq!(stereo_share(channels, 3), (0.0, 0.0), "LFE stays out");
+        }
+        // Surround left to the left, surround right to the right.
+        assert!(stereo_share(8, 6).0 > 0.0 && stereo_share(8, 6).1 == 0.0);
+        assert!(stereo_share(8, 7).1 > 0.0 && stereo_share(8, 7).0 == 0.0);
+        assert!(stereo_share(4, 2).0 > 0.0 && stereo_share(4, 3).1 > 0.0);
+    }
 
     /// Roughly a week of uptime — that is how large real QPC values are.
     const NOW: i64 = 7 * 24 * 3600 * 10_000_000;
