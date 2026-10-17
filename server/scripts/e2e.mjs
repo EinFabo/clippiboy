@@ -5,24 +5,38 @@
 //   node scripts/e2e.mjs
 //   npx wrangler d1 execute clippiboy-friends --remote --command "DELETE FROM users WHERE discord_id LIKE 'test-%'"
 //
-// Remove the accounts afterwards: their codes are easy to guess.
-import { createHash } from "node:crypto";
+// The seed makes up fresh tokens and friend codes and keeps them only in
+// scripts/e2e-tokens.json (ignored by git). They used to be fixed strings in
+// this file — and this file is public, so anybody could sign in as the test
+// accounts for as long as they stood. Remove the accounts afterwards all the
+// same.
+import { createHash, randomBytes } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 
-const BASE = process.env.FRIENDS_SERVER ?? "https://clippiboy-friends.fabian081964.workers.dev";
+const BASE = process.env.FRIENDS_SERVER ?? "https://api.clippiboy.com";
+const TOKENS = new URL("./e2e-tokens.json", import.meta.url);
 
 if (process.argv.includes("--seed")) {
   const hash = (token) => createHash("sha256").update(token).digest("base64url");
+  const code = () => {
+    const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    return Array.from(randomBytes(8), (byte) => alphabet[byte % alphabet.length]).join("");
+  };
+  const seed = {
+    a: { token: randomBytes(32).toString("base64url"), id: "00000000-0000-4000-8000-00000000000a" },
+    b: { token: randomBytes(32).toString("base64url"), id: "00000000-0000-4000-8000-00000000000b" },
+  };
+  writeFileSync(TOKENS, JSON.stringify(seed, null, 2));
   const now = Date.now();
   console.log(`INSERT INTO users (id, discord_id, username, display_name, avatar, friend_code, created_at) VALUES
-  ('00000000-0000-4000-8000-00000000000a', 'test-a', 'testalpha', 'Test Alpha', NULL, 'AAAAAAAA', ${now}),
-  ('00000000-0000-4000-8000-00000000000b', 'test-b', 'testbravo', 'Test Bravo', NULL, 'BBBBBBBB', ${now});
+  ('${seed.a.id}', 'test-a', 'testalpha', 'Test Alpha', NULL, '${code()}', ${now}),
+  ('${seed.b.id}', 'test-b', 'testbravo', 'Test Bravo', NULL, '${code()}', ${now});
 INSERT INTO sessions (token_hash, user_id, created_at, last_used) VALUES
-  ('${hash("tok-a-test-only")}', '00000000-0000-4000-8000-00000000000a', ${now}, ${now}),
-  ('${hash("tok-b-test-only")}', '00000000-0000-4000-8000-00000000000b', ${now}, ${now});`);
+  ('${hash(seed.a.token)}', '${seed.a.id}', ${now}, ${now}),
+  ('${hash(seed.b.token)}', '${seed.b.id}', ${now}, ${now});`);
   process.exit(0);
 }
-const A = { token: "tok-a-test-only", id: "00000000-0000-4000-8000-00000000000a" };
-const B = { token: "tok-b-test-only", id: "00000000-0000-4000-8000-00000000000b" };
+const { a: A, b: B } = JSON.parse(readFileSync(TOKENS, "utf8"));
 
 async function api(who, method, path, body) {
   const res = await fetch(BASE + path, {
@@ -69,8 +83,8 @@ await api(B, "DELETE", `/blocks/${A.id}`);
 
 check("no token → 401", (await fetch(BASE + "/me")).status === 401);
 const me = await api(A, "GET", "/me");
-check("GET /me", me.status === 200 && me.data.friendCode === "AAAAAAAA", me);
-check("self request refused", (await api(A, "POST", "/friends/request", { query: "aaaa-aaaa" })).status === 400);
+check("GET /me", me.status === 200 && /^[A-Z2-9]{8}$/.test(me.data.friendCode), me);
+check("self request refused", (await api(A, "POST", "/friends/request", { query: me.data.friendCode })).status === 400);
 check("unknown refused", (await api(A, "POST", "/friends/request", { query: "nobody-here" })).status === 404);
 
 const sa = await socket(A, "A");
@@ -80,7 +94,8 @@ sb.ws.send(JSON.stringify({ t: "hello", invisible: false, game: "VALORANT", sinc
 check("A snapshot", !!(await waitFor(sa.inbox, (m) => m.t === "snapshot")));
 check("B snapshot", !!(await waitFor(sb.inbox, (m) => m.t === "snapshot")));
 
-const req = await api(A, "POST", "/friends/request", { query: "bbbb-bbbb" });
+const bravo = (await api(B, "GET", "/me")).data;
+const req = await api(A, "POST", "/friends/request", { query: bravo.friendCode.toLowerCase() });
 check("request by code", req.status === 200 && req.data.status === "sent", req);
 check("B told about request", !!(await waitFor(sb.inbox, (m) => m.t === "friends")));
 const listB = await api(B, "GET", "/friends");

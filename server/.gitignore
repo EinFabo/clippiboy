@@ -1,3 +1,5 @@
 node_modules/
 .wrangler/
 .dev.vars
+# Made up by `node scripts/e2e.mjs --seed`; the test accounts sign in with these.
+scripts/e2e-tokens.json
