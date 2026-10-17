@@ -11,13 +11,15 @@
 //! the config (see [`write_handoff`]) — both programs run on this machine under
 //! this user, so nobody has to copy anything by hand.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tauri::Manager;
-use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::state::AppState;
 
@@ -29,8 +31,18 @@ const HANDOFF: &str = "streamdeck.json";
 /// standard scheme, and a name of our own says plainly that this is ours.
 const TOKEN_HEADER: &str = "x-clippiboy-token";
 
+/// Limits on what a request may be. The port used to run on tiny_http, which
+/// read the whole of a refused request's body before closing — any program on
+/// this machine could send a `Content-Length` of terabytes without the token
+/// and either hang the one serving thread for good or make the app allocate
+/// that much and abort. Here a request that is too big, too slow or too many
+/// is closed, not drained.
+const MAX_HEAD: usize = 8 * 1024;
+const MAX_BODY: usize = 4 * 1024;
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CONNECTIONS: usize = 8;
+
 struct Running {
-    server: Arc<Server>,
     stop: Arc<AtomicBool>,
     /// Kept so a restart can wait for the old thread — see [`stop`].
     thread: std::thread::JoinHandle<()>,
@@ -38,6 +50,9 @@ struct Running {
 
 /// The server currently listening, if there is one.
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+/// Connections being served right now.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// Start the control port, unless it is switched off.
 ///
@@ -59,8 +74,10 @@ pub fn start(app: &tauri::AppHandle) {
 
     // Explicitly the loopback address, not `0.0.0.0`: this must not be a port
     // anybody else on the network can reach.
-    let server = match Server::http(("127.0.0.1", port)) {
-        Ok(server) => Arc::new(server),
+    let listener = match TcpListener::bind(("127.0.0.1", port))
+        .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
+    {
+        Ok(listener) => listener,
         Err(err) => {
             log::warn!("control port {port} will not open ({err}) — Stream Deck keys stay silent");
             clear_handoff();
@@ -70,18 +87,13 @@ pub fn start(app: &tauri::AppHandle) {
 
     let stop = Arc::new(AtomicBool::new(false));
     let thread = {
-        let server = server.clone();
         let stop = stop.clone();
         let app = app.clone();
         let token = token.clone();
-        std::thread::spawn(move || serve(app, server, stop, token))
+        std::thread::spawn(move || serve(app, listener, stop, token))
     };
 
-    *RUNNING.lock() = Some(Running {
-        server,
-        stop,
-        thread,
-    });
+    *RUNNING.lock() = Some(Running { stop, thread });
     write_handoff(app, port, &token);
     log::info!("control port listening on 127.0.0.1:{port}");
 }
@@ -89,15 +101,11 @@ pub fn start(app: &tauri::AppHandle) {
 /// Stop the control port and take the handshake file with it.
 ///
 /// Waits for the listening thread, and that is the point of it: the thread holds
-/// the second half of the socket, so without the wait a `restart` onto the same
-/// port would find it still taken and quietly give up.
+/// the socket, so without the wait a `restart` onto the same port would find it
+/// still taken and quietly give up.
 pub fn stop() {
     if let Some(running) = RUNNING.lock().take() {
         running.stop.store(true, Ordering::SeqCst);
-        // Wakes the thread out of `incoming_requests`, which otherwise sits
-        // there until the next request that will never come.
-        running.server.unblock();
-        drop(running.server);
         if running.thread.join().is_err() {
             log::warn!("the control port's thread ended badly");
         }
@@ -128,60 +136,188 @@ pub fn regenerate_token(app: &tauri::AppHandle) {
     restart(app);
 }
 
-fn serve(app: tauri::AppHandle, server: Arc<Server>, stop: Arc<AtomicBool>, token: String) {
-    for request in server.incoming_requests() {
-        if stop.load(Ordering::SeqCst) {
-            break;
+/// Accept connections until told to stop. Non-blocking with a short nap, so
+/// `stop` needs no trick to wake it.
+fn serve(app: tauri::AppHandle, listener: TcpListener, stop: Arc<AtomicBool>, token: String) {
+    let token: Arc<str> = token.into();
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if ACTIVE.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                    ACTIVE.fetch_sub(1, Ordering::SeqCst);
+                    continue; // dropped, i.e. closed
+                }
+                let app = app.clone();
+                let token = token.clone();
+                // Each on its own thread: saving a clip takes a second or two,
+                // and the answer waits for it — the key shows whether the clip
+                // made it.
+                std::thread::spawn(move || {
+                    connection(&app, stream, &token);
+                    ACTIVE.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => {
+                log::debug!("control port: {err}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-        handle(&app, request, &token);
     }
     log::info!("control port stopped");
 }
 
-fn handle(app: &tauri::AppHandle, mut request: Request, token: &str) {
-    let mut supplied: Option<String> = None;
+/// One request, one answer, then the connection closes.
+fn connection(app: &tauri::AppHandle, mut stream: TcpStream, token: &str) {
+    let setup = stream
+        .set_nonblocking(false)
+        .and_then(|()| stream.set_read_timeout(Some(READ_TIMEOUT)))
+        .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(5))));
+    if setup.is_err() {
+        return;
+    }
+    let (code, body) = match read_request(&mut stream) {
+        Ok(request) => handle(app, &request, token),
+        Err((code, error)) => (code, json!({ "ok": false, "error": error })),
+    };
+    if let Err(err) = write_response(&mut stream, code, &body) {
+        // The plugin gave up waiting, or the Stream Deck software was closed
+        // mid-request. Nothing to fix here.
+        log::debug!("control port could not answer: {err}");
+    }
+}
+
+/// A request as far as this port cares.
+#[derive(Debug, PartialEq)]
+struct Request {
+    method: String,
+    /// The path, without the query — nothing here uses one, and cutting it off
+    /// keeps a stray `?x=1` from turning into a 404.
+    route: String,
+    /// Header names in lower case.
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+/// Read one request, within [`MAX_HEAD`] and [`MAX_BODY`]. The error is the
+/// status to answer with.
+fn read_request(stream: &mut impl Read) -> Result<Request, (u16, &'static str)> {
+    let mut buffer = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    let head_end = loop {
+        if let Some(at) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break at;
+        }
+        if buffer.len() > MAX_HEAD {
+            return Err((431, "request head too large"));
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err((400, "incomplete request")),
+            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+            Err(_) => return Err((408, "request too slow")),
+        }
+    };
+    let head = std::str::from_utf8(&buffer[..head_end]).map_err(|_| (400, "unreadable head"))?;
+    let mut lines = head.split("\r\n");
+    let mut first = lines.next().unwrap_or("").split(' ');
+    let method = first.next().unwrap_or("").to_string();
+    let target = first.next().unwrap_or("");
+    let route = target.split('?').next().unwrap_or("").to_string();
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    let header = |name: &str| headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str());
+
+    if header("transfer-encoding").is_some() {
+        return Err((411, "send a Content-Length"));
+    }
+    let length = match header("content-length") {
+        Some(value) => value.parse::<usize>().map_err(|_| (400, "bad Content-Length"))?,
+        None => 0,
+    };
+    if length > MAX_BODY {
+        return Err((413, "body too large"));
+    }
+    let mut body = buffer[head_end + 4..].to_vec();
+    body.truncate(length);
+    while body.len() < length {
+        let want = (length - body.len()).min(chunk.len());
+        match stream.read(&mut chunk[..want]) {
+            Ok(0) => return Err((400, "incomplete body")),
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(_) => return Err((408, "request too slow")),
+        }
+    }
+    let body = String::from_utf8(body).map_err(|_| (400, "unreadable body"))?;
+    Ok(Request { method, route, headers, body })
+}
+
+fn write_response(stream: &mut impl Write, code: u16, body: &Value) -> std::io::Result<()> {
+    let reason = match code {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        411 => "Length Required",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
+        _ => "Error",
+    };
+    let body = body.to_string();
+    write!(
+        stream,
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()
+}
+
+fn handle(app: &tauri::AppHandle, request: &Request, token: &str) -> (u16, Value) {
+    let mut supplied: Option<&str> = None;
     // A browser sets `Origin` on every cross-site request it makes. Nothing that
     // belongs here ever sends one, so refusing them closes the door on a web
     // page firing clips through a rebound DNS name — even if it somehow knew
     // the token.
     let mut from_browser = false;
-    for header in request.headers() {
-        match header.field.as_str().as_str().to_ascii_lowercase().as_str() {
+    for (name, value) in &request.headers {
+        match name.as_str() {
             "origin" | "referer" | "sec-fetch-site" => from_browser = true,
-            TOKEN_HEADER => supplied = Some(header.value.as_str().to_string()),
+            TOKEN_HEADER => supplied = Some(value),
             _ => {}
         }
     }
 
-    let allowed = !from_browser && supplied.is_some_and(|supplied| equals(&supplied, token));
+    let allowed = !from_browser && supplied.is_some_and(|supplied| equals(supplied, token));
     if !allowed {
-        return respond(request, 403, json!({ "ok": false, "error": "forbidden" }));
+        return (403, json!({ "ok": false, "error": "forbidden" }));
     }
-    if *request.method() == Method::Post {
+    if request.method == "POST" {
         crate::telemetry::used(crate::telemetry::Feature::StreamDeck);
     }
+    let action = || {
+        serde_json::from_str::<Value>(&request.body)
+            .ok()
+            .and_then(|value| value.get("action")?.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "toggle".into())
+    };
 
-    // The query part is nothing this port uses; cutting it off keeps a stray
-    // `?x=1` from turning into a 404.
-    let route = request.url().split('?').next().unwrap_or("").to_string();
-    match (request.method(), route.as_str()) {
-        (Method::Get, "/v1/status") => {
-            let body = status(app);
-            respond(request, 200, body)
-        }
-        (Method::Post, "/v1/clip") => {
+    match (request.method.as_str(), request.route.as_str()) {
+        ("GET", "/v1/status") => (200, status(app)),
+        ("POST", "/v1/clip") => {
             // Optional `{"seconds": 150}`: a key set to a length of its own.
             // Without it, or unreadable, the configured clip length applies.
-            let mut body = String::new();
-            if request.as_reader().read_to_string(&mut body).is_err() {
-                return respond(request, 400, json!({ "ok": false, "error": "unreadable body" }));
-            }
-            let seconds = serde_json::from_str::<Value>(&body)
+            let seconds = serde_json::from_str::<Value>(&request.body)
                 .ok()
                 .and_then(|value| value.get("seconds")?.as_u64())
                 .filter(|&seconds| seconds > 0)
                 .map(|seconds| seconds.min(u32::MAX as u64) as u32);
-            reply_later(app, request, move |app| match crate::save_clip_and_notify(app, seconds) {
+            match crate::save_clip_and_notify(app, seconds) {
                 Ok(clip) => (
                     200,
                     json!({
@@ -192,89 +328,54 @@ fn handle(app: &tauri::AppHandle, mut request: Request, token: &str) {
                     }),
                 ),
                 Err(error) => (409, json!({ "ok": false, "error": error })),
-            })
+            }
         }
-        (Method::Post, "/v1/screenshot") => reply_later(app, request, |app| {
-            match crate::take_screenshot_and_notify(app) {
-                Ok(clip) => (
-                    200,
-                    json!({
-                        "ok": true,
-                        "id": clip.id,
-                        "width": clip.width,
-                        "height": clip.height,
-                    }),
-                ),
-                Err(error) => (409, json!({ "ok": false, "error": error })),
-            }
-        }),
-        (Method::Post, "/v1/buffer") => {
-            // The body has to be read before the request moves onto the worker
-            // thread — afterwards the reader is gone with it.
-            let mut body = String::new();
-            if request.as_reader().read_to_string(&mut body).is_err() {
-                return respond(request, 400, json!({ "ok": false, "error": "unreadable body" }));
-            }
-            let action = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|value| value.get("action")?.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "toggle".into());
-            match action.as_str() {
-                "toggle" | "start" | "stop" => reply_later(app, request, move |app| {
-                    match action.as_str() {
-                        "start" => crate::start_buffer_and_notify(app),
-                        "stop" => crate::stop_buffer_and_notify(app),
-                        _ => crate::toggle_buffer_and_notify(app),
-                    }
-                    let active = app.state::<AppState>().status.lock().buffer_active;
-                    (200, json!({ "ok": true, "bufferActive": active }))
+        ("POST", "/v1/screenshot") => match crate::take_screenshot_and_notify(app) {
+            Ok(clip) => (
+                200,
+                json!({
+                    "ok": true,
+                    "id": clip.id,
+                    "width": clip.width,
+                    "height": clip.height,
                 }),
-                other => respond(
-                    request,
-                    400,
-                    json!({ "ok": false, "error": format!("unknown action '{other}'") }),
-                ),
+            ),
+            Err(error) => (409, json!({ "ok": false, "error": error })),
+        },
+        ("POST", "/v1/buffer") => match action().as_str() {
+            action @ ("toggle" | "start" | "stop") => {
+                match action {
+                    "start" => crate::start_buffer_and_notify(app),
+                    "stop" => crate::stop_buffer_and_notify(app),
+                    _ => crate::toggle_buffer_and_notify(app),
+                }
+                let active = app.state::<AppState>().status.lock().buffer_active;
+                (200, json!({ "ok": true, "bufferActive": active }))
             }
-        }
-        (Method::Post, "/v1/recording") => {
-            let mut body = String::new();
-            if request.as_reader().read_to_string(&mut body).is_err() {
-                return respond(request, 400, json!({ "ok": false, "error": "unreadable body" }));
-            }
-            let action = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|value| value.get("action")?.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "toggle".into());
-            match action.as_str() {
-                // Answered once the work is done — for "stop" that is when the
-                // file is written, so the key can show the check mark.
-                "toggle" | "start" | "stop" => reply_later(app, request, move |app| {
-                    let running = app.state::<AppState>().is_recording();
-                    let outcome = match (action.as_str(), running) {
-                        ("start", true) | ("stop", false) => Ok(()),
-                        (_, true) => crate::stop_recording_and_notify(app).map(|_| ()),
-                        (_, false) => {
-                            crate::start_recording_and_notify(app);
-                            Ok(())
-                        }
-                    };
-                    let recording = app.state::<AppState>().is_recording();
-                    match outcome {
-                        Ok(()) => (200, json!({ "ok": true, "recording": recording })),
-                        Err(error) => (
-                            409,
-                            json!({ "ok": false, "error": error, "recording": recording }),
-                        ),
+            other => (400, json!({ "ok": false, "error": format!("unknown action '{other}'") })),
+        },
+        ("POST", "/v1/recording") => match action().as_str() {
+            // Answered once the work is done — for "stop" that is when the
+            // file is written, so the key can show the check mark.
+            action @ ("toggle" | "start" | "stop") => {
+                let running = app.state::<AppState>().is_recording();
+                let outcome = match (action, running) {
+                    ("start", true) | ("stop", false) => Ok(()),
+                    (_, true) => crate::stop_recording_and_notify(app).map(|_| ()),
+                    (_, false) => {
+                        crate::start_recording_and_notify(app);
+                        Ok(())
                     }
-                }),
-                other => respond(
-                    request,
-                    400,
-                    json!({ "ok": false, "error": format!("unknown action '{other}'") }),
-                ),
+                };
+                let recording = app.state::<AppState>().is_recording();
+                match outcome {
+                    Ok(()) => (200, json!({ "ok": true, "recording": recording })),
+                    Err(error) => (409, json!({ "ok": false, "error": error, "recording": recording })),
+                }
             }
-        }
-        _ => respond(request, 404, json!({ "ok": false, "error": "no such route" })),
+            other => (400, json!({ "ok": false, "error": format!("unknown action '{other}'") })),
+        },
+        _ => (404, json!({ "ok": false, "error": "no such route" })),
     }
 }
 
@@ -304,35 +405,6 @@ fn status(app: &tauri::AppHandle) -> Value {
         "recording": status.recording,
         "recordingSeconds": status.recording_seconds,
     })
-}
-
-/// Do the work on a thread of its own and answer when it is done.
-///
-/// Saving a clip takes a second or two — on the listening thread that would
-/// block every other request, and answering before the file exists would rob
-/// the key of the one thing it is for: showing whether the clip made it.
-fn reply_later<F>(app: &tauri::AppHandle, request: Request, work: F)
-where
-    F: FnOnce(&tauri::AppHandle) -> (u16, Value) + Send + 'static,
-{
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let (code, body) = work(&app);
-        respond(request, code, body);
-    });
-}
-
-fn respond(request: Request, code: u16, body: Value) {
-    let json = Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..])
-        .expect("a constant header");
-    let response = Response::from_string(body.to_string())
-        .with_status_code(code)
-        .with_header(json);
-    if let Err(err) = request.respond(response) {
-        // The plugin gave up waiting, or the Stream Deck software was closed
-        // mid-request. Nothing to fix here.
-        log::debug!("control port could not answer: {err}");
-    }
 }
 
 /// Compare without giving away how far the match got.
@@ -405,6 +477,46 @@ mod tests {
         assert!(!equals("", ""));
         assert!(!equals("something", ""));
         assert!(!equals("", "something"));
+    }
+
+
+    fn read(raw: &[u8]) -> Result<Request, (u16, &'static str)> {
+        read_request(&mut std::io::Cursor::new(raw.to_vec()))
+    }
+
+    #[test]
+    fn a_request_is_read_with_its_body_and_without_its_query() {
+        let request = read(
+            b"POST /v1/clip?x=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nX-ClippiBoy-Token: abc\r\n\
+              Content-Length: 15\r\n\r\n{\"seconds\": 30}",
+        )
+        .unwrap();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.route, "/v1/clip");
+        assert!(request.headers.contains(&(TOKEN_HEADER.into(), "abc".into())));
+        assert_eq!(request.body, "{\"seconds\": 30}");
+    }
+
+    /// The attack on the old server: a huge declared body, never sent. It has
+    /// to be turned away from the head alone — not read, not allocated.
+    #[test]
+    fn a_huge_body_is_refused_before_it_is_read() {
+        let refused = read(b"POST /v1/clip HTTP/1.1\r\nContent-Length: 99999999999999\r\n\r\n");
+        assert_eq!(refused.unwrap_err().0, 413);
+        let chunked = read(b"POST /v1/clip HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+        assert_eq!(chunked.unwrap_err().0, 411);
+    }
+
+    #[test]
+    fn an_endless_head_is_cut_off() {
+        let mut raw = b"GET /v1/status HTTP/1.1\r\n".to_vec();
+        raw.extend(std::iter::repeat_n(b'a', MAX_HEAD + 10));
+        assert_eq!(read(&raw).unwrap_err().0, 431);
+    }
+
+    #[test]
+    fn a_body_that_stops_short_is_not_taken() {
+        assert_eq!(read(b"POST /v1/buffer HTTP/1.1\r\nContent-Length: 50\r\n\r\n{}").unwrap_err().0, 400);
     }
 
     #[test]
