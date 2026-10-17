@@ -608,6 +608,9 @@ pub struct Latest {
     /// stutter looks like from the outside. Nothing counted this before, so a
     /// clock that never kept its beat looked exactly like one that did.
     pub overruns: AtomicU64,
+    /// Ticks the clock skipped because it was too far behind to catch up.
+    /// Each one is a frame the clip does not have.
+    pub skipped: AtomicU64,
     running: AtomicBool,
 }
 
@@ -622,6 +625,7 @@ impl Latest {
             starved: AtomicU64::new(0),
             encoder: Mutex::new(None),
             overruns: AtomicU64::new(0),
+            skipped: AtomicU64::new(0),
             running: AtomicBool::new(true),
         })
     }
@@ -690,6 +694,9 @@ impl Latest {
     }
 }
 
+/// How far the clock may fall behind before it skips rather than catches up.
+const CATCH_UP: Duration = Duration::from_millis(250);
+
 /// The clock. Runs until `Latest::stop`.
 pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
     let fps = fps.max(1) as u64;
@@ -708,6 +715,20 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
             std::thread::sleep(due - now);
         } else if index > 0 {
             latest.overruns.fetch_add(1, Ordering::Relaxed);
+            // Far behind: the encoder cannot keep up, or the PC slept. Every
+            // missed tick replayed meant a burst of the same old picture —
+            // after a night's sleep minutes of it at full encoder load — and
+            // timestamps that fell further behind the clock with every second
+            // the encoder stayed short, until the audio cut for a clip lay
+            // outside the ring and the clip was silent. Jump to the present
+            // instead; the clip is muxed at the rate its timestamps really
+            // span (`muxer::timing`). A short stall is still caught up.
+            let behind = now - due;
+            if behind > CATCH_UP {
+                let skip = (behind.as_nanos() / period.as_nanos()) as u64;
+                index += skip;
+                latest.skipped.fetch_add(skip, Ordering::Relaxed);
+            }
         }
 
         let generation = latest.generation.load(Ordering::Acquire);

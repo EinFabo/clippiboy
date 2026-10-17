@@ -203,7 +203,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // A clip is written in a second or two — nobody watches a bar for that.
     let outcome = encode(
         &video_path,
-        snapshot.fps,
+        &snapshot.rate,
         &wavs,
         &request.clip_id,
         request.output,
@@ -215,6 +215,51 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         let _ = std::fs::remove_file(&input.path);
     }
     outcome
+}
+
+/// How a raw H.264 stream is laid out in time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Timing {
+    /// For ffmpeg's `-r`: pictures per second, possibly as a fraction.
+    pub rate: String,
+    /// How long the picture lasts, in microseconds — the audio is cut to it.
+    pub span_us: u64,
+}
+
+/// The rate a raw stream of `frames` pictures plays at so it lasts as long as
+/// it took to record.
+///
+/// The elementary stream carries no timestamps; ffmpeg spreads it at a fixed
+/// rate. At the configured rate that is right only while every tick became a
+/// frame. When the encoder falls short, the clock skips ticks
+/// (`convert::pace`) and a frame lost in `mft::submit` leaves a hole; at the
+/// nominal rate the picture then came out shorter than the time it covers and
+/// ran ahead of the audio cut beside it. Spread over `first..=last` instead,
+/// both last the same and meet at either end.
+///
+/// A span far longer than the frames can explain is not a short encoder but a
+/// gap — the PC slept with a recording running. Stretched over that, the whole
+/// recording would play in slow motion, so the nominal rate stays.
+pub fn timing(frames: u64, span_us: Option<u64>, fps: u32) -> Timing {
+    let fps = fps.max(1) as u64;
+    let nominal = frames * 1_000_000 / fps;
+    match span_us {
+        Some(span) if frames > 0 && span >= nominal && span <= nominal * 3 / 2 => Timing {
+            rate: format!("{}/{}", frames * 1_000_000, span),
+            span_us: span,
+        },
+        _ => Timing {
+            rate: fps.to_string(),
+            span_us: nominal,
+        },
+    }
+}
+
+/// From the first and last timestamp of a run of frames to the span it covers:
+/// the last frame lasts a period too.
+pub fn span_of(first_pts_us: i64, last_pts_us: i64, fps: u32) -> Option<u64> {
+    let period = 1_000_000 / fps.max(1) as i64;
+    u64::try_from(last_pts_us - first_pts_us + period).ok()
 }
 
 /// ffmpeg's quicker AAC rate control. Stopping a recording encodes every
@@ -231,7 +276,7 @@ const AAC_CODER: &str = "fast";
 /// The inputs are left where they are — clearing them away is the caller's.
 pub fn encode(
     video_path: &Path,
-    fps: u32,
+    rate: &str,
     wavs: &[AudioInput],
     clip_id: &str,
     output: PathBuf,
@@ -258,9 +303,9 @@ pub fn encode(
     let mut command = ffmpeg();
     command.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
     command.arg("-progress").arg("pipe:1").arg("-nostats");
-    // The elementary stream carries no timestamps — the frame rate supplies them.
-    // It is exact because the clock generates true CFR.
-    command.arg("-f").arg("h264").arg("-r").arg(fps.to_string());
+    // The elementary stream carries no timestamps — the rate supplies them
+    // ([`timing`]).
+    command.arg("-f").arg("h264").arg("-r").arg(rate);
     command.arg("-i").arg(video_path);
     for input in wavs {
         if input.raw {
@@ -489,4 +534,39 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
     let text = String::from_utf8_lossy(&output.stdout);
     let seconds: f64 = text.trim().parse().ok()?;
     Some((seconds * 1000.0) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stream_without_losses_plays_at_the_configured_rate() {
+        // 1800 frames at 60 fps, timestamps 0 … 29.983 s.
+        let timing = timing(1800, span_of(0, 1799 * 1_000_000 / 60, 60), 60);
+        assert!(timing.span_us.abs_diff(30_000_000) < 100, "{}", timing.span_us);
+        let rate = match timing.rate.split_once('/') {
+            Some((a, b)) => a.parse::<f64>().unwrap() / b.parse::<f64>().unwrap(),
+            None => timing.rate.parse::<f64>().unwrap(),
+        };
+        assert!((rate - 60.0).abs() < 0.01, "{}", timing.rate);
+    }
+
+    #[test]
+    fn a_short_encoder_spreads_its_frames_over_the_real_time() {
+        // 30 s of timestamps but only 1500 frames — the clock skipped ticks.
+        let timing = timing(1500, Some(30_000_000), 60);
+        assert_eq!(timing.span_us, 30_000_000);
+        assert_eq!(timing.rate, "1500000000/30000000");
+    }
+
+    #[test]
+    fn a_gap_the_frames_cannot_explain_keeps_the_nominal_rate() {
+        // A recording across an hour of sleep: stretching would be slow motion.
+        let slept = timing(1800, Some(3_630_000_000), 60);
+        assert_eq!(slept.rate, "60");
+        assert_eq!(slept.span_us, 30_000_000);
+        // No span known (a recording recovered after a crash): the same.
+        assert_eq!(timing(1800, None, 60).rate, "60");
+    }
 }

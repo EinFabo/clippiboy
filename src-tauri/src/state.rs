@@ -718,6 +718,11 @@ impl AppState {
             status.buffered_seconds = shared.buffered_seconds();
             status.buffer_bytes = shared.buffer_bytes();
             status.dropped_frames = shared.dropped.load(std::sync::atomic::Ordering::Relaxed);
+            // Ticks the clock skipped are frames lost just the same.
+            #[cfg(windows)]
+            if let Some(pacer) = shared.pacer.lock().as_ref() {
+                status.dropped_frames += pacer.skipped.load(std::sync::atomic::Ordering::Relaxed);
+            }
             status.rate_control = *shared.rate_control.lock();
             // `status.fps` is not worked out here: it is a rate, and a rate has
             // to be measured over an interval that only one caller may consume.

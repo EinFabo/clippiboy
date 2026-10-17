@@ -22,7 +22,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 
@@ -70,6 +70,12 @@ pub struct Meta {
     /// after a crash it is counted off the stream.
     #[serde(default)]
     pub frames: Option<u64>,
+    /// Microseconds from the first frame to the end of the last, by their
+    /// timestamps — what the picture is spread over (`muxer::timing`). Known
+    /// only after a clean stop, like `frames`; without it the configured rate
+    /// stands.
+    #[serde(default)]
+    pub span_us: Option<u64>,
     /// Friends who played the same game when the recording started. Kept here
     /// rather than beside the running recording, so that they stay with this
     /// one: a stop that is still encoding while the next recording starts,
@@ -120,6 +126,9 @@ pub struct Recorder {
     jobs: Mutex<Option<Sender<Job>>>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
     frames: AtomicU64,
+    /// Earliest and latest frame timestamp so far, for `Meta::span_us`.
+    first_pts_us: AtomicI64,
+    last_pts_us: AtomicI64,
     video_bytes: AtomicU64,
     failure: Arc<Mutex<Option<String>>>,
     audio: Mutex<AudioSide>,
@@ -183,6 +192,8 @@ impl Recorder {
             jobs: Mutex::new(Some(tx)),
             writer: Mutex::new(Some(writer)),
             frames: AtomicU64::new(0),
+            first_pts_us: AtomicI64::new(i64::MAX),
+            last_pts_us: AtomicI64::new(i64::MIN),
             video_bytes: AtomicU64::new(0),
             failure,
             audio: Mutex::new(AudioSide {
@@ -214,6 +225,8 @@ impl Recorder {
             return;
         }
         self.frames.fetch_add(1, Ordering::Relaxed);
+        self.first_pts_us.fetch_min(packet.pts_us, Ordering::Relaxed);
+        self.last_pts_us.fetch_max(packet.pts_us, Ordering::Relaxed);
         self.video_bytes
             .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
         self.send(Job::Video(packet.data.clone()));
@@ -350,6 +363,13 @@ impl Recorder {
             meta.game = Some(game);
         }
         meta.frames = Some(self.frames());
+        let (first, last) = (
+            self.first_pts_us.load(Ordering::Relaxed),
+            self.last_pts_us.load(Ordering::Relaxed),
+        );
+        meta.span_us = (first <= last)
+            .then(|| crate::muxer::span_of(first, last, meta.fps))
+            .flatten();
         // Labels as they stand now — a source renamed mid-recording.
         write_meta(&self.dir, &meta)?;
         Ok(meta)
@@ -429,9 +449,9 @@ pub fn read_meta(dir: &Path) -> Result<Meta, String> {
 /// Bring every track to exactly `frames` frames: cut what runs over, pad what
 /// falls short with silence.
 ///
-/// The length comes from the picture, as it does for a clip: the video is
-/// muxed from `-r fps` and is exactly as long as it has frames, so audio
-/// measured any other way runs ahead the moment a frame was lost.
+/// The length comes from the picture, as it does for a clip: the video lasts
+/// what `muxer::timing` spreads it over, so audio measured any other way runs
+/// ahead the moment a frame was lost.
 ///
 /// Opened for writing, not for appending: on Windows an append handle carries
 /// no right to change the length, and cutting failed with "access denied" —
@@ -543,7 +563,8 @@ pub fn finalize(
     if frames == 0 {
         return Err("The recording is empty.".into());
     }
-    let audio_frames = frames * SAMPLE_RATE as u64 / fps as u64;
+    let timing = muxer::timing(frames, meta.span_us, fps);
+    let audio_frames = timing.span_us * SAMPLE_RATE as u64 / 1_000_000;
 
     let mut into_mix: Vec<PathBuf> = Vec::new();
     let mut own: Vec<AudioInput> = Vec::new();
@@ -591,10 +612,10 @@ pub fn finalize(
     inputs.extend(own);
     on_progress(0.1);
 
-    let length_ms = frames * 1000 / fps as u64;
+    let length_ms = timing.span_us / 1000;
     let result = muxer::encode(
         &video,
-        fps,
+        &timing.rate,
         &inputs,
         &meta.id,
         output,

@@ -166,6 +166,26 @@ impl TrackRing {
         }
     }
 
+    /// Count `samples` of silence without being handed them.
+    ///
+    /// For a gap the mixer will not fill in — after the PC slept, the next
+    /// window would span hours, and every ring a block of zeros that long. The
+    /// count is what [`Self::push`] keeps for a quiet block anyway, so the
+    /// timeline comes out exactly as if the zeros had been pushed.
+    pub(crate) fn skip(&self, samples: usize) {
+        let mut inner = self.inner.lock();
+        if !inner.primed {
+            return;
+        }
+        inner.silence = inner.silence.saturating_add(samples);
+        if inner.silence >= self.capacity() {
+            inner.samples.clear();
+            inner.samples.shrink_to_fit();
+            inner.primed = false;
+            inner.silence = 0;
+        }
+    }
+
     /// The window starting at `from_100ns` over `frames` frames, as interleaved
     /// PCM.
     ///
@@ -553,7 +573,8 @@ pub struct ClipSnapshot {
     /// value.
     pub start_100ns: i64,
     pub audio_frames: usize,
-    pub fps: u32,
+    /// For ffmpeg's `-r` — see `muxer::timing`.
+    pub rate: String,
 }
 
 /// A running capture.
@@ -751,6 +772,9 @@ mod win {
     }
 }
 
+/// Longest window the mixer mixes in one go; anything longer is a gap (1 s).
+const MAX_WINDOW_100NS: i64 = 10_000_000;
+
 /// The mixer: produces gapless consecutive audio windows on the QPC axis.
 fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     let mut sources = shared.sources.lock().clone();
@@ -779,6 +803,30 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         }
         let frames = ((target - from) * SAMPLE_RATE as i64 / 10_000_000) as usize;
         if frames == 0 {
+            continue;
+        }
+
+        // A window this long means the thread did not run — the PC slept, or
+        // something stalled it. The clock kept counting, and mixing the whole
+        // gap at once asked for gigabytes after a night's sleep: the
+        // allocation failed and took the app and the buffer with it. Nobody
+        // was playing in that gap, so it is counted as silence instead.
+        if target - from > MAX_WINDOW_100NS {
+            log::warn!("audio: {} s without a window — counted as silence", (target - from) / 10_000_000);
+            let rings = shared.tracks.lock();
+            let recording = shared.recorder.lock().clone();
+            let recording = recording.filter(|recorder| recorder.begin_window(&rings, from));
+            for ring in rings.iter() {
+                ring.skip(frames * CHANNELS);
+            }
+            drop(rings);
+            // A recording writes the gap out as zeros the next time a block
+            // arrives (`Recorder::audio`), in small pieces.
+            if let Some(recorder) = &recording {
+                recorder.end_window(frames);
+            }
+            // The buffers last held a window of normal length; nothing to give back.
+            next_100ns = Some(from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64);
             continue;
         }
 
@@ -987,20 +1035,21 @@ impl Pipeline {
         }
 
         let first_pts = packets.first().map(|p| p.pts_us).unwrap_or(0);
+        // Highest rather than last: should frames ever be reordered, the last
+        // packet is not the latest picture.
+        let last_pts = packets.iter().map(|p| p.pts_us).max().unwrap_or(0);
 
-        // How long the audio has to be is decided by how many pictures there are,
-        // not by how much time they span.
-        //
-        // The two are the same right up until a frame is lost. `mft::submit`
-        // gives up after `SUBMIT_WAIT` and says so, and the packet is then gone
-        // for good — but its neighbours keep their timestamps, so a span measured
-        // from first to last still counts it. The video does not: it is muxed as
-        // a raw elementary stream whose whole timeline comes from `-r fps`
-        // (`muxer.rs`), which makes it exactly as long as it has frames. Every
-        // dropped frame therefore used to leave the audio a frame longer than the
-        // picture, and everything after the drop running ahead of the sound.
-        let audio_frames =
-            packets.len() as i64 * SAMPLE_RATE as i64 / self.shared.fps.max(1) as i64;
+        // The picture is spread over the time its timestamps span, and the
+        // audio cut to the same length, so the two meet at both ends even when
+        // frames were lost or the clock skipped (`muxer::timing`). Counted by
+        // frames alone, as before, every lost frame left the audio a frame
+        // longer than the picture.
+        let timing = crate::muxer::timing(
+            packets.len() as u64,
+            crate::muxer::span_of(first_pts, last_pts, self.shared.fps),
+            self.shared.fps,
+        );
+        let audio_frames = timing.span_us as i64 * SAMPLE_RATE as i64 / 1_000_000;
 
         // The assignment as it stands **now**, not as it stood while recording:
         // every source has a ring of its own, so a ⧉ flipped a minute ago still
@@ -1020,7 +1069,7 @@ impl Pipeline {
             sequence_header: self.shared.sequence_header.lock().clone(),
             start_100ns: self.shared.qpc_of(first_pts),
             audio_frames: audio_frames.max(0) as usize,
-            fps: self.shared.fps,
+            rate: timing.rate,
             packets,
         })
     }
@@ -1047,6 +1096,25 @@ mod tests {
     fn qpc_of_frame(frame: i64) -> i64 {
         assert_eq!(frame % STEP, 0, "only test exactly representable distances");
         frame * 10_000_000 / SAMPLE_RATE as i64
+    }
+
+    #[test]
+    fn a_skipped_gap_reads_back_as_the_zeros_it_stands_for() {
+        let pushed = TrackRing::new("a".into(), "A".into(), 5);
+        let skipped = TrackRing::new("b".into(), "B".into(), 5);
+        let sound: Vec<i16> = vec![3; STEP as usize * CHANNELS];
+        let gap = vec![0i16; 4 * STEP as usize * CHANNELS];
+        for ring in [&pushed, &skipped] {
+            ring.push(&sound, qpc_of_frame(0));
+        }
+        pushed.push(&gap, qpc_of_frame(STEP));
+        skipped.skip(gap.len());
+        for ring in [&pushed, &skipped] {
+            ring.push(&sound, qpc_of_frame(5 * STEP));
+        }
+        let whole = 6 * STEP as usize;
+        assert_eq!(skipped.window(0, whole), pushed.window(0, whole));
+        assert_eq!(skipped.window(0, whole)[5 * STEP as usize * CHANNELS], 3);
     }
 
     #[test]
