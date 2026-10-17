@@ -159,6 +159,9 @@ export interface ClipMeta {
   game: string | null;
 }
 
+/** Settings writes so far — see `patchConfig`. */
+let configWrites = 0;
+
 export const useEngine = create<EngineState>((set, get) => ({
   ready: false,
   config: mock.mockConfig,
@@ -297,6 +300,12 @@ export const useEngine = create<EngineState>((set, get) => ({
       await events.onClipDeleted((id) =>
         set((st) => ({ clips: st.clips.filter((c) => c.id !== id) })),
       );
+      // The core corrected the settings by itself; a write still on its way
+      // answers with the same correction.
+      await events.onConfigChanged((config) => {
+        configWrites++;
+        set({ config });
+      });
       // Only the newest read counts; an older one landing late would undo it.
       let reads = 0;
       await events.onClipsChanged(() => {
@@ -363,8 +372,14 @@ export const useEngine = create<EngineState>((set, get) => ({
     const config = { ...get().config, ...patch };
     set({ config });
     if (!inTauri) return;
+    const ticket = ++configWrites;
     try {
-      await api.setConfig(config);
+      // The core's answer, not what was sent: it puts back a source changed
+      // mid-recording, swaps an encoder that is not there, cleans colours.
+      // Kept as sent, the uncorrected copy went back with the next change.
+      // Only the newest answer counts — an older one landing late would undo it.
+      const kept = await api.setConfig(config);
+      if (ticket === configWrites) set({ config: kept });
     } catch (err) {
       // The selection already stands in the UI — if the core does not accept it,
       // somebody has to see that rather than have it fail silently.

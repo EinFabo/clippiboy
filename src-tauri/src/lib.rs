@@ -493,7 +493,9 @@ fn start_buffer_if_configured(app: &tauri::AppHandle) {
 /// recording source, banner, console — and save if anything moved.
 ///
 /// At startup, and again whenever the screen watcher has seen them change.
-fn repair_screens(state: &AppState) {
+fn repair_screens(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let state = app.state::<AppState>();
     let mut config = state.config.lock();
     let fixed_source = capture::repair(&mut config.recording);
     let fixed_banner = capture::repair_overlay(&mut config.overlay);
@@ -526,9 +528,18 @@ fn repair_screens(state: &AppState) {
             config.console_monitor
         );
     }
-    if (fixed_source || fixed_banner || fixed_console) && config::save(&config).is_err() {
+    if !(fixed_source || fixed_banner || fixed_console) {
+        return;
+    }
+    if config::save(&config).is_err() {
         log::warn!("the corrected screen was not saved");
     }
+    // The windows keep a copy of the settings and send all of it back on the
+    // next change. Left with the old device name, an unrelated switch put it
+    // back — and that read as a new source and restarted the buffer.
+    let fixed = config.clone();
+    drop(config);
+    let _ = app.emit("config-changed", fixed);
 }
 
 /// Put the banner and the console back on their screens when the screens change.
@@ -563,7 +574,7 @@ fn watch_monitors(app: &tauri::AppHandle) {
         return;
     }
     log::info!("the screens have changed \u{2014} laying banner and console out again");
-    repair_screens(&app.state::<AppState>());
+    repair_screens(app);
     overlay::reposition(app);
     console::relayout(app);
 }
@@ -607,7 +618,7 @@ fn watch_screen(app: &tauri::AppHandle) {
         // The automation may have switched the buffer off in the meantime —
         // then there is nothing to move.
         if state.is_buffering() && !state.is_recording() {
-            repair_screens(&state);
+            repair_screens(&app);
             state.stop_pipeline();
             match state.start_pipeline() {
                 Ok(()) => {
@@ -1222,7 +1233,7 @@ pub fn run() {
             // at boot, so after a restart it can name a different panel than it
             // did yesterday — the identity saved beside it says which one was
             // meant, and the device name is corrected from it here.
-            repair_screens(&app.state::<AppState>());
+            repair_screens(app.handle());
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);

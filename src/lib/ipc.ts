@@ -44,7 +44,8 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   /** The logo as RGBA pixels, square, for the tray and the task bar. */
   setLogoIcon: (rgba: number[], size: number) => invoke<void>("set_logo_icon", { rgba, size }),
-  setConfig: (config: AppConfig) => invoke<void>("set_config", { config }),
+  /** Answers with the settings as the core keeps them — it corrects some. */
+  setConfig: (config: AppConfig) => invoke<AppConfig>("set_config", { config }),
   /** Play a notification sound at `volume` (0–1), switched on or not. */
   previewSound: (kind: SoundKind, volume: number) => invoke<void>("preview_sound", { kind, volume }),
   /** The download link the installer came from, if its name carried one. */
@@ -217,6 +218,9 @@ export const events = {
    * read the list back, a copy could be older than what this window has.
    */
   onClipsChanged: (cb: () => void): Promise<UnlistenFn> => listen("clips-changed", () => cb()),
+  /** The core changed the settings by itself (a screen came back under a new name). */
+  onConfigChanged: (cb: (config: AppConfig) => void): Promise<UnlistenFn> =>
+    listen<AppConfig>("config-changed", (e) => cb(e.payload)),
   onClipProgress: (cb: (p: ClipProgress) => void): Promise<UnlistenFn> =>
     listen<ClipProgress>("clip-progress", (e) => cb(e.payload)),
   /** Writing a stopped recording out, 0 to 1; 1 means done, either way. */

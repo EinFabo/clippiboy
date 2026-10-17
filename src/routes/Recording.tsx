@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -108,6 +108,9 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
     })),
   );
   const rec = config.recording;
+  /** The buffer sliders while dragged — see there. */
+  const [secondsDraft, setSecondsDraft] = useState<number | null>(null);
+  const [memoryDraft, setMemoryDraft] = useState<number | null>(null);
 
   // Windows come and go: when ClippiBoy started the game usually was not
   // running yet, so the list is fetched again when the page opens.
@@ -386,26 +389,32 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 </p>
               </div>
               <span className="font-mono text-sm text-ink-muted">
-                {formatBufferSeconds(config.buffer.seconds)}
+                {formatBufferSeconds(secondsDraft ?? config.buffer.seconds)}
               </span>
             </div>
             <div className="mt-4">
+              {/* Written when the knob is let go. Every step on the way used to
+                  reach the core, and a drag that passed below the value it
+                  ended on shrank the buffer there — what lay beyond was gone. */}
               <Slider
                 label="Buffer length"
-                value={config.buffer.seconds}
+                value={secondsDraft ?? config.buffer.seconds}
                 min={15}
                 max={600}
                 step={15}
-                onChange={(seconds) =>
-                  patchConfig({
+                onChange={setSecondsDraft}
+                onCommit={(seconds) => {
+                  setSecondsDraft(null);
+                  if (seconds === config.buffer.seconds) return;
+                  void patchConfig({
                     buffer: {
                       ...config.buffer,
                       seconds,
                       // A clip can never outlast the buffer it is cut from.
                       clipSeconds: Math.min(config.buffer.clipSeconds, seconds),
                     },
-                  })
-                }
+                  });
+                }}
               />
             </div>
           </div>
@@ -461,19 +470,22 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 </p>
               </div>
               <span className="font-mono text-sm text-ink-muted">
-                {memoryBudgetMb(rec, config.buffer)} MB
+                {memoryDraft ?? memoryBudgetMb(rec, config.buffer)} MB
               </span>
             </div>
             <div className="mt-4">
+              {/* Let go, then written — the same reason as the length above. */}
               <Slider
                 label="Memory budget"
-                value={memoryBudgetMb(rec, config.buffer)}
+                value={memoryDraft ?? memoryBudgetMb(rec, config.buffer)}
                 min={64}
                 max={4096}
                 step={64}
-                onChange={(memoryMb) =>
-                  patchConfig({ buffer: { ...config.buffer, memoryMb } })
-                }
+                onChange={setMemoryDraft}
+                onCommit={(memoryMb) => {
+                  setMemoryDraft(null);
+                  void patchConfig({ buffer: { ...config.buffer, memoryMb } });
+                }}
               />
             </div>
             <p className="mt-3 text-xs text-ink-faint">

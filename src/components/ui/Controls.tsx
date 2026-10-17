@@ -94,6 +94,7 @@ export function Slider({
   max,
   step = 1,
   onChange,
+  onCommit,
   label,
 }: {
   value: number;
@@ -101,9 +102,17 @@ export function Slider({
   max: number;
   step?: number;
   onChange: (v: number) => void;
+  /**
+   * Where the knob was let go — by the pointer or after a key. For settings
+   * where every value in between would do something: `onChange` then only
+   * moves a draft.
+   */
+  onCommit?: (v: number) => void;
   label?: string;
 }) {
   const pct = ((value - min) / (max - min)) * 100;
+  const commit = (e: React.SyntheticEvent<HTMLInputElement>) =>
+    onCommit?.(Number(e.currentTarget.value));
   return (
     <input
       type="range"
@@ -113,6 +122,8 @@ export function Slider({
       max={max}
       step={step}
       onChange={(e) => onChange(Number(e.target.value))}
+      onPointerUp={commit}
+      onKeyUp={commit}
       className="h-1.5 w-full cursor-pointer appearance-none rounded-pill outline-none
         [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5
         [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-pill

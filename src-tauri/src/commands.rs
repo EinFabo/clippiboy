@@ -116,8 +116,14 @@ pub fn set_config(
         || next.recording.target_stable_id != previous.recording.target_stable_id;
     if target_changed && state.is_buffering() {
         log::info!("capture source changed — restarting the buffer");
-        state.stop_pipeline();
-        crate::start_buffer_and_notify(&app);
+        // Not here: this runs on the main thread, and stopping waits for a
+        // save while starting brings up the whole capture — every window
+        // stood still meanwhile.
+        let app = app.clone();
+        std::thread::spawn(move || {
+            tauri::Manager::state::<AppState>(&app).stop_pipeline();
+            crate::start_buffer_and_notify(&app);
+        });
     }
 
     // Hotkeys normally go through `set_hotkeys`; if they do come through here
