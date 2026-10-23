@@ -367,40 +367,44 @@ fn export_part(target: &Path) -> std::path::PathBuf {
 }
 
 /// The name a manual export is offered under: `"<stem> - <n> MB.mp4"`. Not
-/// the console's `"<stem> (<n> MB).mp4"` — that pattern is reserved for its
-/// Discord copies, which go when the clip is edited or deleted, and a manual
-/// export saved beside the clip must never go with them.
+/// the console's `"<stem> (<n> MB).mp4"`, so the two never stand for each
+/// other — the console's copies live in ClippiBoy's own data folder
+/// ([`discord_dir`]) and go when the clip is edited or deleted.
 fn manual_export_name(clip_stem: &str, megabytes: u64) -> String {
     format!("{clip_stem} - {megabytes} MB.mp4")
 }
 
-/// Is `file_name` one of the console's Discord exports of the clip named
-/// `clip_stem` — `"<stem> (<n> MB).mp4"`, exactly?
-fn is_discord_export(clip_stem: &str, file_name: &str) -> bool {
-    file_name
-        .strip_prefix(clip_stem)
-        .and_then(|rest| rest.strip_prefix(" ("))
-        .and_then(|rest| rest.strip_suffix(" MB).mp4"))
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+/// Where the console's Discord copies are kept: ClippiBoy's data folder, where
+/// nobody but the core writes. Beside the clip they could not be told from a
+/// file of the user's under the same name.
+pub(crate) fn discord_root() -> std::path::PathBuf {
+    crate::config::data_dir().join("discord")
 }
 
-/// Delete the Discord exports beside a clip. They are copies of what the clip
-/// was: once it is edited or gone they would hand out the old picture, and they
-/// would keep its game folder from being removed.
-fn remove_discord_exports(clip_path: &Path) {
-    let (Some(folder), Some(stem)) = (clip_path.parent(), clip_path.file_stem()) else {
+/// The folder of one clip's Discord copies.
+fn discord_dir(root: &Path, clip_id: &str) -> std::path::PathBuf {
+    root.join(crate::muxer::sanitize(clip_id))
+}
+
+/// A Discord copy of the clip: `"<stem> (<n> MB).mp4"` — the name the friend
+/// sees in Discord — in the clip's own folder of copies.
+fn discord_copy(root: &Path, clip_id: &str, clip_stem: &str, megabytes: u64) -> std::path::PathBuf {
+    discord_dir(root, clip_id).join(format!("{clip_stem} ({megabytes} MB).mp4"))
+}
+
+/// Delete a clip's Discord copies. They are copies of what the clip was: once
+/// it is edited or gone they would hand out the old picture. Only the clip's
+/// folder under `root` — nothing beside the clip is ever touched.
+fn remove_discord_copies(root: &Path, clip_id: &str) {
+    // An empty id names the root itself, with every clip's copies in it.
+    if crate::muxer::sanitize(clip_id).is_empty() {
         return;
-    };
-    let stem = stem.to_string_lossy();
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if is_discord_export(&stem, &entry.file_name().to_string_lossy()) {
-            if let Err(err) = std::fs::remove_file(entry.path()) {
-                log::warn!("could not remove the Discord export {}: {err}", entry.path().display());
-            }
-        }
+    }
+    let dir = discord_dir(root, clip_id);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => log::warn!("could not remove the Discord copies in {}: {err}", dir.display()),
     }
 }
 
@@ -843,9 +847,8 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // The thumbnail too, even when none is recorded in the database.
     crate::thumbs::remove(&clip.id);
 
-    // Its Discord copies too — they would show what is gone, and keep the
-    // game folder below from being removed.
-    remove_discord_exports(Path::new(&clip.path));
+    // Its Discord copies too — they would show what is gone.
+    remove_discord_copies(&discord_root(), &clip.id);
     // If that was the last clip of its game, an empty folder would otherwise be
     // left standing.
     if let Some(folder) = folder {
@@ -1006,8 +1009,9 @@ pub fn show_clip_in_app(app: tauri::AppHandle, id: String, at: f64) -> Result<()
 ///
 /// The console's version of the export dialog: over a game there is no save
 /// dialog to point anywhere, and the next step is always the same — paste it
-/// into Discord. So the file lands beside the clip it came from, carrying the
-/// size in its name, and goes straight onto the clipboard.
+/// into Discord. So the file lands in ClippiBoy's own folder of copies
+/// ([`discord_dir`]), named after the clip with the size added, and goes
+/// straight onto the clipboard.
 #[tauri::command(async)]
 pub fn export_for_discord(
     state: State<'_, AppState>,
@@ -1023,7 +1027,11 @@ pub fn export_for_discord(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "clip".into());
-    let output = source.with_file_name(format!("{stem} ({megabytes} MB).mp4"));
+    let output = discord_copy(&discord_root(), &id, &stem, megabytes);
+    if let Some(folder) = output.parent() {
+        std::fs::create_dir_all(folder)
+            .map_err(|err| format!("Could not make a folder for the Discord copy: {err}"))?;
+    }
     let target_bytes = megabytes * 1024 * 1024;
 
     // Already there from an earlier run, small enough and newer than the clip:
@@ -1034,8 +1042,8 @@ pub fn export_for_discord(
         .unwrap_or(false)
         && stems::is_newer(&output, &source);
     if !ready {
-        // Straight to the work: the target is the core's own, beside the clip,
-        // and a clip folder on a share is as good as one on a drive.
+        // Straight to the work: the target is the core's own, in its data
+        // folder — `export_target` would rightly refuse it for the dialog.
         export_to(&state, &app, &id, target_bytes, &output)?;
     }
     crate::clipboard::copy_files(&[output.clone()])?;
@@ -1581,7 +1589,7 @@ fn store(
     // The clip's Discord copies show what it was before. An undo puts back a
     // file with the original's old time, so the age check in
     // `export_for_discord` alone would let them through.
-    remove_discord_exports(Path::new(&stored.path));
+    remove_discord_copies(&discord_root(), &clip.id);
     announce_change(app);
     Ok(stored)
 }
@@ -1729,23 +1737,56 @@ mod tests {
     }
 
     #[test]
-    fn a_discord_export_is_known_by_its_name() {
-        let stem = "Valorant_2026-10-22_12-00-00-123";
-        assert!(is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (10 MB).mp4"));
-        assert!(is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (500 MB).mp4"));
-        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123.mp4"));
-        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (ten MB).mp4"));
-        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-124 (10 MB).mp4"));
-        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (10 MB).4711.export.mp4"));
-        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 ( MB).mp4"));
+    fn a_discord_copy_lives_in_its_clips_folder_of_copies() {
+        let root = Path::new("data").join("discord");
+        let id = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
+        let folder = root.join("1b4e28ba_2fa1_11d2_883f_0016d3cca427");
+        assert_eq!(discord_dir(&root, id), folder);
+        assert_eq!(
+            discord_copy(&root, id, "Valorant_2026-10-22_12-00-00-123", 10),
+            folder.join("Valorant_2026-10-22_12-00-00-123 (10 MB).mp4"),
+            "the name the friend sees in Discord"
+        );
+        assert!(discord_dir(&root, "../../up").starts_with(&root));
+        assert!(discord_root().starts_with(crate::config::data_dir()));
     }
 
     #[test]
-    fn a_manual_export_is_never_taken_for_a_discord_copy() {
+    fn the_cleanup_takes_the_clips_copies_and_leaves_files_beside_the_clip_alone() {
+        let dir = std::env::temp_dir().join(format!("clippiboy-discord-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("discord");
+        let clips = dir.join("clips");
+        std::fs::create_dir_all(&clips).unwrap();
+        let (id, other) = ("clip-1", "clip-2");
+        let copy = discord_copy(&root, id, "Valorant", 10);
+        let kept = discord_copy(&root, other, "Valorant", 10);
+        for file in [&copy, &kept] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"x").unwrap();
+        }
+        let beside = clips.join("Valorant (10 MB).mp4");
+        std::fs::write(clips.join("Valorant.mp4"), b"x").unwrap();
+        std::fs::write(&beside, b"x").unwrap();
+
+        remove_discord_copies(&root, id);
+        assert!(!discord_dir(&root, id).exists(), "the clip's copies are gone");
+        assert!(kept.is_file(), "another clip's copies stay");
+        assert!(beside.is_file(), "a file of the user's beside the clip");
+        remove_discord_copies(&root, id);
+        remove_discord_copies(&root, "");
+        assert!(kept.is_file(), "an empty id is not the whole folder");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_manual_export_is_never_named_like_a_discord_copy() {
         let stem = "Valorant_2026-10-22_12-00-00-123";
         let name = manual_export_name(stem, 10);
         assert_eq!(name, "Valorant_2026-10-22_12-00-00-123 - 10 MB.mp4");
-        assert!(!is_discord_export(stem, &name), "the cleanup would take it");
+        assert_ne!(
+            Some(name.as_str()),
+            discord_copy(Path::new("d"), "id", stem, 10).file_name().and_then(|n| n.to_str())
+        );
     }
 
     #[test]

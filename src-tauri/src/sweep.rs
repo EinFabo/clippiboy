@@ -11,6 +11,7 @@
 //!   `<clip>.<pid>.neu.mp4`, an export's `<name>.<pid>.export.mp4` and a cam
 //!   composite's `<clip>.<pid>.cam.mp4`;
 //! - in the originals store: a cam the save did not finish (`cam.part.*`);
+//! - in the folder of Discord copies: an export's part file, as above;
 //! - in the stem store: a clip's folder with neither an index nor a clip.
 //!
 //! Only names given out here, and only files from before the start — a save
@@ -38,6 +39,10 @@ pub fn run(app: &tauri::AppHandle) {
         // The data folder first: it is local, the clip folder may not be —
         // though the stores do ask it which recordings wait to be finished.
         for path in cam_partials(&crate::edit::root(), started) {
+            remove_file(&path);
+        }
+        // A Discord copy is written beside where it goes, like any export.
+        for path in leftovers_in(&crate::commands::discord_root(), started) {
             remove_file(&path);
         }
         if let Some(mut known) = clip_ids(&app) {
