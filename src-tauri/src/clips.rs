@@ -2,6 +2,8 @@
 //! the database only holds metadata so the gallery loads without scanning the
 //! file system.
 
+use std::path::Path;
+
 use rusqlite::{params, Connection};
 
 use crate::config;
@@ -319,14 +321,9 @@ impl Library {
         Ok(())
     }
 
-    /// Removes the record and the video file.
+    /// Removes the record and its tags. The files are the caller's: a file
+    /// that cannot be deleted must keep its record (see `remove_file_patiently`).
     pub fn delete(&self, id: &str) -> rusqlite::Result<()> {
-        if let Some(clip) = self.get(id)? {
-            let _ = std::fs::remove_file(&clip.path);
-            if let Some(thumb) = clip.thumb_path {
-                let _ = std::fs::remove_file(thumb);
-            }
-        }
         self.conn
             .execute("DELETE FROM clips WHERE id = ?1", params![id])?;
         // The cascade on `tags` takes these along already — the bundled SQLite
@@ -412,6 +409,25 @@ fn decode_original(raw: Option<String>) -> Option<ClipOriginal> {
     }
 }
 
+/// Deletes a file, trying again for a while when something holds it (a player,
+/// a scanner). A file that is not there counts as gone.
+pub fn remove_file_patiently(path: &Path, attempts: u32) -> std::io::Result<()> {
+    let mut last = None;
+    for attempt in 0..attempts.max(1) {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                last = Some(err);
+                if attempt + 1 < attempts {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+                }
+            }
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +473,34 @@ mod tests {
         let clips = lib.list().unwrap();
         assert_eq!(clips[0].id, "neu");
         assert_eq!(clips.len(), 2);
+    }
+
+    fn delete_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("clippiboy-delete-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_clip_file_goes_and_a_missing_one_counts_as_gone() {
+        let dir = delete_dir();
+        let file = dir.join("clip.mp4");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(remove_file_patiently(&file, 1).is_ok());
+        assert!(!file.exists());
+        assert!(remove_file_patiently(&file, 1).is_ok(), "already gone is fine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_will_not_go_is_reported() {
+        let dir = delete_dir();
+        // A folder where the clip should be stands in for a file a player holds.
+        let blocked = dir.join("clip.mp4");
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert!(remove_file_patiently(&blocked, 2).is_err());
+        assert!(blocked.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

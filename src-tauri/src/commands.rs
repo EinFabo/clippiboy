@@ -834,17 +834,24 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // The clip first, and the stores by its stored id. The stores are named
     // after a sanitised id, so an id that is empty or spelled differently
     // named the whole store — every clip's tracks and originals went with it.
-    let clip = with_library(&state, |lib| {
-        let clip = lib.get(&id).map_err(|e| e.to_string())?;
-        if let Some(clip) = &clip {
-            lib.delete(&clip.id).map_err(|e| e.to_string())?;
-        }
-        Ok(clip)
-    })?;
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?;
     // Already gone (deleted from another window): nothing left to clear.
     let Some(clip) = clip else {
         return Ok(());
     };
+    // The file first, without the library lock — a player that holds it keeps
+    // the clip, record and all, and the notice says why.
+    if let Err(err) = crate::clips::remove_file_patiently(Path::new(&clip.path), 10) {
+        let msg = format!(
+            "Could not delete the clip ({err}). Is it open somewhere right now?"
+        );
+        crate::notify(&app, "error", msg.clone());
+        return Err(msg);
+    }
+    with_library(&state, |lib| lib.delete(&clip.id).map_err(|e| e.to_string()))?;
+    if let Some(thumb) = &clip.thumb_path {
+        let _ = std::fs::remove_file(thumb);
+    }
     let folder = std::path::PathBuf::from(&clip.path).parent().map(Path::to_path_buf);
     // The individual tracks and the original belong to the clip and serve no
     // purpose without it.

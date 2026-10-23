@@ -525,7 +525,18 @@ export const useEngine = create<EngineState>((set, get) => ({
 
   async deleteClip(id) {
     set((st) => ({ clips: st.clips.filter((c) => c.id !== id) }));
-    if (inTauri) await api.deleteClip(id);
+    if (!inTauri) return;
+    try {
+      await api.deleteClip(id);
+    } catch (err) {
+      // Refused (a player holds the file): the clip is still there, so show it.
+      set({ lastError: String(err) });
+      try {
+        set({ clips: await api.listClips() });
+      } catch {
+        // The error above already says it failed.
+      }
+    }
   },
 
   async updateClip(id, meta) {
