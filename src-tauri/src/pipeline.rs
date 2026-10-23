@@ -662,8 +662,12 @@ pub struct ClipSnapshot {
     /// value.
     pub start_100ns: i64,
     pub audio_frames: usize,
-    /// For ffmpeg's `-r` — see `muxer::timing`.
+    /// For ffmpeg's `-r` — see `muxer::timing`. Used only when the snapshot
+    /// is not [`Self::timestamped`].
     pub rate: String,
+    /// The frames go to ffmpeg with their own timestamps
+    /// (`muxer::keeps_timestamps`) instead of spread at `rate`.
+    pub timestamped: bool,
     /// The longest step between neighbouring frames, which told a short
     /// encoder from a gap for `rate` (`muxer::largest_step_us`).
     pub largest_step_us: i64,
@@ -1154,19 +1158,33 @@ impl Pipeline {
         // packet is not the latest picture.
         let last_pts = pts.iter().copied().max().unwrap_or(0);
         let largest_step_us = crate::muxer::largest_step_us(&pts);
+        let timestamped = crate::muxer::keeps_timestamps(
+            &pts,
+            largest_step_us,
+            crate::buffer::jump_limit_us(self.shared.keyframe_seconds),
+        );
 
-        // The picture is spread over the time its timestamps span, and the
-        // audio cut to the same length, so the two meet at both ends even when
-        // frames were lost or the clock skipped (`muxer::timing`). Counted by
-        // frames alone, as before, every lost frame left the audio a frame
-        // longer than the picture.
+        // The picture lasts the time its timestamps span, and the audio is cut
+        // to the same length. With its own timestamps each frame sits where it
+        // was captured, so the two meet everywhere, not only at the ends — a
+        // stall in the middle is a held frame (BUF-6). Otherwise the picture is
+        // spread evenly over that span (`muxer::timing`), which keeps the ends
+        // together even when frames were lost or the clock skipped. Counted by
+        // frames alone, as once, every lost frame left the audio a frame longer
+        // than the picture.
+        let span = crate::muxer::span_of(first_pts, last_pts, self.shared.fps);
         let timing = crate::muxer::timing(
             packets.len() as u64,
-            crate::muxer::span_of(first_pts, last_pts, self.shared.fps),
+            span,
             Some(largest_step_us),
             self.shared.fps,
         );
-        let audio_frames = timing.span_us as i64 * SAMPLE_RATE as i64 / 1_000_000;
+        let span_us = if timestamped {
+            span.unwrap_or(timing.span_us)
+        } else {
+            timing.span_us
+        };
+        let audio_frames = span_us as i64 * SAMPLE_RATE as i64 / 1_000_000;
 
         // The assignment as it stands **now**, not as it stood while recording:
         // every source has a ring of its own, so a ⧉ flipped a minute ago still
@@ -1187,6 +1205,7 @@ impl Pipeline {
             start_100ns: self.shared.qpc_of(first_pts),
             audio_frames: audio_frames.max(0) as usize,
             rate: timing.rate,
+            timestamped,
             largest_step_us,
             mixed: self.shared.mixed.clone(),
             packets,

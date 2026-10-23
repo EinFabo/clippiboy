@@ -4,6 +4,7 @@
 //!
 //!     cargo run --example record-probe -- [seconds]
 //!     cargo run --example record-probe -- --encoder qsv 10
+//!     cargo run --example record-probe -- --encoder nvenc --hole 10
 //!
 //! With no `--encoder` it works through **every** encoder Media Foundation
 //! admits to and writes a `report.txt` next to itself. That is the shape it is
@@ -43,7 +44,7 @@ fn main() {
 
     let options = Options::parse();
     match &options.encoder {
-        Some(name) => one(name, &options.variant, options.seconds, options.full),
+        Some(name) => one(name, &options.variant, options.seconds, options.full, options.hole),
         None => sweep(options.seconds, options.full),
     }
 }
@@ -53,6 +54,8 @@ struct Options {
     variant: String,
     seconds: u64,
     full: bool,
+    /// Cut a second out of the middle of the clip (BUF-6).
+    hole: bool,
 }
 
 impl Options {
@@ -62,6 +65,7 @@ impl Options {
             variant: VARIANTS[0].name.to_string(),
             seconds: 30,
             full: false,
+            hole: false,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -73,10 +77,11 @@ impl Options {
                     }
                 }
                 "--full" => options.full = true,
+                "--hole" => options.hole = true,
                 "--help" | "-h" => {
                     println!(
                         "usage: record-probe [seconds] [--encoder nvenc|amf|qsv] \
-                         [--variant {}] [--full]",
+                         [--variant {}] [--full] [--hole]",
                         VARIANTS
                             .iter()
                             .map(|v| v.name)
@@ -733,7 +738,7 @@ fn summary(encoder: &str, outcomes: &[Outcome], seconds: u64) -> String {
 }
 
 /// One encoder in one variant, measured.
-fn one(name: &str, variant: &str, seconds: u64, full: bool) {
+fn one(name: &str, variant: &str, seconds: u64, full: bool, hole: bool) {
     // The sweep sets these for the child; set them here too, so calling the
     // probe by hand behaves the same. Forcing the encoder goes past the
     // availability check on purpose — an encoder that is not offered is the
@@ -829,7 +834,7 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool) {
     verdict(&outcome, budget_us());
     outcome.print();
 
-    let snapshot = match pipeline.snapshot(5) {
+    let mut snapshot = match pipeline.snapshot(5) {
         Ok(snapshot) => snapshot,
         Err(err) => {
             println!("no snapshot: {err}");
@@ -837,6 +842,23 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool) {
             std::process::exit(1);
         }
     };
+    if hole {
+        // A second (60 frames, all between keyframes at a 2 s GOP; an encoder
+        // that keeps a shorter GOP of its own loses one) gone from the middle,
+        // as a stall leaves it — span and start stay as they are. The clip has
+        // to keep it as a held frame of about 1.017 s, not spread it over
+        // every step (BUF-6). The picture after it breaks: this clip is only
+        // for its timestamps.
+        let before = snapshot.packets.len();
+        let cut: Vec<_> = snapshot.packets.drain(30..90).collect();
+        println!(
+            "\nhole: dropped packets 30..90 ({} keyframes among them), {before} -> {} packets, \
+             timestamped: {}",
+            cut.iter().filter(|p| p.keyframe).count(),
+            snapshot.packets.len(),
+            snapshot.timestamped
+        );
+    }
     let keyframes = snapshot.packets.iter().filter(|p| p.keyframe).count();
     println!(
         "\nsnapshot: {} packets, {keyframes} keyframes, SPS/PPS {} bytes",

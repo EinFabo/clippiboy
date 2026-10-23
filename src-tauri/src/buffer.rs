@@ -20,6 +20,15 @@ pub const VIDEO_TRACK: u32 = 0;
 /// 2 s the clock uses to stop counting skipped ticks (`convert::GAP`).
 pub const DISCONTINUITY_US: i64 = 2_000_000;
 
+/// The longest step between neighbouring frames that a clip still keeps as
+/// time that passed: three keyframe intervals, and at least a second. A hang
+/// up to this long stays in the clip as a held frame, in sync with its sound
+/// (`muxer::keeps_timestamps`); a longer one is a break the ring is meant to
+/// cut (BUF-5), not something to play back.
+pub fn jump_limit_us(keyframe_seconds: u32) -> i64 {
+    (3 * keyframe_seconds as i64 * 1_000_000).max(1_000_000)
+}
+
 #[derive(Debug, Clone)]
 pub struct EncodedPacket {
     pub track: u32,

@@ -38,6 +38,7 @@ pub mod tint;
 pub mod telemetry;
 pub mod tools;
 pub mod tray;
+pub mod ts;
 pub mod updater;
 pub mod watermark;
 pub mod wgc;

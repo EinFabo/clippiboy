@@ -7,9 +7,11 @@
 //! stitch together. Because every segment encoder started its timekeeping over
 //! at zero, `+genpts` was needed and `-ss` had no effect — the clip always began
 //! at a segment boundary and was up to ten seconds too long. Now the video comes
-//! out of a single encoder as one continuous elementary stream: the cut sits on
-//! the keyframe before it, and the timestamps follow from the constant frame
-//! rate.
+//! out of a single encoder as one continuous stream, and the cut sits on the
+//! keyframe before it. Each frame keeps the time it was captured at, in a small
+//! MPEG-TS written here ([`crate::ts`]); only a snapshot that cannot carry its
+//! timestamps ([`keeps_timestamps`]) still goes as a raw stream spread at one
+//! rate ([`timing`]).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -134,12 +136,33 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // whatever drive the clips are on — a buffer's worth per save.
     let scratch = |kind: &str| request.output.with_file_name(scratch_name(&request.clip_id, kind));
 
-    // Video packets as a raw H.264 elementary stream, straight into the file:
-    // gathered in one buffer first, a long buffer at a high bitrate cost its
-    // own size in memory a second time, for the whole save.
-    let video_path = scratch("h264");
+    // Video packets straight into the file: gathered in one buffer first, a
+    // long buffer at a high bitrate cost its own size in memory a second time,
+    // for the whole save.
+    //
+    // With their timestamps when they can keep them (BUF-6): spread at one
+    // rate, a stall in the middle of the clip was smeared over all of it and
+    // pulled picture and sound apart by up to half its length. Otherwise as a
+    // raw H.264 elementary stream, as before.
+    let video_path = scratch(if snapshot.timestamped { "ts" } else { "h264" });
     let write_video = || -> std::io::Result<()> {
-        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&video_path)?);
+        let file = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&video_path)?);
+        if snapshot.timestamped {
+            let zero = snapshot.packets[0].pts_us;
+            let mut ts = crate::ts::TsWriter::new(file);
+            for (at, packet) in snapshot.packets.iter().enumerate() {
+                if at == 0 {
+                    // SPS/PPS in front of the first frame, as on the raw path.
+                    let mut first = snapshot.sequence_header.clone();
+                    first.extend_from_slice(&packet.data);
+                    ts.write_frame(packet.pts_us - zero, packet.keyframe, &first)?;
+                } else {
+                    ts.write_frame(packet.pts_us - zero, packet.keyframe, &packet.data)?;
+                }
+            }
+            return ts.finish().map(drop);
+        }
+        let mut out = file;
         // Prepend SPS/PPS. Most encoders send them before every IDR anyway —
         // any decoder skips a duplicate, but they must not be missing entirely.
         out.write_all(&snapshot.sequence_header)?;
@@ -222,9 +245,13 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         }
     }
 
-    let video = VideoInput::Raw {
-        path: video_path.clone(),
-        rate: snapshot.rate.clone(),
+    let video = if snapshot.timestamped {
+        VideoInput::Timestamped(video_path.clone())
+    } else {
+        VideoInput::Raw {
+            path: video_path.clone(),
+            rate: snapshot.rate.clone(),
+        }
     };
     // A clip is written in a second or two — nobody watches a bar for that.
     let outcome = encode(
@@ -242,7 +269,8 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     outcome
 }
 
-/// How a raw H.264 stream is laid out in time.
+/// How a raw H.264 stream is laid out in time — for the streams that cannot
+/// keep their own timestamps ([`keeps_timestamps`]) and for recordings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Timing {
     /// For ffmpeg's `-r`: pictures per second, possibly as a fraction.
@@ -314,6 +342,19 @@ pub fn largest_step_us(pts_us: &[i64]) -> i64 {
         .unwrap_or(0)
 }
 
+/// Can a snapshot go to ffmpeg with its own timestamps ([`crate::ts`])?
+///
+/// Only when the frames come in presentation order: the writer carries no DTS,
+/// so a stream with B-frames, whose pts run back and forth, keeps the raw path.
+/// And only when no step between them is longer than `jump_limit_us`
+/// ([`crate::buffer::jump_limit_us`]): a hang of a few seconds is time that
+/// passed and stays in the clip as a held frame, in sync with its sound; a
+/// longer jump (the PC slept) would be minutes of a frozen picture, and keeps
+/// the old path until the ring cuts such snapshots itself (BUF-5).
+pub fn keeps_timestamps(video_pts_us: &[i64], largest_step_us: i64, jump_limit_us: i64) -> bool {
+    video_pts_us.windows(2).all(|pair| pair[0] < pair[1]) && largest_step_us <= jump_limit_us
+}
+
 /// From the first and last timestamp of a run of frames to the span it covers:
 /// the last frame lasts a period too.
 pub fn span_of(first_pts_us: i64, last_pts_us: i64, fps: u32) -> Option<u64> {
@@ -330,11 +371,14 @@ const AAC_CODER: &str = "fast";
 /// Where a save's picture comes from.
 pub enum VideoInput {
     /// A raw H.264 elementary stream. It carries no timestamps; `rate` (for
-    /// ffmpeg's `-r`, see [`timing`]) supplies them.
+    /// ffmpeg's `-r`, see [`timing`]) spreads its frames evenly.
     Raw { path: PathBuf, rate: String },
+    /// An MPEG-TS from [`crate::ts::TsWriter`]: every frame carries its own
+    /// time, so no rate is given.
+    Timestamped(PathBuf),
 }
 
-/// Mux a raw H.264 stream and its audio into the finished clip: one mixed
+/// Mux the H.264 picture and its audio into the finished clip: one mixed
 /// audio track in the file, the inputs themselves kept as individual tracks
 /// when there is more than one. Written beside the target and only renamed
 /// onto it once ffprobe can read it.
@@ -476,12 +520,18 @@ pub(crate) fn arguments(
         .to_vec();
     args.extend(["-progress", "pipe:1", "-nostats"].map(String::from));
     match video {
-        // The elementary stream carries no timestamps — the rate supplies them
-        // ([`timing`]).
+        // The elementary stream carries no timestamps — the rate spreads its
+        // frames evenly ([`timing`]).
         VideoInput::Raw { path: video, rate } => {
             args.extend(["-f", "h264", "-r"].map(String::from));
             args.push(rate.clone());
             args.push("-i".into());
+            args.push(path(video));
+        }
+        // Each frame brings its own time; ffmpeg starts the picture at 0 as it
+        // starts the raw stream, whatever the first PTS says.
+        VideoInput::Timestamped(video) => {
+            args.extend(["-f", "mpegts", "-i"].map(String::from));
             args.push(path(video));
         }
     }
@@ -623,7 +673,7 @@ pub fn sanitize(text: &str) -> String {
         .collect()
 }
 
-/// The name of a save's intermediate file of `kind` (`h264`, `mp4`,
+/// The name of a save's intermediate file of `kind` (`ts`, `h264`, `mp4`,
 /// `<track>.wav`): `<clip id>.part.<kind>`.
 ///
 /// The clip id alone keeps it unique, and short: with the file name in front, a
@@ -668,6 +718,7 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::jump_limit_us;
 
     fn raw(path: &str, rate: &str) -> VideoInput {
         VideoInput::Raw {
@@ -814,6 +865,38 @@ mod tests {
     fn a_folder_without_a_largest_step_keeps_the_old_rule() {
         assert_eq!(timing(1080, Some(30_000_000), None, 60).rate, "60");
         assert_eq!(timing(1500, Some(30_000_000), None, 60).rate, "1500000000/30000000");
+    }
+
+    /// BUF-6: a snapshot that can carry its timestamps does, including a 3 s hang,
+    /// which used to be spread over the whole clip.
+    #[test]
+    fn an_ordinary_snapshot_keeps_its_timestamps() {
+        let limit = jump_limit_us(2); // 6 s
+        assert!(keeps_timestamps(&[0, 16_666, 33_333, 1_033_333], 1_000_000, limit));
+        assert!(keeps_timestamps(&[0, 16_666, 3_016_666], 3_000_000, limit));
+    }
+
+    /// Review Focus: B-frames arrive out of order and keep the raw path.
+    #[test]
+    fn reordered_frames_keep_the_raw_path() {
+        assert!(!keeps_timestamps(&[0, 50_000, 16_666, 33_333], 33_334, jump_limit_us(2)));
+    }
+
+    /// Review Focus: a sleep inside a snapshot keeps today's path, until BUF-5
+    /// (stage 2) cuts such snapshots.
+    #[test]
+    fn a_snapshot_across_a_discontinuity_keeps_the_raw_path() {
+        assert!(!keeps_timestamps(&[0, 16_666, 600_000_000], 599_983_334, jump_limit_us(2)));
+        assert_eq!((jump_limit_us(0), jump_limit_us(4)), (1_000_000, 12_000_000));
+    }
+
+    /// BUF-6: a timestamped input is read as MPEG-TS, with no rate.
+    #[test]
+    fn a_timestamped_input_is_read_without_a_rate() {
+        let input = VideoInput::Timestamped("C:/c/x.part.ts".into());
+        let args = arguments(&input, &[], Path::new("C:/c/x.part.mp4"), &[]);
+        assert!(args.windows(4).any(|w| w == ["-f", "mpegts", "-i", "C:/c/x.part.ts"]));
+        assert!(!args.iter().any(|a| a == "-r"));
     }
 
     /// SAVE-4: steps are measured between neighbours in time, not in arrival order.

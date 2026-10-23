@@ -124,7 +124,7 @@ pub fn is_scratch_name(name: &str) -> bool {
     if let Some((head, tail)) = name.split_once(".part.") {
         let kind = match tail.strip_suffix(".wav") {
             Some(track) => !track.is_empty() && track.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
-            None => tail == "h264" || tail == "mp4",
+            None => tail == "ts" || tail == "h264" || tail == "mp4",
         };
         return kind && ends_in_clip_id(head);
     }
@@ -275,6 +275,8 @@ mod tests {
             format!("Valorant_2026-10-22_12-00-00-123_{ID}.part.h264"),
             format!("Valorant_2026-10-22_12-00-00-123_{ID}.part.mix.wav"),
             format!("{ID}.part.mp4"),
+            format!("{ID}.part.ts"),
+            format!("Valorant_2026-10-22_12-00-00-123_{ID}.part.ts"),
             format!("{ID}.part.game_1.wav"),
             "Valorant_2026-10-22_12-00-00-123.4711.neu.mp4".into(),
             "Valorant_2026-10-22_12-00-00-123.4294967295.neu.mp4".into(),
@@ -310,6 +312,7 @@ mod tests {
         for name in [
             format!("Valorant_2026_10_20_{ID}.mp4"),
             format!("clip_{ID}.part.mkv"),
+            format!("clip_{ID}.part.tsv"),
             format!("clip_{ID}.part..wav"),
             format!("clip-{ID}.part.h264"),
             "clip_not_a_uuid_at_all_but_36_chars_x.part.h264".to_owned(),
