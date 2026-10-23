@@ -232,6 +232,7 @@ fn stereo_share(channels: usize, channel: usize) -> (f32, f32) {
 #[cfg(windows)]
 mod win {
     use super::*;
+    use crate::audio::resample::Resampler;
     use std::sync::mpsc::Sender;
     use windows::core::{implement, IUnknown, Interface, PCWSTR};
     use windows::Win32::Foundation::{CloseHandle, E_INVALIDARG, HANDLE, S_OK, WAIT_OBJECT_0};
@@ -333,7 +334,13 @@ mod win {
     }
 
     /// Convert a raw buffer to 48 kHz/stereo/f32.
-    fn convert(raw: &[u8], frames: usize, format: &Format, out: &mut Vec<f32>) {
+    fn convert(
+        raw: &[u8],
+        frames: usize,
+        format: &Format,
+        resampler: &mut Resampler,
+        out: &mut Vec<f32>,
+    ) {
         out.clear();
         let src_channels = format.channels.max(1);
 
@@ -379,26 +386,7 @@ mod win {
             stereo.push(right);
         }
 
-        if format.sample_rate == SAMPLE_RATE {
-            out.extend_from_slice(&stereo);
-            return;
-        }
-
-        // A linear resampling step; devices practically always run at 48 kHz
-        // already, this is the stopgap for 44.1 kHz and the like.
-        let ratio = SAMPLE_RATE as f64 / format.sample_rate as f64;
-        let target_frames = (frames as f64 * ratio) as usize;
-        for frame in 0..target_frames {
-            let src_pos = frame as f64 / ratio;
-            let index = src_pos.floor() as usize;
-            let frac = (src_pos - index as f64) as f32;
-            let next = (index + 1).min(frames.saturating_sub(1));
-            for channel in 0..CHANNELS {
-                let a = stereo.get(index * CHANNELS + channel).copied().unwrap_or(0.0);
-                let b = stereo.get(next * CHANNELS + channel).copied().unwrap_or(0.0);
-                out.push(a + (b - a) * frac);
-            }
-        }
+        resampler.process(&stereo, out);
     }
 
     fn device_client(device_id: &str, loopback: bool) -> windows::core::Result<(IAudioClient, Format)> {
@@ -669,6 +657,8 @@ mod win {
         }
 
         let mut converted: Vec<f32> = Vec::with_capacity(4096);
+        // One per attempt: its phase belongs to this stream and format.
+        let mut resampler = Resampler::new(format.sample_rate);
         let frame_bytes = format.channels * (format.bits as usize / 8);
 
         // See `usable_stamp` — not every device reports usable times.
@@ -740,12 +730,12 @@ mod win {
                     // feed silence instead, otherwise the track drifts.
                     if flags & 0x2 != 0 {
                         converted.clear();
-                        converted.resize(frames as usize * CHANNELS, 0.0);
+                        resampler.silence(frames as usize, &mut converted);
                     } else {
                         let raw = unsafe {
                             std::slice::from_raw_parts(data, frames as usize * frame_bytes)
                         };
-                        convert(raw, frames as usize, &format, &mut converted);
+                        convert(raw, frames as usize, &format, &mut resampler, &mut converted);
                     }
                     ring.write(&converted, qpc_100ns);
                 }

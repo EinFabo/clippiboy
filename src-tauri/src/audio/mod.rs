@@ -4,6 +4,7 @@
 pub mod capture;
 pub mod devices;
 pub mod engine;
+pub mod resample;
 pub mod ring;
 
 use std::collections::HashMap;
