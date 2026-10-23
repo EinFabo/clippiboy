@@ -257,14 +257,17 @@ impl Recorder {
 
     fn send(&self, job: Job) {
         let bytes = job.bytes();
+        // Raised before the job is handed over, so the writer's subtraction
+        // can never run ahead of it and wrap the counter.
+        let queued = self.queued.fetch_add(bytes, Ordering::Relaxed) + bytes;
         let sent = match self.jobs.lock().as_ref() {
             Some(tx) => tx.send(job).is_ok(),
             None => false,
         };
         if !sent {
+            self.queued.fetch_sub(bytes, Ordering::Relaxed);
             return;
         }
-        let queued = self.queued.fetch_add(bytes, Ordering::Relaxed) + bytes;
         if let Some(why) = backlog_failure(queued) {
             // The 1 s tick sees it and stops the recording. Nothing waits here.
             self.failure.lock().get_or_insert(why);
@@ -796,6 +799,26 @@ mod tests {
         assert_eq!(backlog_failure(WRITER_BACKLOG_LIMIT), None);
         let why = backlog_failure(WRITER_BACKLOG_LIMIT + 1).expect("over the limit");
         assert!(why.contains("cannot keep up"), "{why}");
+    }
+
+    #[test]
+    fn the_backlog_counter_is_back_at_zero_once_everything_is_written() {
+        let dir = scratch("queued");
+        let meta = Meta { id: "q".into(), fps: 60, ..Meta::default() };
+        let recorder = Recorder::start(&dir, meta, &[0, 0, 0, 1, 0x67], Vec::new(), 0).unwrap();
+        let ring = ring_with("game");
+        assert!(recorder.begin_window(&[ring.clone()], 1250));
+        for _ in 0..50 {
+            recorder.audio(&ring, &[3i16; 960]);
+        }
+        recorder.end_window(480);
+        let _ = recorder.finish(Vec::new(), None);
+        assert_eq!(recorder.queued.load(Ordering::Relaxed), 0);
+        assert!(recorder.failure().is_none());
+        // After the stop nothing is counted for a job that goes nowhere.
+        recorder.audio(&ring, &[1i16; 8]);
+        assert_eq!(recorder.queued.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
