@@ -1127,7 +1127,11 @@ impl Pipeline {
         };
         let start_100ns = self.shared.qpc_of(first.pts_us);
         let header = self.shared.sequence_header.lock().clone();
-        let recorder = Recorder::start(clip_dir, meta, &header, backlog, start_100ns)?;
+        // An encoder that reorders its frames (B-frames) keeps the raw
+        // stream: the TS carries no DTS. It shows a few frames after the
+        // stream's first keyframe, and the ring keeps it until it is cleared.
+        let timestamped = !ring.reorders();
+        let recorder = Recorder::start(clip_dir, meta, &header, backlog, start_100ns, timestamped)?;
         *self.shared.recorder.lock() = Some(recorder.clone());
         drop(ring);
         Ok(recorder)

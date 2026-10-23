@@ -8,9 +8,11 @@
 //!
 //! Only what ffmpeg's demuxer needs: one program, one H.264 stream that also
 //! carries the clock, one PES per frame with its PTS. No DTS — only frames in
-//! presentation order come this way ([`crate::muxer::keeps_timestamps`]).
+//! presentation order come this way ([`crate::muxer::keeps_timestamps`] for a
+//! clip, [`crate::buffer::ReplayBuffer::reorders`] for a recording).
 
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 /// The PID the video and its clock (PCR) travel on.
 pub const VIDEO_PID: u16 = 0x100;
@@ -20,7 +22,7 @@ const PMT_PID: u16 = 0x1000;
 /// PTS, the same gap ffmpeg's own TS muxer leaves.
 pub const PTS_OFFSET_90K: u64 = 63_000;
 
-const PACKET: usize = 188;
+pub const PACKET: usize = 188;
 /// What follows the 4-byte packet header.
 const BODY: usize = PACKET - 4;
 const SYNC: u8 = 0x47;
@@ -237,6 +239,33 @@ pub fn read_pts(bytes: &[u8]) -> Vec<u64> {
     found
 }
 
+/// How long the picture in a TS file lasts, from its first frame to the end
+/// of its last, in microseconds — for a recording that never stopped cleanly
+/// and so never wrote its span down (REC-6).
+///
+/// Only the two ends are read: the first 64 KiB and the last 1 MiB, the
+/// latter from a packet boundary counted from the start of the file. A packet
+/// cut off at the end, as a crash leaves it, is not read.
+pub fn span_us(path: &Path, fps: u32) -> Option<u64> {
+    const HEAD: u64 = 64 << 10;
+    const TAIL: u64 = 1 << 20;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut read = |from: u64, max: u64| -> Option<Vec<u64>> {
+        file.seek(SeekFrom::Start(from)).ok()?;
+        let mut bytes = Vec::new();
+        (&mut file).take(max).read_to_end(&mut bytes).ok()?;
+        Some(read_pts(&bytes))
+    };
+    let first = *read(0, HEAD)?.first()?;
+    let start = len.saturating_sub(TAIL);
+    let start = start - start % PACKET as u64;
+    let last = *read(start, u64::MAX)?.last()?;
+    // Past 26.5 hours the 33-bit clock has wrapped once.
+    let ticks = (last + WRAP_90K + 1 - first) & WRAP_90K;
+    Some(ticks * 100 / 9 + 1_000_000 / fps.max(1) as u64)
+}
+
 /// CRC-32/MPEG-2: polynomial 0x04C11DB7, starting at all ones, unreflected,
 /// with no final XOR. Over a whole section, its CRC included, it comes to 0.
 fn crc32(data: &[u8]) -> u32 {
@@ -319,6 +348,32 @@ mod tests {
         let steps: Vec<u64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
         assert_eq!(steps.iter().filter(|s| (1_499..=1_501).contains(*s)).count(), 118);
         assert!((91_490..=91_510).contains(&steps[59]), "the hole is {} ticks", steps[59]);
+    }
+
+    /// REC-6: a recording that never stopped cleanly takes its length from
+    /// its own first and last timestamp. A crash leaves a cut-off packet at
+    /// the end, which is not read as one.
+    #[test]
+    fn the_span_of_a_ts_file_is_read_from_its_ends() {
+        let mut ts = TsWriter::new(Vec::new());
+        for k in 0..120 {
+            ts.write_frame(k * 16_666, k % 60 == 0, &frame(12_000)).unwrap();
+        }
+        let mut bytes = ts.finish().unwrap();
+        bytes.extend([0x47u8; 100]);
+        let dir = std::env::temp_dir().join("clippiboy-ts-span");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("video.ts");
+        std::fs::write(&path, &bytes).unwrap();
+        let span = span_us(&path, 60).expect("a span");
+        assert!((1_999_900..=1_999_940).contains(&span), "{span}");
+        // Long enough that the two ends are read apart, the second from a
+        // start that has to be put back on a packet boundary.
+        assert!(bytes.len() > (64 << 10) + (1 << 20));
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(span_us(&path, 60), None, "an empty file has no span");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The check value of CRC-32/MPEG-2.

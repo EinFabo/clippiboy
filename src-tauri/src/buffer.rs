@@ -65,6 +65,10 @@ pub struct ReplayBuffer {
     keyframes: VecDeque<(u64, i64)>,
     bytes: u64,
     newest_pts: i64,
+    /// Has a video packet come in behind the newest one since the last clear?
+    /// An encoder with B-frames does that, and its stream cannot go into a
+    /// TS without DTS ([`crate::ts`]).
+    reorders: bool,
 }
 
 impl ReplayBuffer {
@@ -79,6 +83,7 @@ impl ReplayBuffer {
             keyframes: VecDeque::new(),
             bytes: 0,
             newest_pts: 0,
+            reorders: false,
         }
     }
 
@@ -89,6 +94,10 @@ impl ReplayBuffer {
     }
 
     pub fn push(&mut self, packet: EncodedPacket) {
+        // Before `newest_pts` moves: a picture behind the newest one so far.
+        if packet.is_video() && packet.pts_us < self.newest_pts {
+            self.reorders = true;
+        }
         self.newest_pts = self.newest_pts.max(packet.pts_us);
         self.bytes += packet.data.len() as u64;
         if packet.is_video() && packet.keyframe {
@@ -170,6 +179,13 @@ impl ReplayBuffer {
         self.bytes = 0;
         self.head_seq = self.next_seq;
         self.newest_pts = 0;
+        self.reorders = false;
+    }
+
+    /// Does the encoder hand out pictures out of order (B-frames)? Then a
+    /// recording keeps the raw stream rather than its timestamps.
+    pub fn reorders(&self) -> bool {
+        self.reorders
     }
 
     pub fn bytes(&self) -> u64 {
@@ -414,6 +430,25 @@ mod tests {
             buf.bytes() > 1,
             "the budget was allowed to win over the last group of pictures"
         );
+    }
+
+    /// Review Focus, BUF-6: an encoder with B-frames hands out pictures
+    /// behind the newest one. A recording then cannot keep its timestamps (the
+    /// TS carries no DTS), so the ring says so; a clear starts afresh.
+    #[test]
+    fn a_ring_notices_reordered_frames() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        for (pts, key) in [(0, true), (16_666, false), (33_333, false)] {
+            buf.push(EncodedPacket { pts_us: pts, ..packet(VIDEO_TRACK, 0, key, 10) });
+        }
+        assert!(!buf.reorders());
+        buf.clear();
+        for (pts, key) in [(0, true), (50_000, false), (16_666, false)] {
+            buf.push(EncodedPacket { pts_us: pts, ..packet(VIDEO_TRACK, 0, key, 10) });
+        }
+        assert!(buf.reorders());
+        buf.clear();
+        assert!(!buf.reorders(), "a clear starts afresh");
     }
 
     #[test]

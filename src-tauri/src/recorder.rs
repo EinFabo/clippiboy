@@ -6,10 +6,17 @@
 //! in memory. A writer thread streams it all into a folder of its own,
 //!
 //! ```text
-//! <clip folder>/.recording/<id>/video.h264    the raw elementary stream
+//! <clip folder>/.recording/<id>/video.ts      the picture, every frame with its time
 //! <clip folder>/.recording/<id>/track_<n>.pcm one per source, 16-bit, 48 kHz
 //! <clip folder>/.recording/<id>/meta.json     what the files are
 //! ```
+//!
+//! The picture keeps its timestamps in a small MPEG-TS ([`crate::ts`]), so a
+//! stall is a held frame where it happened rather than spread over the whole
+//! file (BUF-6), and a folder finished after a crash plays at its real speed
+//! (REC-6). An encoder with B-frames, whose pictures come out of order, and
+//! folders written before this version have `video.h264` instead: the raw
+//! elementary stream, spread at one rate (`muxer::timing`).
 //!
 //! and stopping muxes that into an MP4 the same way a clip is written
 //! (`muxer::encode`). The folder sits inside the clip folder on purpose: the
@@ -34,11 +41,16 @@ use crate::audio::capture::{CHANNELS, SAMPLE_RATE};
 use crate::buffer::{EncodedPacket, DISCONTINUITY_US};
 use crate::muxer::{self, AudioInput, ClipResult};
 use crate::pipeline::TrackRing;
+use crate::ts::{self, TsWriter};
 
 /// The folder inside the clip folder that unfinished recordings live in.
 pub const WORK_DIR: &str = ".recording";
 
+/// The picture as a raw elementary stream: from an encoder that reorders its
+/// frames, or from a version before [`VIDEO_TS`].
 const VIDEO_FILE: &str = "video.h264";
+/// The picture with its timestamps.
+const VIDEO_TS: &str = "video.ts";
 const META_FILE: &str = "meta.json";
 const MIX_FILE: &str = "mix.pcm";
 
@@ -153,7 +165,16 @@ pub struct MetaTrack {
 
 /// What the writer thread is told to do.
 enum Job {
-    Video(Arc<[u8]>),
+    /// One frame. `pts_us` counts from the recording's first frame, its gaps
+    /// taken out; only the TS writes it.
+    Video {
+        data: Arc<[u8]>,
+        pts_us: i64,
+        keyframe: bool,
+    },
+    /// SPS/PPS. Raw, it goes into the stream as it is; in a TS it is no frame
+    /// of its own and rides in front of the next one.
+    Header(Arc<[u8]>),
     Open(usize),
     Audio(usize, Vec<i16>),
     /// Zeros, counted in frames rather than handed over — a source that joins
@@ -170,9 +191,52 @@ impl Job {
     /// What the job holds in memory while it waits in the queue.
     fn bytes(&self) -> u64 {
         match self {
-            Job::Video(data) => data.len() as u64,
+            Job::Video { data, .. } | Job::Header(data) => data.len() as u64,
             Job::Audio(_, samples) => samples.len() as u64 * 2,
             Job::Open(_) | Job::Silence(..) | Job::Meta(_) => 0,
+        }
+    }
+}
+
+/// Where the writer puts the picture.
+enum VideoOut {
+    Ts(TsWriter<BufWriter<File>>),
+    Raw(BufWriter<File>),
+}
+
+/// The picture's file, and in a TS the header still waiting for a frame.
+struct VideoSink {
+    out: VideoOut,
+    header: Vec<u8>,
+}
+
+impl VideoSink {
+    fn header(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match &mut self.out {
+            VideoOut::Ts(_) => {
+                self.header.extend_from_slice(data);
+                Ok(())
+            }
+            VideoOut::Raw(out) => out.write_all(data),
+        }
+    }
+
+    fn frame(&mut self, data: &[u8], pts_us: i64, keyframe: bool) -> std::io::Result<()> {
+        match &mut self.out {
+            VideoOut::Ts(ts) if self.header.is_empty() => ts.write_frame(pts_us, keyframe, data),
+            VideoOut::Ts(ts) => {
+                let mut unit = std::mem::take(&mut self.header);
+                unit.extend_from_slice(data);
+                ts.write_frame(pts_us, keyframe, &unit)
+            }
+            VideoOut::Raw(out) => out.write_all(data),
+        }
+    }
+
+    fn close(self) -> std::io::Result<()> {
+        match self.out {
+            VideoOut::Ts(ts) => ts.finish().map(drop),
+            VideoOut::Raw(mut out) => out.flush(),
         }
     }
 }
@@ -224,17 +288,23 @@ impl Recorder {
     /// Create the folder and the writer, and write the packets the recording
     /// starts with (see `ReplayBuffer::from_last_keyframe`) behind the
     /// sequence header.
+    ///
+    /// `timestamped`: the frames come in presentation order and go into
+    /// [`VIDEO_TS`] with their times. Otherwise (B-frames) the raw stream
+    /// goes into [`VIDEO_FILE`], as before.
     pub fn start(
         clip_dir: &Path,
         meta: Meta,
         sequence_header: &[u8],
         backlog: Vec<EncodedPacket>,
         start_100ns: i64,
+        timestamped: bool,
     ) -> Result<Arc<Self>, String> {
         let dir = clip_dir.join(WORK_DIR).join(&meta.id);
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("could not create '{}': {err}", dir.display()))?;
-        let video = File::create(dir.join(VIDEO_FILE))
+        let name = if timestamped { VIDEO_TS } else { VIDEO_FILE };
+        let video = File::create(dir.join(name))
             .map_err(|err| format!("could not create the recording: {err}"))?;
         write_meta(&dir, &meta)?;
 
@@ -248,7 +318,15 @@ impl Recorder {
             std::thread::Builder::new()
                 .name("clippiboy-recorder".into())
                 .spawn(move || {
-                    let mut video = BufWriter::with_capacity(WRITE_BUFFER, video);
+                    let video = BufWriter::with_capacity(WRITE_BUFFER, video);
+                    let mut video = VideoSink {
+                        out: if timestamped {
+                            VideoOut::Ts(TsWriter::new(video))
+                        } else {
+                            VideoOut::Raw(video)
+                        },
+                        header: Vec::new(),
+                    };
                     let mut tracks: Vec<Option<BufWriter<File>>> = Vec::new();
                     let mut broken = false;
                     for job in rx {
@@ -267,7 +345,7 @@ impl Recorder {
                         }
                         queued.fetch_sub(bytes, Ordering::Relaxed);
                     }
-                    let _ = video.flush();
+                    let _ = video.close();
                     for track in tracks.iter_mut().flatten() {
                         let _ = track.flush();
                     }
@@ -300,7 +378,7 @@ impl Recorder {
 
         // SPS/PPS first, as a clip does: most encoders repeat them before every
         // IDR, but they must not be missing.
-        recorder.send(Job::Video(sequence_header.to_vec().into()));
+        recorder.send(Job::Header(sequence_header.to_vec().into()));
         for packet in &backlog {
             recorder.video(packet);
         }
@@ -347,7 +425,16 @@ impl Recorder {
         }
         self.video_bytes
             .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
-        self.send(Job::Video(packet.data.clone()));
+        // From the first frame, less the gaps so far — including one this
+        // frame just closed: the written times run on without a hole.
+        let pts_us = packet.pts_us
+            - self.first_pts_us.load(Ordering::Relaxed)
+            - self.closed_us.load(Ordering::Relaxed);
+        self.send(Job::Video {
+            data: packet.data.clone(),
+            pts_us,
+            keyframe: packet.keyframe,
+        });
     }
 
     /// A jump in the picture too long for a stall: the PC slept, or the
@@ -564,13 +651,18 @@ fn track_file(index: usize) -> String {
 fn run_job(
     dir: &Path,
     job: Job,
-    video: &mut BufWriter<File>,
+    video: &mut VideoSink,
     tracks: &mut Vec<Option<BufWriter<File>>>,
 ) -> Result<(), String> {
     match job {
-        Job::Video(data) => {
+        Job::Video { data, pts_us, keyframe } => {
             video
-                .write_all(&data)
+                .frame(&data, pts_us, keyframe)
+                .map_err(|err| format!("could not write the video: {err}"))?;
+        }
+        Job::Header(data) => {
+            video
+                .header(&data)
                 .map_err(|err| format!("could not write the video: {err}"))?;
         }
         Job::Open(index) => {
@@ -911,6 +1003,43 @@ fn count_frames(video: &Path) -> Option<u64> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+/// The picture of a finished folder for `muxer::encode`, and how long it
+/// lasts in microseconds — what the sound is cut to.
+///
+/// A [`VIDEO_TS`] brings its own times. Its span is the one a clean stop wrote
+/// down, or after a crash the one between its first and last timestamp
+/// (REC-6) — no longer the nominal rate, which ran the picture ahead of its
+/// sound by every frame lost. A [`VIDEO_FILE`] is spread as it always was.
+fn recorded_video(dir: &Path, meta: &Meta) -> Result<(muxer::VideoInput, u64), String> {
+    let fps = meta.fps.max(1);
+    if meta.frames == Some(0) {
+        return Err("The recording is empty.".into());
+    }
+    let unreadable = || "the recording's video could not be read".to_string();
+    let stamped = dir.join(VIDEO_TS);
+    if stamped.is_file() {
+        let span_us = match meta.span_us {
+            Some(span) => span,
+            None => ts::span_us(&stamped, fps).ok_or_else(unreadable)?,
+        };
+        return Ok((muxer::VideoInput::Timestamped(stamped), span_us));
+    }
+    let video = dir.join(VIDEO_FILE);
+    let frames = match meta.frames {
+        Some(frames) => frames,
+        None => count_frames(&video).ok_or_else(unreadable)?,
+    };
+    if frames == 0 {
+        return Err("The recording is empty.".into());
+    }
+    let timing = muxer::timing(frames, meta.span_us, meta.largest_step_us, fps);
+    let video = muxer::VideoInput::Raw {
+        path: video,
+        rate: timing.rate,
+    };
+    Ok((video, timing.span_us))
+}
+
 /// Turn a finished folder into the recording at `output`, and clear the folder
 /// away once that worked.
 ///
@@ -925,26 +1054,12 @@ pub fn finalize(
     output: PathBuf,
     on_progress: &dyn Fn(f32),
 ) -> Result<ClipResult, String> {
-    let video = dir.join(VIDEO_FILE);
-    let fps = meta.fps.max(1);
-    let frames = match meta.frames {
-        Some(frames) => frames,
-        None => count_frames(&video)
-            .ok_or_else(|| "the recording's video could not be read".to_string())?,
-    };
-    if frames == 0 {
-        return Err("The recording is empty.".into());
-    }
-    let timing = muxer::timing(frames, meta.span_us, meta.largest_step_us, fps);
-    let audio_frames = timing.span_us * SAMPLE_RATE as u64 / 1_000_000;
+    let (video, span_us) = recorded_video(dir, meta)?;
+    let audio_frames = span_us * SAMPLE_RATE as u64 / 1_000_000;
     let inputs = prepare_tracks(dir, meta, audio_frames)?;
     on_progress(0.1);
 
-    let length_ms = timing.span_us / 1000;
-    let video = muxer::VideoInput::Raw {
-        path: video,
-        rate: timing.rate,
-    };
+    let length_ms = span_us / 1000;
     let result = muxer::encode(
         &video,
         &inputs,
@@ -973,11 +1088,16 @@ pub fn finalize(
 }
 
 /// A work folder with nothing to finish: no frame was written (a crash in the
-/// first half second), or the video file is missing or empty. Decided by the
-/// files alone, never by ffprobe, which may simply be absent.
+/// first half second), or the video file is missing or empty — for a TS, not
+/// even one whole packet. Decided by the files alone, never by ffprobe, which
+/// may simply be absent.
 pub fn is_empty_leftover(dir: &Path, meta: &Meta) -> bool {
-    meta.frames == Some(0)
-        || std::fs::metadata(dir.join(VIDEO_FILE)).map_or(true, |m| m.len() == 0)
+    let size = |name: &str| std::fs::metadata(dir.join(name)).ok().map(|m| m.len());
+    let empty = match size(VIDEO_TS) {
+        Some(len) => len < ts::PACKET as u64,
+        None => size(VIDEO_FILE).is_none_or(|len| len == 0),
+    };
+    meta.frames == Some(0) || empty
 }
 
 /// Folders left behind by a recording that never stopped — the app crashed, or
@@ -1028,7 +1148,7 @@ mod tests {
         let dir = scratch("step");
         let meta = Meta { id: "s".into(), fps: 60, ..Meta::default() };
         let backlog = vec![frame(0, true), frame(16_666, false), frame(516_666, false)];
-        let recorder = Recorder::start(&dir, meta, &[], backlog, 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], backlog, 0, true).unwrap();
         assert_eq!(recorder.finish(Vec::new(), None).largest_step_us, Some(500_000));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1044,7 +1164,7 @@ mod tests {
     fn the_tracks_that_feed_the_main_mix_are_counted() {
         let dir = scratch("in-mix");
         let meta = Meta { id: "m".into(), fps: 60, ..Meta::default() };
-        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
         let (game, mic) = (ring_with("game"), ring_with("mic"));
         game.push(&[5i16; 12], 0);
         assert!(recorder.begin_window(&[game.clone(), mic.clone()], 1250));
@@ -1070,6 +1190,122 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// REC-6: a leftover that wrote its picture as MPEG-TS is told apart
+    /// from an empty one by that file, with no `video.h264` beside it.
+    #[test]
+    fn an_empty_timestamped_leftover_is_recognised() {
+        let dir = scratch("empty-ts");
+        std::fs::write(dir.join(VIDEO_TS), b"").unwrap();
+        assert!(is_empty_leftover(&dir, &Meta::default()));
+        // Less than one packet: nothing ffmpeg could read.
+        std::fs::write(dir.join(VIDEO_TS), [0x47u8; 100]).unwrap();
+        assert!(is_empty_leftover(&dir, &Meta::default()));
+        let mut ts = ts::TsWriter::new(Vec::new());
+        ts.write_frame(0, true, &[0, 0, 0, 1, 0x65]).unwrap();
+        std::fs::write(dir.join(VIDEO_TS), ts.finish().unwrap()).unwrap();
+        assert!(!is_empty_leftover(&dir, &Meta::default()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BUF-6: a recording keeps the time of every frame.
+    #[test]
+    fn a_recording_keeps_the_times_of_its_frames() {
+        let dir = scratch("ts");
+        let meta = Meta { id: "t".into(), fps: 60, ..Meta::default() };
+        let backlog = vec![frame(0, true), frame(16_666, false), frame(516_666, false)];
+        let recorder = Recorder::start(&dir, meta, &[], backlog, 0, true).unwrap();
+        let _ = recorder.finish(Vec::new(), None);
+        let written = std::fs::read(dir.join(WORK_DIR).join("t").join(VIDEO_TS)).unwrap();
+        assert_eq!(ts::read_pts(&written), vec![63_000, 64_500, 109_500]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-1 together with BUF-6: a gap is taken out of the written times.
+    #[test]
+    fn a_closed_gap_is_taken_out_of_the_written_times() {
+        let dir = scratch("tsgap");
+        let meta = Meta { id: "g".into(), fps: 60, ..Meta::default() };
+        let backlog = [0, 16_666, 600_000_000, 600_016_666]
+            .map(|pts| frame(pts, pts % 600_000_000 == 0))
+            .to_vec();
+        let recorder = Recorder::start(&dir, meta, &[], backlog, 0, true).unwrap();
+        let _ = recorder.finish(Vec::new(), None);
+        let written = std::fs::read(dir.join(WORK_DIR).join("g").join(VIDEO_TS)).unwrap();
+        assert_eq!(ts::read_pts(&written), vec![63_000, 64_500, 66_000, 67_500]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BUF-6: SPS/PPS are no frame of their own. They ride in front of the
+    /// first one, so the times stay one per picture.
+    #[test]
+    fn the_sequence_header_rides_in_front_of_the_first_frame() {
+        let dir = scratch("tshead");
+        let meta = Meta { id: "h".into(), fps: 60, ..Meta::default() };
+        let header = [0u8, 0, 0, 1, 0x67, 0x42];
+        let recorder = Recorder::start(&dir, meta, &header, vec![frame(0, true)], 0, true).unwrap();
+        let _ = recorder.finish(Vec::new(), None);
+        let written = std::fs::read(dir.join(WORK_DIR).join("h").join(VIDEO_TS)).unwrap();
+        assert_eq!(ts::read_pts(&written), vec![63_000]);
+        let together = [&header[..], &[0u8, 1]].concat();
+        assert!(written.windows(together.len()).any(|w| w == together), "header and frame apart");
+        assert_eq!(recorder.queued.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BUF-6: an encoder with B-frames sends its pictures out of order, and
+    /// the TS carries no DTS. Such a recording stays a raw stream.
+    #[test]
+    fn a_reordering_encoder_records_raw() {
+        let dir = scratch("raw");
+        let meta = Meta { id: "r".into(), fps: 60, ..Meta::default() };
+        let backlog = vec![frame(0, true), frame(50_000, false), frame(16_666, false)];
+        let header = [0u8, 0, 0, 1, 0x67];
+        let recorder = Recorder::start(&dir, meta, &header, backlog, 0, false).unwrap();
+        let _ = recorder.finish(Vec::new(), None);
+        let folder = dir.join(WORK_DIR).join("r");
+        assert!(!folder.join(VIDEO_TS).exists());
+        let raw = std::fs::read(folder.join(VIDEO_FILE)).unwrap();
+        assert_eq!(raw, [&header[..], &[0, 1], &[0, 1], &[0, 1]].concat());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review Focus: a folder from the version before finalizes as it always did.
+    #[test]
+    fn a_folder_from_before_the_update_still_finalizes_raw() {
+        let dir = scratch("old");
+        std::fs::write(dir.join("video.h264"), [0u8; 4]).unwrap();
+        let meta = Meta { fps: 60, frames: Some(1800), span_us: Some(30_000_000), ..Meta::default() };
+        let (video, span) = recorded_video(&dir, &meta).unwrap();
+        assert!(matches!(&video, muxer::VideoInput::Raw { rate, .. } if rate == "1800000000/30000000"));
+        assert_eq!(span, 30_000_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-6: a recording that never stopped cleanly has no span in its
+    /// description. It is read off the file's timestamps instead of assumed
+    /// from the nominal rate.
+    #[test]
+    fn a_crashed_recording_takes_its_span_from_the_file() {
+        let dir = scratch("crashed");
+        let mut ts = ts::TsWriter::new(Vec::new());
+        // 60 frames, of which 20 were lost: the nominal rate would make 0.67 s of it.
+        for k in (0..60).filter(|k| k % 3 != 1) {
+            ts.write_frame(k * 16_666, k == 0, &[0, 0, 0, 1, 0x41]).unwrap();
+        }
+        std::fs::write(dir.join(VIDEO_TS), ts.finish().unwrap()).unwrap();
+        let meta = Meta { fps: 60, ..Meta::default() };
+        let (video, span) = recorded_video(&dir, &meta).unwrap();
+        assert!(matches!(&video, muxer::VideoInput::Timestamped(path) if path == &dir.join(VIDEO_TS)));
+        assert!((999_900..=1_000_000).contains(&span), "{span}");
+        // A clean stop's own span is taken as it is.
+        let meta = Meta { fps: 60, span_us: Some(1_000_000), ..Meta::default() };
+        assert_eq!(recorded_video(&dir, &meta).unwrap().1, 1_000_000);
+        // No frame at all is an empty recording, not one to mux.
+        let meta = Meta { fps: 60, frames: Some(0), ..Meta::default() };
+        assert!(recorded_video(&dir, &meta).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_writer_half_a_gigabyte_behind_stops_the_recording() {
         assert_eq!(backlog_failure(WRITER_BACKLOG_LIMIT), None);
@@ -1081,7 +1317,7 @@ mod tests {
     fn the_backlog_counter_is_back_at_zero_once_everything_is_written() {
         let dir = scratch("queued");
         let meta = Meta { id: "q".into(), fps: 60, ..Meta::default() };
-        let recorder = Recorder::start(&dir, meta, &[0, 0, 0, 1, 0x67], Vec::new(), 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[0, 0, 0, 1, 0x67], Vec::new(), 0, true).unwrap();
         let ring = ring_with("game");
         assert!(recorder.begin_window(&[ring.clone()], 1250));
         for _ in 0..50 {
@@ -1101,13 +1337,13 @@ mod tests {
     fn a_description_that_cannot_be_written_still_closes_the_recording() {
         let dir = scratch("meta-fails");
         let meta = Meta { id: "m".into(), fps: 60, ..Meta::default() };
-        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
         // A folder where the temp file goes: the write fails like a full or vanished drive.
         std::fs::create_dir_all(recorder.dir.join("meta.json.tmp")).unwrap();
         let meta = recorder.finish(Vec::new(), Some("Valorant".into()));
         assert_eq!(meta.frames, Some(0));
         assert_eq!(meta.game.as_deref(), Some("Valorant"));
-        assert!(recorder.dir.join(VIDEO_FILE).is_file(), "the folder stays for the next start");
+        assert!(recorder.dir.join(VIDEO_TS).is_file(), "the folder stays for the next start");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1156,7 +1392,7 @@ mod tests {
             ..Meta::default()
         };
         // 1250 ticks are exactly 6 frames at 48 kHz.
-        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
         let game = ring_with("game");
         game.push(&[5i16; 12], 0);
 
@@ -1194,7 +1430,7 @@ mod tests {
             fps: 60,
             ..Meta::default()
         };
-        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 2500).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 2500, true).unwrap();
         assert!(!recorder.begin_window(&[ring_with("game")], 1250));
         let _ = recorder.finish(Vec::new(), None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1214,7 +1450,7 @@ mod tests {
                 friends: vec!["Luca".into()],
                 ..Meta::default()
             };
-            let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+            let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
             let on_disk = read_meta(&recorder.dir).unwrap();
             assert_eq!(on_disk.friends, vec!["Luca".to_string()]);
             let meta = recorder.finish(Vec::new(), stop_game.map(String::from));
@@ -1237,7 +1473,7 @@ mod tests {
         let meta = Meta { id: "z".into(), fps: 60, ..Meta::default() };
         let before = (0..60).map(|k| frame(k * 16_666, k == 0));
         let after = (0..60).map(|k| frame(600_000_000 + k * 16_666, k == 0));
-        let recorder = Recorder::start(&dir, meta, &[], before.chain(after).collect(), 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], before.chain(after).collect(), 0, true).unwrap();
         let meta = recorder.finish(Vec::new(), None);
         assert_eq!(meta.video_gaps, vec![VideoGap { at_us: 999_960, len_us: 599_000_040 }]);
         assert_eq!(meta.span_us, Some(1_999_920));
@@ -1254,7 +1490,7 @@ mod tests {
         let dir = scratch("stall");
         let meta = Meta { id: "st".into(), fps: 60, ..Meta::default() };
         let backlog = vec![frame(0, true), frame(16_666, false), frame(1_516_666, false)];
-        let recorder = Recorder::start(&dir, meta, &[], backlog, 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], backlog, 0, true).unwrap();
         let meta = recorder.finish(Vec::new(), None);
         assert!(meta.video_gaps.is_empty());
         assert_eq!(meta.span_us, Some(1_533_332));
@@ -1267,7 +1503,7 @@ mod tests {
     fn a_sleep_writes_no_zeros() {
         let dir = scratch("nozeros");
         let meta = Meta { id: "n".into(), fps: 60, ..Meta::default() };
-        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
         let game = ring_with("game");
         game.push(&[5i16; 12], 0);
         assert!(recorder.begin_window(&[game.clone()], 1250));
@@ -1291,7 +1527,7 @@ mod tests {
     fn a_source_joining_after_a_sleep_gets_only_the_silence_it_missed() {
         let dir = scratch("join-after-sleep");
         let meta = Meta { id: "j".into(), fps: 60, ..Meta::default() };
-        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
         let game = ring_with("game");
         game.push(&[5i16; 12], 0);
         assert!(recorder.begin_window(&[game.clone()], 1250));
