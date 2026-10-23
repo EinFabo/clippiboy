@@ -492,18 +492,10 @@ pub fn toggle_recording(state: State<'_, AppState>, app: tauri::AppHandle) -> Re
 /// the while — including the window calls the overlay banner sends there.
 #[tauri::command(async)]
 pub fn save_clip(
-    state: State<'_, AppState>,
     app: tauri::AppHandle,
     seconds: Option<u32>,
 ) -> Result<Clip> {
-    match seconds {
-        None => crate::save_clip_and_notify(&app, None),
-        Some(seconds) => {
-            let clip = state.save_clip(Some(seconds))?;
-            with_library(&state, |lib| lib.insert(&clip).map_err(|e| e.to_string()))?;
-            Ok(clip)
-        }
-    }
+    crate::save_clip_and_notify(&app, seconds)
 }
 
 /// One picture from the recording source, like the hotkey and the tray entry.

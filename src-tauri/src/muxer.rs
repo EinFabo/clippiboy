@@ -79,12 +79,18 @@ pub fn run(command: &mut Command, what: &str) -> Result<(), String> {
 }
 
 /// Can ffmpeg be found?
+///
+/// Both programs: a save without ffprobe would write the clip and then be unable
+/// to check it.
 pub fn available() -> bool {
-    ffmpeg()
-        .arg("-version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    let answers = |mut program: Command| {
+        program
+            .arg("-version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    };
+    answers(ffmpeg()) && answers(command("ffprobe"))
 }
 
 pub struct ClipRequest {
@@ -214,7 +220,7 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         &wavs,
         &request.clip_id,
         request.output,
-        None,
+        Some(snapshot.audio_frames as u64 * 1000 / SAMPLE_RATE as u64),
         &|_| {},
     );
     let _ = std::fs::remove_file(&video_path);
@@ -419,8 +425,19 @@ pub fn encode(
     // a truncated MP4 is hundreds of megabytes of the right shape and the only
     // thing that notices is the one call whose answer was being thrown away. A
     // clip that cannot be read here cannot be played later either.
-    let Some(duration_ms) = probe_duration_ms(&pending) else {
-        return give_up("The clip was written but cannot be read back — nothing was kept.".into());
+    let duration_ms = match probe_duration(&pending) {
+        Ok(Some(ms)) => ms,
+        Ok(None) => {
+            return give_up(
+                "The clip was written but cannot be read back — nothing was kept.".into(),
+            )
+        }
+        // ffprobe itself is gone (it was there at the gate): that says nothing
+        // about the file, so the clip stays.
+        Err(err) => {
+            log::warn!("{err} — keeping the clip unchecked");
+            length_ms.unwrap_or(0)
+        }
     };
 
     if let Err(err) = replace_file(&pending, &output) {
@@ -534,8 +551,15 @@ pub fn scratch_name(clip_id: &str, kind: &str) -> String {
     format!("{}.part.{kind}", sanitize(clip_id))
 }
 
-pub fn probe_duration_ms(path: &Path) -> Option<u64> {
-    let output = command("ffprobe")
+/// The length of a media file in milliseconds. `Err` means ffprobe could not
+/// be started at all — that says nothing about the file; `Ok(None)` means it ran
+/// and could not read the file.
+pub fn probe_duration(path: &Path) -> Result<Option<u64>, String> {
+    probe_duration_by(command("ffprobe"), path)
+}
+
+fn probe_duration_by(mut program: Command, path: &Path) -> Result<Option<u64>, String> {
+    let output = program
         .args([
             "-v",
             "error",
@@ -546,15 +570,28 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
         ])
         .arg(path)
         .output()
-        .ok()?;
+        .map_err(|err| format!("could not start ffprobe: {err}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
-    let seconds: f64 = text.trim().parse().ok()?;
-    Some((seconds * 1000.0) as u64)
+    Ok(text
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|seconds| (seconds * 1000.0) as u64))
+}
+
+pub fn probe_duration_ms(path: &Path) -> Option<u64> {
+    probe_duration(path).ok().flatten()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ffprobe_that_cannot_start_is_not_an_unreadable_clip() {
+        let missing = Command::new("clippiboy-no-such-ffprobe");
+        assert!(probe_duration_by(missing, Path::new("clip.mp4")).is_err());
+    }
 
     #[test]
     fn scratch_names_carry_only_the_clip_id() {
