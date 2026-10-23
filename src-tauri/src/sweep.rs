@@ -10,7 +10,8 @@
 //!   the `<stem>_<clip id>.part.*` of versions before), an edit's
 //!   `<clip>.<pid>.neu.mp4` and an export's `<name>.<pid>.clippiboy-export.mp4`;
 //! - in the originals store: a cam the save did not finish (`cam.part.*`);
-//! - in the folder of Discord copies: an export's part file, as above;
+//! - in the folder of Discord copies: an export's part file, as above, and
+//!   copies more than a week old ([`COPY_AGE`]);
 //! - in the stem store: a clip's folder with neither an index nor a clip.
 //!
 //! Only names given out here, and only files from before the start — a save
@@ -28,6 +29,11 @@ use crate::state::AppState;
 /// over: a share import writes stems before its clip has a row.
 const STORE_GRACE: Duration = Duration::from_secs(10 * 60);
 
+/// How long a Discord copy is kept. It is only a hand-off to the clipboard —
+/// `export_for_discord` makes a fresh one when it is needed again — and out of
+/// sight in the data folder nobody would ever clear it.
+const COPY_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// Clear away the leftovers, on a thread of its own: a clip folder on a share
 /// that is offline must not hold up the start until the network gives up.
 pub fn run(app: &tauri::AppHandle) {
@@ -41,8 +47,21 @@ pub fn run(app: &tauri::AppHandle) {
             remove_file(&path);
         }
         // A Discord copy is written beside where it goes, like any export.
-        for path in leftovers_in(&crate::commands::discord_root(), started) {
+        let discord = crate::commands::discord_root();
+        for path in leftovers_in(&discord, started) {
             remove_file(&path);
+        }
+        let before = started.checked_sub(COPY_AGE).unwrap_or(SystemTime::UNIX_EPOCH);
+        for path in aged_copies(&discord, before) {
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match removed {
+                Ok(()) => log::info!("removed the old Discord copy '{}'", path.display()),
+                Err(err) => log::warn!("could not remove '{}': {err}", path.display()),
+            }
         }
         if let Some(mut known) = clip_ids(&app) {
             // A recording that is finished after the fact writes its stems
@@ -208,6 +227,36 @@ pub fn orphan_stores(root: &Path, known: &HashSet<String>, before: SystemTime) -
         .collect()
 }
 
+/// The Discord copies under `root` last changed before `before`: a clip's
+/// whole folder when everything in it is that old (an empty one by its own
+/// time), otherwise the old copies in it one by one.
+pub fn aged_copies(root: &Path, before: SystemTime) -> Vec<PathBuf> {
+    let Ok(folders) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for folder in folders.flatten() {
+        if !folder.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(folder.path()) else {
+            continue;
+        };
+        let entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        let old: Vec<PathBuf> = entries
+            .iter()
+            .filter(|path| modified_before(path, before))
+            .cloned()
+            .collect();
+        if old.len() == entries.len() && (!entries.is_empty() || modified_before(&folder.path(), before)) {
+            found.push(folder.path());
+        } else {
+            found.extend(old.into_iter().filter(|path| path.is_file()));
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +372,39 @@ mod tests {
         found.sort();
         assert_eq!(found, vec![store.join("cam.part.h264"), store.join("cam.part.mp4")]);
         assert!(cam_partials(&root, SystemTime::UNIX_EPOCH).is_empty(), "a save writing its cam right now");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn age(path: &Path, by: Duration) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - by).unwrap();
+    }
+
+    #[test]
+    fn discord_copies_go_once_they_have_aged_out() {
+        let root = scratch_dir();
+        let week = Duration::from_secs(7 * 24 * 60 * 60);
+        let day = Duration::from_secs(24 * 60 * 60);
+        for name in ["old", "fresh", "mixed"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let old = root.join("old").join("Valorant (10 MB).mp4");
+        let fresh = root.join("fresh").join("Valorant (10 MB).mp4");
+        let stale = root.join("mixed").join("Valorant (10 MB).mp4");
+        let newer = root.join("mixed").join("Valorant (25 MB).mp4");
+        for file in [&old, &fresh, &stale, &newer] {
+            std::fs::write(file, b"x").unwrap();
+        }
+        age(&old, week + day);
+        age(&stale, week + day);
+        age(&newer, day);
+        let before = SystemTime::now() - week;
+        let mut found = aged_copies(&root, before);
+        found.sort();
+        let mut expected = vec![root.join("old"), stale];
+        expected.sort();
+        assert_eq!(found, expected, "the old folder whole, an old copy beside a fresh one alone");
+        assert!(aged_copies(&root, SystemTime::UNIX_EPOCH).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
