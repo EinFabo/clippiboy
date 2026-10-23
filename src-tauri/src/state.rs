@@ -1164,13 +1164,9 @@ impl AppState {
             now_ms().saturating_sub(recorder.started_at()).max(0) as u64,
         );
         let game = self.game_for(length);
-        let meta = match recorder.finish(separate, game) {
-            Ok(meta) => meta,
-            Err(err) => {
-                log::error!("recording not closed cleanly: {err}");
-                return None;
-            }
-        };
+        // Whatever `finish` could persist: capture and the REC state end here
+        // either way, the folder stays for `recover_recordings`.
+        let meta = recorder.finish(separate, game);
         if !self.buffer_wanted() {
             self.halt_pipeline();
         }

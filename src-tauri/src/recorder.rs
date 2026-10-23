@@ -346,7 +346,7 @@ impl Recorder {
     /// `separate` and `game` are taken now rather than at the start: the track
     /// assignment may have been changed, and a game detected half way should
     /// still claim the recording.
-    pub fn finish(&self, separate: Vec<String>, game: Option<String>) -> Result<Meta, String> {
+    pub fn finish(&self, separate: Vec<String>, game: Option<String>) -> Meta {
         // Dropping the sender ends the writer's loop once the queue is empty.
         self.jobs.lock().take();
         if let Some(writer) = self.writer.lock().take() {
@@ -371,8 +371,13 @@ impl Recorder {
             .then(|| crate::muxer::span_of(first, last, meta.fps))
             .flatten();
         // Labels as they stand now — a source renamed mid-recording.
-        write_meta(&self.dir, &meta)?;
-        Ok(meta)
+        // A description that cannot be written (drive gone, file held) must not
+        // keep the recording open: the caller still gets it, and the folder
+        // stays for the next start.
+        if let Err(err) = write_meta(&self.dir, &meta) {
+            log::error!("recording description not written: {err}");
+        }
+        meta
     }
 }
 
@@ -665,6 +670,20 @@ mod tests {
     }
 
     #[test]
+    fn a_description_that_cannot_be_written_still_closes_the_recording() {
+        let dir = scratch("meta-fails");
+        let meta = Meta { id: "m".into(), fps: 60, ..Meta::default() };
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        // A folder where the temp file goes: the write fails like a full or vanished drive.
+        std::fs::create_dir_all(recorder.dir.join("meta.json.tmp")).unwrap();
+        let meta = recorder.finish(Vec::new(), Some("Valorant".into()));
+        assert_eq!(meta.frames, Some(0));
+        assert_eq!(meta.game.as_deref(), Some("Valorant"));
+        assert!(recorder.dir.join(VIDEO_FILE).is_file(), "the folder stays for the next start");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_short_track_is_padded_and_a_long_one_cut() {
         let dir = scratch("align");
         let short = dir.join("short.pcm");
@@ -723,7 +742,7 @@ mod tests {
         recorder.audio(&mic, &[9i16; 12]);
         recorder.end_window(6);
 
-        let meta = recorder.finish(vec!["mic".into()], None).unwrap();
+        let meta = recorder.finish(vec!["mic".into()], None);
         let rec = dir.join(WORK_DIR).join("t");
         let game_track = samples(&rec.join(&meta.tracks[0].file));
         let mic_track = samples(&rec.join(&meta.tracks[1].file));
@@ -770,7 +789,7 @@ mod tests {
             let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
             let on_disk = read_meta(&recorder.dir).unwrap();
             assert_eq!(on_disk.friends, vec!["Luca".to_string()]);
-            let meta = recorder.finish(Vec::new(), stop_game.map(String::from)).unwrap();
+            let meta = recorder.finish(Vec::new(), stop_game.map(String::from));
             assert_eq!(!meta.friends.is_empty(), kept, "stop in {stop_game:?}");
             assert_eq!(read_meta(&recorder.dir).unwrap().friends, meta.friends);
             let _ = std::fs::remove_dir_all(&dir);
