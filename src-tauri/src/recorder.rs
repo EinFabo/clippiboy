@@ -941,9 +941,12 @@ pub fn finalize(
     on_progress(0.1);
 
     let length_ms = timing.span_us / 1000;
+    let video = muxer::VideoInput::Raw {
+        path: video,
+        rate: timing.rate,
+    };
     let result = muxer::encode(
         &video,
-        &timing.rate,
         &inputs,
         &meta.id,
         output,

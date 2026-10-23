@@ -222,10 +222,13 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         }
     }
 
+    let video = VideoInput::Raw {
+        path: video_path.clone(),
+        rate: snapshot.rate.clone(),
+    };
     // A clip is written in a second or two — nobody watches a bar for that.
     let outcome = encode(
-        &video_path,
-        &snapshot.rate,
+        &video,
         &wavs,
         &request.clip_id,
         request.output,
@@ -324,6 +327,13 @@ pub fn span_of(first_pts_us: i64, last_pts_us: i64, fps: u32) -> Option<u64> {
 /// 3.7 s instead of 9.8 s) at 192 kbit/s and no audible difference.
 const AAC_CODER: &str = "fast";
 
+/// Where a save's picture comes from.
+pub enum VideoInput {
+    /// A raw H.264 elementary stream. It carries no timestamps; `rate` (for
+    /// ffmpeg's `-r`, see [`timing`]) supplies them.
+    Raw { path: PathBuf, rate: String },
+}
+
 /// Mux a raw H.264 stream and its audio into the finished clip: one mixed
 /// audio track in the file, the inputs themselves kept as individual tracks
 /// when there is more than one. Written beside the target and only renamed
@@ -331,8 +341,7 @@ const AAC_CODER: &str = "fast";
 ///
 /// The inputs are left where they are — clearing them away is the caller's.
 pub fn encode(
-    video_path: &Path,
-    rate: &str,
+    video: &VideoInput,
     wavs: &[AudioInput],
     clip_id: &str,
     output: PathBuf,
@@ -343,69 +352,6 @@ pub fn encode(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // The clip gets **one** audio track with everything in it. Discord, browsers
-    // and most players stubbornly play only the first audio track of an MP4 — with
-    // the sources on separate tracks alongside, as they used to be, they were
-    // silent everywhere outside the editor.
-    //
-    // The levels from the recording mixer are already baked into the WAVs
-    // (`AudioEngine::mix_window`), so this sums at 0 dB.
-    let inputs: Vec<(String, f32)> = (1..=wavs.len())
-        .map(|index| (format!("{index}:a"), 0.0))
-        .collect();
-    let filter = stems::mix_filter(&inputs);
-
-    let mut command = ffmpeg();
-    command.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
-    command.arg("-progress").arg("pipe:1").arg("-nostats");
-    // The elementary stream carries no timestamps — the rate supplies them
-    // ([`timing`]).
-    command.arg("-f").arg("h264").arg("-r").arg(rate);
-    command.arg("-i").arg(video_path);
-    for input in wavs {
-        if input.raw {
-            command
-                .arg("-f")
-                .arg("s16le")
-                .arg("-ar")
-                .arg(SAMPLE_RATE.to_string())
-                .arg("-ac")
-                .arg(CHANNELS.to_string());
-        }
-        command.arg("-i").arg(&input.path);
-    }
-    if let Some(filter) = &filter {
-        command.arg("-filter_complex").arg(filter);
-    }
-
-    // First output: the clip itself.
-    command.arg("-map").arg("0:v:0");
-    match &filter {
-        Some(_) => {
-            command.arg("-map").arg(stems::MIX_LABEL);
-            command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
-            command.arg("-aac_coder").arg(AAC_CODER);
-            // The same name twice on purpose: MP4 has no single agreed field for
-            // track names, and depending on the program one or the other is read.
-            command.arg("-metadata:s:a:0").arg("title=Mix");
-            command.arg("-metadata:s:a:0").arg("handler_name=Mix");
-        }
-        None => {
-            command.arg("-an");
-        }
-    }
-    command.arg("-c:v").arg("copy");
-    // No `-shortest`: the video stream is only copied and is therefore done in
-    // fractions of a second. ffmpeg then considers the output finished and closes
-    // it before the AAC encoder has delivered its first packet — the file
-    // demonstrably came out with no audio track at all. It is not needed either:
-    // `write_wav_window` already cuts the audio to the length of the video.
-    command.arg("-avoid_negative_ts").arg("make_zero");
-    // No `+faststart`: that moves the moov atom to the front and reads the
-    // finished file through once more to do it — at 40 Mbit/s and a two-minute
-    // buffer, flatly twice the wait after the key press. Playback and trimming do
-    // not need it.
-    //
     // Written beside the target rather than onto it. ffmpeg fills an MP4 from the
     // front and writes the `moov` atom last, so a run that dies half way leaves
     // something that is the right size, carries the right name and opens as a
@@ -422,24 +368,21 @@ pub fn encode(
     // is the very thing the temp names above are careful to avoid.
     let pending = output.with_file_name(scratch_name(clip_id, "mp4"));
     let _ = std::fs::remove_file(&pending);
-    command.arg(&pending);
 
     // Further outputs: the individual tracks, so the mix can still be changed
     // later. With only one track that would be a copy of the clip's audio track —
     // and that one will do.
     let keep_stems = wavs.len() > 1;
-    let stems_dir = stems::dir(clip_id);
+    let mut stem_outputs = Vec::new();
     if keep_stems {
-        std::fs::create_dir_all(&stems_dir).map_err(|e| e.to_string())?;
-        for index in 1..=wavs.len() {
-            command.arg("-map").arg(format!("{index}:a"));
-            command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
-            command.arg("-aac_coder").arg(AAC_CODER);
-            command.arg("-movflags").arg("+faststart");
-            command.arg(stems::track_path(clip_id, index as u32 - 1));
-        }
+        std::fs::create_dir_all(stems::dir(clip_id)).map_err(|e| e.to_string())?;
+        stem_outputs = (0..wavs.len())
+            .map(|index| stems::track_path(clip_id, index as u32))
+            .collect();
     }
 
+    let mut command = ffmpeg();
+    command.args(arguments(video, wavs, &pending, &stem_outputs));
     let outcome = run_reporting(&mut command, "writing the clip", length_ms, on_progress);
 
     // Everything from here that says "no" has to leave the half-written file
@@ -503,6 +446,102 @@ pub fn encode(
         size_bytes,
         thumb_path,
     })
+}
+
+/// The ffmpeg line [`encode`] runs, writing the clip to `pending` and, when
+/// `stem_outputs` is not empty, input `n` of `wavs` to its `n`-th entry. Pulled
+/// out so it can be checked without a run.
+pub(crate) fn arguments(
+    video: &VideoInput,
+    wavs: &[AudioInput],
+    pending: &Path,
+    stem_outputs: &[PathBuf],
+) -> Vec<String> {
+    let path = |path: &Path| path.to_string_lossy().to_string();
+
+    // The clip gets **one** audio track with everything in it. Discord, browsers
+    // and most players stubbornly play only the first audio track of an MP4 — with
+    // the sources on separate tracks alongside, as they used to be, they were
+    // silent everywhere outside the editor.
+    //
+    // The levels from the recording mixer are already baked into the WAVs
+    // (`AudioEngine::mix_window`), so this sums at 0 dB.
+    let inputs: Vec<(String, f32)> = (1..=wavs.len())
+        .map(|index| (format!("{index}:a"), 0.0))
+        .collect();
+    let filter = stems::mix_filter(&inputs);
+
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
+        .map(String::from)
+        .to_vec();
+    args.extend(["-progress", "pipe:1", "-nostats"].map(String::from));
+    match video {
+        // The elementary stream carries no timestamps — the rate supplies them
+        // ([`timing`]).
+        VideoInput::Raw { path: video, rate } => {
+            args.extend(["-f", "h264", "-r"].map(String::from));
+            args.push(rate.clone());
+            args.push("-i".into());
+            args.push(path(video));
+        }
+    }
+    for input in wavs {
+        if input.raw {
+            args.extend(["-f", "s16le", "-ar"].map(String::from));
+            args.push(SAMPLE_RATE.to_string());
+            args.push("-ac".into());
+            args.push(CHANNELS.to_string());
+        }
+        args.push("-i".into());
+        args.push(path(&input.path));
+    }
+    if let Some(filter) = &filter {
+        args.push("-filter_complex".into());
+        args.push(filter.clone());
+    }
+
+    // First output: the clip itself.
+    args.extend(["-map", "0:v:0"].map(String::from));
+    match &filter {
+        Some(_) => {
+            args.push("-map".into());
+            args.push(stems::MIX_LABEL.into());
+            args.extend(["-c:a", "aac", "-b:a", "192k", "-aac_coder", AAC_CODER].map(String::from));
+            // The same name twice on purpose: MP4 has no single agreed field for
+            // track names, and depending on the program one or the other is read.
+            args.extend(["-metadata:s:a:0", "title=Mix"].map(String::from));
+            args.extend(["-metadata:s:a:0", "handler_name=Mix"].map(String::from));
+        }
+        None => args.push("-an".into()),
+    }
+    args.extend(["-c:v", "copy"].map(String::from));
+    // No `-shortest`: the video stream is only copied and is therefore done in
+    // fractions of a second. ffmpeg then considers the output finished and closes
+    // it before the AAC encoder has delivered its first packet — the file
+    // demonstrably came out with no audio track at all. It is not needed either:
+    // `write_wav_window` already cuts the audio to the length of the video.
+    //
+    // No `-avoid_negative_ts make_zero` either (SAVE-7). On this output alone it
+    // pushed the picture 21.33 ms later, by the AAC encoder's priming (1024
+    // samples), while the stems kept their priming before 0; mixed from those
+    // stems, every edit then put the picture another 21.33 ms behind the
+    // sound. Every output now starts its picture and its sound at 0 and keeps
+    // the priming before it, in an edit list.
+    // No `+faststart`: that moves the moov atom to the front and reads the
+    // finished file through once more to do it — at 40 Mbit/s and a two-minute
+    // buffer, flatly twice the wait after the key press. Playback and trimming do
+    // not need it.
+    args.push(path(pending));
+
+    // Further outputs: the individual tracks, input by input.
+    for (index, stem) in (1..=wavs.len()).zip(stem_outputs) {
+        args.push("-map".into());
+        args.push(format!("{index}:a"));
+        args.extend(["-c:a", "aac", "-b:a", "192k", "-aac_coder", AAC_CODER].map(String::from));
+        args.extend(["-movflags", "+faststart"].map(String::from));
+        args.push(path(stem));
+    }
+    args
 }
 
 /// Move a freshly written file into the place of an existing one.
@@ -629,6 +668,92 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw(path: &str, rate: &str) -> VideoInput {
+        VideoInput::Raw {
+            path: PathBuf::from(path),
+            rate: rate.into(),
+        }
+    }
+
+    /// A save's main mix as WAV and a recording's headerless microphone track.
+    fn two_wavs() -> Vec<AudioInput> {
+        vec![
+            AudioInput {
+                path: PathBuf::from("C:/c/mix.wav"),
+                label: "Main mix".into(),
+                raw: false,
+            },
+            AudioInput {
+                path: PathBuf::from("C:/c/mic.pcm"),
+                label: "Microphone".into(),
+                raw: true,
+            },
+        ]
+    }
+
+    fn two_stems() -> Vec<PathBuf> {
+        vec![PathBuf::from("C:/d/0.m4a"), PathBuf::from("C:/d/1.m4a")]
+    }
+
+    /// Review ("No argument builder in `muxer::encode`"): the clip's ffmpeg
+    /// line was filled in inline and untested. Written out by hand from the
+    /// code as it stood, element by element.
+    #[test]
+    fn the_clip_command_is_the_one_encode_built_before() {
+        let args = arguments(
+            &raw("C:/c/x.part.h264", "60"),
+            &two_wavs(),
+            Path::new("C:/c/x.part.mp4"),
+            &two_stems(),
+        );
+        let expected = [
+            "-y", "-hide_banner", "-loglevel", "error",
+            "-progress", "pipe:1", "-nostats",
+            "-f", "h264", "-r", "60", "-i", "C:/c/x.part.h264",
+            "-i", "C:/c/mix.wav",
+            "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "C:/c/mic.pcm",
+            "-filter_complex",
+            "[1:a]volume=1[m0];[2:a]volume=1[m1];[m0][m1]amix=inputs=2:normalize=0:dropout_transition=0[aout]",
+            "-map", "0:v:0",
+            "-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-aac_coder", "fast",
+            "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix",
+            "-c:v", "copy",
+            // `-avoid_negative_ts make_zero` stood here until SAVE-7.
+            "C:/c/x.part.mp4",
+            "-map", "1:a", "-c:a", "aac", "-b:a", "192k", "-aac_coder", "fast",
+            "-movflags", "+faststart", "C:/d/0.m4a",
+            "-map", "2:a", "-c:a", "aac", "-b:a", "192k", "-aac_coder", "fast",
+            "-movflags", "+faststart", "C:/d/1.m4a",
+        ];
+        for (at, (got, want)) in args.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got, want, "argument {at}: {args:?}");
+        }
+        assert_eq!(args.len(), expected.len(), "{args:?}");
+    }
+
+    /// One input keeps no stems, and the clip is the only output.
+    #[test]
+    fn a_single_input_writes_the_clip_alone() {
+        let wavs = &two_wavs()[..1];
+        let args = arguments(&raw("C:/c/x.part.h264", "60"), wavs, Path::new("C:/c/x.part.mp4"), &[]);
+        assert_eq!(args.last().map(String::as_str), Some("C:/c/x.part.mp4"), "{args:?}");
+        assert!(args.contains(&"[1:a]volume=1[m0];[m0]anull[aout]".to_string()), "{args:?}");
+        assert!(!args.contains(&"s16le".to_string()), "{args:?}");
+    }
+
+    /// SAVE-7: `make_zero` on the clip output alone shifted its picture by the
+    /// AAC priming, while the stems kept theirs. Every output follows one policy.
+    #[test]
+    fn every_output_of_a_save_shares_one_zero_point() {
+        let args = arguments(
+            &raw("C:/c/x.part.h264", "60"),
+            &two_wavs(),
+            Path::new("C:/c/x.part.mp4"),
+            &two_stems(),
+        );
+        assert_eq!(args.iter().filter(|a| *a == "-avoid_negative_ts").count(), 0, "{args:?}");
+    }
 
     #[test]
     fn an_ffprobe_that_cannot_start_is_not_an_unreadable_clip() {

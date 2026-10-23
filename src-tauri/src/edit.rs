@@ -733,7 +733,10 @@ fn arguments(
     } else {
         args.extend(["-c:v", "copy"].map(String::from));
     }
-    args.extend(["-avoid_negative_ts", "make_zero"].map(String::from));
+    // No `-avoid_negative_ts make_zero` (SAVE-7): the stems read back with the
+    // AAC priming before 0, and shifting the result by it moved the picture
+    // another 21.33 ms behind the sound with every edit. The priming stays
+    // before 0, in an edit list, as in every file a save writes.
     args.extend(["-movflags", "+faststart"].map(String::from));
 
     // `-t` applies to the whole output and therefore belongs after all inputs.
@@ -1485,6 +1488,23 @@ mod tests {
             .map(|(at, _)| &args[at + 1])
             .collect();
         assert_eq!(seeks, ["2.000"], "only the picture is seeked: {args:?}");
+    }
+
+    /// SAVE-7: a sound-only edit no longer moves the picture another 21.33 ms.
+    #[test]
+    fn an_edit_leaves_the_zero_point_where_it_is() {
+        let plan = plan(None, true, 30_000, Trim::whole(30_000));
+        let list = vec![track(0, true), track(1, true)];
+        let args = arguments(
+            &plan,
+            Path::new("C:/clips/x.mp4"),
+            &list,
+            &[],
+            Path::new("C:/clips/x.neu.mp4"),
+            EncoderId::X264,
+            70,
+        );
+        assert!(!args.iter().any(|a| a == "-avoid_negative_ts"), "{args:?}");
     }
 
     #[test]
