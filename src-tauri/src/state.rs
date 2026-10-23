@@ -451,10 +451,25 @@ impl AppState {
     /// (buffer length and audio sources). The video source of a running
     /// recording is changed by `commands::set_config` — the restart can be
     /// reported there too.
-    pub fn replace_config(&self, mut next: AppConfig) -> AppConfig {
+    pub fn replace_config(&self, next: AppConfig) -> AppConfig {
+        self.replace_config_with(next, |_, _| {})
+    }
+
+    /// [`Self::replace_config`], with `settle` run on the new config against
+    /// the current one under the config lock, before it is saved. What has to
+    /// come from the config as it stands — the clip folder and the token,
+    /// changed only by their own commands — is taken from there: from a copy
+    /// read earlier, an overlapping `set_clip_dir` or `regenerate_token` would
+    /// be undone.
+    pub fn replace_config_with(
+        &self,
+        mut next: AppConfig,
+        settle: impl FnOnce(&mut AppConfig, &AppConfig),
+    ) -> AppConfig {
         next.recording.encoder = crate::encode::resolve(next.recording.encoder);
         let previous = {
             let mut guard = self.config.lock();
+            settle(&mut next, &guard);
             // Saved under the lock, as every other writer does — two saves
             // never run at once, and the file always ends on the newest config.
             if let Err(err) = config::save(&next) {

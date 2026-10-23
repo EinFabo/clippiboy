@@ -153,10 +153,11 @@ fn migrate_sources(config: &mut AppConfig) {
 pub enum Loaded {
     /// Read and parsed — or not there at all, which is a first start.
     Fine,
-    /// The file was there but could not be used. `aside` is where it was moved
-    /// (`None` when even that failed — then it is left alone and nothing is
-    /// saved over it this session); `from_backup` says whether the copy from
-    /// the last good start stands in for it.
+    /// The file was there but could not be used. `aside` is where a damaged
+    /// file was moved (`None` when it could not be read at all, or not be
+    /// moved — then it is left alone and nothing is saved over it this
+    /// session); `from_backup` says whether the copy from the last good start
+    /// stands in for it.
     Recovered {
         aside: Option<PathBuf>,
         from_backup: bool,
@@ -205,8 +206,8 @@ impl Loaded {
     }
 }
 
-/// Set at start when the config file could not be read and could not be moved
-/// aside either — another program holding it, say. Saving would put this
+/// Set at start when the config file could not be read — another program
+/// holding it, say — or was damaged and could not be moved aside. Saving would put this
 /// session's settings over a file that may be perfectly fine, so nothing is
 /// written until the next start.
 static HOLD_SAVES: AtomicBool = AtomicBool::new(false);
@@ -214,10 +215,12 @@ static HOLD_SAVES: AtomicBool = AtomicBool::new(false);
 /// Read the config file in `dir` as it stands, before any fix-ups.
 ///
 /// Only a file that is not there means a first start. A good file is copied to
-/// `config.json.bak` — the copy from the last good start. Anything else (a read
-/// error, bytes that are not JSON, JSON that is not a config) moves the file
-/// aside as `config.json.broken-<stamp_ms>` and brings that copy back, so the
-/// defaults never get saved over the user's settings.
+/// `config.json.bak` — the copy from the last good start. Bytes that are not
+/// a config (not UTF-8, not JSON, JSON that is not a config) move the file
+/// aside as `config.json.broken-<stamp_ms>` and bring that copy back, so the
+/// defaults never get saved over the user's settings. A file that cannot be
+/// read at all is left where it is (`aside: None`): the copy stands in for
+/// it, and nothing is saved over it until the next start.
 fn read_config(dir: &Path, stamp_ms: i64) -> (Option<AppConfig>, Loaded) {
     let path = dir.join("config.json");
     let mut attempt = 0;
@@ -235,9 +238,15 @@ fn read_config(dir: &Path, stamp_ms: i64) -> (Option<AppConfig>, Loaded) {
             other => break other,
         }
     };
-    let reason = match read {
+    // Only bytes that were read and are no config make a damaged file. One
+    // that could not be read at all may be perfectly fine — held by another
+    // program, say — and moving it aside would lose the last session's
+    // changes: it stays, and nothing is saved over it this session.
+    let (reason, damaged) = match read {
         Err(err) if err.kind() == ErrorKind::NotFound => return (None, Loaded::Fine),
-        Err(err) => err.to_string(),
+        // Not UTF-8: read, and no config.
+        Err(err) if err.kind() == ErrorKind::InvalidData => (err.to_string(), true),
+        Err(err) => (err.to_string(), false),
         Ok(text) => match serde_json::from_str::<AppConfig>(&text) {
             Ok(config) => {
                 if let Err(err) = write_synced(&dir.join("config.json.bak"), &text) {
@@ -245,17 +254,21 @@ fn read_config(dir: &Path, stamp_ms: i64) -> (Option<AppConfig>, Loaded) {
                 }
                 return (Some(config), Loaded::Fine);
             }
-            Err(err) => err.to_string(),
+            Err(err) => (err.to_string(), true),
         },
     };
 
-    let target = dir.join(format!("config.json.broken-{stamp_ms}"));
-    let aside = match std::fs::rename(&path, &target) {
-        Ok(()) => Some(target),
-        Err(err) => {
-            log::warn!("could not move the unreadable settings file aside: {err}");
-            None
+    let aside = if damaged {
+        let target = dir.join(format!("config.json.broken-{stamp_ms}"));
+        match std::fs::rename(&path, &target) {
+            Ok(()) => Some(target),
+            Err(err) => {
+                log::warn!("could not move the damaged settings file aside: {err}");
+                None
+            }
         }
+    } else {
+        None
     };
     let backup = std::fs::read_to_string(dir.join("config.json.bak"))
         .ok()
@@ -603,8 +616,20 @@ mod tests {
         let dir = config_dir();
         // A folder where the file should be: reading fails, and not with NotFound.
         std::fs::create_dir_all(dir.join("config.json")).unwrap();
-        let (_, loaded) = read_config(&dir, 9);
-        assert!(matches!(loaded, Loaded::Recovered { .. }), "{loaded:?}");
+        let mut good = default_config();
+        good.clip_dir = r"D:\Clips".into();
+        std::fs::write(dir.join("config.json.bak"), serde_json::to_string(&good).unwrap()).unwrap();
+        let (config, loaded) = read_config(&dir, 9);
+        assert!(matches!(loaded, Loaded::Recovered { aside: None, from_backup: true, .. }), "{loaded:?}");
+        assert_eq!(config.expect("the backup").clip_dir, r"D:\Clips");
+        assert!(dir.join("config.json").is_dir(), "a file that could not be read is never moved");
+        assert!(!dir.join("config.json.broken-9").exists());
+        assert!(
+            loaded.message().unwrap().starts_with("The settings file could not be opened ("),
+            "{:?}",
+            loaded.message()
+        );
+        assert!(loaded.message().unwrap().ends_with("leaves the file alone until the next start."));
     }
 
     #[test]

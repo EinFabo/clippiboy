@@ -75,12 +75,15 @@ pub fn set_config(
     // The clip folder and the token have their own commands: the folder is
     // granted to the player recursively and the token is what every Stream
     // Deck key holds, so a settings write (a stale page, the mock config) must
-    // not carry either — an empty token would kill every key too.
-    crate::config::keep_core_owned(&mut config, &previous);
-    crate::config::keep_once_flags(&mut config, &previous);
+    // not carry either — an empty token would kill every key too. Against the
+    // config under its lock, not `previous`: a `set_clip_dir` or a new token
+    // in between would be undone.
     config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
     config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
-    let next = state.replace_config(config);
+    let next = state.replace_config_with(config, |next, current| {
+        crate::config::keep_core_owned(next, current);
+        crate::config::keep_once_flags(next, current);
+    });
     if previous.friends != next.friends {
         crate::friends::config_changed(&app);
     }
