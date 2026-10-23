@@ -20,7 +20,8 @@
 //! the last write, and the next start finds it ([`leftovers`]) and finishes it.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
@@ -30,7 +31,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::audio::capture::{CHANNELS, SAMPLE_RATE};
-use crate::buffer::EncodedPacket;
+use crate::buffer::{EncodedPacket, DISCONTINUITY_US};
 use crate::muxer::{self, AudioInput, ClipResult};
 use crate::pipeline::TrackRing;
 
@@ -95,9 +96,9 @@ pub struct Meta {
     #[serde(default)]
     pub frames: Option<u64>,
     /// Microseconds from the first frame to the end of the last, by their
-    /// timestamps — what the picture is spread over (`muxer::timing`). Known
-    /// only after a clean stop, like `frames`; without it the configured rate
-    /// stands.
+    /// timestamps, less the [`Self::video_gaps`] — what the picture is spread
+    /// over (`muxer::timing`). Known only after a clean stop, like `frames`;
+    /// without it the configured rate stands.
     #[serde(default)]
     pub span_us: Option<u64>,
     /// The longest step between neighbouring frame timestamps, which tells an
@@ -112,6 +113,34 @@ pub struct Meta {
     /// or a folder finished after a crash, still knows who was there.
     #[serde(default)]
     pub friends: Vec<String>,
+    /// Jumps in the picture longer than [`DISCONTINUITY_US`] — the PC slept.
+    /// They are left out of the span, and the sound of that stretch goes with
+    /// them. Written down the moment they happen, so a recording finished
+    /// after a crash leaves them out too.
+    #[serde(default)]
+    pub video_gaps: Vec<VideoGap>,
+    /// Stretches the mixer did not run through, counted rather than written
+    /// as zeros: nothing of them is in the track files.
+    #[serde(default)]
+    pub audio_gaps: Vec<AudioGap>,
+}
+
+/// A hole in the picture, in microseconds from the recording's first frame.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoGap {
+    /// Where the last frame before the jump ends.
+    pub at_us: i64,
+    /// How long nothing came.
+    pub len_us: i64,
+}
+
+/// A hole in the sound, on the recording's audio timeline (48 kHz frames).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioGap {
+    pub at_frame: u64,
+    pub frames: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +159,11 @@ enum Job {
     /// Zeros, counted in frames rather than handed over — a source that joins
     /// an hour in would otherwise be an allocation of an hour of silence.
     Silence(usize, u64),
+    /// The description, written by the writer rather than by the thread that
+    /// changed it: the encoder and the mixer never wait on the disk, and two
+    /// of them never race on `meta.json.tmp`. Boxed: every job in the queue
+    /// is as big as the biggest kind.
+    Meta(Box<Meta>),
 }
 
 impl Job {
@@ -138,7 +172,7 @@ impl Job {
         match self {
             Job::Video(data) => data.len() as u64,
             Job::Audio(_, samples) => samples.len() as u64 * 2,
-            Job::Open(_) | Job::Silence(..) => 0,
+            Job::Open(_) | Job::Silence(..) | Job::Meta(_) => 0,
         }
     }
 }
@@ -149,6 +183,9 @@ struct AudioSide {
     attached: bool,
     /// Frames on the shared timeline so far — every track is held to this.
     timeline: u64,
+    /// The part of `timeline` that is a gap ([`Recorder::skip_window`]) and
+    /// not in the files.
+    virtual_frames: u64,
     tracks: Vec<TrackState>,
 }
 
@@ -173,6 +210,9 @@ pub struct Recorder {
     /// The longest step forward between a frame and the latest one before it,
     /// for `Meta::largest_step_us`.
     largest_step_us: AtomicI64,
+    /// The picture's gaps so far, summed: how much the timestamps after the
+    /// latest one run ahead of the recording.
+    closed_us: AtomicI64,
     video_bytes: AtomicU64,
     failure: Arc<Mutex<Option<String>>>,
     /// Bytes handed to the writer and not yet written.
@@ -246,12 +286,14 @@ impl Recorder {
             first_pts_us: AtomicI64::new(i64::MAX),
             last_pts_us: AtomicI64::new(i64::MIN),
             largest_step_us: AtomicI64::new(0),
+            closed_us: AtomicI64::new(0),
             video_bytes: AtomicU64::new(0),
             failure,
             queued,
             audio: Mutex::new(AudioSide {
                 attached: false,
                 timeline: 0,
+                virtual_frames: 0,
                 tracks: Vec::new(),
             }),
         });
@@ -296,12 +338,35 @@ impl Recorder {
         // The first frame has nothing before it; one that arrives behind the
         // latest leaves the step to the next one forward.
         if previous != i64::MIN && packet.pts_us > previous {
-            self.largest_step_us
-                .fetch_max(packet.pts_us - previous, Ordering::Relaxed);
+            let step = packet.pts_us - previous;
+            if step > DISCONTINUITY_US {
+                self.close_gap(previous, packet.pts_us);
+            } else {
+                self.largest_step_us.fetch_max(step, Ordering::Relaxed);
+            }
         }
         self.video_bytes
             .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
         self.send(Job::Video(packet.data.clone()));
+    }
+
+    /// A jump in the picture too long for a stall: the PC slept, or the
+    /// encoder hung. It is written down rather than spread over, and the step
+    /// does not count as one.
+    fn close_gap(&self, previous_us: i64, pts_us: i64) {
+        let mut meta = self.meta.lock();
+        let period = 1_000_000 / meta.fps.max(1) as i64;
+        let first = self.first_pts_us.load(Ordering::Relaxed);
+        let end = previous_us + period;
+        let gap = VideoGap {
+            at_us: end - first,
+            len_us: pts_us - end,
+        };
+        self.closed_us.fetch_add(gap.len_us, Ordering::Relaxed);
+        meta.video_gaps.push(gap);
+        // Sent under the lock, so that descriptions reach the writer in the
+        // order they were made and an older one never lands last.
+        self.send(Job::Meta(Box::new(meta.clone())));
     }
 
     /// How long the recording runs so far, by its frames.
@@ -379,8 +444,9 @@ impl Recorder {
             None => self.open_track(&mut audio, ring),
         };
         // A source that joined late — or dropped out and came back — starts
-        // with the silence it missed, or its audio would run ahead.
-        let timeline = audio.timeline;
+        // with the silence it missed, or its audio would run ahead. Missed on
+        // file: a gap is in no track, so none is padded for it.
+        let timeline = audio.timeline - audio.virtual_frames;
         let track = &mut audio.tracks[index];
         if track.frames < timeline {
             self.send(Job::Silence(index, timeline - track.frames));
@@ -398,6 +464,31 @@ impl Recorder {
         }
     }
 
+    /// A window the mixer did not mix — the PC slept, or the mixer stalled.
+    ///
+    /// Counted on the timeline rather than written as zeros: eight hours
+    /// asleep were 5.5 GB per track. `finalize` puts back the zeros only where
+    /// the picture went on ([`audio_edits`]). The timeline still moves on, or
+    /// a stall of the mixer alone would shift the sound for the rest of the
+    /// file.
+    pub fn skip_window(&self, frames: usize) {
+        let mut audio = self.audio.lock();
+        if !audio.attached {
+            return;
+        }
+        let gap = AudioGap {
+            at_frame: audio.timeline,
+            frames: frames as u64,
+        };
+        {
+            let mut meta = self.meta.lock();
+            meta.audio_gaps.push(gap);
+            self.send(Job::Meta(Box::new(meta.clone())));
+        }
+        audio.timeline += gap.frames;
+        audio.virtual_frames += gap.frames;
+    }
+
     /// A new file for a source the recording has not seen yet.
     fn open_track(&self, audio: &mut AudioSide, ring: &TrackRing) -> usize {
         let index = audio.tracks.len();
@@ -412,9 +503,7 @@ impl Recorder {
             label: ring.label(),
             file: track_file(index),
         });
-        if let Err(err) = write_meta(&self.dir, &meta) {
-            log::warn!("recording: {err}");
-        }
+        self.send(Job::Meta(Box::new(meta.clone())));
         index
     }
 
@@ -450,9 +539,12 @@ impl Recorder {
             self.first_pts_us.load(Ordering::Relaxed),
             self.last_pts_us.load(Ordering::Relaxed),
         );
+        // The gaps are not played: the picture is spread over what is left.
+        let closed = self.closed_us.load(Ordering::Relaxed).max(0) as u64;
         meta.span_us = (first <= last)
             .then(|| crate::muxer::span_of(first, last, meta.fps))
-            .flatten();
+            .flatten()
+            .map(|span| span.saturating_sub(closed));
         meta.largest_step_us = Some(self.largest_step_us.load(Ordering::Relaxed));
         // Labels as they stand now — a source renamed mid-recording.
         // A description that cannot be written (drive gone, file held) must not
@@ -504,6 +596,13 @@ fn run_job(
             };
             write_zeros(track, frames * FRAME_BYTES)
                 .map_err(|err| format!("could not write the audio: {err}"))?;
+        }
+        // Not a reason to stop the recording, as before: `finish` writes it
+        // again, and a held file is usually free by then.
+        Job::Meta(meta) => {
+            if let Err(err) = write_meta(dir, &meta) {
+                log::warn!("recording: {err}");
+            }
         }
     }
     Ok(())
@@ -558,6 +657,190 @@ fn align(path: &Path, frames: u64) -> std::io::Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+/// One step of cutting a track to its picture, in frames.
+#[derive(Debug, PartialEq)]
+enum Edit {
+    /// Keep what the file holds.
+    Copy(u64),
+    /// Drop what the file holds: sound from a stretch whose picture is gone.
+    Skip(u64),
+    /// Silence the file does not hold: the mixer stalled while the picture
+    /// went on.
+    Zeros(u64),
+}
+
+/// What to do with a track, walking the recording's audio timeline of
+/// `timeline_frames`. The track file holds every stretch outside the
+/// `audio_gaps` and none inside them; the `video_gaps` are what the finished
+/// recording leaves out. The two never line up to the frame — the mixer lags,
+/// the pacer skips — so the seam may cost a few zeros, but never a shift.
+fn audio_edits(
+    timeline_frames: u64,
+    video_gaps: &[Range<u64>],
+    audio_gaps: &[Range<u64>],
+) -> Vec<Edit> {
+    let mut cuts: Vec<u64> = vec![0, timeline_frames];
+    for gap in video_gaps.iter().chain(audio_gaps) {
+        cuts.extend([gap.start.min(timeline_frames), gap.end.min(timeline_frames)]);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut edits: Vec<Edit> = Vec::new();
+    for piece in cuts.windows(2) {
+        let (at, len) = (piece[0], piece[1] - piece[0]);
+        let inside = |gaps: &[Range<u64>]| gaps.iter().any(|gap| gap.contains(&at));
+        let edit = match (inside(video_gaps), inside(audio_gaps)) {
+            (false, false) => Edit::Copy(len),
+            (false, true) => Edit::Zeros(len),
+            (true, false) => Edit::Skip(len),
+            // Neither in the file nor in the recording.
+            (true, true) => continue,
+        };
+        match (edits.last_mut(), edit) {
+            (Some(Edit::Copy(n)), Edit::Copy(m))
+            | (Some(Edit::Skip(n)), Edit::Skip(m))
+            | (Some(Edit::Zeros(n)), Edit::Zeros(m)) => *n += m,
+            (_, edit) => edits.push(edit),
+        }
+    }
+    edits
+}
+
+/// Where a track lies once it is cut: a name of its own rather than the old
+/// one, so that a second try at `finalize` knows it is done and does not cut
+/// what is already cut.
+fn cut_path(path: &Path) -> PathBuf {
+    path.with_extension("cut.pcm")
+}
+
+/// Cut a track file by its `edits`, through `<file>.cut`. The result is
+/// renamed to [`cut_path`] and only then the uncut file removed; returns the
+/// cut one.
+///
+/// A file that runs out early stops being read: whatever follows is silence,
+/// which [`align`] pads in at the end.
+fn apply_edits(path: &Path, edits: &[Edit]) -> std::io::Result<PathBuf> {
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".cut");
+    let temp = PathBuf::from(temp);
+    let written = (|| {
+        let mut input = BufReader::with_capacity(WRITE_BUFFER, File::open(path)?);
+        let mut out = BufWriter::with_capacity(WRITE_BUFFER, File::create(&temp)?);
+        for edit in edits {
+            match *edit {
+                Edit::Copy(frames) => {
+                    std::io::copy(&mut (&mut input).take(frames * FRAME_BYTES), &mut out)?;
+                }
+                Edit::Skip(frames) => {
+                    input.seek_relative((frames * FRAME_BYTES) as i64)?;
+                }
+                Edit::Zeros(frames) => write_zeros(&mut out, frames * FRAME_BYTES)?,
+            }
+        }
+        out.flush()
+    })();
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err);
+    }
+    let cut = cut_path(path);
+    std::fs::rename(&temp, &cut)?;
+    std::fs::remove_file(path)?;
+    Ok(cut)
+}
+
+/// The tracks of a finished folder, ready for `muxer::encode`: cut to the
+/// picture where the recording has gaps, every one `audio_frames` long, and
+/// the main mix summed — first in the list, as in a clip.
+fn prepare_tracks(dir: &Path, meta: &Meta, audio_frames: u64) -> Result<Vec<AudioInput>, String> {
+    let to_frames = |us: i64| us.max(0) as u64 * SAMPLE_RATE as u64 / 1_000_000;
+    let video_gaps: Vec<Range<u64>> = meta
+        .video_gaps
+        .iter()
+        .map(|gap| {
+            let at = to_frames(gap.at_us);
+            at..at + to_frames(gap.len_us)
+        })
+        .collect();
+    let audio_gaps: Vec<Range<u64>> = meta
+        .audio_gaps
+        .iter()
+        .map(|gap| gap.at_frame..gap.at_frame + gap.frames)
+        .collect();
+    // The timeline still holds the gaps the picture is spread without.
+    let timeline_frames =
+        audio_frames + video_gaps.iter().map(|gap| gap.end - gap.start).sum::<u64>();
+    let edits = if video_gaps.is_empty() && audio_gaps.is_empty() {
+        Vec::new()
+    } else {
+        audio_edits(timeline_frames, &video_gaps, &audio_gaps)
+    };
+    let rewrite =
+        edits.len() > 1 || edits.first().is_some_and(|edit| !matches!(edit, Edit::Copy(_)));
+
+    let mut into_mix: Vec<PathBuf> = Vec::new();
+    let mut own: Vec<AudioInput> = Vec::new();
+    for track in &meta.tracks {
+        let mut path = dir.join(&track.file);
+        // Stop rather than leave the track out. Carrying on would write a
+        // recording without it and then clear the folder away — the audio
+        // would be gone for good. Stopping keeps the folder, and the next
+        // start tries again.
+        let failed = |err: std::io::Error| {
+            format!("could not prepare audio track '{}': {err}", track.label)
+        };
+        if rewrite {
+            let cut = cut_path(&path);
+            // Without the uncut file, an earlier try got as far as cutting it.
+            // Without either, the track never got a file: `align` makes it
+            // silence, as before.
+            if path.exists() {
+                path = apply_edits(&path, &edits).map_err(failed)?;
+            } else if cut.exists() {
+                path = cut;
+            }
+        }
+        align(&path, audio_frames).map_err(failed)?;
+        if meta.separate.contains(&track.source_id) {
+            own.push(AudioInput {
+                path,
+                label: track.label.clone(),
+                raw: true,
+            });
+        } else {
+            into_mix.push(path);
+        }
+    }
+
+    // The main mix first, as in a clip — the editor lists the tracks in this
+    // order.
+    let mut inputs: Vec<AudioInput> = Vec::new();
+    match into_mix.len() {
+        0 => {}
+        1 => inputs.push(AudioInput {
+            path: into_mix.remove(0),
+            label: "Main mix".into(),
+            raw: true,
+        }),
+        _ => {
+            let mix = dir.join(MIX_FILE);
+            if let Err(err) = sum_tracks(&into_mix, &mix) {
+                // A half-written mix of an hour is gigabytes the next try
+                // would have to find room beside.
+                let _ = std::fs::remove_file(&mix);
+                return Err(format!("could not mix the recording's audio: {err}"));
+            }
+            inputs.push(AudioInput {
+                path: mix,
+                label: "Main mix".into(),
+                raw: true,
+            });
+        }
+    }
+    inputs.extend(own);
+    Ok(inputs)
 }
 
 /// Sum several tracks of the same length into one, block by block — an hour
@@ -654,55 +937,7 @@ pub fn finalize(
     }
     let timing = muxer::timing(frames, meta.span_us, meta.largest_step_us, fps);
     let audio_frames = timing.span_us * SAMPLE_RATE as u64 / 1_000_000;
-
-    let mut into_mix: Vec<PathBuf> = Vec::new();
-    let mut own: Vec<AudioInput> = Vec::new();
-    for track in &meta.tracks {
-        let path = dir.join(&track.file);
-        // Stop rather than leave the track out. Carrying on would write a
-        // recording without it and then clear the folder away — the audio
-        // would be gone for good. Stopping keeps the folder, and the next
-        // start tries again.
-        align(&path, audio_frames).map_err(|err| {
-            format!("could not prepare audio track '{}': {err}", track.label)
-        })?;
-        if meta.separate.contains(&track.source_id) {
-            own.push(AudioInput {
-                path,
-                label: track.label.clone(),
-                raw: true,
-            });
-        } else {
-            into_mix.push(path);
-        }
-    }
-
-    // The main mix first, as in a clip — the editor lists the tracks in this
-    // order.
-    let mut inputs: Vec<AudioInput> = Vec::new();
-    match into_mix.len() {
-        0 => {}
-        1 => inputs.push(AudioInput {
-            path: into_mix.remove(0),
-            label: "Main mix".into(),
-            raw: true,
-        }),
-        _ => {
-            let mix = dir.join(MIX_FILE);
-            if let Err(err) = sum_tracks(&into_mix, &mix) {
-                // A half-written mix of an hour is gigabytes the next try
-                // would have to find room beside.
-                let _ = std::fs::remove_file(&mix);
-                return Err(format!("could not mix the recording's audio: {err}"));
-            }
-            inputs.push(AudioInput {
-                path: mix,
-                label: "Main mix".into(),
-                raw: true,
-            });
-        }
-    }
-    inputs.extend(own);
+    let inputs = prepare_tracks(dir, meta, audio_frames)?;
     on_progress(0.1);
 
     let length_ms = timing.span_us / 1000;
@@ -984,6 +1219,204 @@ mod tests {
             assert_eq!(read_meta(&recorder.dir).unwrap().friends, meta.friends);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    fn write_samples(path: &Path, values: &[i16]) {
+        let raw: Vec<u8> = values.iter().flat_map(|s| s.to_le_bytes()).collect();
+        std::fs::write(path, raw).unwrap();
+    }
+
+    /// REC-1: ten minutes asleep in the middle. The picture's jump is written down
+    /// and taken out of the span, instead of stretching the whole recording.
+    #[test]
+    fn a_sleep_in_the_picture_is_a_gap_not_part_of_the_span() {
+        let dir = scratch("sleep");
+        let meta = Meta { id: "z".into(), fps: 60, ..Meta::default() };
+        let before = (0..60).map(|k| frame(k * 16_666, k == 0));
+        let after = (0..60).map(|k| frame(600_000_000 + k * 16_666, k == 0));
+        let recorder = Recorder::start(&dir, meta, &[], before.chain(after).collect(), 0).unwrap();
+        let meta = recorder.finish(Vec::new(), None);
+        assert_eq!(meta.video_gaps, vec![VideoGap { at_us: 999_960, len_us: 599_000_040 }]);
+        assert_eq!(meta.span_us, Some(1_999_920));
+        assert_eq!(meta.largest_step_us, Some(16_666), "the gap is not a step");
+        assert_eq!(recorder.closed_us.load(Ordering::Relaxed), 599_000_040);
+        assert_eq!(read_meta(&recorder.dir).unwrap().video_gaps, meta.video_gaps);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-1: a stall the encoder or the pacer recovers from is no sleep. It
+    /// stays in the span, as `muxer::timing` expects.
+    #[test]
+    fn a_stall_shorter_than_two_seconds_is_not_a_gap() {
+        let dir = scratch("stall");
+        let meta = Meta { id: "st".into(), fps: 60, ..Meta::default() };
+        let backlog = vec![frame(0, true), frame(16_666, false), frame(1_516_666, false)];
+        let recorder = Recorder::start(&dir, meta, &[], backlog, 0).unwrap();
+        let meta = recorder.finish(Vec::new(), None);
+        assert!(meta.video_gaps.is_empty());
+        assert_eq!(meta.span_us, Some(1_533_332));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-1: the mixer's gap is counted, not written. Eight hours asleep used to
+    /// be 5.5 GB of zeros per track.
+    #[test]
+    fn a_sleep_writes_no_zeros() {
+        let dir = scratch("nozeros");
+        let meta = Meta { id: "n".into(), fps: 60, ..Meta::default() };
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let game = ring_with("game");
+        game.push(&[5i16; 12], 0);
+        assert!(recorder.begin_window(&[game.clone()], 1250));
+        recorder.audio(&game, &[7i16; 12]);
+        recorder.end_window(6);
+        recorder.skip_window(28_800_000);
+        assert!(recorder.begin_window(&[game.clone()], 6_000_001_250));
+        recorder.audio(&game, &[8i16; 12]);
+        recorder.end_window(6);
+        let meta = recorder.finish(Vec::new(), None);
+        let track = samples(&dir.join(WORK_DIR).join("n").join(&meta.tracks[0].file));
+        assert_eq!(track.len(), 36, "zeros were written for the sleep");
+        assert_eq!(meta.audio_gaps, vec![AudioGap { at_frame: 12, frames: 28_800_000 }]);
+        assert_eq!(recorder.queued.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-1: a source that turns up after the wake is held to the timeline
+    /// on file, which the sleep is not part of.
+    #[test]
+    fn a_source_joining_after_a_sleep_gets_only_the_silence_it_missed() {
+        let dir = scratch("join-after-sleep");
+        let meta = Meta { id: "j".into(), fps: 60, ..Meta::default() };
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let game = ring_with("game");
+        game.push(&[5i16; 12], 0);
+        assert!(recorder.begin_window(&[game.clone()], 1250));
+        recorder.audio(&game, &[7i16; 12]);
+        recorder.end_window(6);
+        recorder.skip_window(28_800_000);
+        let mic = ring_with("mic");
+        assert!(recorder.begin_window(&[game.clone(), mic.clone()], 6_000_001_250));
+        recorder.audio(&game, &[8i16; 12]);
+        recorder.audio(&mic, &[9i16; 12]);
+        recorder.end_window(6);
+        let meta = recorder.finish(Vec::new(), None);
+        let rec = dir.join(WORK_DIR).join("j");
+        let mic_track = samples(&rec.join(&meta.tracks[1].file));
+        assert_eq!(mic_track.len(), 36, "the sleep was padded in");
+        assert_eq!(&mic_track[..24], &[0i16; 24]);
+        assert_eq!(&mic_track[24..], &[9i16; 12]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-1, Review Focus: the mixer's gap and the picture's gap never line up to
+    /// the frame (mixer lag, pacer skip). The seam costs a few zeros and never a shift.
+    #[test]
+    fn gaps_that_do_not_line_up_leave_only_zeros_at_the_seam() {
+        assert_eq!(
+            audio_edits(100, &[40..90], &[44..92]),
+            vec![Edit::Copy(40), Edit::Skip(4), Edit::Zeros(2), Edit::Copy(8)]
+        );
+    }
+
+    /// REC-1: the other cases, in frames on the recording's timeline.
+    #[test]
+    fn audio_edits_follow_both_gaps() {
+        assert_eq!(audio_edits(100, &[], &[]), vec![Edit::Copy(100)]);
+        // Sleep: picture and sound stopped together.
+        assert_eq!(audio_edits(100, &[40..90], &[40..90]), vec![Edit::Copy(50)]);
+        // Only the mixer stalled: its zeros come back, and nothing shifts.
+        assert_eq!(audio_edits(100, &[], &[30..60]), vec![Edit::Copy(30), Edit::Zeros(30), Edit::Copy(40)]);
+        // Only the encoder hung: that sound goes together with the picture it belongs to.
+        assert_eq!(audio_edits(100, &[30..60], &[]), vec![Edit::Copy(30), Edit::Skip(30), Edit::Copy(40)]);
+    }
+
+    /// REC-1: the seam edits above, done to a file. What comes out is as long
+    /// as the picture, and the sound after the seam is the sound after the wake.
+    #[test]
+    fn a_cut_track_is_exactly_as_long_as_the_picture() {
+        let dir = scratch("cut");
+        let path = dir.join("track_0.pcm");
+        let ramp: Vec<i16> = (0..52i16).flat_map(|k| [k; CHANNELS]).collect();
+        write_samples(&path, &ramp);
+        let cut = apply_edits(&path, &audio_edits(100, &[40..90], &[44..92])).unwrap();
+        let out = samples(&cut);
+        assert_eq!(out.len(), 50 * CHANNELS);
+        let at = |frame: usize| out[frame * CHANNELS];
+        assert!((0..40).all(|k| at(k) == k as i16));
+        assert_eq!((at(40), at(41)), (0, 0));
+        assert!((42..50).all(|k| at(k) == k as i16 + 2));
+        assert!(!path.exists(), "the uncut track is left lying beside the cut one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn slept_folder(name: &str) -> (PathBuf, Meta) {
+        let dir = scratch(name);
+        let track: Vec<i16> = std::iter::repeat_n(1i16, 48_000 * CHANNELS)
+            .chain(std::iter::repeat_n(2i16, 48_000 * CHANNELS))
+            .collect();
+        let mut tracks = Vec::new();
+        for (index, id) in ["game", "mic"].into_iter().enumerate() {
+            write_samples(&dir.join(track_file(index)), &track);
+            tracks.push(MetaTrack {
+                source_id: id.into(),
+                label: id.into(),
+                file: track_file(index),
+            });
+        }
+        let meta = Meta {
+            id: "w".into(),
+            fps: 60,
+            tracks,
+            video_gaps: vec![VideoGap { at_us: 1_000_000, len_us: 600_000_000 }],
+            audio_gaps: vec![AudioGap { at_frame: 48_000, frames: 28_800_000 }],
+            ..Meta::default()
+        };
+        (dir, meta)
+    }
+
+    /// REC-1: a recording that slept between its two seconds keeps both of
+    /// them, the second where it belongs — the sound after the wake is not
+    /// cut off as running past the picture.
+    #[test]
+    fn a_slept_recording_keeps_its_sound_after_the_wake() {
+        let (dir, meta) = slept_folder("slept");
+        let inputs = prepare_tracks(&dir, &meta, 96_000).unwrap();
+        let mix = samples(&inputs[0].path);
+        assert_eq!(mix.len(), 96_000 * CHANNELS);
+        assert_eq!(mix[0], 2);
+        assert_eq!(mix[50_000 * CHANNELS], 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-1: a stop whose ffmpeg failed keeps the folder, and the next try
+    /// prepares the tracks again. A track that is cut already is not cut a
+    /// second time — that would throw away sound after the seam.
+    #[test]
+    fn a_second_try_does_not_cut_a_track_twice() {
+        let dir = scratch("cut-twice");
+        let ramp: Vec<i16> = (0..52i16).flat_map(|k| [k; CHANNELS]).collect();
+        write_samples(&dir.join(track_file(0)), &ramp);
+        let meta = Meta {
+            id: "c".into(),
+            fps: 60,
+            tracks: vec![MetaTrack {
+                source_id: "game".into(),
+                label: "Game".into(),
+                file: track_file(0),
+            }],
+            // Frames 40..90 of the picture, in µs (a frame is 20.83 µs), and
+            // 44..92 of the sound: the seam above.
+            video_gaps: vec![VideoGap { at_us: 834, len_us: 1_042 }],
+            audio_gaps: vec![AudioGap { at_frame: 44, frames: 48 }],
+            ..Meta::default()
+        };
+        let first = samples(&prepare_tracks(&dir, &meta, 50).unwrap()[0].path);
+        let second = samples(&prepare_tracks(&dir, &meta, 50).unwrap()[0].path);
+        assert_eq!(first.len(), 50 * CHANNELS);
+        assert_eq!(first[42 * CHANNELS], 44, "the cut is not the seam's");
+        assert_eq!(first, second);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

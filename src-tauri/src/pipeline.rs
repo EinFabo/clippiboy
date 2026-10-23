@@ -874,8 +874,10 @@ mod win {
     }
 }
 
-/// Longest window the mixer mixes in one go; anything longer is a gap (1 s).
-const MAX_WINDOW_100NS: i64 = 10_000_000;
+/// Longest window the mixer mixes in one go; anything longer is a gap. The
+/// same 2 s the pacer and a recording's picture take for one
+/// (`buffer::DISCONTINUITY_US`), so that a sleep is a gap on every side.
+const MAX_WINDOW_100NS: i64 = crate::buffer::DISCONTINUITY_US * 10;
 
 /// The mixer: produces gapless consecutive audio windows on the QPC axis.
 fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
@@ -922,10 +924,10 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
                 ring.skip(frames * CHANNELS);
             }
             drop(rings);
-            // A recording writes the gap out as zeros the next time a block
-            // arrives (`Recorder::audio`), in small pieces.
+            // A recording counts the gap rather than writing it; `finalize`
+            // puts zeros back only where the picture went on.
             if let Some(recorder) = &recording {
-                recorder.end_window(frames);
+                recorder.skip_window(frames);
             }
             // The buffers last held a window of normal length; nothing to give back.
             let next = from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64;
