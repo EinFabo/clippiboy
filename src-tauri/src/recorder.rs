@@ -100,6 +100,12 @@ pub struct Meta {
     /// stands.
     #[serde(default)]
     pub span_us: Option<u64>,
+    /// The longest step between neighbouring frame timestamps, which tells an
+    /// encoder that fell short from a gap such as sleep (`muxer::timing`).
+    /// Known only after a clean stop; a folder written before it was kept
+    /// falls back to the old rule.
+    #[serde(default)]
+    pub largest_step_us: Option<i64>,
     /// Friends who played the same game when the recording started. Kept here
     /// rather than beside the running recording, so that they stay with this
     /// one: a stop that is still encoding while the next recording starts,
@@ -164,6 +170,9 @@ pub struct Recorder {
     /// Earliest and latest frame timestamp so far, for `Meta::span_us`.
     first_pts_us: AtomicI64,
     last_pts_us: AtomicI64,
+    /// The longest step forward between a frame and the latest one before it,
+    /// for `Meta::largest_step_us`.
+    largest_step_us: AtomicI64,
     video_bytes: AtomicU64,
     failure: Arc<Mutex<Option<String>>>,
     /// Bytes handed to the writer and not yet written.
@@ -236,6 +245,7 @@ impl Recorder {
             frames: AtomicU64::new(0),
             first_pts_us: AtomicI64::new(i64::MAX),
             last_pts_us: AtomicI64::new(i64::MIN),
+            largest_step_us: AtomicI64::new(0),
             video_bytes: AtomicU64::new(0),
             failure,
             queued,
@@ -282,7 +292,13 @@ impl Recorder {
         }
         self.frames.fetch_add(1, Ordering::Relaxed);
         self.first_pts_us.fetch_min(packet.pts_us, Ordering::Relaxed);
-        self.last_pts_us.fetch_max(packet.pts_us, Ordering::Relaxed);
+        let previous = self.last_pts_us.fetch_max(packet.pts_us, Ordering::Relaxed);
+        // The first frame has nothing before it; one that arrives behind the
+        // latest leaves the step to the next one forward.
+        if previous != i64::MIN && packet.pts_us > previous {
+            self.largest_step_us
+                .fetch_max(packet.pts_us - previous, Ordering::Relaxed);
+        }
         self.video_bytes
             .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
         self.send(Job::Video(packet.data.clone()));
@@ -437,6 +453,7 @@ impl Recorder {
         meta.span_us = (first <= last)
             .then(|| crate::muxer::span_of(first, last, meta.fps))
             .flatten();
+        meta.largest_step_us = Some(self.largest_step_us.load(Ordering::Relaxed));
         // Labels as they stand now — a source renamed mid-recording.
         // A description that cannot be written (drive gone, file held) must not
         // keep the recording open: the caller still gets it, and the folder
@@ -635,7 +652,7 @@ pub fn finalize(
     if frames == 0 {
         return Err("The recording is empty.".into());
     }
-    let timing = muxer::timing(frames, meta.span_us, fps);
+    let timing = muxer::timing(frames, meta.span_us, meta.largest_step_us, fps);
     let audio_frames = timing.span_us * SAMPLE_RATE as u64 / 1_000_000;
 
     let mut into_mix: Vec<PathBuf> = Vec::new();
@@ -755,6 +772,27 @@ mod tests {
             .chunks_exact(2)
             .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
             .collect()
+    }
+
+    fn frame(pts_us: i64, keyframe: bool) -> EncodedPacket {
+        EncodedPacket {
+            track: crate::buffer::VIDEO_TRACK,
+            pts_us,
+            duration_us: 16_666,
+            keyframe,
+            data: vec![0u8, 1].into(),
+        }
+    }
+
+    /// SAVE-4: a recording hands its largest step to `finalize`.
+    #[test]
+    fn a_recording_remembers_its_largest_step() {
+        let dir = scratch("step");
+        let meta = Meta { id: "s".into(), fps: 60, ..Meta::default() };
+        let backlog = vec![frame(0, true), frame(16_666, false), frame(516_666, false)];
+        let recorder = Recorder::start(&dir, meta, &[], backlog, 0).unwrap();
+        assert_eq!(recorder.finish(Vec::new(), None).largest_step_us, Some(500_000));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -738,7 +738,12 @@ const CATCH_UP: Duration = Duration::from_millis(250);
 /// process stopped): skipped, but not counted as frames lost. Eight hours of
 /// standby were 1.7 million "dropped frames" in the console and on the
 /// Stream Deck otherwise.
-pub const GAP: Duration = Duration::from_secs(5);
+///
+/// The same 2 s ([`DISCONTINUITY_US`](crate::buffer::DISCONTINUITY_US)) that
+/// decides whether a clip's frames are stretched over their time
+/// (`muxer::timing`): a jump the counter calls sleep is one the clip treats as
+/// sleep, and a shortfall it counts is one the clip stretches.
+pub const GAP: Duration = Duration::from_micros(crate::buffer::DISCONTINUITY_US as u64);
 
 /// The clock. Runs until `Latest::stop`.
 pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {

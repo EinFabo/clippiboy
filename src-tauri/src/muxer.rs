@@ -259,14 +259,35 @@ pub struct Timing {
 /// ran ahead of the audio cut beside it. Spread over `first..=last` instead,
 /// both last the same and meet at either end.
 ///
-/// A span far longer than the frames can explain is not a short encoder but a
-/// gap — the PC slept with a recording running. Stretched over that, the whole
-/// recording would play in slow motion, so the nominal rate stays.
-pub fn timing(frames: u64, span_us: Option<u64>, fps: u32) -> Timing {
+/// A single step between neighbouring frames longer than
+/// [`DISCONTINUITY_US`](crate::buffer::DISCONTINUITY_US) (`largest_step_us`)
+/// is not a short encoder but a gap — the PC slept with a recording running.
+/// Stretched over that, the whole recording would play in slow motion, so the
+/// nominal rate stays. Short of that, however far the encoder fell behind, the
+/// frames are stretched: told apart by the ratio of span to frames, as before,
+/// an encoder at 36 of 60 fps passed for sleep, and its clip played 1.67× fast
+/// with the end of its sound cut off.
+///
+/// Without a largest step (a recording folder written before it was kept) the
+/// old ratio decides: a span up to half again the nominal one is stretched.
+pub fn timing(
+    frames: u64,
+    span_us: Option<u64>,
+    largest_step_us: Option<i64>,
+    fps: u32,
+) -> Timing {
     let fps = fps.max(1) as u64;
     let nominal = frames * 1_000_000 / fps;
+    let stretch = |span: u64| {
+        frames > 0
+            && span >= nominal
+            && match largest_step_us {
+                Some(step) => step <= crate::buffer::DISCONTINUITY_US,
+                None => span <= nominal * 3 / 2,
+            }
+    };
     match span_us {
-        Some(span) if frames > 0 && span >= nominal && span <= nominal * 3 / 2 => Timing {
+        Some(span) if stretch(span) => Timing {
             rate: format!("{}/{}", frames * 1_000_000, span),
             span_us: span,
         },
@@ -275,6 +296,19 @@ pub fn timing(frames: u64, span_us: Option<u64>, fps: u32) -> Timing {
             span_us: nominal,
         },
     }
+}
+
+/// The longest step between two frames that follow each other in time, or 0
+/// for fewer than two. Sorted first: should frames ever arrive out of order,
+/// neighbours in the list are not neighbours in time.
+pub fn largest_step_us(pts_us: &[i64]) -> i64 {
+    let mut sorted = pts_us.to_vec();
+    sorted.sort_unstable();
+    sorted
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .max()
+        .unwrap_or(0)
 }
 
 /// From the first and last timestamp of a run of frames to the span it covers:
@@ -613,7 +647,7 @@ mod tests {
     #[test]
     fn a_stream_without_losses_plays_at_the_configured_rate() {
         // 1800 frames at 60 fps, timestamps 0 … 29.983 s.
-        let timing = timing(1800, span_of(0, 1799 * 1_000_000 / 60, 60), 60);
+        let timing = timing(1800, span_of(0, 1799 * 1_000_000 / 60, 60), Some(16_667), 60);
         assert!(timing.span_us.abs_diff(30_000_000) < 100, "{}", timing.span_us);
         let rate = match timing.rate.split_once('/') {
             Some((a, b)) => a.parse::<f64>().unwrap() / b.parse::<f64>().unwrap(),
@@ -625,7 +659,7 @@ mod tests {
     #[test]
     fn a_short_encoder_spreads_its_frames_over_the_real_time() {
         // 30 s of timestamps but only 1500 frames — the clock skipped ticks.
-        let timing = timing(1500, Some(30_000_000), 60);
+        let timing = timing(1500, Some(30_000_000), Some(266_666), 60);
         assert_eq!(timing.span_us, 30_000_000);
         assert_eq!(timing.rate, "1500000000/30000000");
     }
@@ -633,10 +667,34 @@ mod tests {
     #[test]
     fn a_gap_the_frames_cannot_explain_keeps_the_nominal_rate() {
         // A recording across an hour of sleep: stretching would be slow motion.
-        let slept = timing(1800, Some(3_630_000_000), 60);
+        let slept = timing(1800, Some(3_630_000_000), Some(3_600_016_666), 60);
         assert_eq!(slept.rate, "60");
         assert_eq!(slept.span_us, 30_000_000);
         // No span known (a recording recovered after a crash): the same.
-        assert_eq!(timing(1800, None, 60).rate, "60");
+        assert_eq!(timing(1800, None, None, 60).rate, "60");
+    }
+
+    /// SAVE-4: 36 of 60 fps for 30 s was muxed at 60 fps. The clip came out 18 s
+    /// long, played 1.67× fast, and its end was 12 s away from its sound.
+    #[test]
+    fn a_sustained_shortfall_is_stretched_not_taken_for_sleep() {
+        let timing = timing(1080, Some(30_000_000), Some(266_666), 60);
+        assert_eq!(timing.rate, "1080000000/30000000");
+        assert_eq!(timing.span_us, 30_000_000);
+    }
+
+    /// Review Focus: a recording folder from before this change has no largest
+    /// step, and keeps the old rule.
+    #[test]
+    fn a_folder_without_a_largest_step_keeps_the_old_rule() {
+        assert_eq!(timing(1080, Some(30_000_000), None, 60).rate, "60");
+        assert_eq!(timing(1500, Some(30_000_000), None, 60).rate, "1500000000/30000000");
+    }
+
+    /// SAVE-4: steps are measured between neighbours in time, not in arrival order.
+    #[test]
+    fn the_largest_step_is_measured_between_neighbours_in_time() {
+        assert_eq!(largest_step_us(&[0, 16_666, 1_516_666, 33_333]), 1_483_333);
+        assert_eq!(largest_step_us(&[5]), 0);
     }
 }

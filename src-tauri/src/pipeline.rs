@@ -664,6 +664,9 @@ pub struct ClipSnapshot {
     pub audio_frames: usize,
     /// For ffmpeg's `-r` — see `muxer::timing`.
     pub rate: String,
+    /// The longest step between neighbouring frames, which told a short
+    /// encoder from a gap for `rate` (`muxer::largest_step_us`).
+    pub largest_step_us: i64,
     /// How far the mixer has got — the rings are read only once it passed
     /// [`Self::end_100ns`].
     pub mixed: Arc<MixPosition>,
@@ -1144,9 +1147,11 @@ impl Pipeline {
         }
 
         let first_pts = packets.first().map(|p| p.pts_us).unwrap_or(0);
+        let pts: Vec<i64> = packets.iter().map(|p| p.pts_us).collect();
         // Highest rather than last: should frames ever be reordered, the last
         // packet is not the latest picture.
-        let last_pts = packets.iter().map(|p| p.pts_us).max().unwrap_or(0);
+        let last_pts = pts.iter().copied().max().unwrap_or(0);
+        let largest_step_us = crate::muxer::largest_step_us(&pts);
 
         // The picture is spread over the time its timestamps span, and the
         // audio cut to the same length, so the two meet at both ends even when
@@ -1156,6 +1161,7 @@ impl Pipeline {
         let timing = crate::muxer::timing(
             packets.len() as u64,
             crate::muxer::span_of(first_pts, last_pts, self.shared.fps),
+            Some(largest_step_us),
             self.shared.fps,
         );
         let audio_frames = timing.span_us as i64 * SAMPLE_RATE as i64 / 1_000_000;
@@ -1179,6 +1185,7 @@ impl Pipeline {
             start_100ns: self.shared.qpc_of(first_pts),
             audio_frames: audio_frames.max(0) as usize,
             rate: timing.rate,
+            largest_step_us,
             mixed: self.shared.mixed.clone(),
             packets,
         })

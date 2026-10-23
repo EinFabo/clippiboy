@@ -13,6 +13,13 @@ use std::sync::Arc;
 /// Track 0 is always video, the audio tracks follow from 1.
 pub const VIDEO_TRACK: u32 = 0;
 
+/// A single step between neighbouring frame timestamps longer than this is
+/// not an encoder falling short but a break in time: the PC slept, or the
+/// process stood still. Below it, frames that are missing were lost, and the
+/// ones there are spread over the time they cover (`muxer::timing`). The same
+/// 2 s the clock uses to stop counting skipped ticks (`convert::GAP`).
+pub const DISCONTINUITY_US: i64 = 2_000_000;
+
 #[derive(Debug, Clone)]
 pub struct EncodedPacket {
     pub track: u32,
