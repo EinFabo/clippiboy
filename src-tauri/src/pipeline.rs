@@ -67,6 +67,12 @@ fn samples_for(seconds: u32) -> usize {
     seconds as usize * SAMPLE_RATE as usize * CHANNELS
 }
 
+/// `frames` of 48 kHz audio in 100 ns ticks, rounded down once for the whole
+/// count. In `i128`, so no count of frames can overflow on the way.
+fn frames_to_100ns(frames: u64) -> i64 {
+    (frames as i128 * 10_000_000 / SAMPLE_RATE as i128) as i64
+}
+
 /// How long a save waits at most for the mixer to reach the clip's end: the
 /// 80 ms it stays behind ([`AUDIO_LAG_100NS`]), one tick and some scheduling.
 pub const MIX_WAIT: Duration = Duration::from_millis(150);
@@ -129,12 +135,24 @@ pub struct TrackRing {
 
 struct TrackInner {
     samples: VecDeque<i16>,
-    /// QPC of the first sample in the ring.
-    start_100ns: i64,
+    /// QPC of the first sample the ring was primed with. The start of what it
+    /// holds now is counted from here in frames ([`Self::start_100ns`]), not
+    /// moved along with every trim: rounding each trim to a tick would lose
+    /// a third of a tick each time, and the mixer's clock no longer does.
+    origin_100ns: i64,
+    /// Frames trimmed off the front since the ring was primed.
+    dropped_frames: u64,
     primed: bool,
     /// Silence that has come in but is not stored — see [`TrackRing::push`].
     /// Counted in samples and never larger than the ring itself.
     silence: usize,
+}
+
+impl TrackInner {
+    /// QPC of the first sample in the ring.
+    fn start_100ns(&self) -> i64 {
+        self.origin_100ns + frames_to_100ns(self.dropped_frames)
+    }
 }
 
 impl TrackRing {
@@ -144,7 +162,8 @@ impl TrackRing {
             label: Mutex::new(label),
             inner: Mutex::new(TrackInner {
                 samples: VecDeque::new(),
-                start_100ns: 0,
+                origin_100ns: 0,
+                dropped_frames: 0,
                 primed: false,
                 silence: 0,
             }),
@@ -214,7 +233,8 @@ impl TrackRing {
         let gap = std::mem::take(&mut inner.silence);
 
         if !inner.primed {
-            inner.start_100ns = at_100ns;
+            inner.origin_100ns = at_100ns;
+            inner.dropped_frames = 0;
             inner.primed = true;
         } else {
             inner.samples.extend(std::iter::repeat(0).take(gap));
@@ -225,8 +245,7 @@ impl TrackRing {
         if inner.samples.len() > capacity {
             let excess = inner.samples.len() - capacity;
             inner.samples.drain(..excess);
-            let frames = (excess / CHANNELS) as i64;
-            inner.start_100ns += frames * 10_000_000 / SAMPLE_RATE as i64;
+            inner.dropped_frames += (excess / CHANNELS) as u64;
         }
     }
 
@@ -262,7 +281,7 @@ impl TrackRing {
             let inner = self.inner.lock();
             if inner.primed {
                 let offset_frames =
-                    (from_100ns - inner.start_100ns) * SAMPLE_RATE as i64 / 10_000_000;
+                    (from_100ns - inner.start_100ns()) * SAMPLE_RATE as i64 / 10_000_000;
                 let offset = offset_frames * CHANNELS as i64;
                 let (mut src, mut dst) = if offset < 0 {
                     (0usize, (-offset) as usize)
@@ -883,6 +902,42 @@ mod win {
 /// (`buffer::DISCONTINUITY_US`), so that a sleep is a gap on every side.
 const MAX_WINDOW_100NS: i64 = crate::buffer::DISCONTINUITY_US * 10;
 
+/// The mixer's position on the QPC axis, counted from where it started.
+///
+/// A window's end is worked out from the frames mixed in total, not added up
+/// window by window: 10 ms of audio is not a whole number of 100 ns ticks, and
+/// rounding every window lost a third of a tick each time — about 10 ms an
+/// hour, which a recording carried into the file (AUD-6). The ring trims count
+/// the same way ([`TrackInner::start_100ns`]), so the two still cancel where
+/// a track is silent (AUD-V1).
+struct MixClock {
+    origin_100ns: i64,
+    frames: u64,
+}
+
+impl MixClock {
+    fn new(origin_100ns: i64) -> Self {
+        Self { origin_100ns, frames: 0 }
+    }
+
+    /// Where the next window starts.
+    fn at(&self) -> i64 {
+        self.origin_100ns + frames_to_100ns(self.frames)
+    }
+
+    /// How many frames fit between here and `target_100ns` — none if the
+    /// clock is already there.
+    fn frames_until(&self, target_100ns: i64) -> usize {
+        let total =
+            (target_100ns as i128 - self.origin_100ns as i128) * SAMPLE_RATE as i128 / 10_000_000;
+        (total - self.frames as i128).max(0) as usize
+    }
+
+    fn advance(&mut self, frames: usize) {
+        self.frames += frames as u64;
+    }
+}
+
 /// The mixer: produces gapless consecutive audio windows on the QPC axis.
 fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     let mut sources = shared.sources.lock().clone();
@@ -890,9 +945,10 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
 
     let mut buffers: Vec<Vec<f32>> = Vec::new();
     let mut scratch: Vec<i16> = Vec::new();
-    // Computed against the clock, not accumulated: that way no error can build
-    // up, however imprecisely the thread wakes.
-    let mut next_100ns: Option<i64> = None;
+    // Each window runs up to the clock, however imprecisely the thread wakes,
+    // and its end is counted from the frames mixed in total, so no rounding
+    // builds up either (AUD-6). Started by the first window.
+    let mut clock: Option<MixClock> = None;
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(MIX_INTERVAL);
@@ -905,11 +961,9 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         }
 
         let target = now_100ns() - AUDIO_LAG_100NS;
-        let from = *next_100ns.get_or_insert(target);
-        if target <= from {
-            continue;
-        }
-        let frames = ((target - from) * SAMPLE_RATE as i64 / 10_000_000) as usize;
+        let clock = clock.get_or_insert_with(|| MixClock::new(target));
+        let from = clock.at();
+        let frames = clock.frames_until(target);
         if frames == 0 {
             continue;
         }
@@ -934,9 +988,8 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
                 recorder.skip_window(frames);
             }
             // The buffers last held a window of normal length; nothing to give back.
-            let next = from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64;
-            next_100ns = Some(next);
-            shared.mixed.publish(next);
+            clock.advance(frames);
+            shared.mixed.publish(clock.at());
             continue;
         }
 
@@ -973,9 +1026,8 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             recorder.end_window(frames);
         }
 
-        let next = from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64;
-        next_100ns = Some(next);
-        shared.mixed.publish(next);
+        clock.advance(frames);
+        shared.mixed.publish(clock.at());
     }
 }
 
@@ -1426,9 +1478,53 @@ mod tests {
         let inner = ring.inner.lock();
         assert_eq!(inner.samples.len(), ring.capacity());
         assert!(
-            inner.start_100ns > 0,
+            inner.start_100ns() > 0,
             "the ring start has to move along, otherwise every window points beside"
         );
+    }
+
+    /// AUD-6: rounding each window lost a third of a tick per window, about 10 ms
+    /// an hour, and recordings carried it into the file.
+    #[test]
+    fn the_mixer_clock_does_not_drift_over_an_hour() {
+        let mut clock = MixClock::new(7_000_000_000_000);
+        let (mut seed, mut total) = (1u64, 0u64);
+        while total < 3_600 * 48_000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let frames = 480 + (seed >> 33) as usize % 49; // windows of 10.0–11.0 ms
+            clock.advance(frames);
+            total += frames as u64;
+        }
+        let exact = (total as i128 * 10_000_000 / 48_000) as i64;
+        assert!((clock.at() - 7_000_000_000_000 - exact).abs() <= 1);
+    }
+
+    /// AUD-V1: counted silence broke the cancellation between the mixer and the
+    /// ring's trim, so a track that is quiet half the time drifted late over hours.
+    #[test]
+    fn a_track_quiet_half_the_time_stays_on_the_clock_for_an_hour() {
+        let ring = TrackRing::new("a".into(), "A".into(), 10);
+        let (mut clock, mut seed, mut last) = (MixClock::new(0), 1u64, 0i64);
+        while clock.at() < 36_000_000_000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let frames = 480 + (seed >> 33) as usize % 49;
+            let from = clock.at();
+            let sounding = (from / 10_000_000) % 2 == 0;
+            // A ramp starting at 1, so a window shows which frame of the block it hit.
+            let block: Vec<i16> = (0..frames)
+                .flat_map(|i| {
+                    let v = if sounding { i as i16 + 1 } else { 0 };
+                    [v, v]
+                })
+                .collect();
+            ring.push(&block, from);
+            if sounding {
+                last = from;
+            }
+            clock.advance(frames);
+        }
+        let w = ring.window(last, 2);
+        assert!(w[0] == 1 || w[0] == 2 || w[CHANNELS] == 1, "the last block reads back at {w:?}");
     }
 
     /// Silence is the normal state of most tracks — a device nobody plays on,
