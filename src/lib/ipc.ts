@@ -197,10 +197,12 @@ export const api = {
   discardAllOriginals: () => invoke<TrimOriginals>("discard_all_originals"),
   /**
    * Write a copy of the clip that comes in under `targetBytes`. The clip itself
-   * is not touched — this is a second file at `output`.
+   * is not touched — this is a second file wherever the user puts it in the
+   * save dialog the core opens, with `suggestedName` offered. Resolves to the
+   * path written, `null` when the user cancelled.
    */
-  exportClip: (id: string, targetBytes: number, output: string) =>
-    invoke<void>("export_clip", { id, targetBytes, output }),
+  exportClip: (id: string, targetBytes: number, suggestedName: string) =>
+    invoke<string | null>("export_clip", { id, targetBytes, suggestedName }),
 };
 
 export const events = {

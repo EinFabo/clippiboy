@@ -317,21 +317,92 @@ fn usable_clip_dir(dir: &str) -> bool {
     crate::grantable_dir(Path::new(dir.trim()))
 }
 
-/// Where an export may go: a local `.mp4` the save dialog could have chosen.
+/// Where an export goes: the `.mp4` the user picked in the core's save dialog.
 ///
-/// The path comes from the window, and ffmpeg writes wherever it is told with
-/// `-y` — over any file, to a `\\server` share (handing it the user's Windows
-/// sign-in) or to a URL. Only a drive path with the clip's extension passes.
-fn export_target(output: &str) -> Result<std::path::PathBuf> {
-    let path = std::path::PathBuf::from(output.trim());
-    let text = path.to_string_lossy();
-    let drive = text.as_bytes().get(1) == Some(&b':') && text.as_bytes()[0].is_ascii_alphabetic();
-    let unc = text.starts_with("\\\\") || text.starts_with("//");
+/// No window hands in a path any more, so a share is as good as a drive — the
+/// user chose it. What stays refused is what the dialog lets through but
+/// nobody means: another extension (ffmpeg would write an `.mp4` under it, and
+/// a typed name without one gets `.mp4`), and ClippiBoy's own data folder, where
+/// an export could land on a clip's original or a track. The clip itself is
+/// refused in [`shrink`], by the file's identity rather than its spelling.
+fn export_target(chosen: &Path) -> Result<std::path::PathBuf> {
+    let mut path = chosen.to_path_buf();
+    if path.extension().is_none() {
+        path.set_extension("mp4");
+    }
     let mp4 = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
-    if !path.is_absolute() || unc || !mp4 || (cfg!(windows) && !drive) {
-        return Err("Export to a .mp4 file on a local drive.".into());
+    let up = path.components().any(|part| matches!(part, std::path::Component::ParentDir));
+    if !path.is_absolute() || !mp4 || up {
+        return Err("Export to a .mp4 file.".into());
+    }
+    // Case-insensitive, as Windows treats the folder.
+    let folded = |path: &Path| -> Vec<String> {
+        path.components()
+            .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    if folded(&path).starts_with(&folded(&crate::config::data_dir())) {
+        return Err("Export somewhere outside ClippiBoy's own data folder.".into());
     }
     Ok(path)
+}
+
+/// The name the save dialog offers: the window's suggestion reduced to a bare
+/// file name, without folders or characters Windows refuses in one. `None`
+/// when nothing usable is left.
+fn export_file_name(suggested: &str) -> Option<String> {
+    let last = suggested.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name: String = last
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    let name = name.trim();
+    if name.trim_matches('.').is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Where ffmpeg writes an export before it is renamed into `target`: beside it,
+/// so the rename stays on one volume, and under a name of its own, so a cut-short
+/// run never carries the final name. The process id lets a later start tell
+/// its own leftovers (`*.<digits>.export.mp4`) from a run still going.
+fn export_part(target: &Path) -> std::path::PathBuf {
+    let stem = target
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "export".into());
+    target.with_file_name(format!("{stem}.{}.export.mp4", std::process::id()))
+}
+
+/// Is `file_name` one of the console's Discord exports of the clip named
+/// `clip_stem` — `"<stem> (<n> MB).mp4"`, exactly?
+fn is_discord_export(clip_stem: &str, file_name: &str) -> bool {
+    file_name
+        .strip_prefix(clip_stem)
+        .and_then(|rest| rest.strip_prefix(" ("))
+        .and_then(|rest| rest.strip_suffix(" MB).mp4"))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Delete the Discord exports beside a clip. They are copies of what the clip
+/// was: once it is edited or gone they would hand out the old picture, and they
+/// would keep its game folder from being removed.
+fn remove_discord_exports(clip_path: &Path) {
+    let (Some(folder), Some(stem)) = (clip_path.parent(), clip_path.file_stem()) else {
+        return;
+    };
+    let stem = stem.to_string_lossy();
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if is_discord_export(&stem, &entry.file_name().to_string_lossy()) {
+            if let Err(err) = std::fs::remove_file(entry.path()) {
+                log::warn!("could not remove the Discord export {}: {err}", entry.path().display());
+            }
+        }
+    }
 }
 
 /// The suggested clip folder — the starting point of the folder dialog and the
@@ -774,6 +845,9 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // The thumbnail too, even when none is recorded in the database.
     crate::thumbs::remove(&clip.id);
 
+    // Its Discord copies too — they would show what is gone, and keep the
+    // game folder below from being removed.
+    remove_discord_exports(Path::new(&clip.path));
     // If that was the last clip of its game, an empty folder would otherwise be
     // left standing.
     if let Some(folder) = folder {
@@ -954,19 +1028,17 @@ pub fn export_for_discord(
     let output = source.with_file_name(format!("{stem} ({megabytes} MB).mp4"));
     let target_bytes = megabytes * 1024 * 1024;
 
-    // Already there from an earlier run and small enough: copying it again beats
-    // encoding the same file twice.
+    // Already there from an earlier run, small enough and newer than the clip:
+    // copying it again beats encoding the same file twice. An older one still
+    // has what a trim or a muted track has since taken out.
     let ready = std::fs::metadata(&output)
         .map(|meta| meta.len() > 0 && meta.len() <= target_bytes)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && stems::is_newer(&output, &source);
     if !ready {
-        export_clip(
-            state,
-            app,
-            id,
-            target_bytes,
-            output.to_string_lossy().to_string(),
-        )?;
+        // Straight to the work: the target is the core's own, beside the clip,
+        // and a clip folder on a share is as good as one on a drive.
+        export_to(&state, &app, &id, target_bytes, &output)?;
     }
     crate::clipboard::copy_files(&[output.clone()])?;
     Ok(output.to_string_lossy().to_string())
@@ -1159,6 +1231,11 @@ pub fn discard_clip_original(
 /// The work of an export, without its notices: shrink a clip into `output`,
 /// reporting 0 to 1 along the way. Returns the bytes written. A share link
 /// shrinks through here too, and says what happened in its own words.
+///
+/// ffmpeg writes beside `output` under a name of its own ([`export_part`]) and
+/// the result is renamed in only when whole: a run cut short leaves no file
+/// that looks finished, and a target the identity check below missed would be
+/// replaced, not truncated while it is being read.
 pub(crate) fn shrink(
     state: &State<'_, AppState>,
     id: &str,
@@ -1175,9 +1252,12 @@ pub(crate) fn shrink(
         return Err("The clip file is no longer there.".into());
     }
     let output = output.to_path_buf();
-    if output == source {
+    // By the file's identity, not its spelling: another case, a hard link or a
+    // junction names the clip just as well.
+    if output == source || (output.exists() && crate::disk::same_file(&output, &source)) {
         return Err("An export cannot overwrite the clip it comes from.".into());
     }
+    let part = export_part(&output);
 
     // The length off the file, not out of the database: the arithmetic hangs on
     // it, and a row that drifted from its file would put the export over the
@@ -1190,7 +1270,7 @@ pub(crate) fn shrink(
         height: clip.height,
     });
     let (encoder, _) = encoder_for(state);
-    let args = crate::export::arguments(&source, &output, &recipe, clip.height, encoder);
+    let args = crate::export::arguments(&source, &part, &recipe, clip.height, encoder);
 
     match edit::run_with_progress(&args, duration_ms, on_progress) {
         Ok(()) => {}
@@ -1198,30 +1278,35 @@ pub(crate) fn shrink(
         // busy sessions, driver trouble — and x264 is always there.
         Err(err) if encoder != crate::model::EncoderId::X264 => {
             log::warn!("export with {encoder:?} failed ({err}) — retrying with x264");
-            let _ = std::fs::remove_file(&output);
+            let _ = std::fs::remove_file(&part);
             let args = crate::export::arguments(
                 &source,
-                &output,
+                &part,
                 &recipe,
                 clip.height,
                 crate::model::EncoderId::X264,
             );
             edit::run_with_progress(&args, duration_ms, on_progress).inspect_err(
                 |_| {
-                    let _ = std::fs::remove_file(&output);
+                    let _ = std::fs::remove_file(&part);
                 },
             )?;
         }
         Err(err) => {
             // A half-written file looks like a finished one in the folder.
-            let _ = std::fs::remove_file(&output);
+            let _ = std::fs::remove_file(&part);
             return Err(err);
         }
     }
-    let written = std::fs::metadata(&output).map(|meta| meta.len()).unwrap_or(0);
+    let written = std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0);
     if written == 0 {
-        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_file(&part);
         return Err("The export came out empty.".into());
+    }
+    if crate::muxer::replace_file(&part, &output).is_err() {
+        let _ = std::fs::remove_file(&part);
+        let name = output.file_name().unwrap_or_default().to_string_lossy();
+        return Err(format!("Could not put the export in place — is \"{name}\" open somewhere right now?"));
     }
     Ok(written)
 }
@@ -1234,26 +1319,85 @@ pub(crate) fn shrink(
 /// refused at the door.
 ///
 /// The original clip is not touched — this writes a second file wherever the
-/// user pointed the save dialog.
+/// user points the save dialog. The core opens that dialog itself: a window
+/// only suggests a name, so no script in it can choose where a file is written,
+/// and whatever the user picks — a network share too — is fine. Returns the
+/// path written, `None` when the user cancelled.
 #[tauri::command(async)]
 pub fn export_clip(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     id: String,
     target_bytes: u64,
-    output: String,
+    suggested_name: String,
+) -> Result<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let chosen = (|| -> Result<Option<std::path::PathBuf>> {
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        refuse_still(&clip)?;
+        let name = export_file_name(&suggested_name).unwrap_or_else(|| {
+            let stem = Path::new(&clip.path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| "clip".into());
+            format!("{stem} ({} MB).mp4", target_bytes / 1024 / 1024)
+        });
+        // Off the main thread (an async command), which the dialog needs: it
+        // is shown there, and this waits for the answer.
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Save the export as")
+            .set_file_name(name)
+            .add_filter("Video", &["mp4"])
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let picked = picked.into_path().map_err(|err| err.to_string())?;
+        let output = export_target(&picked)?;
+        // The dialog asked before replacing what was picked, not the name
+        // with `.mp4` added.
+        if output != picked && output.exists() {
+            let name = output.file_name().unwrap_or_default().to_string_lossy();
+            return Err(format!("\"{name}\" already exists — pick another name."));
+        }
+        Ok(Some(output))
+    })()
+    // Said here, once: the dialog only goes back to ready and relies on this
+    // notice. Cancelling is no failure and says nothing.
+    .inspect_err(|err| crate::notify(&app, "error", err.clone()))?;
+    let Some(output) = chosen else {
+        return Ok(None);
+    };
+    export_to(&state, &app, &id, target_bytes, &output)?;
+    Ok(Some(output.to_string_lossy().to_string()))
+}
+
+/// Shrink a clip into `output` and say how it went — the part of an export
+/// that comes after the target is settled. Every failure is raised as a
+/// notice here, once.
+fn export_to(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+    id: &str,
+    target_bytes: u64,
+    output: &Path,
 ) -> Result<()> {
-    // Said here, once, whichever step fails: the dialog only goes back to
-    // ready and relies on this notice.
-    let written = export_target(&output)
-        .and_then(|output| shrink(&state, &id, target_bytes, &output, &progress(&app, &id)))
-        .inspect_err(|err| crate::notify(&app, "error", err.clone()))?;
-    progress(&app, &id)(1.0);
+    // The target is settled: the window can show the copy being written.
+    progress(app, id)(0.0);
+    let written = shrink(state, id, target_bytes, output, &progress(app, id))
+        .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
+    progress(app, id)(1.0);
     if written > target_bytes {
         // Not an error: the file is there and usually only just over. Saying so
         // beats letting it be refused somewhere else without explanation.
         crate::notify(
-            &app,
+            app,
             "ok",
             format!(
                 "Exported at {} MB — a little over the {} MB asked for.",
@@ -1263,7 +1407,7 @@ pub fn export_clip(
         );
     } else {
         crate::notify(
-            &app,
+            app,
             "ok",
             format!("Exported · {} MB", written.div_ceil(1024 * 1024)),
         );
@@ -1436,6 +1580,10 @@ fn store(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
     })?;
+    // The clip's Discord copies show what it was before. An undo puts back a
+    // file with the original's old time, so the age check in
+    // `export_for_discord` alone would let them through.
+    remove_discord_exports(Path::new(&stored.path));
     announce_change(app);
     Ok(stored)
 }
@@ -1527,13 +1675,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_export_goes_only_to_a_local_mp4() {
+    fn an_export_goes_to_an_mp4_outside_clippiboys_data() {
         let local = if cfg!(windows) { r"C:\Users\me\Videos\clip.mp4" } else { "/home/me/clip.mp4" };
-        assert!(export_target(local).is_ok());
-        assert!(export_target("clip.mp4").is_err(), "relative");
-        assert!(export_target(r"\\server\share\clip.mp4").is_err(), "UNC");
-        assert!(export_target("//server/share/clip.mp4").is_err(), "UNC");
-        assert!(export_target(&local.replace(".mp4", ".exe")).is_err(), "extension");
+        let target = |path: &str| export_target(Path::new(path));
+        assert_eq!(target(local).unwrap(), Path::new(local));
+        assert!(target("clip.mp4").is_err(), "relative");
+        if cfg!(windows) {
+            // Picked in the core's own dialog, so a share is the user's choice.
+            assert_eq!(
+                target(r"\\server\share\clip.mp4").unwrap(),
+                Path::new(r"\\server\share\clip.mp4"),
+                "UNC"
+            );
+        }
+        assert!(target(&local.replace(".mp4", ".exe")).is_err(), "another extension");
+        let upper = local.replace(".mp4", ".MP4");
+        assert_eq!(target(&upper).unwrap(), Path::new(&upper), "the extension in any case");
+        assert_eq!(
+            target(&local.replace(".mp4", "")).unwrap(),
+            Path::new(local),
+            "no extension gets one"
+        );
+        let own = crate::config::data_dir().join("originals").join("x").join("video.mp4");
+        assert!(target(&own.to_string_lossy()).is_err(), "ClippiBoy's own data");
+        let shouted = own.to_string_lossy().to_uppercase().replace(".MP4", ".mp4");
+        assert!(target(&shouted).is_err(), "ClippiBoy's own data in another case");
+        let around = crate::config::data_dir()
+            .join("..")
+            .join(crate::config::data_dir().file_name().unwrap())
+            .join("video.mp4");
+        assert!(target(&around.to_string_lossy()).is_err(), "a way round through ..");
+    }
+
+    #[test]
+    fn the_suggested_name_is_only_a_file_name() {
+        assert_eq!(export_file_name("Valorant (10 MB).mp4").as_deref(), Some("Valorant (10 MB).mp4"));
+        assert_eq!(export_file_name(r"C:\Windows\evil.mp4").as_deref(), Some("evil.mp4"));
+        assert_eq!(export_file_name("../../up/there.mp4").as_deref(), Some("there.mp4"));
+        assert_eq!(export_file_name(r"\\server\share\x.mp4").as_deref(), Some("x.mp4"));
+        assert_eq!(export_file_name("C:x.mp4").as_deref(), Some("Cx.mp4"));
+        assert_eq!(export_file_name("  "), None);
+        assert_eq!(export_file_name("a/"), None);
+        assert_eq!(export_file_name(".."), None);
+    }
+
+    #[test]
+    fn an_export_is_written_beside_its_target_under_a_name_of_its_own() {
+        let target = Path::new("dir").join("Valorant (10 MB).mp4");
+        let part = export_part(&target);
+        assert_eq!(part.parent(), target.parent());
+        assert_eq!(
+            part.file_name().unwrap().to_string_lossy(),
+            format!("Valorant (10 MB).{}.export.mp4", std::process::id())
+        );
+    }
+
+    #[test]
+    fn a_discord_export_is_known_by_its_name() {
+        let stem = "Valorant_2026-10-22_12-00-00-123";
+        assert!(is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (10 MB).mp4"));
+        assert!(is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (500 MB).mp4"));
+        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123.mp4"));
+        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (ten MB).mp4"));
+        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-124 (10 MB).mp4"));
+        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (10 MB).4711.export.mp4"));
+        assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 ( MB).mp4"));
     }
 
     #[test]

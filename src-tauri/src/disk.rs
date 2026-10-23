@@ -7,6 +7,9 @@
 //! allowed to stall; the status snapshot, which answers a command from the
 //! webview, is not. So the status tick reads this every ten seconds into an
 //! atomic and everybody else reads the atomic.
+//!
+//! It also answers whether two paths name one file, which a string compare
+//! cannot: case, `.`, hard links and junctions all spell the same file anew.
 
 use std::path::Path;
 
@@ -71,6 +74,46 @@ pub fn volume_of(_dir: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Do `a` and `b` name the same file — under any spelling, through a hard link
+/// or a junction? Asks the file system for the file's identity: the volume's
+/// serial number and the file's index on Windows, device and inode elsewhere.
+/// `false` when either cannot be opened.
+#[cfg(windows)]
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_ATTRIBUTES,
+    };
+
+    let identity = |path: &Path| -> Option<(u32, u32, u32)> {
+        // The attributes are all it takes, and asking for no more lets this
+        // open a clip another program holds open for writing.
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .open(path)
+            .ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+        Some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+    };
+    match (identity(a), identity(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +133,26 @@ mod tests {
         assert_eq!(volume_of(&root.join("not-there-yet").join("deeper")), Some(volume.clone()));
         let drive = &root.to_string_lossy()[..2];
         assert!(volume.to_string_lossy().eq_ignore_ascii_case(&format!("{drive}\\")), "{}", volume.display());
+    }
+
+    #[test]
+    fn the_same_file_is_recognised_under_another_spelling() {
+        let dir = std::env::temp_dir().join(format!("clippiboy-same-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("Clip.mp4");
+        let other = dir.join("Other.mp4");
+        std::fs::write(&clip, b"x").unwrap();
+        std::fs::write(&other, b"x").unwrap();
+        let linked = dir.join("linked.mp4");
+        std::fs::hard_link(&clip, &linked).unwrap();
+        assert!(same_file(&clip, &dir.join(".").join("Clip.mp4")));
+        assert!(same_file(&clip, &linked), "a hard link is the same file");
+        if cfg!(windows) {
+            assert!(same_file(&clip, &dir.join("clip.MP4")), "another case");
+        }
+        assert!(!same_file(&clip, &other));
+        assert!(!same_file(&clip, &dir.join("missing.mp4")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

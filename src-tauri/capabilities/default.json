@@ -17,7 +17,7 @@
     "core:window:allow-start-dragging",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
-    "dialog:default",
+    "dialog:allow-open",
     "global-shortcut:default",
     "allow-list-audio-devices",
     "allow-list-audio-processes",

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { Button } from "@/components/ui/Button";
 import { BusyRing } from "@/components/ui/BusyVeil";
@@ -63,7 +62,10 @@ function preview(clip: Clip, targetMb: number) {
 export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => void }) {
   const [targetMb, setTargetMb] = useState(25);
   const [custom, setCustom] = useState("");
-  const [busy, setBusy] = useState(false);
+  // "choosing" while the core's save dialog is open, "writing" from the
+  // moment the core reports the copy under way.
+  const [stage, setStage] = useState<"idle" | "choosing" | "writing">("idle");
+  const busy = stage !== "idle";
   const [progress, setProgress] = useState(0);
   const plan = preview(clip, targetMb);
 
@@ -83,7 +85,9 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
     let off: (() => void) | undefined;
     void events
       .onClipProgress((update) => {
-        if (!cancelled && update.clipId === clip.id) setProgress(update.progress);
+        if (cancelled || update.clipId !== clip.id) return;
+        setProgress(update.progress);
+        setStage((now) => (now === "choosing" ? "writing" : now));
       })
       .then((unlisten) => {
         if (cancelled) unlisten();
@@ -97,20 +101,17 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
 
   async function run() {
     const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} (${targetMb} MB).mp4`;
-    const output = await saveDialog({
-      defaultPath: suggested,
-      filters: [{ name: "Video", extensions: ["mp4"] }],
-      title: "Save the export as",
-    });
-    if (!output) return;
-    setBusy(true);
+    setStage("choosing");
     setProgress(0);
     try {
-      await api.exportClip(clip.id, targetMb * MB, output);
-      onClose();
+      // The core opens the save dialog itself and only takes the name as a
+      // suggestion; `null` means it was cancelled, which leaves this open.
+      const written = await api.exportClip(clip.id, targetMb * MB, suggested);
+      if (written === null) setStage("idle");
+      else onClose();
     } catch {
       // The core has already raised the failure as a notice.
-      setBusy(false);
+      setStage("idle");
     }
   }
 
@@ -202,7 +203,7 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
         {/* Zero means the core has not reported anything yet, not that it is
             nought per cent through — so the mark walks instead of standing
             still at the bottom of its arc. */}
-        {busy && (
+        {stage === "writing" && (
           <BusyRing
             className="mt-4 rounded-inner bg-elevated px-3 py-2.5"
             progress={progress > 0 ? progress : null}
@@ -219,7 +220,7 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
             disabled={busy || !inTauri || targetMb < 1}
             onClick={() => void run()}
           >
-            {busy ? "Exporting…" : "Export"}
+            {stage === "writing" ? "Exporting…" : "Export"}
           </Button>
         </div>
       </div>
