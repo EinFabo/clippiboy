@@ -77,6 +77,38 @@ pub fn usable_stamp(stamped: i64, now: i64, trust: &mut bool) -> i64 {
     }
 }
 
+/// `AUDCLNT_BUFFERFLAGS_SILENT`: the packet holds no sound, only its length.
+pub const BUFFER_FLAG_SILENT: u32 = 0x2;
+/// `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`: the packet's stamp is not reliable.
+pub const BUFFER_FLAG_TIMESTAMP_ERROR: u32 = 0x4;
+
+/// When was this packet captured?
+///
+/// A trusted, non-zero, unflagged stamp is used as it is. In every other case
+/// the packet is placed by its queue: it was captured `queued_frames` of the
+/// device before `now`, because the reader drains the queue oldest packet first.
+/// Using `now` itself put the first packet of a burst after a stall a whole
+/// stall late, which left a fake dropout and then a source that sat late until
+/// the ring pulled it back. The distrust rule of [`usable_stamp`] runs only on
+/// stamps that are unflagged and non-zero.
+pub fn capture_time(
+    stamped: i64,
+    flags: u32,
+    now: i64,
+    queued_frames: u32,
+    device_rate: u32,
+    trust: &mut bool,
+) -> i64 {
+    let usable = flags & BUFFER_FLAG_TIMESTAMP_ERROR == 0 && stamped != 0;
+    if usable {
+        let chosen = usable_stamp(stamped, now, trust);
+        if *trust {
+            return chosen;
+        }
+    }
+    now - queued_frames as i64 * 10_000_000 / device_rate.max(1) as i64
+}
+
 pub struct StreamHandle {
     pub stop: Arc<AtomicBool>,
     pub ring: Arc<SampleRing>,
@@ -714,8 +746,18 @@ mod win {
                 // The clock is the same, only read a little later.
                 let now = now_100ns();
                 let stamped = qpc_100ns as i64;
+                // Valid, unread data in the endpoint buffer, this packet
+                // included — the queue the stamp is estimated from.
+                let queued = unsafe { client.GetCurrentPadding() }.unwrap_or(frames).max(frames);
                 let trusted = trust_qpc;
-                let qpc_100ns = usable_stamp(stamped, now, &mut trust_qpc);
+                let qpc_100ns = capture_time(
+                    stamped,
+                    flags,
+                    now,
+                    queued,
+                    format.sample_rate,
+                    &mut trust_qpc,
+                );
                 if trusted && !trust_qpc {
                     fallback_clock.store(true, Ordering::Relaxed);
                     log::warn!(
@@ -726,9 +768,9 @@ mod win {
                 }
 
                 if frames > 0 {
-                    // AUDCLNT_BUFFERFLAGS_SILENT = 0x2 — ignore the buffer and
+                    // BUFFER_FLAG_SILENT — ignore the buffer and
                     // feed silence instead, otherwise the track drifts.
-                    if flags & 0x2 != 0 {
+                    if flags & BUFFER_FLAG_SILENT != 0 {
                         converted.clear();
                         resampler.silence(frames as usize, &mut converted);
                     } else {
@@ -866,5 +908,62 @@ mod tests {
         let later = NOW + 10_000_000;
         assert_eq!(usable_stamp(later, later, &mut trust), later);
         assert!(!trust);
+    }
+
+    /// AUD-2: an empty stamp used to be the read-out time, 10 ms or a whole stall late.
+    #[test]
+    fn a_missing_stamp_is_estimated_from_what_is_still_queued() {
+        let mut trust = true;
+        assert_eq!(capture_time(0, 0, NOW, 4_800, 48_000, &mut trust), NOW - 1_000_000);
+        assert!(trust);
+    }
+
+    /// AUD-2: a stamp the device flags as wrong is not used, and costs no trust.
+    #[test]
+    fn a_stamp_flagged_as_wrong_is_not_used() {
+        let mut trust = true;
+        let flagged =
+            capture_time(NOW + 3_000_000, BUFFER_FLAG_TIMESTAMP_ERROR, NOW, 480, 48_000, &mut trust);
+        assert_eq!(flagged, NOW - 100_000);
+        assert!(trust);
+    }
+
+    /// AUD-2: a good stamp is still taken as it is.
+    #[test]
+    fn a_good_stamp_is_still_taken_as_it_is() {
+        let mut trust = true;
+        assert_eq!(capture_time(NOW - 50_000, 0, NOW, 480, 48_000, &mut trust), NOW - 50_000);
+    }
+
+    /// AUD-2: on the fallback clock the stamp is ignored and the queue decides.
+    #[test]
+    fn a_distrusted_device_is_placed_by_its_queue() {
+        let mut trust = false;
+        assert_eq!(capture_time(NOW - 50_000, 0, NOW, 441, 44_100, &mut trust), NOW - 100_000);
+    }
+
+    /// AUD-2: on the fallback clock, a stalled reader stamped the first queued
+    /// packet "now": 150 ms of fake dropout, then the source sat late for over a minute.
+    #[test]
+    fn a_stalled_reader_on_the_fallback_clock_does_not_drag_the_source_late() {
+        let ring = SampleRing::new(48_000, 2);
+        let block = vec![0.5f32; 480 * CHANNELS];
+        let mut trust = false; // a device on the fallback clock
+        let mut k = 0i64; // packet k covers [k*10 ms, (k+1)*10 ms)
+        while k < 600 {
+            // Read 2 ms after a packet completes. At 5.2 s the reader stalls and
+            // then drains the 16 packets that piled up.
+            let burst: i64 = if k == 520 { 16 } else { 1 };
+            let now = (k + burst) * 100_000 + 20_000;
+            for queued in (1..=burst).rev() {
+                ring.write(&block, capture_time(0, 0, now, queued as u32 * 480, 48_000, &mut trust));
+                k += 1;
+            }
+        }
+        let end = ring.end_100ns().unwrap();
+        assert!((end - 60_020_000).abs() < 10_000, "the source ends {} ms off", (end - 60_020_000) / 10_000);
+        let mut out = vec![0.0f32; 480 * CHANNELS];
+        ring.read_window(52_500_000, &mut out);
+        assert!(out.iter().all(|s| *s == 0.5), "a fake dropout was filled in after the stall");
     }
 }
