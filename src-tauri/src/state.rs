@@ -320,6 +320,37 @@ impl AutoBuffer {
     }
 }
 
+/// Restarts after an encoder failure allowed within [`RESTART_WINDOW`].
+const RESTARTS_PER_WINDOW: usize = 3;
+const RESTART_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Keeps a failing encoder from being restarted in a loop: one that dies again
+/// every few seconds would otherwise throw the buffer away every few seconds.
+#[derive(Default)]
+pub struct RestartBudget {
+    /// When the restarts within the window happened, oldest first.
+    recent: std::collections::VecDeque<std::time::Instant>,
+}
+
+impl RestartBudget {
+    /// May a restart happen at `now`? A yes counts against the budget; a no
+    /// does not.
+    pub fn allow(&mut self, now: std::time::Instant) -> bool {
+        while self
+            .recent
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) > RESTART_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        if self.recent.len() >= RESTARTS_PER_WINDOW {
+            return false;
+        }
+        self.recent.push_back(now);
+        true
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         let config = config::load();
@@ -872,6 +903,13 @@ impl AppState {
         if !crate::tools::is_ready() && !crate::muxer::available() {
             return Err(crate::tools::not_ready_reason());
         }
+        // The ring keeps its old packets when the encoder stops; "the last 30
+        // seconds" would be the 30 seconds before it did.
+        if let Some(why) = self.encoder_failure() {
+            return Err(format!(
+                "The video encoder stopped ({why}), so the buffer has nothing newer to save."
+            ));
+        }
 
         // Grab everything under a short lock and release it again right away:
         // muxing and the thumbnail take seconds, and "Quit" from the tray, say,
@@ -1166,6 +1204,11 @@ impl AppState {
     /// The first write error of the running recording, if there was one.
     pub fn recording_failure(&self) -> Option<String> {
         self.recorder.lock().as_ref().and_then(|r| r.failure())
+    }
+
+    /// Why the running encoder stopped working, if it has.
+    pub fn encoder_failure(&self) -> Option<String> {
+        self.shared.lock().as_ref().and_then(|shared| shared.encoder_failure())
     }
 
     fn finish_recording(
@@ -1470,5 +1513,17 @@ mod tests {
         assert_eq!(auto.poll_lock(false, false), AutoAction::Start);
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
         assert_eq!(auto.poll_lock(false, false), AutoAction::Start);
+    }
+
+    #[test]
+    fn restarts_stop_after_three_in_ten_minutes() {
+        let mut budget = RestartBudget::default();
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        assert!(budget.allow(at(0)));
+        assert!(budget.allow(at(60)));
+        assert!(budget.allow(at(120)));
+        assert!(!budget.allow(at(180)), "a fourth within ten minutes");
+        assert!(budget.allow(at(601)), "the first one has aged out");
     }
 }

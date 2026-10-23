@@ -12,7 +12,7 @@
 #![cfg(windows)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -110,9 +110,30 @@ pub struct EncoderStats {
     pub encode_worst_us: AtomicU64,
     /// Frames handed over and not yet returned.
     pub in_flight: AtomicU64,
+    /// Why the encoder stopped working, once it has. Until this existed every
+    /// error was one warning line: the ring stopped growing but kept its old
+    /// packets, and a save minutes later wrote the footage from before.
+    failure: parking_lot::Mutex<Option<String>>,
+    /// Frames in a row that waited out [`SUBMIT_WAIT`] and were lost.
+    submit_timeouts: AtomicU32,
 }
 
 impl EncoderStats {
+    /// Mark the encoder as failed. The first reason is the one kept — whatever
+    /// follows is usually a consequence of it.
+    pub fn fail(&self, why: String) {
+        let mut failure = self.failure.lock();
+        if failure.is_none() {
+            log::error!("encoder: {why}");
+            *failure = Some(why);
+        }
+    }
+
+    /// Why the encoder stopped working, if it has.
+    pub fn failure(&self) -> Option<String> {
+        self.failure.lock().clone()
+    }
+
     /// Average time a frame spent inside the encoder, in microseconds.
     pub fn encode_mean_us(&self) -> u64 {
         let count = self.encoded.load(Ordering::Relaxed);
@@ -132,6 +153,55 @@ impl EncoderStats {
 /// costs nothing: the clock computes its timestamps from a counter and catches
 /// up by itself.
 const SUBMIT_WAIT: Duration = Duration::from_millis(500);
+
+/// Lost frames in a row, each after a full [`SUBMIT_WAIT`], before the encoder
+/// counts as stalled: five seconds without taking a frame.
+const SUBMIT_TIMEOUTS_FAIL: u32 = 10;
+
+/// Errors in a row from the encoder before it counts as failed — half a second
+/// at 60 fps. A single error is a lost frame; a run of them is an encoder that
+/// will not recover on its own.
+pub const FAIL_AFTER: u32 = 30;
+
+/// Counts encoder errors in a row.
+#[derive(Default)]
+pub struct ErrorStreak {
+    errors: u32,
+}
+
+impl ErrorStreak {
+    /// One more error. True exactly once: on the [`FAIL_AFTER`]th in a row.
+    pub fn failed(&mut self) -> bool {
+        self.errors = self.errors.saturating_add(1);
+        self.errors == FAIL_AFTER
+    }
+
+    /// Something went through — the count starts over.
+    pub fn succeeded(&mut self) {
+        self.errors = 0;
+    }
+}
+
+/// How long a frame may stay inside the encoder before it is taken for lost.
+///
+/// Frames are paired in and out by count alone. An output that never comes —
+/// one the encoder dropped, or one whose buffer could not be read — would stay
+/// counted for good, and enough of them make every capture look starved: the
+/// buffer then records a still image.
+pub const IN_FLIGHT_LIMIT: Duration = Duration::from_secs(2);
+
+/// Drop the frames that went in longer than `limit` ago; returns how many.
+pub fn age_out(sent: &mut VecDeque<Instant>, now: Instant, limit: Duration) -> usize {
+    let mut removed = 0;
+    while sent
+        .front()
+        .is_some_and(|since| now.saturating_duration_since(*since) > limit)
+    {
+        sent.pop_front();
+        removed += 1;
+    }
+    removed
+}
 
 pub struct EncoderSettings {
     pub width: u32,
@@ -1169,10 +1239,22 @@ impl VideoEncoder {
         // The normal case first, so the frame that goes straight through pays
         // for neither a clock reading nor a counter.
         let job = match self.jobs.try_send(job) {
-            Ok(()) => return true,
+            Ok(()) => {
+                // Read before written, so the usual case stays a read.
+                if self.stats.submit_timeouts.load(Ordering::Relaxed) != 0 {
+                    self.stats.submit_timeouts.store(0, Ordering::Relaxed);
+                }
+                return true;
+            }
             Err(crossbeam_channel::TrySendError::Full(job)) => job,
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                log::warn!("encoder has stopped — one frame is lost");
+                // Once is enough: every tick after it would say the same.
+                if self.stats.failure().is_none() {
+                    log::warn!("encoder has stopped — one frame is lost");
+                }
+                if self.running.load(Ordering::Relaxed) {
+                    self.stats.fail("the encoder thread has ended".into());
+                }
                 return false;
             }
         };
@@ -1189,12 +1271,21 @@ impl VideoEncoder {
             .fetch_add(waited.as_micros() as u64, Ordering::Relaxed);
 
         match sent {
-            Ok(()) => true,
+            Ok(()) => {
+                self.stats.submit_timeouts.store(0, Ordering::Relaxed);
+                true
+            }
             Err(_) => {
                 log::warn!(
                     "encoder cannot keep up — one frame is lost after waiting {} ms",
                     waited.as_millis()
                 );
+                // Slow is one thing; taking nothing at all for seconds is an
+                // encoder that has stopped asking for input.
+                let timeouts = self.stats.submit_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
+                if timeouts >= SUBMIT_TIMEOUTS_FAIL {
+                    self.stats.fail("the encoder has taken no frame for 5 s".into());
+                }
                 false
             }
         }
@@ -1237,6 +1328,8 @@ fn run<F, H>(
     // straight away, and there is nothing to chase.
     let mut header_pending = transform.sequence_header.is_empty();
     let mut header_tries = 0u32;
+    // Errors in a row from `feed` and `take_output` — see [`FAIL_AFTER`].
+    let mut streak = ErrorStreak::default();
 
     /// Note down how long the encoder kept one frame.
     fn took(stats: &EncoderStats, since: Instant, in_flight: usize) {
@@ -1297,6 +1390,7 @@ fn run<F, H>(
                     } else if kind == METransformHaveOutput.0 as u32 {
                         match transform.take_output(duration) {
                             Ok(Some(packet)) => {
+                                streak.succeeded();
                                 if let Some(since) = sent.pop_front() {
                                     took(&stats, since, sent.len());
                                 }
@@ -1309,7 +1403,12 @@ fn run<F, H>(
                                 );
                             }
                             Ok(None) => {}
-                            Err(err) => log::warn!("{err}"),
+                            Err(err) => {
+                                log::warn!("{err}");
+                                if streak.failed() {
+                                    stats.fail(format!("the encoder keeps failing: {err}"));
+                                }
+                            }
                         }
                     } else if kind == METransformDrainComplete.0 as u32 {
                         // Previously ignored, so the loop kept turning over an
@@ -1324,6 +1423,15 @@ fn run<F, H>(
                     break;
                 }
 
+                // Outputs that never came are not waited for forever.
+                let aged = age_out(&mut sent, Instant::now(), IN_FLIGHT_LIMIT);
+                if aged > 0 {
+                    log::warn!(
+                        "{aged} frame(s) never came back out of the encoder — no longer counted as in flight"
+                    );
+                    stats.in_flight.store(sent.len() as u64, Ordering::Relaxed);
+                }
+
                 if pending_input > 0 {
                     // A real wait, on the one thing that is missing. Kept short
                     // so a packet announced meanwhile is not left lying about.
@@ -1331,6 +1439,7 @@ fn run<F, H>(
                         Ok(job) => {
                             match transform.feed(&job, duration) {
                                 Ok(()) => {
+                                    streak.succeeded();
                                     sent.push_back(Instant::now());
                                     // Written on the way in as well as on the way
                                     // out. Only `took` used to touch it, so while
@@ -1341,7 +1450,12 @@ fn run<F, H>(
                                         .in_flight
                                         .store(sent.len() as u64, Ordering::Relaxed);
                                 }
-                                Err(err) => log::warn!("{err}"),
+                                Err(err) => {
+                                    log::warn!("{err}");
+                                    if streak.failed() {
+                                        stats.fail(format!("the encoder keeps failing: {err}"));
+                                    }
+                                }
                             }
                             pending_input -= 1;
                         }
@@ -1364,11 +1478,16 @@ fn run<F, H>(
                 let since = Instant::now();
                 if let Err(err) = transform.feed(&job, duration) {
                     log::warn!("{err}");
+                    if streak.failed() {
+                        stats.fail(format!("the encoder keeps failing: {err}"));
+                    }
                     continue;
                 }
+                streak.succeeded();
                 loop {
                     match transform.take_output(duration) {
                         Ok(Some(packet)) => {
+                            streak.succeeded();
                             took(&stats, since, 0);
                             on_packet(packet);
                             catch_up_on_header(
@@ -1381,12 +1500,21 @@ fn run<F, H>(
                         Ok(None) => break,
                         Err(err) => {
                             log::warn!("{err}");
+                            if streak.failed() {
+                                stats.fail(format!("the encoder keeps failing: {err}"));
+                            }
                             break;
                         }
                     }
                 }
             }
         }
+    }
+
+    // Nobody asked it to stop: the event queue ended or the encoder said it
+    // was done of its own accord, and no frame will come out of it again.
+    if running.load(Ordering::Relaxed) {
+        stats.fail("the encoder stopped on its own".into());
     }
 
     // Let it drain so the last frames still come out.
@@ -1506,5 +1634,40 @@ mod tests {
         // look at, and no panic for looking.
         assert!(!opens_a_gop(&[0, 0, 0, 1]));
         assert!(!opens_a_gop(&[0, 0, 1]));
+    }
+
+    #[test]
+    fn a_run_of_encoder_errors_is_reported_once() {
+        let mut streak = ErrorStreak::default();
+        for _ in 1..FAIL_AFTER {
+            assert!(!streak.failed());
+        }
+        assert!(streak.failed(), "the 30th error in a row is the one");
+        assert!(!streak.failed(), "and it is reported once");
+        streak.succeeded();
+        for _ in 1..FAIL_AFTER {
+            assert!(!streak.failed(), "a packet in between starts the count over");
+        }
+    }
+
+    #[test]
+    fn frames_the_encoder_never_hands_back_age_out() {
+        let now = Instant::now();
+        let mut sent = VecDeque::from([
+            now - Duration::from_secs(3),
+            now - Duration::from_millis(2_500),
+            now - Duration::from_millis(100),
+        ]);
+        assert_eq!(age_out(&mut sent, now, IN_FLIGHT_LIMIT), 2);
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn the_first_encoder_failure_is_the_one_kept() {
+        let stats = EncoderStats::default();
+        assert_eq!(stats.failure(), None);
+        stats.fail("the encoder stopped on its own".into());
+        stats.fail("something later".into());
+        assert_eq!(stats.failure().as_deref(), Some("the encoder stopped on its own"));
     }
 }

@@ -651,6 +651,89 @@ fn watch_screen(app: &tauri::AppHandle) {
     });
 }
 
+/// Restart the buffer when its encoder has stopped working.
+///
+/// A failing encoder used to show up only in the log: the capture went on, the
+/// ring stopped growing but kept its old packets, and "save the last 30 s"
+/// minutes later wrote the 30 s before the failure — see `EncoderStats::fail`
+/// for what counts. A fresh pipeline brings a fresh encoder, which after a
+/// driver reset is usually all it takes.
+///
+/// At most three times in ten minutes ([`state::RestartBudget`]): an encoder
+/// that dies again right away would otherwise empty the buffer every few
+/// seconds. Saving refuses meanwhile, with the reason.
+fn watch_encoder(app: &tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RESTARTING: AtomicBool = AtomicBool::new(false);
+    static BUDGET: std::sync::Mutex<Option<state::RestartBudget>> = std::sync::Mutex::new(None);
+    static GAVE_UP: AtomicBool = AtomicBool::new(false);
+
+    // Behind the lock screen the buffer automation decides about the pipeline.
+    if capture::secure_desktop() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let Some(why) = state.encoder_failure() else {
+        return;
+    };
+    if RESTARTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let allowed = BUDGET
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(state::RestartBudget::default)
+        .allow(std::time::Instant::now());
+    if !allowed {
+        RESTARTING.store(false, Ordering::SeqCst);
+        if !GAVE_UP.swap(true, Ordering::SeqCst) {
+            log::error!("the video encoder keeps failing ({why}) \u{2014} no more restarts for now");
+            notify(app, "error", format!("The video encoder keeps failing ({why})."));
+            sounds::play(app, SoundKind::Error);
+            overlay::show(
+                app,
+                BannerKind::Error,
+                "Video encoder keeps failing",
+                Some("Pick another encoder under Settings \u{2192} Recording, or restart ClippiBoy.".into()),
+            );
+        }
+        return;
+    }
+    log::warn!("the video encoder stopped ({why}) \u{2014} restarting the buffer");
+    let app = app.clone();
+    // Stopping a recording writes it out, and starting brings up the whole
+    // capture stack: neither belongs on the status tick.
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        // A recording runs on the same encoder. What it wrote up to the
+        // failure is kept; a restart under it would cut the file anyway.
+        if state.is_recording() {
+            if let Err(err) = stop_recording_and_notify(&app) {
+                log::warn!("could not close the recording before the restart: {err}");
+            }
+        }
+        if state.is_buffering() {
+            state.stop_pipeline();
+            match state.start_pipeline() {
+                Ok(()) => overlay::show(
+                    &app,
+                    BannerKind::Info,
+                    "Recording restarted",
+                    Some(format!(
+                        "The video encoder stopped ({why}) \u{2014} the buffer starts over"
+                    )),
+                ),
+                Err(err) => {
+                    notify(&app, "error", err.clone());
+                    sounds::play(&app, SoundKind::Error);
+                    overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
+                }
+            }
+        }
+        RESTARTING.store(false, Ordering::SeqCst);
+    });
+}
+
 /// The buffer automation, on the cadence of game detection (every two seconds).
 ///
 /// Covers both modes: "only in game" follows the foreground window, otherwise
@@ -1063,6 +1146,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 // a banner, and that should already stand on the right screen.
                 watch_monitors(&handle);
                 watch_screen(&handle);
+                watch_encoder(&handle);
             }
             // If the recording reports a problem, somebody has to hear about it.
             // Without this the app appears to keep buffering, and only pressing

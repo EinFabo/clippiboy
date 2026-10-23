@@ -545,6 +545,18 @@ impl Shared {
         *self.error.lock() = Some(message);
     }
 
+    /// Why the encoder stopped working, if it has — see `EncoderStats::fail`.
+    pub fn encoder_failure(&self) -> Option<String> {
+        #[cfg(windows)]
+        {
+            self.encoder_stats.lock().as_ref().and_then(|stats| stats.failure())
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     /// Collect the first error not yet reported.
     pub fn take_unseen_error(&self) -> Option<String> {
         if self.error_seen.swap(true, Ordering::SeqCst) {
