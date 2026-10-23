@@ -101,6 +101,30 @@ impl Drop for StreamHandle {
     }
 }
 
+/// How long `start` waits for the device to open. The process-tap activation
+/// waits `ACTIVATION_WAIT_MS`, so it ends inside this.
+const START_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(windows)]
+const ACTIVATION_WAIT_MS: u32 = 4_000;
+
+/// Waits for the capture thread's first answer. On a timeout or a reported
+/// error the thread is told to stop, so it cannot pump on with the device open
+/// after the caller has given up.
+fn await_ready(
+    waiting: &std::sync::mpsc::Receiver<Result<(), String>>,
+    timeout: std::time::Duration,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let answer = match waiting.recv_timeout(timeout) {
+        Ok(answer) => answer,
+        Err(_) => Err("timed out starting the audio source".into()),
+    };
+    if answer.is_err() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    answer
+}
+
 /// Starts capturing one source. An error means the device is gone, the process
 /// has ended or there is no permission — the caller reports that to the UI.
 pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, String> {
@@ -124,16 +148,13 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
 
         // Wait for the result of initialization so errors land in the UI right
         // away instead of vanishing quietly on the thread.
-        match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(StreamHandle {
-                stop,
-                ring,
-                fallback_clock,
-                thread: Some(thread),
-            }),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err("timed out starting the audio source".into()),
-        }
+        await_ready(&ready_rx, START_WAIT, &stop)?;
+        Ok(StreamHandle {
+            stop,
+            ring,
+            fallback_clock,
+            thread: Some(thread),
+        })
     }
 
     #[cfg(not(windows))]
@@ -454,7 +475,7 @@ mod win {
                 &handler,
             )?;
 
-            if WaitForSingleObject(event, 5_000) != WAIT_OBJECT_0 {
+            if WaitForSingleObject(event, ACTIVATION_WAIT_MS) != WAIT_OBJECT_0 {
                 let _ = CloseHandle(event);
                 return Err(windows::core::Error::from_win32());
             }
@@ -640,7 +661,11 @@ mod win {
             return Attempt::Unavailable(err.to_string());
         }
         if let Some(ready) = ready {
-            let _ = ready.send(Ok(()));
+            if ready.send(Ok(())).is_err() {
+                // `start` has given up (timed out): close the device again.
+                let _ = unsafe { client.Stop() };
+                return Attempt::Stopped;
+            }
         }
 
         let mut converted: Vec<f32> = Vec::with_capacity(4096);
@@ -740,6 +765,23 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_start_that_times_out_tells_its_thread_to_stop() {
+        let (_ready, waiting) = std::sync::mpsc::channel::<Result<(), String>>();
+        let stop = AtomicBool::new(false);
+        assert!(await_ready(&waiting, std::time::Duration::from_millis(20), &stop).is_err());
+        assert!(stop.load(Ordering::Relaxed), "left unset, the thread pumps on with the device open");
+    }
+
+    #[test]
+    fn a_start_that_answers_in_time_keeps_its_thread() {
+        let (ready, waiting) = std::sync::mpsc::channel::<Result<(), String>>();
+        ready.send(Ok(())).unwrap();
+        let stop = AtomicBool::new(false);
+        assert!(await_ready(&waiting, std::time::Duration::from_millis(20), &stop).is_ok());
+        assert!(!stop.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn surround_folds_into_stereo_with_its_centre() {
