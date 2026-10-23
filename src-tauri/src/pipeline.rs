@@ -44,9 +44,73 @@ const AUDIO_LAG_100NS: i64 = 80 * 10_000;
 /// The mixer's tick.
 const MIX_INTERVAL: Duration = Duration::from_millis(10);
 
-/// One buffer across the full clip length, plus some slack.
+/// What an audio ring keeps beyond the buffer and one keyframe interval.
+///
+/// A save reads its audio only after the whole `.h264` is written, and the
+/// rings keep moving meanwhile. Ten seconds cover a slow write — an HDD, a
+/// network folder — at ~2 MB per source, where copying every window out under
+/// the lock would cost a buffer's worth of memory per track and save.
+pub(crate) const AUDIO_SLACK_SECONDS: u32 = 10;
+
+/// How long an audio ring is for a buffer of `buffer_seconds`.
+///
+/// A clip as long as the buffer starts on the keyframe before
+/// `newest − buffer_seconds`, up to one keyframe interval earlier; a ring of
+/// only the buffer's length had already let that start go, and the clip began
+/// mute (BUF-1). An interval of 0 counts as one second.
+pub(crate) fn ring_seconds(buffer_seconds: u32, keyframe_seconds: u32) -> u32 {
+    buffer_seconds + keyframe_seconds.max(1) + AUDIO_SLACK_SECONDS
+}
+
+/// Exactly `seconds` of audio, in samples. The slack is [`ring_seconds`]'s.
 fn samples_for(seconds: u32) -> usize {
-    (seconds as usize + 2) * SAMPLE_RATE as usize * CHANNELS
+    seconds as usize * SAMPLE_RATE as usize * CHANNELS
+}
+
+/// How long a save waits at most for the mixer to reach the clip's end: the
+/// 80 ms it stays behind ([`AUDIO_LAG_100NS`]), one tick and some scheduling.
+pub const MIX_WAIT: Duration = Duration::from_millis(150);
+
+/// How far the mixer has got — the QPC its next window starts at.
+///
+/// A save cuts its audio to end where the video ends, and the mixer runs 80 ms
+/// behind the present. Read straight away, the last few dozen milliseconds of
+/// every clip were the zeros of a window not mixed yet (BUF-1).
+pub struct MixPosition {
+    /// `i64::MIN` until the first window is mixed.
+    until_100ns: AtomicI64,
+}
+
+impl Default for MixPosition {
+    fn default() -> Self {
+        Self {
+            until_100ns: AtomicI64::new(i64::MIN),
+        }
+    }
+}
+
+impl MixPosition {
+    /// Everything before `at_100ns` is in the rings.
+    pub fn publish(&self, at_100ns: i64) {
+        self.until_100ns.store(at_100ns, Ordering::Release);
+    }
+
+    /// Wait until the mixer has passed `at_100ns`, for `timeout` at most.
+    /// False when it did not get there — a stalled or stopped mixer must not
+    /// hold up a save; its tail stays silent instead.
+    pub fn wait_until(&self, at_100ns: i64, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.until_100ns.load(Ordering::Acquire) >= at_100ns {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            std::thread::sleep((deadline - now).min(Duration::from_millis(5)));
+        }
+    }
 }
 
 /// Ring buffer of one audio track (16-bit PCM), on the same QPC timeline as the
@@ -282,6 +346,11 @@ fn write_wav(path: &Path, data: &[i16]) -> std::io::Result<()> {
 pub struct Shared {
     /// What a newly added source's ring is sized to — see [`Shared::set_buffer_seconds`].
     buffer_seconds: AtomicU32,
+    /// The encoder's keyframe interval. A clip can start this much before the
+    /// buffer's length, so the audio rings keep it as well ([`ring_seconds`]).
+    keyframe_seconds: u32,
+    /// How far the mixer has got. A save waits for it to pass the clip's end.
+    pub mixed: Arc<MixPosition>,
     pub fps: u32,
     /// The encoded video packets.
     pub packets: Mutex<ReplayBuffer>,
@@ -395,17 +464,23 @@ impl Shared {
         self.packets.lock().bytes()
     }
 
-    /// Take on a new source list and let the mixer know.
+    /// What an audio ring is sized to now — see [`ring_seconds`].
+    pub fn ring_seconds(&self) -> u32 {
+        ring_seconds(self.buffer_seconds.load(Ordering::Relaxed), self.keyframe_seconds)
+    }
+
     /// Resize every audio ring to a new buffer length, and the ones added later
     /// with them. The video ring is resized by the caller: its length also
     /// depends on whether the buffer is wanted at all (`AppState`).
     pub fn set_buffer_seconds(&self, seconds: u32) {
         self.buffer_seconds.store(seconds, Ordering::Relaxed);
+        let ring_seconds = self.ring_seconds();
         for ring in self.tracks.lock().iter() {
-            ring.set_seconds(seconds);
+            ring.set_seconds(ring_seconds);
         }
     }
 
+    /// Take on a new source list and let the mixer know.
     pub fn set_sources(&self, sources: Vec<AudioSource>) {
         *self.sources.lock() = sources;
         self.sources_generation.fetch_add(1, Ordering::Relaxed);
@@ -589,6 +664,16 @@ pub struct ClipSnapshot {
     pub audio_frames: usize,
     /// For ffmpeg's `-r` — see `muxer::timing`.
     pub rate: String,
+    /// How far the mixer has got — the rings are read only once it passed
+    /// [`Self::end_100ns`].
+    pub mixed: Arc<MixPosition>,
+}
+
+impl ClipSnapshot {
+    /// QPC where the clip's audio ends.
+    pub fn end_100ns(&self) -> i64 {
+        self.start_100ns + self.audio_frames as i64 * 10_000_000 / SAMPLE_RATE as i64
+    }
 }
 
 /// A running capture.
@@ -840,7 +925,9 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
                 recorder.end_window(frames);
             }
             // The buffers last held a window of normal length; nothing to give back.
-            next_100ns = Some(from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64);
+            let next = from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64;
+            next_100ns = Some(next);
+            shared.mixed.publish(next);
             continue;
         }
 
@@ -877,7 +964,9 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             recorder.end_window(frames);
         }
 
-        next_100ns = Some(from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64);
+        let next = from + frames as i64 * 10_000_000 / SAMPLE_RATE as i64;
+        next_100ns = Some(next);
+        shared.mixed.publish(next);
     }
 }
 
@@ -899,7 +988,7 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
 fn tracks_for(
     sources: &[AudioSource],
     existing: &[Arc<TrackRing>],
-    buffer_seconds: u32,
+    ring_seconds: u32,
 ) -> Vec<Arc<TrackRing>> {
     let mut out = Vec::new();
     for source in recorded(sources) {
@@ -911,7 +1000,7 @@ fn tracks_for(
             None => out.push(Arc::new(TrackRing::new(
                 source.id.clone(),
                 source.label.clone(),
-                buffer_seconds,
+                ring_seconds,
             ))),
         }
     }
@@ -921,7 +1010,7 @@ fn tracks_for(
 /// Bring the track list in line with a changed config.
 fn sync_tracks(shared: &Arc<Shared>, sources: &[AudioSource]) {
     let mut rings = shared.tracks.lock();
-    let next = tracks_for(sources, &rings, shared.buffer_seconds.load(Ordering::Relaxed));
+    let next = tracks_for(sources, &rings, shared.ring_seconds());
     *rings = next;
 }
 
@@ -937,7 +1026,11 @@ impl Pipeline {
         sources: Vec<AudioSource>,
         audio: Arc<AudioEngine>,
     ) -> Result<Self, String> {
-        let tracks = tracks_for(&sources, &[], buffer_seconds);
+        let tracks = tracks_for(
+            &sources,
+            &[],
+            ring_seconds(buffer_seconds, recording.keyframe_seconds),
+        );
 
         // Without this, every ring still holds the last few minutes of audio that
         // nobody collected.
@@ -945,6 +1038,8 @@ impl Pipeline {
 
         let shared = Arc::new(Shared {
             buffer_seconds: AtomicU32::new(buffer_seconds),
+            keyframe_seconds: recording.keyframe_seconds,
+            mixed: Arc::new(MixPosition::default()),
             fps: recording.fps.max(1),
             packets: Mutex::new(ReplayBuffer::new(buffer_seconds, buffer_bytes)),
             tracks: Mutex::new(tracks),
@@ -1084,6 +1179,7 @@ impl Pipeline {
             start_100ns: self.shared.qpc_of(first_pts),
             audio_frames: audio_frames.max(0) as usize,
             rate: timing.rate,
+            mixed: self.shared.mixed.clone(),
             packets,
         })
     }
@@ -1218,29 +1314,76 @@ mod tests {
 
     #[test]
     fn a_new_buffer_length_reaches_a_running_ring() {
-        // 1 s + 2 s slack = 3 s, then 4 s + 2 s = 6 s.
+        // Ring seconds are exact: 1 s, then 4 s, then 1 s again.
         let ring = TrackRing::new("a".into(), "A".into(), 1);
         let block = vec![7i16; SAMPLE_RATE as usize * CHANNELS];
         let second = block.len();
         for at in 0..5 {
             ring.push(&block, qpc_of_frame(at * SAMPLE_RATE as i64));
         }
-        assert_eq!(ring.inner.lock().samples.len(), 3 * second);
+        assert_eq!(ring.inner.lock().samples.len(), second);
 
         ring.set_seconds(4);
         for at in 5..12 {
             ring.push(&block, qpc_of_frame(at * SAMPLE_RATE as i64));
         }
-        assert_eq!(ring.inner.lock().samples.len(), 6 * second, "longer fills up");
+        assert_eq!(ring.inner.lock().samples.len(), 4 * second, "longer fills up");
 
         ring.set_seconds(1);
         ring.push(&block, qpc_of_frame(12 * SAMPLE_RATE as i64));
-        assert_eq!(ring.inner.lock().samples.len(), 3 * second, "shorter is cut down");
+        assert_eq!(ring.inner.lock().samples.len(), second, "shorter is cut down");
+    }
+
+    /// BUF-1: a clip as long as the buffer starts up to one keyframe interval
+    /// before `newest − seconds`, and its audio is read only after the video is
+    /// written. The ring must still hold that start a second later.
+    #[test]
+    fn a_full_length_clip_still_finds_its_start_after_a_slow_write() {
+        let ring = TrackRing::new("a".into(), "A".into(), ring_seconds(10, 4)); // 24 s
+        let second = SAMPLE_RATE as i64;
+        for at in 0..31 {
+            ring.push(&vec![(at + 1) as i16; second as usize * CHANNELS], qpc_of_frame(at * second));
+        }
+        // Newest at 30 s, cut at the worst keyframe phase: 30 − 10 − 3.9 = 16.1 s,
+        // read after a 1 s write (the 31st block).
+        assert_eq!(ring.window(qpc_of_frame(772_800), 1)[0], 17, "the clip's start was trimmed away");
+    }
+
+    /// BUF-1: what the slack has to cover.
+    #[test]
+    fn a_ring_covers_the_buffer_a_keyframe_interval_and_ten_seconds() {
+        assert_eq!(ring_seconds(120, 2), 132);
+        assert_eq!(ring_seconds(120, 4), 134);
+        assert_eq!(ring_seconds(30, 0), 41, "an interval of 0 counts as one second");
+    }
+
+    /// BUF-1, the tail: a save waits for the mixer to pass the clip's end, so the
+    /// last 80 ms the mixer has not reached yet do not come out as zeros.
+    #[test]
+    fn a_save_waits_for_the_mixer_to_pass_the_clips_end() {
+        let mixed = Arc::new(MixPosition::default());
+        let mixer = {
+            let mixed = mixed.clone();
+            std::thread::spawn(move || for step in 1..=5 {
+                std::thread::sleep(Duration::from_millis(10));
+                mixed.publish(step * 100_000);
+            })
+        };
+        assert!(mixed.wait_until(500_000, MIX_WAIT));
+        mixer.join().unwrap();
+    }
+
+    /// BUF-1 and Review Focus: a stalled or stopped mixer must not hold up the save.
+    #[test]
+    fn the_wait_for_a_stalled_mixer_gives_up() {
+        let began = std::time::Instant::now();
+        assert!(!MixPosition::default().wait_until(1, MIX_WAIT));
+        assert!(began.elapsed() >= MIX_WAIT && began.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
     fn the_oldest_audio_is_dropped_and_the_start_moves_with_it() {
-        // 1 s capacity + 2 s slack = 3 s.
+        // A capacity of exactly 1 s.
         let ring = TrackRing::new("a".into(), "A".into(), 1);
         // Not zeros: silence is not stored at all, and the ring would stay empty.
         let block = vec![7i16; SAMPLE_RATE as usize * CHANNELS];
@@ -1312,7 +1455,7 @@ mod tests {
     /// the buffer, so it goes and the memory with it.
     #[test]
     fn a_track_quiet_for_a_whole_buffer_gives_its_memory_back() {
-        // 1 s capacity + 2 s slack = 3 s.
+        // A capacity of exactly 1 s.
         let ring = TrackRing::new("a".into(), "A".into(), 1);
         ring.push(&[7, 7], qpc_of_frame(0));
         assert!(!ring.inner.lock().samples.is_empty());

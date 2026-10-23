@@ -153,6 +153,15 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         return Err(err.to_string());
     }
 
+    // The mixer runs 80 ms behind the present: read at once, the clip's last
+    // few dozen milliseconds would be windows it has not mixed yet, and so
+    // zeros. Writing the video usually took longer than that and this returns
+    // at once. Bounded, and no lock is held here: a stalled mixer costs the
+    // tail, never the save.
+    if !snapshot.mixed.wait_until(snapshot.end_100ns(), pipeline::MIX_WAIT) {
+        log::info!("audio: the mixer has not reached the clip's end — its tail is silent");
+    }
+
     // Audio tracks as WAV, cut to the same QPC as the first frame.
     //
     // The buffer holds one ring per source; which of them belong together is
