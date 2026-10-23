@@ -763,28 +763,54 @@ fn watch_encoder(app: &tauri::AppHandle) {
         let state = app.state::<AppState>();
         // A recording runs on the same encoder. What it wrote up to the
         // failure is kept; a restart under it would cut the file anyway.
-        if state.is_recording() {
+        let stopped_recording = state.is_recording();
+        if stopped_recording {
             if let Err(err) = stop_recording_and_notify(&app) {
                 log::warn!("could not close the recording before the restart: {err}");
             }
         }
+        // "Recording saved" alone reads as a normal stop, and the restart
+        // after it as the recording going on: it has ended, and says so.
+        let stop_body = format!("The video encoder failed ({why}). Start the recording again.");
+        let recording_stopped = || {
+            notify(&app, "error", format!("Recording stopped: {stop_body}"));
+            sounds::play(&app, SoundKind::Error);
+            overlay::show(&app, BannerKind::Error, "Recording stopped", Some(stop_body.clone()));
+        };
         if state.is_buffering() {
             state.stop_pipeline();
             match state.start_pipeline() {
-                Ok(()) => overlay::show(
-                    &app,
-                    BannerKind::Info,
-                    "Recording restarted",
-                    Some(format!(
-                        "The video encoder stopped ({why}) \u{2014} the buffer starts over"
-                    )),
-                ),
+                Ok(()) => {
+                    // Announced again should it ever have to give up later on.
+                    GAVE_UP.store(false, Ordering::SeqCst);
+                    // One banner stands at a time: the ended recording is the
+                    // one that has to stay, the restart is a side note then.
+                    if stopped_recording {
+                        recording_stopped();
+                    } else {
+                        overlay::show(
+                            &app,
+                            BannerKind::Info,
+                            "Buffer restarted",
+                            Some(format!(
+                                "The video encoder stopped ({why}) \u{2014} the buffer starts over"
+                            )),
+                        );
+                    }
+                }
                 Err(err) => {
+                    // The buffer's banner wins here — it is the one to act
+                    // on; the ended recording still gets its notice.
+                    if stopped_recording {
+                        notify(&app, "error", format!("Recording stopped: {stop_body}"));
+                    }
                     notify(&app, "error", err.clone());
                     sounds::play(&app, SoundKind::Error);
                     overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
                 }
             }
+        } else if stopped_recording {
+            recording_stopped();
         }
         RESTARTING.store(false, Ordering::SeqCst);
     });
