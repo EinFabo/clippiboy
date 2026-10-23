@@ -1132,10 +1132,35 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
 ///
 /// Without it the player plays nothing as soon as `clipDir` lies outside the
 /// `$VIDEO` scope from `tauri.conf.json`.
+///
+/// Checked as the folder really is: Tauri grants the resolved form as well, so
+/// `D:\clips\..` or a junction onto `D:\` would open the whole drive.
 pub fn allow_clip_dir(app: &tauri::AppHandle, dir: &str) {
-    if let Err(err) = app.asset_protocol_scope().allow_directory(dir, true) {
+    let Some(real) = grant_target(dir) else {
+        log::warn!("clip folder '{dir}' is not granted to the player: it is a whole drive");
+        return;
+    };
+    if let Err(err) = app.asset_protocol_scope().allow_directory(&real, true) {
         log::warn!("clip folder '{dir}' is not granted to the player: {err}");
     }
+}
+
+/// The folder [`allow_clip_dir`] grants for `dir`: resolved, or `None` when
+/// either form of it is a whole drive.
+fn grant_target(dir: &str) -> Option<std::path::PathBuf> {
+    let real = dunce::canonicalize(dir).unwrap_or_else(|_| std::path::PathBuf::from(dir));
+    (grantable_dir(std::path::Path::new(dir)) && grantable_dir(&real)).then_some(real)
+}
+
+/// A folder the player may be granted in full: absolute, not a whole drive,
+/// and without `..` or `.`, which only show what they point to once resolved.
+pub fn grantable_dir(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    path.is_absolute()
+        && path.parent().is_some()
+        && path
+            .components()
+            .all(|part| !matches!(part, Component::ParentDir | Component::CurDir))
 }
 
 /// Grant the folders older clips live in as well.
@@ -1238,6 +1263,11 @@ pub fn run() {
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);
             discard_leftovers();
+            {
+                let clip_dir = std::path::PathBuf::from(&config.clip_dir);
+                let started = std::time::SystemTime::now();
+                std::thread::spawn(move || muxer::discard_partial_saves(&clip_dir, started));
+            }
             // Throwaway files from an old session: clear first, then grant.
             preview::clear();
             allow_clip_dir(handle, &preview::dir().to_string_lossy());
@@ -1422,4 +1452,44 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_way_up_to_the_drive_is_not_granted_even_when_it_exists() {
+        let temp = std::env::temp_dir();
+        let inside = temp.join(format!("cb-grant-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&inside).unwrap();
+        let granted = grant_target(&inside.to_string_lossy()).expect("a real folder is granted");
+        assert_eq!(granted, dunce::canonicalize(&inside).unwrap());
+        // Up out of a real folder, and up to the drive.
+        assert!(grant_target(&inside.join("..").to_string_lossy()).is_none());
+        let root = inside.ancestors().last().unwrap().to_path_buf();
+        let to_root = inside.join(std::iter::repeat_n("..", inside.components().count()).collect::<std::path::PathBuf>());
+        assert!(grant_target(&to_root.to_string_lossy()).is_none(), "{}", to_root.display());
+        assert!(grant_target(&root.to_string_lossy()).is_none());
+        let _ = std::fs::remove_dir_all(&inside);
+    }
+
+    /// A junction onto the drive reads as an ordinary folder until resolved.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_onto_the_drive_is_not_granted() {
+        let temp = std::env::temp_dir();
+        let link = temp.join(format!("cb-junction-{}", uuid::Uuid::new_v4()));
+        let drive = format!("{}\\", &temp.to_string_lossy()[..2]);
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&drive)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        assert!(grantable_dir(&link), "as text it looks like a folder");
+        assert!(grant_target(&link.to_string_lossy()).is_none());
+        std::fs::remove_dir(&link).unwrap();
+    }
 }

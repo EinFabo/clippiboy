@@ -37,6 +37,8 @@ log = "0.4"
 env_logger = "0.11"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
+# Resolves a folder without the `\\?\` prefix std puts in front on Windows.
+dunce = "1"
 jiff = "0.2"
 # The local control port for the Stream Deck plugin. Blocking, one thread, no
 # async runtime dragged in behind it — which is what the rest of this crate does

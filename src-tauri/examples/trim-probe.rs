@@ -136,7 +136,7 @@ fn main() {
 
 /// Every track at full — the mix should not distort anything here.
 fn mix_for(clip: &Clip) -> Vec<TrackMix> {
-    stems::tracks(&clip.id, &edit::source_path(clip))
+    stems::tracks(&clip.id, &edit::source_path(clip), edit::audio_untouched(clip))
         .unwrap_or_default()
         .iter()
         .map(|track| TrackMix {

@@ -53,7 +53,7 @@ fn main() {
             let clip = clip.clone();
             std::thread::spawn(move || {
                 let source = edit::source_path(&clip);
-                (n, stems::tracks(&clip.id, &source))
+                (n, stems::tracks(&clip.id, &source, edit::audio_untouched(&clip)))
             })
         })
         .collect();

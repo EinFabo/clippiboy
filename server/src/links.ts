@@ -420,26 +420,46 @@ function gone(): Response {
 
 // --- Hourly -----------------------------------------------------------------------
 
+/** Links taken down per step: R2 deletes at most 1000 keys at once, two per link. */
+const SUSPEND_BATCH = 400;
+
 /**
  * Carry suspensions through: sign the account out everywhere, take its links
  * down and drop its open connections, within the hour of `banned_at` being
- * set.
+ * set. Each suspension once: `suspension_applied_at` keeps the `banned_at` it
+ * was carried out for, so a suspension set anew is carried out anew.
  */
 export async function applySuspensions(env: Env): Promise<void> {
-  const { results: banned } = await env.DB.prepare("SELECT id FROM users WHERE banned_at IS NOT NULL")
-    .all<{ id: string }>();
-  for (const { id } of banned) {
-    const { results: shares } = await env.DB.prepare("SELECT id FROM shares WHERE owner = ? AND deleted_at IS NULL")
-      .bind(id)
-      .all<{ id: string }>();
-    if (shares.length > 0) {
-      await env.CLIPS.delete(shares.flatMap((row) => [video(row.id), poster(row.id)]));
-      const now = Date.now();
-      await env.DB.batch(shares.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)));
+  const { results: banned } = await env.DB.prepare(
+    `SELECT id, banned_at FROM users WHERE banned_at IS NOT NULL
+       AND (suspension_applied_at IS NULL OR suspension_applied_at < banned_at)`,
+  ).all<{ id: string; banned_at: number }>();
+  for (const { id, banned_at } of banned) {
+    // One that fails must not hold up everyone after it, hour after hour.
+    try {
+      await suspend(env, id, banned_at);
+    } catch (err) {
+      console.error("suspension", id, err);
     }
-    await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
-    await env.HUB.getByName(id).closeAll("account suspended");
   }
+}
+
+async function suspend(env: Env, id: string, bannedAt: number): Promise<void> {
+  for (;;) {
+    const { results: shares } = await env.DB.prepare(
+      "SELECT id FROM shares WHERE owner = ? AND deleted_at IS NULL LIMIT ?",
+    )
+      .bind(id, SUSPEND_BATCH)
+      .all<{ id: string }>();
+    if (shares.length === 0) break;
+    await env.CLIPS.delete(shares.flatMap((row) => [video(row.id), poster(row.id)]));
+    const now = Date.now();
+    await env.DB.batch(shares.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)));
+  }
+  await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
+  await env.HUB.getByName(id).closeAll("account suspended", id);
+  // Last: whatever failed above is tried again next hour.
+  await env.DB.prepare("UPDATE users SET suspension_applied_at = ? WHERE id = ?").bind(bannedAt, id).run();
 }
 
 /** Delete what has run out, and forget rows that no longer count for anything. */

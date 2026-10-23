@@ -298,10 +298,12 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           clips={playlist}
           index={shownIndex}
           // Read off the ids in the update, not off this render's list: a
-          // delete right before has already taken its id out.
+          // delete right before has already taken its id out. Thinned to the
+          // clips still there, as `playlist` is: one deleted elsewhere (the
+          // console) would push every position after it along by one.
           onIndexChange={(index) =>
             setPlaying((was) => {
-              const shown = was?.ids[index];
+              const shown = was?.ids.filter((id) => clips.some((clip) => clip.id === id))[index];
               return was && shown ? { ...was, shown, seen: [...was.seen, shown] } : was;
             })
           }

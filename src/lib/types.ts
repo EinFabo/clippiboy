@@ -411,6 +411,11 @@ export interface ClipEdit {
   endMs: number;
   /** The levels currently baked into the file's audio track. */
   tracks: TrackMix[];
+  /**
+   * A mix sits in the file's own audio with no untouched copy beside it: the
+   * levels start over at zero, and the file no longer sounds as recorded.
+   */
+  baked?: boolean;
 }
 
 /**

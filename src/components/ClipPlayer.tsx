@@ -584,7 +584,12 @@ export function ClipPlayer({
     element?.removeAttribute("src");
     element?.load();
     try {
-      await applyClipEdit(clip.id, current.startMs, current.endMs, current.tracks);
+      const written = await applyClipEdit(clip.id, current.startMs, current.endMs, current.tracks);
+      // A mix baked into the file (a single track without its untouched copy)
+      // is stored as level zero: the sliders follow, or the next save would
+      // apply the same −6 dB a second time.
+      const kept = written?.edit?.tracks;
+      if (kept && !sameEdit({ ...current, tracks: kept }, current)) mix.adopt(kept);
       setJustSaved(true);
     } catch {
       // The store has already raised the error as a notice. All that counts here

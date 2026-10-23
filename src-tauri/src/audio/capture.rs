@@ -155,6 +155,37 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
 /// LFE stays out. Quad has no centre: its back pair follows the fronts. Other
 /// odd counts keep the old rule, their layouts do not agree on where the
 /// centre sits.
+///
+/// Scaled so that front and centre together never go past full scale on
+/// their side (-4.6 dB on 5.1 and 7.1, nothing on quad). Scaling for the
+/// surrounds as well, as ffmpeg does, made plain stereo content on a virtual
+/// 7.1 headset 10 dB quieter than every other track; what the surrounds add on
+/// top is bent back by [`soft_clip`] instead. Stereo and mono stay as they are.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn stereo_shares(channels: usize) -> Vec<(f32, f32)> {
+    let shares: Vec<(f32, f32)> = (0..channels).map(|channel| stereo_share(channels, channel)).collect();
+    let front = |channel: usize| channel < 2 || (channels >= 6 && channel == 2);
+    let side = |pick: fn(&(f32, f32)) -> f32| {
+        shares.iter().enumerate().filter(|(channel, _)| front(*channel)).map(|(_, share)| pick(share)).sum::<f32>().max(1.0)
+    };
+    let (left, right) = (side(|share| share.0), side(|share| share.1));
+    shares.into_iter().map(|(l, r)| (l / left, r / right)).collect()
+}
+
+/// Peaks above the knee are bent towards full scale instead of being cut off
+/// hard; below it nothing changes. Only for folded-down surround, where the
+/// surrounds can add up past full scale.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn soft_clip(sample: f32) -> f32 {
+    const KNEE: f32 = 0.8;
+    let level = sample.abs();
+    if level <= KNEE {
+        return sample;
+    }
+    (KNEE + (1.0 - KNEE) * ((level - KNEE) / (1.0 - KNEE)).tanh()).copysign(sample)
+}
+
+/// One channel's share, before [`stereo_shares`] scales them.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn stereo_share(channels: usize, channel: usize) -> (f32, f32) {
     const MINUS_3_DB: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -261,6 +292,9 @@ mod win {
         /// true = f32 samples, false = 16-bit PCM
         float: bool,
         bits: u16,
+        /// Each channel's share of left and right, worked out once per
+        /// stream rather than for every packet.
+        shares: Vec<(f32, f32)>,
     }
 
     unsafe fn read_format(ptr: *const WAVEFORMATEX) -> Format {
@@ -273,6 +307,7 @@ mod win {
             sample_rate: wf.nSamplesPerSec,
             float,
             bits: wf.wBitsPerSample,
+            shares: super::stereo_shares((wf.nChannels as usize).max(1)),
         }
     }
 
@@ -311,9 +346,13 @@ mod win {
                     0.0
                 };
 
-                let (to_left, to_right) = super::stereo_share(src_channels, channel);
+                let (to_left, to_right) = format.shares[channel];
                 left += sample * to_left;
                 right += sample * to_right;
+            }
+            if src_channels > 2 {
+                left = super::soft_clip(left);
+                right = super::soft_clip(right);
             }
             stereo.push(left);
             stereo.push(right);
@@ -449,6 +488,7 @@ mod win {
                     sample_rate: SAMPLE_RATE,
                     float: true,
                     bits: 32,
+                    shares: super::stereo_shares(CHANNELS),
                 },
             ))
         }
@@ -717,6 +757,42 @@ mod tests {
         assert!(stereo_share(8, 6).0 > 0.0 && stereo_share(8, 6).1 == 0.0);
         assert!(stereo_share(8, 7).1 > 0.0 && stereo_share(8, 7).0 == 0.0);
         assert!(stereo_share(4, 2).0 > 0.0 && stereo_share(4, 3).1 > 0.0);
+    }
+
+    #[test]
+    fn a_surround_downmix_keeps_front_and_centre_at_full_scale() {
+        // Stereo and mono untouched.
+        assert_eq!(stereo_shares(2), vec![(1.0, 0.0), (0.0, 1.0)]);
+        assert_eq!(stereo_shares(1), vec![(1.0, 1.0)]);
+        // Quad has no centre: its front stays at full level.
+        assert_eq!(stereo_shares(4)[0], (1.0, 0.0));
+        for channels in [6, 8] {
+            let shares = stereo_shares(channels);
+            // Front and centre add up to exactly full scale on each side …
+            assert!((shares[0].0 + shares[2].0 - 1.0).abs() < 1e-6, "{channels}: {shares:?}");
+            assert!((shares[1].1 + shares[2].1 - 1.0).abs() < 1e-6, "{channels}: {shares:?}");
+            // … so plain stereo content loses only 4.6 dB, not 10.
+            let db = 20.0 * shares[0].0.log10();
+            assert!((-4.7..-4.5).contains(&db), "{channels} channels: {db} dB");
+            // The balance stays: centre at -3 dB against the front.
+            assert!((shares[2].0 / shares[0].0 - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn soft_clip_leaves_ordinary_levels_alone_and_never_reaches_past_full_scale() {
+        for sample in [0.0, 0.3, -0.5, 0.8, -0.8] {
+            assert_eq!(soft_clip(sample), sample);
+        }
+        let mut last = 0.8;
+        for step in 1..400 {
+            let out = soft_clip(0.8 + step as f32 * 0.01);
+            assert!(out <= 1.0 && out >= last, "{out} after {last}");
+            last = out;
+        }
+        assert_eq!(soft_clip(-3.0), -soft_clip(3.0));
+        // No kink at the knee: just above it the curve still rises at about 1.
+        assert!((soft_clip(0.801) - 0.801).abs() < 1e-4);
     }
 
     /// Roughly a week of uptime — that is how large real QPC values are.

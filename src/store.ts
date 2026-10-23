@@ -133,7 +133,7 @@ interface EngineState {
     startMs: number,
     endMs: number,
     tracks: TrackMix[],
-  ) => Promise<void>;
+  ) => Promise<Clip | undefined>;
   /** Undo the trim and pull the whole recording back. */
   restoreClipOriginal: (id: string) => Promise<void>;
   /** Throw the untouched recording away, keep the trimmed clip. */
@@ -161,6 +161,25 @@ export interface ClipMeta {
 
 /** Settings writes so far — see `patchConfig`. */
 let configWrites = 0;
+/** Writes of the settings still waiting for the core's answer. */
+let configPending = 0;
+/**
+ * The core corrected the settings while a write was on its way. Its copy may
+ * be from before that write; read anew once every answer is in.
+ */
+let configStale = false;
+
+/** The settings as the core now holds them, unless a newer write came since. */
+async function rereadConfig(set: (state: { config: AppConfig }) => void) {
+  configStale = false;
+  const ticket = ++configWrites;
+  try {
+    const config = await api.getConfig();
+    if (ticket === configWrites) set({ config });
+  } catch {
+    // The event's copy stands; the next write answers with the right one.
+  }
+}
 
 export const useEngine = create<EngineState>((set, get) => ({
   ready: false,
@@ -303,6 +322,10 @@ export const useEngine = create<EngineState>((set, get) => ({
       // The core corrected the settings by itself; a write still on its way
       // answers with the same correction.
       await events.onConfigChanged((config) => {
+        if (configPending > 0) {
+          configStale = true;
+          return;
+        }
         configWrites++;
         set({ config });
       });
@@ -373,6 +396,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     set({ config });
     if (!inTauri) return;
     const ticket = ++configWrites;
+    configPending++;
     try {
       // The core's answer, not what was sent: it puts back a source changed
       // mid-recording, swaps an encoder that is not there, cleans colours.
@@ -384,6 +408,9 @@ export const useEngine = create<EngineState>((set, get) => ({
       // The selection already stands in the UI — if the core does not accept it,
       // somebody has to see that rather than have it fail silently.
       set({ lastError: `Apply setting: ${String(err)}` });
+    } finally {
+      configPending--;
+      if (configPending === 0 && configStale) void rereadConfig(set);
     }
   },
 
@@ -604,6 +631,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       const clip = await api.applyClipEdit(id, startMs, endMs, tracks);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+      return clip;
     } catch (err) {
       set({ lastError: String(err) });
       throw err;

@@ -99,8 +99,13 @@ pub fn set_config(
         // (`set_logo_icon`).
         let _ = app.emit("accent-changed", next.accent());
     }
-    // Otherwise the player cannot reach clips outside the Videos folder.
-    crate::allow_clip_dir(&app, &next.clip_dir);
+    // Otherwise the player cannot reach clips outside the Videos folder. Only
+    // when it changed: the grant resolves the folder on disk, and this runs on
+    // the main thread for every switch in the settings — a clip folder on a
+    // share that is offline would freeze every window each time.
+    if previous.clip_dir != next.clip_dir {
+        crate::allow_clip_dir(&app, &next.clip_dir);
+    }
     // The corner or the screen may have changed.
     crate::overlay::reposition(&app);
     // And so may the badge. Switching it off is a switch flipped while
@@ -287,6 +292,12 @@ pub fn set_clip_dir(
     let path = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&path)
         .map_err(|err| format!("Folder \"{dir}\" cannot be created: {err}"))?;
+    // Checked as it really is: a junction onto a drive is a whole drive as
+    // well. Kept as typed, though — the clips already filed carry that
+    // spelling, and `filing` compares paths as text.
+    if dunce::canonicalize(&path).is_ok_and(|real| !crate::grantable_dir(&real)) {
+        return Err("Pick a folder for the clips, not a whole drive.".into());
+    }
     let probe = path.join(".clippiboy-schreibtest");
     std::fs::write(&probe, b"")
         .map_err(|err| format!("ClippiBoy is not allowed to write in \"{dir}\": {err}"))?;
@@ -300,10 +311,10 @@ pub fn set_clip_dir(
     Ok(next)
 }
 
-/// A clip folder that may be granted: absolute, and not a whole drive.
+/// A clip folder that may be granted: absolute, not a whole drive, and no
+/// `..` in it — `D:\clips\..` is a whole drive too.
 fn usable_clip_dir(dir: &str) -> bool {
-    let path = Path::new(dir.trim());
-    path.is_absolute() && path.parent().is_some()
+    crate::grantable_dir(Path::new(dir.trim()))
 }
 
 /// Where an export may go: a local `.mp4` the save dialog could have chosen.
@@ -1232,14 +1243,11 @@ pub fn export_clip(
     target_bytes: u64,
     output: String,
 ) -> Result<()> {
-    let output = export_target(&output)?;
-    let written = shrink(
-        &state,
-        &id,
-        target_bytes,
-        &output,
-        &progress(&app, &id),
-    )?;
+    // Said here, once, whichever step fails: the dialog only goes back to
+    // ready and relies on this notice.
+    let written = export_target(&output)
+        .and_then(|output| shrink(&state, &id, target_bytes, &output, &progress(&app, &id)))
+        .inspect_err(|err| crate::notify(&app, "error", err.clone()))?;
     progress(&app, &id)(1.0);
     if written > target_bytes {
         // Not an error: the file is there and usually only just over. Saying so
@@ -1414,6 +1422,9 @@ fn store(
         start_ms: 0,
         end_ms: applied.duration_ms,
         tracks,
+        // Once in the file, it stays there: zero levels must not read as
+        // "as recorded" afterwards (`edit::audio_untouched`).
+        baked: applied.mix_baked || clip.edit.as_ref().is_some_and(|edit| edit.baked),
     };
     let stored = with_library(state, |lib| {
         lib.set_edit(&clip.id, Some(&edit)).map_err(|e| e.to_string())?;
@@ -1532,5 +1543,18 @@ mod tests {
         assert!(!usable_clip_dir(root));
         assert!(!usable_clip_dir(""));
         assert!(!usable_clip_dir("clips"));
+    }
+
+    #[test]
+    fn a_way_up_out_of_the_clip_folder_is_no_clip_folder() {
+        let dirs: &[&str] = if cfg!(windows) {
+            &[r"D:\clips\..", r"D:\clips\.\..", r"D:\clips\sub\..\..", r"\\server\share\a\.."]
+        } else {
+            &["/home/me/clips/..", "/home/me/clips/./..", "/home/me/clips/sub/../.."]
+        };
+        for dir in dirs {
+            assert!(!usable_clip_dir(dir), "{dir}");
+        }
+        assert!(usable_clip_dir(if cfg!(windows) { r"D:\clips" } else { "/home/me/clips" }));
     }
 }

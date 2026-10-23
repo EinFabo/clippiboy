@@ -491,6 +491,7 @@ mod tests {
                 gain_db: -6.0,
                 muted: true,
             }],
+            baked: true,
         };
         lib.set_edit("a", Some(&edit)).unwrap();
         assert_eq!(lib.get("a").unwrap().unwrap().edit, Some(edit));

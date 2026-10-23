@@ -177,8 +177,13 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
-  /** The account is gone or suspended: drop every connection and forget the presence. */
-  async closeAll(reason = "account deleted"): Promise<void> {
+  /**
+   * The account is gone or suspended: drop every connection and forget the
+   * presence. Friends hear it went offline first — a suspended account keeps
+   * its friends, and once the presence is forgotten the closing sockets have
+   * nothing left to compare against and tell nobody.
+   */
+  async closeAll(reason = "account deleted", user?: string): Promise<void> {
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.close(4001, reason);
@@ -186,6 +191,7 @@ export class Hub extends DurableObject<Env> {
         // Already closed.
       }
     }
+    if (user) await this.publish(user);
     await this.ctx.storage.deleteAll();
   }
 

@@ -747,6 +747,11 @@ pub struct ClipEdit {
     pub end_ms: u64,
     #[serde(default)]
     pub tracks: Vec<TrackMix>,
+    /// A mix was saved into the file's own audio, with no untouched copy
+    /// beside it. The levels then start over at zero (`tracks`), and only this
+    /// says that the file no longer sounds as recorded. Never unset again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub baked: bool,
 }
 
 /// The recording that was trimmed away and lives on under

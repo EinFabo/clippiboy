@@ -40,6 +40,10 @@ const TOKEN_HEADER: &str = "x-clippiboy-token";
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_BODY: usize = 4 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// For the whole request: [`READ_TIMEOUT`] holds for one read only, and a
+/// client sending a byte every 1.9 s would keep a connection for hours —
+/// eight of them and the Stream Deck is locked out.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_CONNECTIONS: usize = 8;
 
 struct Running {
@@ -187,7 +191,7 @@ fn connection(app: &tauri::AppHandle, mut stream: TcpStream, token: &str) {
     if setup.is_err() {
         return;
     }
-    let (code, body) = match read_request(&mut stream) {
+    let (code, body) = match read_request(&mut stream, std::time::Instant::now() + REQUEST_DEADLINE) {
         Ok(request) => handle(app, &request, token),
         Err((code, error)) => (code, json!({ "ok": false, "error": error })),
     };
@@ -210,9 +214,16 @@ struct Request {
     body: String,
 }
 
-/// Read one request, within [`MAX_HEAD`] and [`MAX_BODY`]. The error is the
-/// status to answer with.
-fn read_request(stream: &mut impl Read) -> Result<Request, (u16, &'static str)> {
+/// Read one request, within [`MAX_HEAD`] and [`MAX_BODY`] and by `deadline`.
+/// The error is the status to answer with.
+fn read_request(stream: &mut impl Read, deadline: std::time::Instant) -> Result<Request, (u16, &'static str)> {
+    let in_time = || {
+        if std::time::Instant::now() > deadline {
+            Err((408, "request too slow"))
+        } else {
+            Ok(())
+        }
+    };
     let mut buffer = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     let head_end = loop {
@@ -227,6 +238,7 @@ fn read_request(stream: &mut impl Read) -> Result<Request, (u16, &'static str)> 
             Ok(n) => buffer.extend_from_slice(&chunk[..n]),
             Err(_) => return Err((408, "request too slow")),
         }
+        in_time()?;
     };
     let head = std::str::from_utf8(&buffer[..head_end]).map_err(|_| (400, "unreadable head"))?;
     let mut lines = head.split("\r\n");
@@ -259,6 +271,7 @@ fn read_request(stream: &mut impl Read) -> Result<Request, (u16, &'static str)> 
             Ok(n) => body.extend_from_slice(&chunk[..n]),
             Err(_) => return Err((408, "request too slow")),
         }
+        in_time()?;
     }
     let body = String::from_utf8(body).map_err(|_| (400, "unreadable body"))?;
     Ok(Request { method, route, headers, body })
@@ -492,7 +505,7 @@ mod tests {
 
 
     fn read(raw: &[u8]) -> Result<Request, (u16, &'static str)> {
-        read_request(&mut std::io::Cursor::new(raw.to_vec()))
+        read_request(&mut std::io::Cursor::new(raw.to_vec()), std::time::Instant::now() + REQUEST_DEADLINE)
     }
 
     #[test]
@@ -544,7 +557,7 @@ mod tests {
         let (mut stream, _) = listener.accept().unwrap();
         stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
         let started = std::time::Instant::now();
-        let outcome = read_request(&mut stream);
+        let outcome = read_request(&mut stream, started + REQUEST_DEADLINE);
         let took = started.elapsed();
         client.join().unwrap();
         (outcome, took)
@@ -565,6 +578,31 @@ mod tests {
         let (outcome, took) = served(b"GET /v1/status HTTP/1.1\r\nX-Cl", Duration::from_secs(4));
         assert_eq!(outcome.unwrap_err().0, 408);
         assert!(took >= READ_TIMEOUT && took < READ_TIMEOUT * 2, "took {took:?}");
+    }
+
+    /// One byte per read, each well inside the read timeout.
+    struct Drip(&'static [u8], usize);
+
+    impl Read for Drip {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(30));
+            let Some(&byte) = self.0.get(self.1) else {
+                return Ok(0);
+            };
+            self.1 += 1;
+            out[0] = byte;
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn a_client_that_drips_its_request_is_let_go_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let mut drip = Drip(b"GET /v1/status HTTP/1.1\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n", 0);
+        let outcome = read_request(&mut drip, started + Duration::from_millis(200));
+        assert_eq!(outcome.unwrap_err().0, 408);
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(400), "took {took:?}");
     }
 
     #[test]

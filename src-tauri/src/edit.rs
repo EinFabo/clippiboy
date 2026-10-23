@@ -103,9 +103,11 @@ pub fn audio_untouched(clip: &Clip) -> bool {
     }
     clip.original.is_none()
         && clip.edit.as_ref().is_none_or(|edit| {
-            edit.tracks
-                .iter()
-                .all(|track| !track.muted && track.gain_db.abs() < 0.05)
+            !edit.baked
+                && edit
+                    .tracks
+                    .iter()
+                    .all(|track| !track.muted && track.gain_db.abs() < 0.05)
         })
 }
 
@@ -943,6 +945,7 @@ fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOrigina
                 start_ms: 0,
                 end_ms: actual_ms,
                 tracks: edit.tracks.clone(),
+                baked: edit.baked,
             }),
         );
     }
@@ -1096,6 +1099,7 @@ mod tests {
             start_ms: 0,
             end_ms: 30_000,
             tracks: vec![TrackMix { index: 0, gain_db, muted }],
+            baked: false,
         })
     }
 
@@ -1107,6 +1111,10 @@ mod tests {
         // the recording, and a copy of it would carry that level as its zero.
         assert!(!audio_untouched(&plain_clip(mixed(-6.0, false), None)));
         assert!(!audio_untouched(&plain_clip(mixed(0.0, true), None)));
+        // A mix saved into the file starts the levels over at zero; that is
+        // not the recorded sound.
+        let baked = mixed(0.0, false).map(|edit| ClipEdit { baked: true, ..edit });
+        assert!(!audio_untouched(&plain_clip(baked, None)));
         // Trimmed, but the original is gone: the file starts somewhere inside
         // the recording, and a copy of it would sit at the wrong offset.
         let trimmed = ClipOriginal { duration_ms: 60_000, start_ms: 10_000, end_ms: 40_000 };

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { SLIDE, SlidingIndicator } from "./SlidingIndicator";
 
@@ -105,16 +105,29 @@ export function Slider({
   /**
    * Where the knob was let go — by the pointer or after a key. For settings
    * where every value in between would do something: `onChange` then only
-   * moves a draft.
+   * moves a draft. Only when the value really changed: a click on the knob or
+   * a Tab onto it must not write the value shown.
    */
   onCommit?: (v: number) => void;
   label?: string;
 }) {
   const pct = ((value - min) / (max - min)) * 100;
-  const commit = (e: React.SyntheticEvent<HTMLInputElement>) =>
-    onCommit?.(Number(e.currentTarget.value));
+  const input = useRef<HTMLInputElement>(null);
+  const commit = useRef(onCommit);
+  commit.current = onCommit;
+  // The browser's own `change`, not React's `onChange` (which is `input`): it
+  // fires once the knob is let go — wherever the pointer is by then — or a key
+  // moved it, and only when the value differs from where it started.
+  useEffect(() => {
+    const element = input.current;
+    if (!element) return;
+    const committed = () => commit.current?.(Number(element.value));
+    element.addEventListener("change", committed);
+    return () => element.removeEventListener("change", committed);
+  }, []);
   return (
     <input
+      ref={input}
       type="range"
       aria-label={label}
       value={value}
@@ -122,8 +135,6 @@ export function Slider({
       max={max}
       step={step}
       onChange={(e) => onChange(Number(e.target.value))}
-      onPointerUp={commit}
-      onKeyUp={commit}
       className="h-1.5 w-full cursor-pointer appearance-none rounded-pill outline-none
         [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5
         [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-pill

@@ -159,9 +159,12 @@ struct TrackOffer {
 
 /// More would be a strange clip, or not a clip at all.
 const MAX_TRACKS: usize = 16;
-/// Largest clip or recording an offer may announce. A long 4K recording
-/// stays well under it; anything above is not a clip.
-const MAX_OFFER_BYTES: u64 = 64 << 30;
+/// Largest clip or recording an offer may announce. Recordings have no length
+/// limit, and at the highest bitrate (100 Mbit/s) 64 GiB were reached after an
+/// hour and a half; 2 TiB is some 44 hours of that. The limit is not what keeps
+/// the disk from filling up (`receive` checks the free space), it only turns
+/// sizes that cannot be right away.
+const MAX_OFFER_BYTES: u64 = 2 << 40;
 /// Largest single track an offer may announce.
 const MAX_TRACK_BYTES: u64 = 2 << 30;
 /// Left free on a drive after a download, so receiving never fills it.
@@ -539,6 +542,19 @@ pub fn relay_failed(app: &AppHandle, reference: Option<&str>, reason: &str) {
     });
 }
 
+/// What an offer comes to with its tracks, or `None` when its sizes cannot be
+/// right.
+///
+/// Added up with checks: the release build has no overflow checks, and a track
+/// of 2^64 − 1 bytes wrapped the sum round to the clip's own size — the banner
+/// said "1 MB", and the download wrote until the disk was full.
+fn offer_total(size: u64, tracks: &[TrackOffer]) -> Option<u64> {
+    tracks
+        .iter()
+        .try_fold(size, |sum, track| sum.checked_add(track.size))
+        .filter(|_| size <= MAX_OFFER_BYTES && tracks.iter().all(|track| track.size <= MAX_TRACK_BYTES))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn offered(
     app: &AppHandle,
@@ -569,15 +585,7 @@ fn offered(
     if meta.tracks.len() > MAX_TRACKS || meta.tracks.iter().any(|track| track.sha256.len() != 64) {
         meta.tracks.clear();
     }
-    // Added up with checks: the release build has no overflow checks, and a
-    // track of 2^64 − 1 bytes wrapped the sum round to the clip's own size —
-    // the banner said "1 MB", and the download wrote until the disk was full.
-    let total = meta
-        .tracks
-        .iter()
-        .try_fold(size, |sum, track| sum.checked_add(track.size))
-        .filter(|_| size <= MAX_OFFER_BYTES && meta.tracks.iter().all(|track| track.size <= MAX_TRACK_BYTES));
-    let Some(total) = total else {
+    let Some(total) = offer_total(size, &meta.tracks) else {
         log::warn!("share: offer {id} from {from} with sizes that cannot be right — refused");
         crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false });
         return;
@@ -660,13 +668,23 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     let dir = crate::filing::dir_for(Path::new(&config.clip_dir), meta.game.as_deref(), false, kind);
     std::fs::create_dir_all(&dir).map_err(|err| format!("Could not create the folder: {err}"))?;
     // Room for it first, on both drives: the clip goes to the clip folder,
-    // its tracks to the app data folder.
+    // its tracks to the app data folder — usually both on C:.
+    let mut meta = meta;
     let tracks_size: u64 = meta.tracks.iter().map(|track| track.size).sum();
-    let short = |at: &Path, need: u64| {
-        crate::disk::free_bytes(at).is_some_and(|free| free < need.saturating_add(SPACE_MARGIN))
-    };
-    if short(&dir, size) || short(&crate::config::data_dir(), tracks_size) {
-        return Err(format!("Not enough free space for this {what} ({}).", megabytes(size + tracks_size)));
+    let data_dir = crate::config::data_dir();
+    let same_drive = tracks_size > 0
+        && crate::disk::volume_of(&dir).is_some_and(|volume| Some(volume) == crate::disk::volume_of(&data_dir));
+    let data_free = if tracks_size > 0 { crate::disk::free_bytes(&data_dir) } else { None };
+    match room(size, tracks_size, crate::disk::free_bytes(&dir), data_free, same_drive) {
+        Room::Fits => {}
+        Room::WithoutTracks => {
+            // Tracks are a bonus everywhere else as well: the clip still comes.
+            log::warn!("share: no room for the tracks of {id} — receiving the {what} alone");
+            meta.tracks.clear();
+            // The size shown counted them; without, the bar would stop short.
+            set_in(app, id, |transfer| transfer.size = size);
+        }
+        Room::None => return Err(format!("Not enough free space for this {what} ({}).", megabytes(size))),
     }
     let target = crate::filing::free_name(&dir, &safe_file_name(&meta.file_name));
     let part = target.with_extension(format!(
@@ -727,6 +745,38 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     let _ = std::fs::remove_file(&part);
     crate::stems::remove(&clip_id);
     Err(format!("The {what} did not get through: {last_error}"))
+}
+
+/// Whether an offer fits on the drives it goes to.
+#[derive(Debug, PartialEq, Eq)]
+enum Room {
+    Fits,
+    /// The clip fits, its tracks do not.
+    WithoutTracks,
+    None,
+}
+
+/// Room for a clip of `size` and its tracks, with [`SPACE_MARGIN`] left over
+/// on each drive. A free size that cannot be read counts as room: refusing a
+/// clip over a question nobody could answer helps nobody.
+fn room(size: u64, tracks_size: u64, clip_free: Option<u64>, data_free: Option<u64>, same_drive: bool) -> Room {
+    let short = |free: Option<u64>, need: u64| free.is_some_and(|free| free < need.saturating_add(SPACE_MARGIN));
+    if short(clip_free, size) {
+        return Room::None;
+    }
+    if tracks_size == 0 {
+        return Room::Fits;
+    }
+    let tracks_short = if same_drive {
+        short(clip_free, size.saturating_add(tracks_size))
+    } else {
+        short(data_free, tracks_size)
+    };
+    if tracks_short {
+        Room::WithoutTracks
+    } else {
+        Room::Fits
+    }
 }
 
 /// The individual tracks into the stems store of the clip to be, each checked
@@ -888,6 +938,7 @@ fn file_clip(
             start_ms: 0,
             end_ms: meta.duration_ms,
             tracks: meta.mix.clone(),
+            baked: false,
         }),
         original: None,
         original_available: false,
@@ -1246,6 +1297,35 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_is_checked_for_the_clip_and_its_tracks_together_on_one_drive() {
+        const GB: u64 = 1 << 30;
+        // Without tracks the app data drive does not matter.
+        assert_eq!(room(3 << 20, 0, Some(10 * GB), Some(0), false), Room::Fits);
+        // Only the app data drive is short: the clip comes alone.
+        assert_eq!(room(GB, GB, Some(10 * GB), Some(GB / 2), false), Room::WithoutTracks);
+        // Both on C:, 11 GB free, 10 GB clip and 6 GB tracks: each alone fits,
+        // together they do not.
+        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), true), Room::WithoutTracks);
+        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), false), Room::Fits);
+        assert_eq!(room(10 * GB, 0, Some(10 * GB), None, false), Room::None, "the margin counts");
+        assert_eq!(room(10 * GB, 6 * GB, None, None, true), Room::Fits, "unknown counts as room");
+    }
+
+    #[test]
+    fn a_long_recording_may_be_offered_but_no_size_that_cannot_be_right() {
+        let track = |size| TrackOffer { label: "Game".into(), size, sha256: "0".repeat(64) };
+        // Some two and a half hours at 100 Mbit/s, with two tracks.
+        let long = 100 << 30;
+        assert_eq!(offer_total(long, &[track(300 << 20), track(300 << 20)]), Some(long + (600 << 20)));
+        assert_eq!(offer_total(u64::MAX, &[]), None);
+        assert_eq!(offer_total(1 << 20, &[track(MAX_TRACK_BYTES + 1)]), None);
+        assert!(offer_total(MAX_OFFER_BYTES, &vec![track(MAX_TRACK_BYTES); MAX_TRACKS]).is_some());
+        // The sum wraps round: refused, not counted as the clip's own size.
+        let wrapping = [track(u64::MAX - (1 << 20)), track(2 << 20)];
+        assert_eq!(offer_total(1 << 20, &wrapping), None);
+    }
 
     #[test]
     fn file_names_from_a_friend_stay_names() {

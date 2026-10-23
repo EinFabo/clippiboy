@@ -388,6 +388,16 @@ export function useClipMix(
   }, []);
 
   /**
+   * Take the sliders from a stored state again. After a save that baked the mix
+   * into the file the core counts the levels from zero — the sliders have to go
+   * back with them.
+   */
+  const adopt = useCallback(
+    (saved: TrackMix[]) => setMix(initialMix(tracks, saved)),
+    [tracks],
+  );
+
+  /**
    * The slider positions as the core expects them on save. Solo does not exist
    * there — it is resolved into mutes here.
    */
@@ -407,5 +417,5 @@ export function useClipMix(
     (state) => state.muted || state.solo || state.gainDb !== 0,
   );
 
-  return { tracks, mix, loading, failed, setTrack, reset, toRequest, touched, separate };
+  return { tracks, mix, loading, failed, setTrack, reset, adopt, toRequest, touched, separate };
 }

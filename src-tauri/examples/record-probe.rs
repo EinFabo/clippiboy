@@ -852,7 +852,6 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool) {
             snapshot,
             clip_id: format!("probe-{name}"),
             output: output.clone(),
-            temp_dir: temp.clone(),
         }) {
             Ok(result) => {
                 println!(
@@ -1042,7 +1041,7 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
         tags: Vec::new(),
     };
 
-    let tracks = match stems::tracks(&clip.id, &edit::source_path(&clip)) {
+    let tracks = match stems::tracks(&clip.id, &edit::source_path(&clip), edit::audio_untouched(&clip)) {
         Ok(tracks) => tracks,
         Err(err) => {
             println!("tracks not readable: {err}");

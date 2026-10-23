@@ -188,7 +188,11 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
                 label: "Main mix".into(),
                 raw: false,
             }),
-            Err(err) => log::warn!("could not write the main mix: {err}"),
+            Err(err) => {
+                // Half written, it is no input, and it would stay beside the clip.
+                let _ = std::fs::remove_file(&path);
+                log::warn!("could not write the main mix: {err}");
+            }
         }
     }
     for track in own {
@@ -201,10 +205,10 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
                 label: track.label(),
                 raw: false,
             }),
-            Err(err) => log::warn!(
-                "could not write audio track '{}': {err}",
-                track.label()
-            ),
+            Err(err) => {
+                let _ = std::fs::remove_file(&path);
+                log::warn!("could not write audio track '{}': {err}", track.label());
+            }
         }
     }
 
@@ -526,6 +530,66 @@ pub fn sanitize(text: &str) -> String {
         .collect()
 }
 
+/// Clear away what saves cut short left in the clip folder.
+///
+/// The intermediate files lie beside the clip, and a save the app did not
+/// survive (a crash, a kill, the power) leaves a buffer's worth there for good.
+/// Only the folders a clip goes into are looked at, only names this file gives
+/// out are touched, and only files from before `started` — the app's start — so
+/// a save begun meanwhile keeps its own. That lets it run on a thread of its
+/// own: a clip folder on a share that is offline would otherwise hold up the
+/// start until the network gives up. A recording's own folder is left alone:
+/// it is picked up again.
+pub fn discard_partial_saves(clip_dir: &Path, started: std::time::SystemTime) {
+    let mut dirs = vec![(clip_dir.to_path_buf(), 0)];
+    while let Some((dir, depth)) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            // `<clip folder>/<game>/Videos` is as deep as a clip ever goes.
+            if kind.is_dir() && depth < 2 && name != crate::recorder::WORK_DIR {
+                dirs.push((path, depth + 1));
+            } else if kind.is_file()
+                && is_partial_save(&name)
+                && entry.metadata().and_then(|meta| meta.modified()).is_ok_and(|at| at < started)
+            {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => log::info!("removed '{}' from a save cut short", path.display()),
+                    Err(err) => log::warn!("could not remove '{}': {err}", path.display()),
+                }
+            }
+        }
+    }
+}
+
+/// `<stem>_<clip id>.part.h264`, `….part.<track>.wav` or `….part.mp4`, as
+/// [`build`] and [`encode`] name them.
+fn is_partial_save(name: &str) -> bool {
+    // The stem is sanitized, so the first `.part.` is the one put in here.
+    let Some((head, tail)) = name.split_once(".part.") else {
+        return false;
+    };
+    // A sanitized uuid: 8-4-4-4-12 hex digits, joined by `_`.
+    let Some(id) = head.len().checked_sub(36).and_then(|at| head.get(at..)) else {
+        return false;
+    };
+    let id_like = id.char_indices().all(|(at, c)| match at {
+        8 | 13 | 18 | 23 => c == '_',
+        _ => c.is_ascii_hexdigit(),
+    });
+    let kind = match tail.strip_suffix(".wav") {
+        Some(track) => !track.is_empty() && track.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        None => tail == "h264" || tail == "mp4",
+    };
+    head.len() > 37 && head.as_bytes()[head.len() - 37] == b'_' && id_like && kind
+}
+
 pub fn probe_duration_ms(path: &Path) -> Option<u64> {
     let output = command("ffprobe")
         .args([
@@ -547,6 +611,59 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_intermediate_files_of_a_save_count_as_left_over() {
+        let id = "0f8fad5b_d9cb_469f_a165_70867728950e";
+        for name in [
+            format!("Valorant_2026_10_20_{id}.part.h264"),
+            format!("Valorant_2026_10_20_{id}.part.mic_1.wav"),
+            format!("Valorant_2026_10_20_{id}.part.mp4"),
+        ] {
+            assert!(is_partial_save(&name), "{name}");
+        }
+        for name in [
+            "Valorant 2026-10-20.mp4".to_owned(),
+            format!("Valorant_2026_10_20_{id}.mp4"),
+            format!("{id}.part.h264"),
+            format!("clip_{id}.part.mkv"),
+            format!("clip_{id}.part..wav"),
+            "clip_not_a_uuid_at_all_but_36_chars_x.part.h264".to_owned(),
+            "clip.mp4.part".to_owned(),
+        ] {
+            assert!(!is_partial_save(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn partial_saves_are_cleared_from_the_clip_folders_only() {
+        let root = std::env::temp_dir().join(format!("cb-mux-{}", uuid::Uuid::new_v4()));
+        let id = "0f8fad5b_d9cb_469f_a165_70867728950e";
+        let videos = root.join("Valorant").join("Videos");
+        let work = root.join(crate::recorder::WORK_DIR).join("rec");
+        let deep = videos.join("mine");
+        for dir in [&videos, &work, &deep] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let gone = [videos.join(format!("a_{id}.part.h264")), videos.join(format!("a_{id}.part.game.wav")), root.join(format!("b_{id}.part.mp4"))];
+        let kept = [videos.join("a.mp4"), work.join(format!("a_{id}.part.h264")), deep.join(format!("a_{id}.part.h264"))];
+        for file in gone.iter().chain(&kept) {
+            std::fs::write(file, b"x").unwrap();
+        }
+        // Begun after the start: left alone.
+        discard_partial_saves(&root, std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        for file in gone.iter().chain(&kept) {
+            assert!(file.exists(), "{}", file.display());
+        }
+        discard_partial_saves(&root, std::time::SystemTime::now() + std::time::Duration::from_secs(1));
+        for file in &gone {
+            assert!(!file.exists(), "{}", file.display());
+        }
+        for file in &kept {
+            assert!(file.exists(), "{}", file.display());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_stream_without_losses_plays_at_the_configured_rate() {

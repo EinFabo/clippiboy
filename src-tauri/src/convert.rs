@@ -631,7 +631,8 @@ pub struct Latest {
     pub overruns: AtomicU64,
     /// The generation the clock picked up last.
     taken: AtomicU64,
-    /// Ticks the clock skipped because it was too far behind to catch up.
+    /// Ticks the clock skipped because it was too far behind to catch up — not
+    /// those of a gap longer than [`GAP`], which is sleep rather than loss.
     /// Each one is a frame the clip does not have.
     pub skipped: AtomicU64,
     running: AtomicBool,
@@ -733,6 +734,12 @@ impl Latest {
 /// How far the clock may fall behind before it skips rather than catches up.
 const CATCH_UP: Duration = Duration::from_millis(250);
 
+/// From this far behind the clock was not slow, the PC was asleep (or the
+/// process stopped): skipped, but not counted as frames lost. Eight hours of
+/// standby were 1.7 million "dropped frames" in the console and on the
+/// Stream Deck otherwise.
+pub const GAP: Duration = Duration::from_secs(5);
+
 /// The clock. Runs until `Latest::stop`.
 pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
     let fps = fps.max(1) as u64;
@@ -763,7 +770,9 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
             if behind > CATCH_UP {
                 let skip = (behind.as_nanos() / period.as_nanos()) as u64;
                 index += skip;
-                latest.skipped.fetch_add(skip, Ordering::Relaxed);
+                if behind <= GAP {
+                    latest.skipped.fetch_add(skip, Ordering::Relaxed);
+                }
             }
         }
 

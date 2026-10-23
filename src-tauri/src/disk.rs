@@ -48,6 +48,29 @@ pub fn free_bytes(_dir: &Path) -> Option<u64> {
     None
 }
 
+/// The root of the volume `dir` lies on (`C:\`, a mount point, a share) —
+/// two folders with the same one share their free space. Blocks like
+/// [`free_bytes`] on a share that is gone.
+#[cfg(windows)]
+pub fn volume_of(dir: &Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetVolumePathNameW;
+
+    let path = existing(dir)?;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut root = vec![0u16; wide.len().max(4) + 1];
+    unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut root) }.ok()?;
+    let len = root.iter().position(|&c| c == 0)?;
+    Some(std::ffi::OsString::from_wide(&root[..len]).into())
+}
+
+#[cfg(not(windows))]
+pub fn volume_of(_dir: &Path) -> Option<std::path::PathBuf> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,6 +80,16 @@ mod tests {
         let root = std::env::temp_dir();
         let missing = root.join("clippiboy-nicht-da").join("auch-nicht");
         assert_eq!(existing(&missing), Some(root.as_path()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn two_folders_on_one_drive_share_a_volume() {
+        let root = std::env::temp_dir();
+        let volume = volume_of(&root).expect("the temp folder has a volume");
+        assert_eq!(volume_of(&root.join("not-there-yet").join("deeper")), Some(volume.clone()));
+        let drive = &root.to_string_lossy()[..2];
+        assert!(volume.to_string_lossy().eq_ignore_ascii_case(&format!("{drive}\\")), "{}", volume.display());
     }
 
     #[test]
