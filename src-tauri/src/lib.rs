@@ -32,6 +32,7 @@ pub mod shot;
 pub mod sounds;
 pub mod state;
 pub mod stems;
+pub mod sweep;
 pub mod thumbs;
 pub mod tint;
 pub mod telemetry;
@@ -113,6 +114,11 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
         log::info!("a clip is already being written — key press ignored");
         return Err("A clip is already being saved.".into());
     };
+    // Checked after the save is registered: Quit sets the flag first and then
+    // looks for a save, so one of the two always sees the other.
+    if state.quitting.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("ClippiBoy is quitting.".into());
+    }
 
     // Give feedback right away. Sealing and muxing take several seconds
     // depending on bitrate and buffer length; without a sign in the UI you press
@@ -148,6 +154,50 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
             Err(err)
         }
     }
+}
+
+/// How long Quit and the update restart wait for a running save or edit.
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait, on the calling thread, until no clip is being saved and no edit
+/// rendered — at most [`QUIT_WAIT`]. Cut off half way, the clip the user asked
+/// for would be lost and its scratch files left for the next start.
+pub fn wait_for_saves(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let busy = || state.is_saving() || edit::is_busy();
+    if !busy() {
+        return;
+    }
+    overlay::show(
+        app,
+        BannerKind::Clip,
+        "Finishing the clip…",
+        Some("ClippiBoy quits once it is saved".into()),
+    );
+    if !state::wait_until_idle(busy, QUIT_WAIT, std::time::Duration::from_millis(100)) {
+        log::warn!("still saving after {} s — quitting anyway", QUIT_WAIT.as_secs());
+    }
+}
+
+/// Quit, from the tray: no new save starts from here on, one that is running
+/// is waited for, then the recording is closed (the next start finishes it)
+/// and the app ends.
+pub fn quit(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    // A second click while the first one waits changes nothing.
+    if state.quitting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    // Still on the main thread, where the tray handler runs.
+    console::close(app);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        wait_for_saves(&app);
+        let state = app.state::<AppState>();
+        state.abandon_recording();
+        state.stop_pipeline();
+        app.exit(0);
+    });
 }
 
 /// Take a screenshot and report the result.
@@ -675,6 +725,10 @@ fn watch_encoder(app: &tauri::AppHandle) {
         return;
     }
     let state = app.state::<AppState>();
+    // Quit is winding everything down: nothing gets restarted under it.
+    if state.quitting.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(why) = state.encoder_failure() else {
         return;
     };
@@ -1351,11 +1405,6 @@ pub fn run() {
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);
             discard_leftovers();
-            {
-                let clip_dir = std::path::PathBuf::from(&config.clip_dir);
-                let started = std::time::SystemTime::now();
-                std::thread::spawn(move || muxer::discard_partial_saves(&clip_dir, started));
-            }
             // Throwaway files from an old session: clear first, then grant.
             preview::clear();
             allow_clip_dir(handle, &preview::dir().to_string_lossy());
@@ -1386,6 +1435,9 @@ pub fn run() {
                 // last time moves there now.
                 filing::tidy(library, &config.clip_dir);
             }
+            // What saves, edits and exports cut short left in the clip folder
+            // and the data folder — on a thread of its own.
+            sweep::run(handle);
             // ffmpeg/ffprobe: at once when they are there, otherwise fetched
             // in the background — the buffer does not wait for them.
             tools::setup(handle);

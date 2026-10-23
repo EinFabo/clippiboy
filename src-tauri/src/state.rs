@@ -1367,12 +1367,36 @@ fn destination(
     Ok(dir.join(name))
 }
 
+/// A game name as the front of a file name: at most [`crate::filing::MAX_LEN`]
+/// characters, like its folder. Unknown games are named after their window
+/// title, and a title that is a whole sentence made every save fail on a path
+/// too long for Windows.
 fn sanitize_name(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect::<String>()
         .trim_matches('_')
+        .chars()
+        .take(crate::filing::MAX_LEN)
+        .collect::<String>()
+        .trim_matches('_')
         .to_string()
+}
+
+/// Poll `busy` every `step` until it says no, for at most `limit`. `true` when
+/// it did in time.
+///
+/// What Quit and the update restart wait on: a save or an edit cut off half
+/// way loses the clip the user asked for.
+pub fn wait_until_idle(busy: impl Fn() -> bool, limit: std::time::Duration, step: std::time::Duration) -> bool {
+    let until = std::time::Instant::now() + limit;
+    while busy() {
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(step);
+    }
+    true
 }
 
 impl Default for AppState {
@@ -1546,5 +1570,24 @@ mod tests {
         assert!(budget.allow(at(120)));
         assert!(!budget.allow(at(180)), "a fourth within ten minutes");
         assert!(budget.allow(at(601)), "the first one has aged out");
+    }
+
+    #[test]
+    fn a_long_window_title_makes_a_short_file_name() {
+        assert_eq!(sanitize_name(&"Ы".repeat(300)).chars().count(), 60);
+        assert_eq!(sanitize_name("Counter-Strike 2"), "Counter_Strike_2");
+        assert_eq!(sanitize_name(&format!("{}!", "a".repeat(59))), "a".repeat(59), "no underscore left after the cut");
+    }
+
+    #[test]
+    fn quitting_waits_for_a_save_but_not_forever() {
+        let polls = std::cell::Cell::new(0);
+        let busy_twice = || {
+            polls.set(polls.get() + 1);
+            polls.get() < 3
+        };
+        let ms = std::time::Duration::from_millis;
+        assert!(wait_until_idle(busy_twice, ms(1_000), ms(1)));
+        assert!(!wait_until_idle(|| true, ms(20), ms(5)));
     }
 }

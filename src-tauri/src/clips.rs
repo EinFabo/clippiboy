@@ -130,6 +130,14 @@ impl Library {
         tx.commit()
     }
 
+    /// Every clip's id, and nothing else — for telling a store that belongs
+    /// to a clip from one a save left behind (`sweep.rs`).
+    pub fn ids(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM clips")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,

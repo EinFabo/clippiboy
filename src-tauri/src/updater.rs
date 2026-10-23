@@ -77,7 +77,11 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
         .on_before_exit({
             let app = app.clone();
             move || {
+                // A save or an edit cut off by the restart loses its clip: none
+                // starts from here on, and a running one is waited for.
                 let state = app.state::<AppState>();
+                state.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::wait_for_saves(&app);
                 state.abandon_recording();
                 state.stop_pipeline();
             }

@@ -136,17 +136,9 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
                     log::warn!("could not open the log folder: {err}");
                 }
             }
-            "quit" => {
-                let state = app.state::<AppState>();
-                state
-                    .quitting
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                // Closed, not muxed: the next start finishes the recording.
-                crate::console::close(app);
-                state.abandon_recording();
-                state.stop_pipeline();
-                app.exit(0);
-            }
+            // Closed, not muxed: the next start finishes the recording. A save
+            // in progress is waited for first.
+            "quit" => crate::quit(app),
             other => log::warn!("Unbekannter Tray-Eintrag: {other}"),
         })
         .on_tray_icon_event(|tray, event| {

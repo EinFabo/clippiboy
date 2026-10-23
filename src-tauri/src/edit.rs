@@ -52,6 +52,11 @@ const MIN_LENGTH_MS: u64 = 200;
 /// replacing it.
 static WORKING: Mutex<()> = Mutex::new(());
 
+/// Is an edit being rendered or swapped in right now? Quit waits for it.
+pub fn is_busy() -> bool {
+    WORKING.try_lock().is_none()
+}
+
 /// Root of all originals. **Permanent**, like the individual tracks.
 pub fn root() -> PathBuf {
     config::data_dir().join("originals")

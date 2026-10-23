@@ -32,7 +32,7 @@ const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "COM", "LPT"];
 
 /// A folder name gets no longer than this. Game names sometimes come from
 /// window titles, and those can be whole sentences.
-const MAX_LEN: usize = 60;
+pub const MAX_LEN: usize = 60;
 
 /// Turn a game name into a folder name Windows will accept.
 ///
