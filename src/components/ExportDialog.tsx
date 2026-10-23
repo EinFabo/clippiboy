@@ -100,7 +100,9 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
   }, [clip.id]);
 
   async function run() {
-    const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} (${targetMb} MB).mp4`;
+    // Not "<name> (<n> MB).mp4": that is the console's Discord copy, which goes
+    // when the clip is edited or deleted (`manual_export_name` in the core).
+    const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} - ${targetMb} MB.mp4`;
     setStage("choosing");
     setProgress(0);
     try {

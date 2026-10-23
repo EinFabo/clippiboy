@@ -375,6 +375,14 @@ fn export_part(target: &Path) -> std::path::PathBuf {
     target.with_file_name(format!("{stem}.{}.export.mp4", std::process::id()))
 }
 
+/// The name a manual export is offered under: `"<stem> - <n> MB.mp4"`. Not
+/// the console's `"<stem> (<n> MB).mp4"` — that pattern is reserved for its
+/// Discord copies, which go when the clip is edited or deleted, and a manual
+/// export saved beside the clip must never go with them.
+fn manual_export_name(clip_stem: &str, megabytes: u64) -> String {
+    format!("{clip_stem} - {megabytes} MB.mp4")
+}
+
 /// Is `file_name` one of the console's Discord exports of the clip named
 /// `clip_stem` — `"<stem> (<n> MB).mp4"`, exactly?
 fn is_discord_export(clip_stem: &str, file_name: &str) -> bool {
@@ -1343,7 +1351,7 @@ pub fn export_clip(
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().to_string())
                 .unwrap_or_else(|| "clip".into());
-            format!("{stem} ({} MB).mp4", target_bytes / 1024 / 1024)
+            manual_export_name(&stem, target_bytes / 1024 / 1024)
         });
         // Off the main thread (an async command), which the dialog needs: it
         // is shown there, and this waits for the answer.
@@ -1740,6 +1748,14 @@ mod tests {
         assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-124 (10 MB).mp4"));
         assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 (10 MB).4711.export.mp4"));
         assert!(!is_discord_export(stem, "Valorant_2026-10-22_12-00-00-123 ( MB).mp4"));
+    }
+
+    #[test]
+    fn a_manual_export_is_never_taken_for_a_discord_copy() {
+        let stem = "Valorant_2026-10-22_12-00-00-123";
+        let name = manual_export_name(stem, 10);
+        assert_eq!(name, "Valorant_2026-10-22_12-00-00-123 - 10 MB.mp4");
+        assert!(!is_discord_export(stem, &name), "the cleanup would take it");
     }
 
     #[test]
