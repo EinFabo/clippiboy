@@ -18,6 +18,8 @@ pub mod game;
 pub mod links;
 pub mod share;
 pub mod gpu;
+#[cfg(test)]
+mod grants;
 pub mod logging;
 pub mod mft;
 pub mod model;
@@ -1430,9 +1432,18 @@ pub fn run() {
             // The ✕ in our own title bar, Alt+F4 and the taskbar's window list
             // all end up here.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
+                let label = window.label();
+                if label == "main" {
                     api.prevent_close();
                     hide_to_tray(window);
+                } else if label == console::LABEL {
+                    // Alt+F4 over a borderless game: close it like Escape. Left
+                    // alone, the window would be destroyed and the hotkey would
+                    // find nothing to open until the next start.
+                    api.prevent_close();
+                    console::request_close(window.app_handle());
+                } else if label == overlay::LABEL {
+                    api.prevent_close();
                 }
             }
         })

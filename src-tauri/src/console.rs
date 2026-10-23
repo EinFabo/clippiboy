@@ -131,7 +131,7 @@ pub fn toggle(app: &tauri::AppHandle) {
 /// stay over the game, so it is closed here after a grace period. Only if it is
 /// still the same opening: pressed shut and open again in between, the fallback
 /// would otherwise close the fresh one.
-fn request_close(app: &tauri::AppHandle) {
+pub fn request_close(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
@@ -171,8 +171,15 @@ pub fn open(app: &tauri::AppHandle) {
         );
         return;
     }
+    // Missing means it was destroyed some other way; make it once more. Safe
+    // here: `open` runs from the hotkey inside `run_on_main_thread`, never from
+    // a sync command or a WebView2 event, where building a window can deadlock.
+    if app.get_webview_window(LABEL).is_none() {
+        log::warn!("console window missing; creating it again");
+        create(app);
+    }
     let Some(window) = app.get_webview_window(LABEL) else {
-        log::warn!("console window missing");
+        log::warn!("console window could not be created");
         return;
     };
 
