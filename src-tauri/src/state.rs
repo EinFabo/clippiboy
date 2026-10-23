@@ -17,6 +17,9 @@ const IDLE_RING_SECONDS: u32 = 2;
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
+    /// What went wrong reading the config file at start, worded for the
+    /// start-up banner; `None` when it loaded fine.
+    pub config_trouble: Mutex<Option<String>>,
     pub library: Mutex<Option<Library>>,
     pub status: Mutex<EngineStatus>,
     pub audio: Arc<AudioEngine>,
@@ -353,7 +356,7 @@ impl RestartBudget {
 
 impl AppState {
     pub fn new() -> Self {
-        let config = config::load();
+        let (config, loaded) = config::load();
         crate::watermark::set_enabled(config.watermark);
         let library = match Library::open() {
             Ok(lib) => Some(lib),
@@ -399,6 +402,7 @@ impl AppState {
 
         Self {
             config: Mutex::new(config),
+            config_trouble: Mutex::new(loaded.message()),
             library: Mutex::new(library),
             status: Mutex::new(status),
             audio,
@@ -451,6 +455,11 @@ impl AppState {
         next.recording.encoder = crate::encode::resolve(next.recording.encoder);
         let previous = {
             let mut guard = self.config.lock();
+            // Saved under the lock, as every other writer does — two saves
+            // never run at once, and the file always ends on the newest config.
+            if let Err(err) = config::save(&next) {
+                log::error!("could not save the config: {err}");
+            }
             std::mem::replace(&mut *guard, next.clone())
         };
         // Takes effect with the next frame, no restart.
@@ -480,9 +489,6 @@ impl AppState {
         // game is running.
         if let Some(shared) = self.shared.lock().as_ref() {
             shared.set_sources(next.sources.clone());
-        }
-        if let Err(err) = config::save(&next) {
-            log::error!("could not save the config: {err}");
         }
         next
     }

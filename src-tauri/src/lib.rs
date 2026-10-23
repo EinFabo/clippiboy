@@ -1448,6 +1448,22 @@ pub fn run() {
                 }
             }
             overlay::create(handle);
+            // A config file that could not be read says so once the banner page
+            // has loaded — on a thread of its own, the setup does not wait.
+            let trouble = app.state::<AppState>().config_trouble.lock().clone();
+            if let Some(text) = trouble {
+                let app = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    overlay::show(
+                        &app,
+                        BannerKind::Error,
+                        "Settings could not be read",
+                        Some(text.clone()),
+                    );
+                    notify(&app, "error", text);
+                });
+            }
             console::create(handle);
             friends::start(handle);
             {
