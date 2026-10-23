@@ -80,7 +80,11 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
                 // A save or an edit cut off by the restart loses its clip: none
                 // starts from here on, and a running one is waited for.
                 let state = app.state::<AppState>();
-                state.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Only a flag set here is the update's to take back (`install`);
+                // one from "Quit" stays.
+                if !state.quitting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    QUIT_FOR_UPDATE.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 crate::wait_for_saves(&app);
                 state.abandon_recording();
                 state.stop_pipeline();
@@ -142,9 +146,24 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
             },
         )
         .await
-        .map_err(|err| format!("could not install the update: {err}"))?;
+        .map_err(|err| {
+            // The installer never took over, so ClippiBoy keeps running: with
+            // `quitting` left set it would refuse every save and no longer
+            // restart a failed encoder. The buffer the hook stopped stays
+            // stopped until it is started again (or auto start does it).
+            if QUIT_FOR_UPDATE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                app.state::<AppState>()
+                    .quitting
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            format!("could not install the update: {err}")
+        })?;
     Ok(())
 }
+
+/// Set when the update's exit hook started the quit, so a failed install
+/// knows to call it off again.
+static QUIT_FOR_UPDATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Look at startup and then every [`INTERVAL`], and report a find to the UI.
 ///

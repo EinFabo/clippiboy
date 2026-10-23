@@ -588,7 +588,8 @@ impl AppState {
     fn launch_pipeline(&self, for_buffer: bool) -> Result<(), String> {
         // While ffmpeg is still being fetched the buffer may already run —
         // it is only needed once a clip is written.
-        if !crate::muxer::available() && crate::tools::is_ready() {
+        // The cheap check first: `available` starts two processes.
+        if crate::tools::is_ready() && !crate::muxer::available() {
             return Err(
                 "ffmpeg was not found. Without ffmpeg no clips can be written."
                     .into(),
