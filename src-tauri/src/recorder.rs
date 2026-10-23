@@ -44,6 +44,30 @@ const MIX_FILE: &str = "mix.pcm";
 /// Bytes per audio frame: 16 bit per sample, [`CHANNELS`] samples.
 const FRAME_BYTES: u64 = 2 * CHANNELS as u64;
 
+/// What the summed main mix takes per second of recording: 48 kHz, 16 bit,
+/// stereo.
+pub const MIX_BYTES_PER_SECOND: u64 = SAMPLE_RATE as u64 * FRAME_BYTES;
+
+/// Scratch space the stop needs for the main mix beside the recording. Below
+/// two tracks nothing is summed: the one track is used as it is.
+pub fn mix_scratch_bytes(tracks_in_mix: usize, seconds: u64) -> u64 {
+    if tracks_in_mix < 2 {
+        0
+    } else {
+        seconds * MIX_BYTES_PER_SECOND
+    }
+}
+
+/// How much the writer may lag behind before the recording is stopped: a
+/// drive that cannot keep up would otherwise let the queue grow until the app
+/// runs out of memory.
+const WRITER_BACKLOG_LIMIT: u64 = 512 << 20;
+
+fn backlog_failure(queued_bytes: u64) -> Option<String> {
+    (queued_bytes > WRITER_BACKLOG_LIMIT)
+        .then(|| "the clip drive cannot keep up with the recording".to_string())
+}
+
 /// Large writes rather than many small ones — the disk is shared with a game
 /// that is loading its own things.
 const WRITE_BUFFER: usize = 1 << 20;
@@ -102,6 +126,17 @@ enum Job {
     Silence(usize, u64),
 }
 
+impl Job {
+    /// What the job holds in memory while it waits in the queue.
+    fn bytes(&self) -> u64 {
+        match self {
+            Job::Video(data) => data.len() as u64,
+            Job::Audio(_, samples) => samples.len() as u64 * 2,
+            Job::Open(_) | Job::Silence(..) => 0,
+        }
+    }
+}
+
 /// The audio side of a running recording.
 struct AudioSide {
     /// Has the mixer caught up with the start yet? See [`Recorder::begin_window`].
@@ -131,6 +166,8 @@ pub struct Recorder {
     last_pts_us: AtomicI64,
     video_bytes: AtomicU64,
     failure: Arc<Mutex<Option<String>>>,
+    /// Bytes handed to the writer and not yet written.
+    queued: Arc<AtomicU64>,
     audio: Mutex<AudioSide>,
 }
 
@@ -154,9 +191,11 @@ impl Recorder {
 
         let (tx, rx) = channel::<Job>();
         let failure = Arc::new(Mutex::new(None));
+        let queued = Arc::new(AtomicU64::new(0));
         let writer = {
             let dir = dir.clone();
             let failure = failure.clone();
+            let queued = queued.clone();
             std::thread::Builder::new()
                 .name("clippiboy-recorder".into())
                 .spawn(move || {
@@ -164,17 +203,20 @@ impl Recorder {
                     let mut tracks: Vec<Option<BufWriter<File>>> = Vec::new();
                     let mut broken = false;
                     for job in rx {
+                        let bytes = job.bytes();
                         // After the first failure everything else is dropped:
                         // the recording is being stopped, and a half-full disk
                         // only gets fuller.
                         if broken {
+                            queued.fetch_sub(bytes, Ordering::Relaxed);
                             continue;
                         }
                         if let Err(err) = run_job(&dir, job, &mut video, &mut tracks) {
                             log::error!("recording: {err}");
-                            *failure.lock() = Some(err);
+                            failure.lock().get_or_insert(err);
                             broken = true;
                         }
+                        queued.fetch_sub(bytes, Ordering::Relaxed);
                     }
                     let _ = video.flush();
                     for track in tracks.iter_mut().flatten() {
@@ -196,6 +238,7 @@ impl Recorder {
             last_pts_us: AtomicI64::new(i64::MIN),
             video_bytes: AtomicU64::new(0),
             failure,
+            queued,
             audio: Mutex::new(AudioSide {
                 attached: false,
                 timeline: 0,
@@ -213,8 +256,18 @@ impl Recorder {
     }
 
     fn send(&self, job: Job) {
-        if let Some(tx) = self.jobs.lock().as_ref() {
-            let _ = tx.send(job);
+        let bytes = job.bytes();
+        let sent = match self.jobs.lock().as_ref() {
+            Some(tx) => tx.send(job).is_ok(),
+            None => false,
+        };
+        if !sent {
+            return;
+        }
+        let queued = self.queued.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        if let Some(why) = backlog_failure(queued) {
+            // The 1 s tick sees it and stops the recording. Nothing waits here.
+            self.failure.lock().get_or_insert(why);
         }
     }
 
@@ -247,6 +300,17 @@ impl Recorder {
         const AAC_BYTES_PER_SECOND: u64 = 192_000 / 8;
         let seconds = self.frames() / fps.max(1) as u64;
         self.video_bytes.load(Ordering::Relaxed) + seconds * AAC_BYTES_PER_SECOND
+    }
+
+    /// How many of the opened tracks are summed into the main mix, that is
+    /// whose source is not in `separate`.
+    pub fn tracks_in_mix(&self, separate: &[String]) -> usize {
+        self.audio
+            .lock()
+            .tracks
+            .iter()
+            .filter(|t| !separate.contains(&t.source_id))
+            .count()
     }
 
     /// The first thing that went wrong while writing — the disk filling up,
@@ -605,8 +669,12 @@ pub fn finalize(
         }),
         _ => {
             let mix = dir.join(MIX_FILE);
-            sum_tracks(&into_mix, &mix)
-                .map_err(|err| format!("could not mix the recording's audio: {err}"))?;
+            if let Err(err) = sum_tracks(&into_mix, &mix) {
+                // A half-written mix of an hour is gigabytes the next try
+                // would have to find room beside.
+                let _ = std::fs::remove_file(&mix);
+                return Err(format!("could not mix the recording's audio: {err}"));
+            }
             inputs.push(AudioInput {
                 path: mix,
                 label: "Main mix".into(),
@@ -626,7 +694,16 @@ pub fn finalize(
         output,
         Some(length_ms),
         &|share| on_progress(0.1 + share * 0.9),
-    )?;
+    );
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => {
+            // The folder stays for the next try, but not the summed mix: it
+            // is made again from the tracks.
+            let _ = std::fs::remove_file(dir.join(MIX_FILE));
+            return Err(err);
+        }
+    };
     if let Err(err) = std::fs::remove_dir_all(dir) {
         log::warn!("recording folder '{}' not cleared: {err}", dir.display());
     }
@@ -635,6 +712,14 @@ pub fn finalize(
         let _ = std::fs::remove_dir(parent);
     }
     Ok(result)
+}
+
+/// A work folder with nothing to finish: no frame was written (a crash in the
+/// first half second), or the video file is missing or empty. Decided by the
+/// files alone, never by ffprobe, which may simply be absent.
+pub fn is_empty_leftover(dir: &Path, meta: &Meta) -> bool {
+    meta.frames == Some(0)
+        || std::fs::metadata(dir.join(VIDEO_FILE)).map_or(true, |m| m.len() == 0)
 }
 
 /// Folders left behind by a recording that never stopped — the app crashed, or
@@ -667,6 +752,50 @@ mod tests {
             .chunks_exact(2)
             .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
             .collect()
+    }
+
+    #[test]
+    fn stopping_needs_room_for_the_summed_mix_too() {
+        assert_eq!(mix_scratch_bytes(0, 3600), 0);
+        assert_eq!(mix_scratch_bytes(1, 3600), 0, "one track is used as it is");
+        assert_eq!(mix_scratch_bytes(2, 3600), 691_200_000);
+    }
+
+    #[test]
+    fn the_tracks_that_feed_the_main_mix_are_counted() {
+        let dir = scratch("in-mix");
+        let meta = Meta { id: "m".into(), fps: 60, ..Meta::default() };
+        let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0).unwrap();
+        let (game, mic) = (ring_with("game"), ring_with("mic"));
+        game.push(&[5i16; 12], 0);
+        assert!(recorder.begin_window(&[game.clone(), mic.clone()], 1250));
+        recorder.audio(&game, &[7i16; 12]);
+        recorder.audio(&mic, &[9i16; 12]);
+        recorder.end_window(6);
+        assert_eq!(recorder.tracks_in_mix(&[]), 2);
+        assert_eq!(recorder.tracks_in_mix(&["mic".to_string()]), 1);
+        let _ = recorder.finish(Vec::new(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_leftover_is_recognised() {
+        let dir = scratch("empty");
+        std::fs::write(dir.join(VIDEO_FILE), b"").unwrap();
+        assert!(is_empty_leftover(&dir, &Meta::default()));
+        std::fs::write(dir.join(VIDEO_FILE), [0u8, 0, 0, 1, 0x65]).unwrap();
+        assert!(!is_empty_leftover(&dir, &Meta::default()));
+        assert!(is_empty_leftover(&dir, &Meta { frames: Some(0), ..Meta::default() }));
+        std::fs::remove_file(dir.join(VIDEO_FILE)).unwrap();
+        assert!(is_empty_leftover(&dir, &Meta::default()), "no video at all");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_writer_half_a_gigabyte_behind_stops_the_recording() {
+        assert_eq!(backlog_failure(WRITER_BACKLOG_LIMIT), None);
+        let why = backlog_failure(WRITER_BACKLOG_LIMIT + 1).expect("over the limit");
+        assert!(why.contains("cannot keep up"), "{why}");
     }
 
     #[test]

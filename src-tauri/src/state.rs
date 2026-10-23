@@ -789,6 +789,20 @@ impl AppState {
         }
     }
 
+    /// Room the running recording needs to be saved: the file it becomes, plus
+    /// the scratch space for the summed main mix that the stop writes beside it.
+    pub fn recording_room_needed(&self) -> Option<u64> {
+        // The lock is dropped before the config is read.
+        let recorder = self.recorder.lock().clone()?;
+        let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);
+        let separate = separate_tracks(&self.config_snapshot().sources);
+        let seconds = recorder.frames() / fps as u64;
+        Some(
+            recorder.estimated_size(fps)
+                + recorder::mix_scratch_bytes(recorder.tracks_in_mix(&separate), seconds),
+        )
+    }
+
     /// Carry the running recording's current metrics into the status.
     pub fn status_snapshot(&self) -> EngineStatus {
         let mut status = self.status.lock().clone();
@@ -1245,7 +1259,8 @@ impl AppState {
         let clip_dir = self.config_snapshot().clip_dir;
         let live = self.recorder.lock().as_ref().map(|r| r.dir.clone());
         let mut done = Vec::new();
-        for dir in recorder::leftovers(std::path::Path::new(&clip_dir)) {
+        let clip_path = std::path::Path::new(&clip_dir);
+        for dir in recorder::leftovers(clip_path) {
             if live.as_ref() == Some(&dir) {
                 continue;
             }
@@ -1256,6 +1271,16 @@ impl AppState {
                     continue;
                 }
             };
+            if recorder::is_empty_leftover(&dir, &meta) {
+                // Nothing to finish; retrying it at every start would never end.
+                if std::fs::remove_dir_all(&dir).is_ok() {
+                    let _ = std::fs::remove_dir(clip_path.join(recorder::WORK_DIR));
+                    log::info!("empty recording folder '{}' cleared", dir.display());
+                } else {
+                    log::warn!("empty recording folder '{}' not cleared", dir.display());
+                }
+                continue;
+            }
             match self.finish_recording(&dir, &meta, on_progress) {
                 Ok(clip) => {
                     log::info!("recording '{}' finished after the fact", meta.id);

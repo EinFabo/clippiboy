@@ -1014,7 +1014,9 @@ fn guard_recording_room(app: &tauri::AppHandle) {
     if free == 0 {
         return;
     }
-    let needed = state.status_snapshot().recording_bytes;
+    let Some(needed) = state.recording_room_needed() else {
+        return;
+    };
     if free < needed + RECORDING_SPARE_BYTES {
         if STOPPING.swap(true, Ordering::Relaxed) {
             return;
