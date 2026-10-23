@@ -372,10 +372,32 @@ pub fn keep_once_flags(next: &mut AppConfig, previous: &AppConfig) {
     next.tray_hint_shown |= previous.tray_hint_shown;
 }
 
+/// The clip folder and the control token change only through their own
+/// commands (`set_clip_dir`, `regenerate_token`). A settings write — from a
+/// page holding stale or mock values — carries whatever it likes in them: a
+/// folder that grants a whole drive, "mock-token" for the Stream Deck's key.
+pub fn keep_core_owned(next: &mut AppConfig, previous: &AppConfig) {
+    next.clip_dir = previous.clip_dir.clone();
+    next.control.token = previous.control.token.clone();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::AudioSource;
+
+    #[test]
+    fn a_settings_page_cannot_move_the_clip_folder_or_change_the_token() {
+        let mut previous = default_config();
+        previous.clip_dir = r"D:\Clips".into();
+        previous.control.token = "real".into();
+        let mut next = default_config();
+        next.clip_dir = r"C:\..".into();
+        next.control.token = "mock-token".into();
+        keep_core_owned(&mut next, &previous);
+        assert_eq!(next.clip_dir, r"D:\Clips");
+        assert_eq!(next.control.token, "real");
+    }
 
     #[test]
     fn a_stale_settings_page_cannot_take_back_a_shown_notice() {

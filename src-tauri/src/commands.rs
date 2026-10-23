@@ -58,14 +58,7 @@ pub fn set_config(
     config: AppConfig,
 ) -> AppConfig {
     let previous = state.config_snapshot();
-    // The token never travels to the UI as something to edit — only to display.
-    // Should it come back empty anyway (a settings page from an older version,
-    // say), the one already in use stays, or every Stream Deck key would go
-    // dead on the next unrelated change.
     let mut config = config;
-    if config.control.token.is_empty() {
-        config.control.token = previous.control.token.clone();
-    }
     // A recording is one stream from one source. Switching the source would
     // restart the capture and cut it in two — so the source stays until it
     // stops.
@@ -79,11 +72,11 @@ pub fn set_config(
         config.recording.target_stable_id = previous.recording.target_stable_id.clone();
         crate::notify(&app, "error", "Stop the recording before changing the source.");
     }
-    // The folder is granted to the player recursively; an empty one or a whole
-    // drive would open everything on it. The dialog never offers those.
-    if !usable_clip_dir(&config.clip_dir) {
-        config.clip_dir = previous.clip_dir.clone();
-    }
+    // The clip folder and the token have their own commands: the folder is
+    // granted to the player recursively and the token is what every Stream
+    // Deck key holds, so a settings write (a stale page, the mock config) must
+    // not carry either — an empty token would kill every key too.
+    crate::config::keep_core_owned(&mut config, &previous);
     crate::config::keep_once_flags(&mut config, &previous);
     config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
     config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
@@ -98,13 +91,6 @@ pub fn set_config(
         // The icons follow once the main window has drawn the logo anew
         // (`set_logo_icon`).
         let _ = app.emit("accent-changed", next.accent());
-    }
-    // Otherwise the player cannot reach clips outside the Videos folder. Only
-    // when it changed: the grant resolves the folder on disk, and this runs on
-    // the main thread for every switch in the settings — a clip folder on a
-    // share that is offline would freeze every window each time.
-    if previous.clip_dir != next.clip_dir {
-        crate::allow_clip_dir(&app, &next.clip_dir);
     }
     // The corner or the screen may have changed.
     crate::overlay::reposition(&app);
@@ -285,6 +271,11 @@ pub fn set_clip_dir(
     app: tauri::AppHandle,
     dir: String,
 ) -> Result<AppConfig> {
+    // The disk guard measures the drive the recording is on and recovery looks
+    // where its files lie; both would point at the wrong place after a move.
+    if state.is_recording() {
+        return Err("Stop the recording before moving the clip folder.".into());
+    }
     let dir = dir.trim();
     if !usable_clip_dir(dir) {
         return Err("Pick a folder for the clips, not a whole drive.".into());
@@ -1764,6 +1755,10 @@ mod tests {
         assert!(!usable_clip_dir(root));
         assert!(!usable_clip_dir(""));
         assert!(!usable_clip_dir("clips"));
+        let climbs: &[&str] = if cfg!(windows) { &[r"C:\..", r"D:\x\..\.."] } else { &["/home/..", "/home/x/../.."] };
+        for dir in climbs {
+            assert!(!usable_clip_dir(dir), "{dir}");
+        }
     }
 
     #[test]

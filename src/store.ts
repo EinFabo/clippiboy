@@ -168,6 +168,11 @@ let configPending = 0;
  * be from before that write; read anew once every answer is in.
  */
 let configStale = false;
+/**
+ * The real settings were read from the core. Until then `config` is the mock;
+ * writing it would put its values (a made-up token, say) over the real ones.
+ */
+let configLoaded = false;
 
 /** The settings as the core now holds them, unless a newer write came since. */
 async function rereadConfig(set: (state: { config: AppConfig }) => void) {
@@ -282,7 +287,15 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       const [config, devices, processes, targets, encoders, clips] =
         await Promise.all([
-          load("Reading the settings", api.getConfig, get().config),
+          load(
+            "Reading the settings",
+            async () => {
+              const config = await api.getConfig();
+              configLoaded = true;
+              return config;
+            },
+            get().config,
+          ),
           load("Reading audio devices", api.listAudioDevices, []),
           load("Reading applications", api.listAudioProcesses, []),
           load("Reading capture sources", api.listCaptureTargets, []),
@@ -392,9 +405,26 @@ export const useEngine = create<EngineState>((set, get) => ({
   },
 
   async patchConfig(patch) {
+    if (!inTauri) {
+      set({ config: { ...get().config, ...patch } });
+      return;
+    }
+    if (!configLoaded) {
+      // The start could not read the settings, so `config` is the mock. Read
+      // them now and put the change on top; failing that, send nothing.
+      try {
+        set({ config: await api.getConfig() });
+        configLoaded = true;
+      } catch {
+        set({
+          lastError:
+            "Apply setting: the settings could not be read, so nothing was saved",
+        });
+        return;
+      }
+    }
     const config = { ...get().config, ...patch };
     set({ config });
-    if (!inTauri) return;
     const ticket = ++configWrites;
     configPending++;
     try {
