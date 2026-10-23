@@ -258,9 +258,21 @@ pub fn span_us(path: &Path, fps: u32) -> Option<u64> {
         Some(read_pts(&bytes))
     };
     let first = *read(0, HEAD)?.first()?;
-    let start = len.saturating_sub(TAIL);
-    let start = start - start % PACKET as u64;
-    let last = *read(start, u64::MAX)?.last()?;
+    // Windows going down can leave the end of the file zero-filled, and one
+    // frame can be larger than the window: without a frame in it, the window
+    // steps back until it finds one.
+    let mut end = len;
+    let last = loop {
+        let start = end.saturating_sub(TAIL);
+        let start = start - start % PACKET as u64;
+        if let Some(&last) = read(start, end - start)?.last() {
+            break last;
+        }
+        if start == 0 {
+            return None;
+        }
+        end = start;
+    };
     // Past 26.5 hours the 33-bit clock has wrapped once.
     let ticks = (last + WRAP_90K + 1 - first) & WRAP_90K;
     Some(ticks * 100 / 9 + 1_000_000 / fps.max(1) as u64)
@@ -373,6 +385,29 @@ mod tests {
         assert!(bytes.len() > (64 << 10) + (1 << 20));
         std::fs::write(&path, b"").unwrap();
         assert_eq!(span_us(&path, 60), None, "an empty file has no span");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REC-6: Windows going down can leave more than the last window of a
+    /// recording zero-filled. The span is still read, from the last frame
+    /// found further back; a file with no frame at all has none.
+    #[test]
+    fn a_zero_filled_end_does_not_hide_the_last_frame() {
+        let mut ts = TsWriter::new(Vec::new());
+        for k in 0..120 {
+            ts.write_frame(k * 16_666, k % 60 == 0, &frame(12_000)).unwrap();
+        }
+        let mut bytes = ts.finish().unwrap();
+        bytes.extend(std::iter::repeat_n(0u8, (1 << 20) + 5_000));
+        let dir = std::env::temp_dir().join("clippiboy-ts-zero-tail");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("video.ts");
+        std::fs::write(&path, &bytes).unwrap();
+        let span = span_us(&path, 60).expect("a span");
+        assert!((1_999_900..=1_999_940).contains(&span), "{span}");
+        std::fs::write(&path, vec![0u8; 3 << 20]).unwrap();
+        assert_eq!(span_us(&path, 60), None, "no frame, no span");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
