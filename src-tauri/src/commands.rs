@@ -357,13 +357,14 @@ fn export_file_name(suggested: &str) -> Option<String> {
 /// Where ffmpeg writes an export before it is renamed into `target`: beside it,
 /// so the rename stays on one volume, and under a name of its own, so a cut-short
 /// run never carries the final name. The process id lets a later start tell
-/// its own leftovers (`*.<digits>.export.mp4`) from a run still going.
+/// its own leftovers (`*.<digits>.clippiboy-export.mp4`, see `sweep`) from a
+/// run still going; the "clippiboy" keeps them apart from the user's files.
 fn export_part(target: &Path) -> std::path::PathBuf {
     let stem = target
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_else(|| "export".into());
-    target.with_file_name(format!("{stem}.{}.export.mp4", std::process::id()))
+    target.with_file_name(format!("{stem}.{}.clippiboy-export.mp4", std::process::id()))
 }
 
 /// The name a manual export is offered under: `"<stem> - <n> MB.mp4"`. Not
@@ -1732,8 +1733,9 @@ mod tests {
         assert_eq!(part.parent(), target.parent());
         assert_eq!(
             part.file_name().unwrap().to_string_lossy(),
-            format!("Valorant (10 MB).{}.export.mp4", std::process::id())
+            format!("Valorant (10 MB).{}.clippiboy-export.mp4", std::process::id())
         );
+        assert!(crate::sweep::is_scratch_name(&part.file_name().unwrap().to_string_lossy()));
     }
 
     #[test]

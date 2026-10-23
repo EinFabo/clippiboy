@@ -8,8 +8,7 @@
 //! - in the clip folder and up to two levels below (`<clip folder>/<game>/Videos`,
 //!   as deep as `filing` ever puts a clip): a save's `<clip id>.part.*` (and
 //!   the `<stem>_<clip id>.part.*` of versions before), an edit's
-//!   `<clip>.<pid>.neu.mp4`, an export's `<name>.<pid>.export.mp4` and a cam
-//!   composite's `<clip>.<pid>.cam.mp4`;
+//!   `<clip>.<pid>.neu.mp4` and an export's `<name>.<pid>.clippiboy-export.mp4`;
 //! - in the originals store: a cam the save did not finish (`cam.part.*`);
 //! - in the folder of Discord copies: an export's part file, as above;
 //! - in the stem store: a clip's folder with neither an index nor a clip.
@@ -101,7 +100,7 @@ fn modified_before(path: &Path, before: SystemTime) -> bool {
         .is_ok_and(|at| at < before)
 }
 
-/// A name only a save, an edit, an export or a cam composite gives out.
+/// A name only a save, an edit or an export gives out.
 pub fn is_scratch_name(name: &str) -> bool {
     if let Some((head, tail)) = name.split_once(".part.") {
         let kind = match tail.strip_suffix(".wav") {
@@ -111,11 +110,19 @@ pub fn is_scratch_name(name: &str) -> bool {
         return kind && ends_in_clip_id(head);
     }
     // `<target stem>.<pid>.<what>.mp4`, see `edit.rs`, `commands::export_part`.
-    [".neu.mp4", ".export.mp4", ".cam.mp4"].iter().any(|suffix| {
+    // The pid as Windows gives it out — up to ten digits, no leading zero — so
+    // a "Holiday.2019.neu.mp4" of the user's has to be very unlucky.
+    [".neu.mp4", ".clippiboy-export.mp4"].iter().any(|suffix| {
         name.strip_suffix(suffix)
             .and_then(|rest| rest.rsplit_once('.'))
-            .is_some_and(|(_, pid)| !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()))
+            .is_some_and(|(_, pid)| is_pid(pid))
     })
+}
+
+fn is_pid(text: &str) -> bool {
+    (1..=10).contains(&text.len())
+        && !text.starts_with('0')
+        && text.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// `<clip id>` or `<anything>_<clip id>`, the id sanitized: 8-4-4-4-12 hex
@@ -221,8 +228,8 @@ mod tests {
             format!("{ID}.part.mp4"),
             format!("{ID}.part.game_1.wav"),
             "Valorant_2026-10-22_12-00-00-123.4711.neu.mp4".into(),
-            "Valorant_2026-10-22_12-00-00-123 (10 MB).4711.export.mp4".into(),
-            "Valorant_2026-10-22_12-00-00-123.4711.cam.mp4".into(),
+            "Valorant_2026-10-22_12-00-00-123.4294967295.neu.mp4".into(),
+            "Valorant_2026-10-22_12-00-00-123 (10 MB).4711.clippiboy-export.mp4".into(),
             crate::muxer::scratch_name("1b4e28ba-2fa1-11d2-883f-0016d3cca427", "mix.wav"),
         ] {
             assert!(is_scratch_name(&name), "{name}");
@@ -234,6 +241,15 @@ mod tests {
             "my.neu.mp4",
             "my.cam.mp4",
             "notes.part.wav",
+            // A user's own files, named the way people name them.
+            "Holiday.2019.export.mp4",
+            "x.0001.export.mp4",
+            "my.2023.cam.mp4",
+            "Valorant_2026-10-22_12-00-00-123.4711.cam.mp4",
+            "Valorant_2026-10-22_12-00-00-123 (10 MB).4711.export.mp4",
+            "x.12345678901.neu.mp4",
+            "x..clippiboy-export.mp4",
+            "x.4711.clippiboy-export.mkv",
         ] {
             assert!(!is_scratch_name(name), "{name}");
         }
