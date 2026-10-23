@@ -1328,8 +1328,12 @@ fn run<F, H>(
     // straight away, and there is nothing to chase.
     let mut header_pending = transform.sequence_header.is_empty();
     let mut header_tries = 0u32;
-    // Errors in a row from `feed` and `take_output` — see [`FAIL_AFTER`].
-    let mut streak = ErrorStreak::default();
+    // Errors in a row — see [`FAIL_AFTER`]. One count each for `feed` and
+    // `take_output`, each reset only by its own success: frames going in fine
+    // say nothing about packets coming out, and one shared count would start
+    // over on every frame while every output failed.
+    let mut feed_streak = ErrorStreak::default();
+    let mut output_streak = ErrorStreak::default();
 
     /// Note down how long the encoder kept one frame.
     fn took(stats: &EncoderStats, since: Instant, in_flight: usize) {
@@ -1390,7 +1394,7 @@ fn run<F, H>(
                     } else if kind == METransformHaveOutput.0 as u32 {
                         match transform.take_output(duration) {
                             Ok(Some(packet)) => {
-                                streak.succeeded();
+                                output_streak.succeeded();
                                 if let Some(since) = sent.pop_front() {
                                     took(&stats, since, sent.len());
                                 }
@@ -1405,7 +1409,7 @@ fn run<F, H>(
                             Ok(None) => {}
                             Err(err) => {
                                 log::warn!("{err}");
-                                if streak.failed() {
+                                if output_streak.failed() {
                                     stats.fail(format!("the encoder keeps failing: {err}"));
                                 }
                             }
@@ -1439,7 +1443,7 @@ fn run<F, H>(
                         Ok(job) => {
                             match transform.feed(&job, duration) {
                                 Ok(()) => {
-                                    streak.succeeded();
+                                    feed_streak.succeeded();
                                     sent.push_back(Instant::now());
                                     // Written on the way in as well as on the way
                                     // out. Only `took` used to touch it, so while
@@ -1452,7 +1456,7 @@ fn run<F, H>(
                                 }
                                 Err(err) => {
                                     log::warn!("{err}");
-                                    if streak.failed() {
+                                    if feed_streak.failed() {
                                         stats.fail(format!("the encoder keeps failing: {err}"));
                                     }
                                 }
@@ -1478,16 +1482,16 @@ fn run<F, H>(
                 let since = Instant::now();
                 if let Err(err) = transform.feed(&job, duration) {
                     log::warn!("{err}");
-                    if streak.failed() {
+                    if feed_streak.failed() {
                         stats.fail(format!("the encoder keeps failing: {err}"));
                     }
                     continue;
                 }
-                streak.succeeded();
+                feed_streak.succeeded();
                 loop {
                     match transform.take_output(duration) {
                         Ok(Some(packet)) => {
-                            streak.succeeded();
+                            output_streak.succeeded();
                             took(&stats, since, 0);
                             on_packet(packet);
                             catch_up_on_header(
@@ -1500,7 +1504,7 @@ fn run<F, H>(
                         Ok(None) => break,
                         Err(err) => {
                             log::warn!("{err}");
-                            if streak.failed() {
+                            if output_streak.failed() {
                                 stats.fail(format!("the encoder keeps failing: {err}"));
                             }
                             break;
@@ -1648,6 +1652,20 @@ mod tests {
         for _ in 1..FAIL_AFTER {
             assert!(!streak.failed(), "a packet in between starts the count over");
         }
+    }
+
+    /// The case that matters most: every frame goes in, no packet comes out.
+    /// The fed frames must not keep starting the output count over.
+    #[test]
+    fn output_errors_are_counted_while_frames_still_go_in() {
+        let mut feed = ErrorStreak::default();
+        let mut output = ErrorStreak::default();
+        for _ in 1..FAIL_AFTER {
+            feed.succeeded();
+            assert!(!output.failed());
+        }
+        feed.succeeded();
+        assert!(output.failed(), "the 30th output error in a row fails, feeding or not");
     }
 
     #[test]
