@@ -43,3 +43,11 @@ test("the newest four connections stay, the oldest goes", () => {
   assert.deepEqual(beyondCap([{ opened: 9 }, {}], 1), [{}]);
   assert.deepEqual(beyondCap(sockets.slice(0, 3), 4), []);
 });
+
+test("a budget restored from storage keeps throttling", () => {
+  let bucket = spend(undefined, rule, now).bucket;
+  for (let i = 0; i < 2; i++) bucket = spend(bucket, rule, now).bucket;
+  const restored = JSON.parse(JSON.stringify(bucket));
+  assert.equal(spend(restored, rule, now + 500).ok, false);
+  assert.equal(spend(restored, rule, now + 1000).ok, true);
+});

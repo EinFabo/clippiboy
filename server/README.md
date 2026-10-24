@@ -61,7 +61,9 @@ friend has no app online, the sender gets `{t: "relayFailed", to, ref, reason}`.
 
 A user has at most four connections (a fifth closes the oldest with 4002),
 and raw messages over 8 KB are dropped unread. Presence is published at most
-ten at once and then one per 30 s, the last change always.
+ten at once and then one per 30 s, the last change always; hellos are
+limited to five at once and then one per minute (the connection closes with
+4003). Both budgets are kept in the hub's storage, so they hold across its sleep.
 
 Presence also carries `status` (a line of the user's own, cut to 60 characters)
 and `busy`; going offline stamps `lastSeen` in the user's hub, which snapshots

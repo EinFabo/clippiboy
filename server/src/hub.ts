@@ -11,6 +11,7 @@ import {
   remember,
   spend,
   type Bucket,
+  type Rule,
   type Contacts,
 } from "./hubrules";
 
@@ -53,6 +54,8 @@ const PUBLISHED = "published";
 const LAST_SEEN = "lastSeen";
 /** Friends an invisible user wrote to lately; kept in storage, memory is lost on hibernation. */
 const CONTACTS = "contacts";
+/** Presence and hello budgets, so they survive the hub going to sleep. */
+const BUCKETS = "buckets";
 /** A relayed message is a handshake, never a file: a few KB are plenty. */
 const RELAY_MAX = 4096;
 
@@ -64,7 +67,8 @@ const NO_PRESENCE: Presence = { game: null, since: null, status: null, busy: fal
  * their own connections. Hibernates between messages.
  */
 export class Hub extends DurableObject<Env> {
-  /** One budget per user across all connections; lost on hibernation, which only follows quiet. */
+  /** One budget per user across all connections. Relay lives in memory only (it refills within the
+      ~10 s before hibernation anyway); presence and hello are kept in storage, see `take`. */
   private buckets = new Map<"relay" | "presence" | "hello", Bucket>();
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -116,9 +120,7 @@ export class Hub extends DurableObject<Env> {
     if (data.t === "relay") return this.relayFrom(ws, data.to, data.body);
     if (data.t !== "hello" && data.t !== "presence") return;
     if (data.t === "hello") {
-      const hello = spend(this.buckets.get("hello"), HELLO, Date.now());
-      this.buckets.set("hello", hello.bucket);
-      if (!hello.ok) return ws.close(4003, "slow down");
+      if (!(await this.take("hello", HELLO, Date.now())).ok) return ws.close(4003, "slow down");
     }
     const attachment = ws.deserializeAttachment() as Attachment;
     attachment.ready = true;
@@ -225,6 +227,7 @@ export class Hub extends DurableObject<Env> {
       }
     }
     if (user) await this.publish(user);
+    this.buckets.clear();
     await this.ctx.storage.deleteAll();
   }
 
@@ -280,14 +283,27 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
+   * Spends from the presence or hello budget. These are slower than the ~10 s a
+   * hub stays awake, so their state is kept in storage and read again after a wake.
+   */
+  private async take(name: "presence" | "hello", rule: Rule, now: number): Promise<{ ok: boolean; nextAt: number }> {
+    let bucket = this.buckets.get(name);
+    if (!bucket) bucket = (await this.ctx.storage.get<Record<string, Bucket>>(BUCKETS))?.[name];
+    const result = spend(bucket, rule, now);
+    this.buckets.set(name, result.bucket);
+    const stored = (await this.ctx.storage.get<Record<string, Bucket>>(BUCKETS)) ?? {};
+    await this.ctx.storage.put(BUCKETS, { ...stored, [name]: result.bucket });
+    return result;
+  }
+
+  /**
    * Publishes at once while the presence budget lasts; after that, the alarm
    * publishes whatever is current when the next token is there, so a burst
    * always ends on its last change.
    */
   private async publishSoon(user: string): Promise<void> {
     const now = Date.now();
-    const budget = spend(this.buckets.get("presence"), PRESENCE, now);
-    this.buckets.set("presence", budget.bucket);
+    const budget = await this.take("presence", PRESENCE, now);
     if (budget.ok) return this.publish(user);
     const due = await this.ctx.storage.getAlarm();
     if (due === null || due > budget.nextAt) await this.ctx.storage.setAlarm(budget.nextAt);
