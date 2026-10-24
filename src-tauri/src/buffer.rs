@@ -96,8 +96,13 @@ impl ReplayBuffer {
 
     pub fn push(&mut self, packet: EncodedPacket) {
         // Before `newest_pts` moves: a picture behind the newest one so far.
-        if packet.is_video() && packet.pts_us < self.newest_pts {
+        if packet.is_video() && packet.pts_us < self.newest_pts && !self.reorders {
             self.reorders = true;
+            // Once until the next clear: the field log says why recordings
+            // take the raw path from here on.
+            log::info!(
+                "the encoder reorders its frames (B-frames) — recordings keep the raw stream"
+            );
         }
         self.newest_pts = self.newest_pts.max(packet.pts_us);
         self.bytes += packet.data.len() as u64;
