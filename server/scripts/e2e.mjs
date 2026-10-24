@@ -116,6 +116,18 @@ const hidden = await waitFor(sa.inbox, (m) => m.t === "presence" && m.id === B.i
 check("invisible B looks offline", hidden && hidden.presence === null, hidden);
 check("going invisible stamps last seen", typeof hidden?.lastSeen === "number", hidden);
 
+sa.ws.send(JSON.stringify({ t: "relay", to: B.id, body: { kind: "shareCancel", id: "probe" } }));
+const probe = await waitFor(sa.inbox, (m) => m.t === "relayFailed" && m.ref === "probe");
+check("invisible B looks offline to a relay too", probe?.reason === "offline", probe);
+
+sb.ws.send(JSON.stringify({ t: "relay", to: A.id, body: { kind: "shareCancel", id: "hi" } }));
+const hi = await waitFor(sa.inbox, (m) => m.t === "relay" && m.body?.id === "hi");
+check("invisible B can still write to A", hi?.from === B.id, hi);
+
+sa.ws.send(JSON.stringify({ t: "relay", to: B.id, body: { kind: "shareCancel", id: "answer" } }));
+const answer = await waitFor(sb.inbox, (m) => m.t === "relay" && m.body?.id === "answer");
+check("a friend invisible B wrote to still reaches B", answer?.from === A.id, answer);
+
 sb.ws.send(JSON.stringify({ t: "presence", invisible: false, game: null, since: null }));
 const back = await waitFor(sa.inbox, (m) => m.t === "presence" && m.id === B.id);
 check("B online without game", back?.presence && back.presence.game === null, back);

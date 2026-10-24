@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { areFriends, friendIds } from "./db";
+import { mayReach, remember, type Contacts } from "./hubrules";
 
 /** What friends see. `null` means offline — or invisible, which looks the same. */
 export interface Presence {
@@ -36,6 +37,8 @@ const STALE_MS = 100_000;
 const SWEEP_MS = 300_000;
 const PUBLISHED = "published";
 const LAST_SEEN = "lastSeen";
+/** Friends an invisible user wrote to lately; kept in storage, memory is lost on hibernation. */
+const CONTACTS = "contacts";
 /** A relayed message is a handshake, never a file: a few KB are plenty. */
 const RELAY_MAX = 4096;
 /** Per connection, per window — a stuck loop in an app must not flood a friend. */
@@ -156,9 +159,15 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * A friend hands this user's apps a message — the handshake for sending a
-   * clip. Nothing is kept. False when no app of this user is there to take it.
+   * clip. Nothing is kept. False when no app of this user is there to take it,
+   * or the user is invisible and has not written to this friend lately.
    */
   async relay(from: string, body: unknown): Promise<boolean> {
+    // While invisible, only friends the user wrote to lately get through: the
+    // replies to their own clips. Everyone else sees "offline", as presence does.
+    if (this.current() === null && !mayReach(await this.ctx.storage.get<Contacts>(CONTACTS), from, Date.now())) {
+      return false;
+    }
     const sockets = this.open().filter((ws) => (ws.deserializeAttachment() as Attachment).ready);
     const text = JSON.stringify({ t: "relay", from, body });
     for (const ws of sockets) ws.send(text);
@@ -263,6 +272,10 @@ export class Hub extends DurableObject<Env> {
     if (JSON.stringify(body).length > RELAY_MAX) return fail("too big");
     // Blocking ends a friendship, so a friend is never someone who blocked.
     if (!(await areFriends(this.env.DB, attachment.user, to))) return fail("not a friend");
+    // A ready socket just sent this, so no current presence means invisible.
+    if (this.current() === null) {
+      await this.ctx.storage.put(CONTACTS, remember((await this.ctx.storage.get<Contacts>(CONTACTS)) ?? {}, to, now));
+    }
     const delivered = await this.env.HUB.getByName(to)
       .relay(attachment.user, body)
       .catch((err) => {
