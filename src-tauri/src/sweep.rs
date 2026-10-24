@@ -12,6 +12,8 @@
 //! - in the originals store: a cam the save did not finish (`cam.part.*`);
 //! - in the folder of Discord copies: an export's part file, as above, and
 //!   copies more than a week old ([`COPY_AGE`]);
+//! - in the same folders: a received clip's `.clippiboy-<offer>.part`
+//!   (see `share::sweep_parts`);
 //! - in the stem store: a clip's folder with neither an index nor a clip.
 //!
 //! Only names given out here, and only files from before the start — a save
@@ -77,6 +79,11 @@ pub fn run(app: &tauri::AppHandle) {
         }
         for path in leftovers_in(&clip_dir, started) {
             remove_file(&path);
+        }
+        // A receive cut short leaves `.clippiboy-<offer>.part` behind.
+        let parts = crate::share::sweep_parts(&clip_dir, STORE_GRACE);
+        if parts > 0 {
+            log::info!("removed {parts} part file(s) of a receive cut short");
         }
     });
 }

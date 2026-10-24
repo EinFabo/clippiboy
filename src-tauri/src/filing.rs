@@ -60,15 +60,20 @@ pub fn folder_name(game: &str) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    // `CON.mp4` cannot be created on Windows, `_CON` can.
-    let stem = name.split('.').next().unwrap_or(&name).to_ascii_uppercase();
+    Some(unreserved(&name))
+}
+
+/// `CON.mp4` cannot be created on Windows, `_CON.mp4` can: puts a `_` in
+/// front of a device name, with or without an extension.
+pub(crate) fn unreserved(name: &str) -> String {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     let reserved = RESERVED.iter().any(|word| {
         stem == *word
             || (stem.len() == word.len() + 1
                 && stem.starts_with(word)
                 && stem.ends_with(|c: char| c.is_ascii_digit()))
     });
-    Some(if reserved { format!("_{name}") } else { name })
+    if reserved { format!("_{name}") } else { name.to_owned() }
 }
 
 /// The folder a clip with this game, this heart and this kind belongs in.

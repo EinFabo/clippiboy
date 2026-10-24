@@ -336,10 +336,12 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         Ok(ok) => ok,
         Err(err) => {
             set_out(&app, &id, |t| fail(t, &err));
+            drop_cuts(&id);
             return Err(err);
         }
     };
     if out_stage(&app, &id) != Some(Stage::Preparing) {
+        drop_cuts(&id);
         return Ok(()); // Called off meanwhile.
     }
     if !tracks.is_empty() {
@@ -359,6 +361,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     if !crate::friends::send_relay(&app, &friend_id, &offer) {
         let err = "Not connected to the friends server.".to_string();
         set_out(&app, &id, |t| fail(t, &err));
+        drop_cuts(&id);
         return Err(err);
     }
     set_out(&app, &id, |t| t.stage = Stage::Asking);
@@ -472,6 +475,8 @@ pub fn share_dismiss(app: AppHandle, id: String) {
     share.outgoing.lock().retain(|key, o| key != &id || !o.transfer.stage.over());
     share.incoming.lock().retain(|key, i| key != &id || !i.transfer.stage.over());
     share.cancelled.lock().remove(&id);
+    // Whatever way the transfer ended, its cut tracks have no use any more.
+    drop_cuts(&id);
     emit(&app);
 }
 
@@ -479,7 +484,17 @@ pub fn share_dismiss(app: AppHandle, id: String) {
 #[tauri::command]
 pub fn share_clear(app: AppHandle) {
     let share = app.state::<Share>();
-    share.outgoing.lock().retain(|_, o| !o.transfer.stage.over());
+    let mut ended = Vec::new();
+    share.outgoing.lock().retain(|key, o| {
+        let over = o.transfer.stage.over();
+        if over {
+            ended.push(key.clone());
+        }
+        !over
+    });
+    for id in &ended {
+        drop_cuts(id);
+    }
     share.incoming.lock().retain(|_, i| !i.transfer.stage.over());
     emit(&app);
 }
@@ -612,7 +627,7 @@ fn offered(
     match verdict(&config, from, asking_already, id.len() <= 64 && sha256.len() == 64) {
         Verdict::Ask => {}
         Verdict::Ignore => {
-            log::info!("share: offer {id} from {from} left unanswered");
+            log::info!("share: an offer from {from} left unanswered");
             return;
         }
         // Busy, or not from someone welcome: a quiet no, without anything popping up.
@@ -730,11 +745,8 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
         }
         Room::None => return Err(format!("Not enough free space for this {what} ({}).", megabytes(size))),
     }
-    let target = crate::filing::free_name(&dir, &safe_file_name(&meta.file_name));
-    let part = target.with_extension(format!(
-        "{}.part",
-        target.extension().and_then(|ext| ext.to_str()).unwrap_or("mp4")
-    ));
+    let name = safe_file_name(&meta.file_name);
+    let part = part_path(&dir, id);
 
     let router = router(app).await?;
     let cancelled = cancel_flag(app, id);
@@ -774,6 +786,9 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                 // and the sender stood at 100 % for good. The sender hangs up
                 // once it has read it; until then, wait (not forever).
                 let _ = tokio::time::timeout(Duration::from_secs(5), connection.closed()).await;
+                // Chosen only now: two offers of one name no longer pick the
+                // same free name while both are still on their way.
+                let target = crate::filing::free_name(&dir, &name);
                 if let Err(err) = std::fs::rename(&part, &target) {
                     crate::stems::remove(&clip_id);
                     return Err(format!("Could not keep the {what}: {err}"));
@@ -1134,13 +1149,12 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
             .lock()
             .get_mut(&ask.id)
             .map(|o| {
-                // The cut tracks have done their job.
-                for cut in o.tracks.drain(..) {
-                    let _ = std::fs::remove_file(&cut.path);
-                }
+                o.tracks.clear();
                 (o.transfer.friend_name.clone(), o.transfer.friend_id.clone(), o.transfer.noun())
             })
             .unwrap_or_else(|| ("Your friend".into(), String::new(), "clip"));
+        // The cut tracks have done their job.
+        drop_cuts(&ask.id);
         let avatar = crate::friends::friend_avatar(app, &friend);
         crate::overlay::show_friend(
             app,
@@ -1254,10 +1268,71 @@ fn audible_stems(mut stems: Vec<crate::model::ClipTrack>, mix: &[TrackMix]) -> (
     (kept, levels)
 }
 
+/// Where an outgoing transfer's cut tracks lie.
+fn cuts_dir(id: &str) -> PathBuf {
+    std::env::temp_dir().join("clippiboy-share").join(crate::muxer::sanitize(id))
+}
+
+/// Removes the cut tracks of a transfer that has ended, in whatever way.
+fn drop_cuts(id: &str) {
+    let _ = std::fs::remove_dir_all(cuts_dir(id));
+}
+
+/// The part file of an incoming offer, in the folder the clip will go to.
+/// Named after the offer, never after the clip: two offers of one name get
+/// parts of their own, and a leftover cannot lend its length to another file.
+fn part_path(dir: &Path, offer_id: &str) -> PathBuf {
+    dir.join(format!("{PART_PREFIX}{}.part", crate::muxer::sanitize(offer_id)))
+}
+
+const PART_PREFIX: &str = ".clippiboy-";
+
+/// Whether `name` is a part file of ours: `.clippiboy-<letters, digits, _>.part`.
+fn is_part_name(name: &str) -> bool {
+    name.strip_prefix(PART_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".part"))
+        .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// Removes our part files, last changed more than `older_than` ago, from the
+/// clip folder and up to two levels below it (as deep as `filing` goes).
+/// Folders starting with a dot are not entered. Returns how many went.
+pub fn sweep_parts(clip_dir: &Path, older_than: Duration) -> usize {
+    let before = std::time::SystemTime::now()
+        .checked_sub(older_than)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let mut removed = 0;
+    let mut dirs = vec![(clip_dir.to_path_buf(), 0)];
+    while let Some((dir, depth)) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if depth < 2 && !name.starts_with('.') {
+                    dirs.push((path, depth + 1));
+                }
+            } else if kind.is_file()
+                && is_part_name(&name)
+                && std::fs::metadata(&path).and_then(|m| m.modified()).is_ok_and(|at| at < before)
+                && std::fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 /// The individual tracks cut to the clip, into the temp folder. Best effort:
 /// whatever goes wrong, the clip still goes — only without its tracks.
 fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length_ms: u64) -> Vec<Cut> {
-    let dir = std::env::temp_dir().join("clippiboy-share").join(crate::muxer::sanitize(id));
+    let dir = cuts_dir(id);
     let cut = || -> Result<Vec<Cut>, String> {
         if stems.len() > MAX_TRACKS {
             return Err(format!("{} tracks", stems.len()));
@@ -1338,7 +1413,7 @@ fn safe_file_name(name: &str) -> String {
     };
     let stem: String = stem.chars().take(120).collect();
     let stem = if stem.trim().is_empty() { "clip".to_owned() } else { stem };
-    format!("{stem}.{ext}")
+    crate::filing::unreserved(&format!("{stem}.{ext}"))
 }
 
 fn same(a: &[u8], b: &[u8]) -> bool {
@@ -1463,6 +1538,47 @@ mod tests {
         }
         let cancel = serde_json::to_value(Signal::ShareCancel { id: "x".into() }).unwrap();
         assert_eq!(cancel["kind"], "shareCancel");
+    }
+
+    #[test]
+    fn a_device_name_from_a_friend_is_not_a_file_name() {
+        assert_eq!(safe_file_name("CON.mp4"), "_CON.mp4");
+        assert_eq!(safe_file_name("com1.MKV"), "_com1.mkv");
+        assert_eq!(safe_file_name("Console.mp4"), "Console.mp4");
+    }
+
+    #[test]
+    fn two_offers_of_one_name_get_parts_of_their_own() {
+        let dir = Path::new("C:/clips/CS2/Videos");
+        assert_ne!(part_path(dir, "a1"), part_path(dir, "b2"));
+        assert_eq!(part_path(dir, "../x").file_name().unwrap(), ".clippiboy-___x.part");
+    }
+
+    #[test]
+    fn only_our_own_old_parts_are_swept() {
+        let root = std::env::temp_dir().join(format!("cb-sweep-{}", uuid::Uuid::new_v4()));
+        let videos = root.join("CS2").join("Videos");
+        let top = root.join("Videos");
+        std::fs::create_dir_all(&videos).unwrap();
+        std::fs::create_dir_all(&top).unwrap();
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let make = |path: &Path, old: bool| {
+            let file = std::fs::File::create(path).unwrap();
+            if old {
+                file.set_modified(hour_ago).unwrap();
+            }
+        };
+        let (a, b) = (videos.join(".clippiboy-a.part"), top.join(".clippiboy-b.part"));
+        let (c, movie) = (videos.join(".clippiboy-c.part"), videos.join("movie.mp4.part"));
+        let odd = videos.join(".clippiboy-.part");
+        make(&a, true);
+        make(&b, true);
+        make(&c, false);
+        make(&movie, true);
+        make(&odd, true);
+        assert_eq!(sweep_parts(&root, Duration::from_secs(600)), 2);
+        assert!(c.exists() && movie.exists() && odd.exists() && !a.exists() && !b.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

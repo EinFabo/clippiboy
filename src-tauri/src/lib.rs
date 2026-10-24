@@ -876,6 +876,14 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
 /// `temp/` belongs to the muxer, which clears its intermediate files itself.
 /// What is still lying here is a crashed run from earlier.
 fn discard_leftovers() {
+    // Cut tracks of transfers an earlier run never finished.
+    let cuts = std::env::temp_dir().join("clippiboy-share");
+    if cuts.is_dir() {
+        match std::fs::remove_dir_all(&cuts) {
+            Ok(()) => log::info!("cleared the cut tracks of unfinished transfers"),
+            Err(err) => log::warn!("could not clear '{}': {err}", cuts.display()),
+        }
+    }
     for stale in ["buffer", "temp"] {
         let dir = config::data_dir().join(stale);
         if !dir.is_dir() {
