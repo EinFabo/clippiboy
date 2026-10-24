@@ -184,27 +184,38 @@ fn ignored() -> &'static HashSet<&'static str> {
 fn games() -> &'static HashMap<String, String> {
     static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
     MAP.get_or_init(|| {
-        let mut map: HashMap<String, String> =
+        let base: HashMap<String, String> =
             serde_json::from_str(include_str!("games.json")).unwrap_or_else(|err| {
                 log::error!("the built-in games.json is broken: {err}");
                 HashMap::new()
             });
+        let mut extra_map = HashMap::new();
 
         let user = crate::config::data_dir().join("games.json");
         if let Ok(text) = std::fs::read_to_string(&user) {
             match serde_json::from_str::<HashMap<String, String>>(&text) {
                 Ok(extra) => {
                     log::info!("{} custom game names from {}", extra.len(), user.display());
-                    map.extend(extra);
+                    extra_map = extra;
                 }
                 Err(err) => log::warn!("{} is unreadable: {err}", user.display()),
             }
         }
 
-        map.into_iter()
-            .map(|(exe, name)| (exe.to_lowercase(), name))
-            .collect()
+        layered(base, extra_map)
     })
+}
+
+/// Lower-cases both maps, then puts the user's entries on top. Layering before
+/// lower-casing let "CS2.exe" and "cs2.exe" both survive, and which one won
+/// depended on hash order, so it changed from start to start.
+fn layered(base: HashMap<String, String>, user: HashMap<String, String>) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = base
+        .into_iter()
+        .map(|(exe, name)| (exe.to_lowercase(), name))
+        .collect();
+    map.extend(user.into_iter().map(|(exe, name)| (exe.to_lowercase(), name)));
+    map
 }
 
 pub fn is_ignored(exe: &str) -> bool {
@@ -585,6 +596,15 @@ pub fn foreground_center() -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_user_entry_overrides_a_builtin_in_any_case() {
+        let base = HashMap::from([("cs2.exe".to_string(), "Counter-Strike 2".to_string())]);
+        let user = HashMap::from([("CS2.exe".to_string(), "CS2 (mine)".to_string())]);
+        let map = layered(base, user);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map["cs2.exe"], "CS2 (mine)");
+    }
 
     #[test]
     fn known_exe_wins_over_the_window_title() {
