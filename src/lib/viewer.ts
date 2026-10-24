@@ -12,3 +12,9 @@ export function typesText(target: { tagName?: string; type?: string } | null): b
   if (target.tagName === "TEXTAREA") return true;
   return target.tagName === "INPUT" && target.type !== "range";
 }
+
+/** What closing the player does: wait for a running write, ask about unapplied edits, or go. */
+export function leaving(writing: boolean, dirty: boolean): "wait" | "ask" | "go" {
+  if (writing) return "wait";
+  return dirty ? "ask" : "go";
+}

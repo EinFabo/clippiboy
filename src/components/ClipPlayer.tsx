@@ -24,7 +24,7 @@ import { formatAgo, formatSize } from "@/lib/format";
 import { useClipMix } from "@/lib/useClipMix";
 import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
-import { typesText } from "@/lib/viewer";
+import { leaving as closing, typesText } from "@/lib/viewer";
 import type { Clip, ClipEdit } from "@/lib/types";
 
 interface Props {
@@ -122,6 +122,9 @@ export function ClipPlayer({
    * without being rebuilt.
    */
   const writing = useRef(false);
+  /** Whether trim or mix are not applied yet; `close` is defined above `dirty`. */
+  const dirtyRef = useRef(false);
+  const [askingDiscard, setAskingDiscard] = useState(false);
   writing.current = saving || restoring;
   const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
@@ -264,6 +267,7 @@ export function ClipPlayer({
   useEffect(() => {
     setJustSaved(false);
     setAskingDelete(false);
+    setAskingDiscard(false);
   }, [clip?.id]);
 
   /** Delete and move on within the player — if the last clip is gone, there is
@@ -275,6 +279,13 @@ export function ClipPlayer({
     if (clips.length <= 1) close();
     else onIndexChange(Math.min(index, clips.length - 2));
   }, [clip, clips.length, index, close, onDelete, onIndexChange]);
+
+  /** Close from the user's side: unapplied trim or mix are asked about first. */
+  const requestClose = useCallback(() => {
+    const next = closing(writing.current, dirtyRef.current);
+    if (next === "ask") setAskingDiscard(true);
+    else if (next === "go") close();
+  }, [close]);
 
   const step = useCallback(
     (delta: number) => {
@@ -501,7 +512,8 @@ export function ClipPlayer({
           if (document.fullscreenElement) return;
           if (askingDelete) return; // the question takes it — see ConfirmDelete
           if (exporting) return; // likewise the export dialog
-          close();
+          if (askingDiscard) return; // and the one about discarding trim and mix
+          requestClose();
         },
       };
       const handler = handlers[event.key] ?? handlers[event.key.toLowerCase()];
@@ -519,8 +531,9 @@ export function ClipPlayer({
     fullscreen,
     mark,
     step,
-    close,
+    requestClose,
     askingDelete,
+    askingDiscard,
     exporting,
     trim.start,
     trim.end,
@@ -552,6 +565,7 @@ export function ClipPlayer({
     (mix.tracks.length > 0
       ? !sameEdit(current, saved)
       : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }));
+  dirtyRef.current = dirty;
 
   /**
    * Write the mix into the file.
@@ -668,7 +682,7 @@ export function ClipPlayer({
         "fixed inset-0 z-50 bg-black/80 backdrop-blur-xl",
         leaving ? "cb-backdrop-out" : "cb-backdrop-in",
       )}
-      onClick={close}
+      onClick={requestClose}
     >
       {/* The scale sits on this wrapper, not on the backdrop: a backdrop that
           scales drags the whole screen with it. */}
@@ -698,16 +712,32 @@ export function ClipPlayer({
           </p>
           <Pill className="bg-white/10">{clip.height}p</Pill>
         </div>
-        <button
-          aria-label="Close player"
-          onClick={close}
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
-            text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
-        >
-          <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth="1.4">
-            <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
-          </svg>
-        </button>
+        {askingDiscard ? (
+          <ConfirmDelete
+            question="Discard trim and mix?"
+            origin="right"
+            confirmLabel="Discard changes"
+            confirmTitle="Close without applying them"
+            cancelLabel="Keep editing"
+            cancelTitle="Back to the player — Escape does the same"
+            onConfirm={() => {
+              setAskingDiscard(false);
+              close();
+            }}
+            onCancel={() => setAskingDiscard(false)}
+          />
+        ) : (
+          <button
+            aria-label="Close player"
+            onClick={requestClose}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
+              text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
+          >
+            <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth="1.4">
+              <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
+            </svg>
+          </button>
+        )}
       </header>
 
       <div
