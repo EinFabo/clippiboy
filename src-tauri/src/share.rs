@@ -327,10 +327,13 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
             Some(stems) => cut_tracks(&cut_id, &stems, start_ms, length_ms),
             None => Vec::new(),
         });
-        let router = router(&app).await?;
-        let sha256 = hashing.await.map_err(|err| err.to_string())??;
+        let router = router(&app).await;
+        let sha256 = hashing.await.map_err(|err| err.to_string()).and_then(|hash| hash);
+        // The cutter is always awaited, error or not: it must be done before
+        // a failure clears its folder, or it would make the folder again.
         let tracks = cutting.await.unwrap_or_default();
-        Ok::<_, String>((router.endpoint().addr(), sha256, tracks))
+        let router = router?;
+        Ok::<_, String>((router.endpoint().addr(), sha256?, tracks))
     };
     let (addr, sha256, tracks) = match prepared.await {
         Ok(ok) => ok,
@@ -475,8 +478,11 @@ pub fn share_dismiss(app: AppHandle, id: String) {
     share.outgoing.lock().retain(|key, o| key != &id || !o.transfer.stage.over());
     share.incoming.lock().retain(|key, i| key != &id || !i.transfer.stage.over());
     share.cancelled.lock().remove(&id);
-    // Whatever way the transfer ended, its cut tracks have no use any more.
-    drop_cuts(&id);
+    // Whatever way the transfer ended, its cut tracks have no use any more —
+    // but a stray dismiss for one still running must not take them away.
+    if may_drop_cuts(out_stage(&app, &id)) {
+        drop_cuts(&id);
+    }
     emit(&app);
 }
 
@@ -1273,6 +1279,12 @@ fn cuts_dir(id: &str) -> PathBuf {
     std::env::temp_dir().join("clippiboy-share").join(crate::muxer::sanitize(id))
 }
 
+/// Whether an outgoing transfer in `stage` (`None`: not on the list) is done
+/// with its cut tracks.
+fn may_drop_cuts(stage: Option<Stage>) -> bool {
+    stage.is_none_or(|stage| stage.over())
+}
+
 /// Removes the cut tracks of a transfer that has ended, in whatever way.
 fn drop_cuts(id: &str) {
     let _ = std::fs::remove_dir_all(cuts_dir(id));
@@ -1538,6 +1550,14 @@ mod tests {
         }
         let cancel = serde_json::to_value(Signal::ShareCancel { id: "x".into() }).unwrap();
         assert_eq!(cancel["kind"], "shareCancel");
+    }
+
+    #[test]
+    fn cuts_stay_while_the_transfer_runs() {
+        assert!(may_drop_cuts(None));
+        assert!(may_drop_cuts(Some(Stage::Done)));
+        assert!(!may_drop_cuts(Some(Stage::Moving)));
+        assert!(!may_drop_cuts(Some(Stage::Asking)));
     }
 
     #[test]
