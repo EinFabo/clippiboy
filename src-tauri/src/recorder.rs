@@ -473,6 +473,12 @@ impl Recorder {
         self.video_bytes.load(Ordering::Relaxed) + seconds * AAC_BYTES_PER_SECOND
     }
 
+    /// Scratch space the stop needs for cutting a track — see [`cut_scratch_bytes`].
+    pub fn cut_scratch_bytes(&self) -> u64 {
+        let meta = self.meta.lock().clone();
+        cut_scratch_bytes(&self.dir, &meta)
+    }
+
     /// How many of the opened tracks are summed into the main mix, that is
     /// whose source is not in `separate`.
     pub fn tracks_in_mix(&self, separate: &[String]) -> usize {
@@ -798,6 +804,21 @@ fn audio_edits(
         }
     }
     edits
+}
+
+/// Scratch space the stop needs for cutting the tracks of a recording with
+/// gaps: each is rewritten beside itself ([`apply_edits`]) before the uncut
+/// file goes, one at a time, so the largest track's size. Nothing without gaps.
+pub fn cut_scratch_bytes(dir: &Path, meta: &Meta) -> u64 {
+    if meta.video_gaps.is_empty() && meta.audio_gaps.is_empty() {
+        return 0;
+    }
+    meta.tracks
+        .iter()
+        .filter_map(|track| std::fs::metadata(dir.join(&track.file)).ok())
+        .map(|file| file.len())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Where a track lies once it is cut: a name of its own rather than the old
@@ -1198,6 +1219,28 @@ mod tests {
         assert!(is_empty_leftover(&dir, &Meta { frames: Some(0), ..Meta::default() }));
         std::fs::remove_file(dir.join(VIDEO_FILE)).unwrap();
         assert!(is_empty_leftover(&dir, &Meta::default()), "no video at all");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A slept recording's stop writes a cut copy of each track beside it, one
+    /// at a time: the disk guard counts the largest.
+    #[test]
+    fn cutting_a_slept_recording_needs_room_for_its_largest_track() {
+        let dir = scratch("cut-room");
+        std::fs::write(dir.join(track_file(0)), vec![0u8; 400]).unwrap();
+        std::fs::write(dir.join(track_file(1)), vec![0u8; 1_000]).unwrap();
+        let track = |index: usize| MetaTrack {
+            source_id: format!("s{index}"),
+            label: String::new(),
+            file: track_file(index),
+        };
+        let mut meta = Meta { tracks: vec![track(0), track(1), track(2)], ..Meta::default() };
+        assert_eq!(cut_scratch_bytes(&dir, &meta), 0, "no gaps, nothing is cut");
+        meta.audio_gaps.push(AudioGap { at_frame: 0, frames: 48 });
+        assert_eq!(cut_scratch_bytes(&dir, &meta), 1_000, "a track with no file yet counts nothing");
+        meta.audio_gaps.clear();
+        meta.video_gaps.push(VideoGap { at_us: 0, len_us: 5_000_000 });
+        assert_eq!(cut_scratch_bytes(&dir, &meta), 1_000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

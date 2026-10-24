@@ -812,7 +812,8 @@ impl AppState {
     }
 
     /// Room the running recording needs to be saved: the file it becomes, plus
-    /// the scratch space for the summed main mix that the stop writes beside it.
+    /// the scratch space the stop writes beside it — the summed main mix, and
+    /// for a recording with gaps the cut copy of a track.
     pub fn recording_room_needed(&self) -> Option<u64> {
         // The lock is dropped before the config is read.
         let recorder = self.recorder.lock().clone()?;
@@ -821,7 +822,8 @@ impl AppState {
         let seconds = recorder.frames() / fps as u64;
         Some(
             recorder.estimated_size(fps)
-                + recorder::mix_scratch_bytes(recorder.tracks_in_mix(&separate), seconds),
+                + recorder::mix_scratch_bytes(recorder.tracks_in_mix(&separate), seconds)
+                + recorder.cut_scratch_bytes(),
         )
     }
 
