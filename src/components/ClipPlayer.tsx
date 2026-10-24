@@ -125,6 +125,8 @@ export function ClipPlayer({
   /** Whether trim or mix are not applied yet; `close` is defined above `dirty`. */
   const dirtyRef = useRef(false);
   const [askingDiscard, setAskingDiscard] = useState(false);
+  /** Which way to page once the discard question is confirmed; 0 means close. */
+  const [pendingStep, setPendingStep] = useState(0);
   writing.current = saving || restoring;
   const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
@@ -283,15 +285,24 @@ export function ClipPlayer({
   /** Close from the user's side: unapplied trim or mix are asked about first. */
   const requestClose = useCallback(() => {
     const next = closing(writing.current, dirtyRef.current);
-    if (next === "ask") setAskingDiscard(true);
-    else if (next === "go") close();
+    if (next === "ask") {
+      setPendingStep(0);
+      setAskingDiscard(true);
+    } else if (next === "go") close();
   }, [close]);
 
   const step = useCallback(
-    (delta: number) => {
-      if (writing.current) return;
+    (delta: number, confirmed = false) => {
       const next = index + delta;
-      if (next >= 0 && next < clips.length) onIndexChange(next);
+      if (next < 0 || next >= clips.length) return;
+      const verdict = closing(writing.current, !confirmed && dirtyRef.current);
+      if (verdict === "wait") return;
+      if (verdict === "ask") {
+        setPendingStep(delta);
+        setAskingDiscard(true);
+        return;
+      }
+      onIndexChange(next);
     },
     [clips.length, index, onIndexChange],
   );
@@ -566,6 +577,10 @@ export function ClipPlayer({
       ? !sameEdit(current, saved)
       : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }));
   dirtyRef.current = dirty;
+  // Edits that were applied meanwhile need no question any more.
+  useEffect(() => {
+    if (!dirty) setAskingDiscard(false);
+  }, [dirty]);
 
   /**
    * Write the mix into the file.
@@ -722,7 +737,8 @@ export function ClipPlayer({
             cancelTitle="Back to the player — Escape does the same"
             onConfirm={() => {
               setAskingDiscard(false);
-              close();
+              if (pendingStep) step(pendingStep, true);
+              else close();
             }}
             onCancel={() => setAskingDiscard(false)}
           />
