@@ -1,3 +1,4 @@
+import { readLimited } from "./limits";
 import { randomCode } from "./shares";
 
 export class HttpError extends Error {
@@ -13,9 +14,12 @@ export function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
 }
 
+/** A JSON body of at most 4 KB — more is refused unread. */
 export async function body<T>(request: Request): Promise<T> {
+  const text = await readLimited(request, 4096);
+  if (text === null) throw new HttpError(413, "Request too large.");
   try {
-    return (await request.json()) as T;
+    return JSON.parse(text) as T;
   } catch {
     throw new HttpError(400, "Expected a JSON body.");
   }

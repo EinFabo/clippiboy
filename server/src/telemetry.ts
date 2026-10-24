@@ -11,8 +11,10 @@ export const REF_PATTERN = /^[a-z0-9-]{1,32}$/;
 /** Answers to the setup's "Where did you hear about ClippiBoy?". */
 export const HEARD = ["tiktok", "youtube", "discord", "friend", "reddit", "other"] as const;
 
+/** A ping's body is read up to this many bytes; past it, it is refused. */
+export const MAX_PING_BYTES = 1024;
+
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const MAX_BODY = 1024;
 const MAX_COUNT = 10_000;
 const MAX_FEATURES = 63;
 const KEEP_DAYS = 400;
@@ -65,10 +67,14 @@ export function cutoffDay(ms: number, days = KEEP_DAYS): string {
   return utcDay(ms - days * DAY_MS);
 }
 
-/** `/get/<ref>` → the ref; anything that is not a valid ref counts as the site. */
-export function refFromPath(pathname: string): string {
+/**
+ * `/get/<ref>` → the ref; anything that is not a valid ref counts as the site.
+ * With `known`, so does a ref not in it: a made-up link adds no row of its own.
+ */
+export function refFromPath(pathname: string, known?: readonly string[]): string {
   const ref = pathname.replace(/^\/get\/?/, "").replace(/\/+$/, "").toLowerCase();
-  return REF_PATTERN.test(ref) ? ref : "site";
+  if (!REF_PATTERN.test(ref)) return "site";
+  return !known || known.includes(ref) ? ref : "site";
 }
 
 export function isBot(userAgent: string | null): boolean {
@@ -80,11 +86,10 @@ export function downloadName(version: string, ref: string): string {
   return `ClippiBoy_${version}_x64-setup.${ref}.exe`;
 }
 
-export async function handlePing(request: Request, env: Env): Promise<Response> {
+/** `text` is the body as the router read it, null when it was over MAX_PING_BYTES. */
+export async function handlePing(text: string | null, env: Env): Promise<Response> {
   const bad = () => Response.json({ error: "Bad ping." }, { status: 400 });
-  if (Number(request.headers.get("Content-Length") ?? 0) > MAX_BODY) return bad();
-  const text = await request.text();
-  if (text.length > MAX_BODY) return bad();
+  if (text === null) return bad();
   let raw: unknown;
   try {
     raw = JSON.parse(text);

@@ -25,12 +25,14 @@ import {
   shareQuota,
   sweep,
 } from "./links";
-import { handlePing, sweepUsage } from "./telemetry";
+import { addressKey, readLimited } from "./limits";
+import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
 
 export { Hub } from "./hub";
 
 const LOGIN_TTL_MS = 10 * 60 * 1000;
 const STATE_COOKIE = "cb_login";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export default {
   async fetch(request, env): Promise<Response> {
@@ -54,6 +56,8 @@ export default {
         // little past their time are harmless — callback and exchange check
         // the age themselves.
         env.DB.prepare("DELETE FROM logins WHERE created_at < ?").bind(Date.now() - LOGIN_TTL_MS).run(),
+        // Yesterday's count stays readable a day; older ones are done.
+        env.DB.prepare("DELETE FROM anon_budget WHERE day < ?").bind(utcDay(Date.now() - DAY_MS)).run(),
       ]).then((outcomes) => {
         for (const outcome of outcomes) {
           if (outcome.status === "rejected") console.error("cron", outcome.reason);
@@ -74,7 +78,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     return authStart(url, env);
   }
   if (path === "/auth/callback" && method === "GET") return authCallback(request, url, env);
-  if (path === "/auth/exchange" && method === "POST") return authExchange(request, env);
+  if (path === "/auth/exchange" && method === "POST") {
+    if (!(await underLimit(request, env, "exchange"))) return json({ error: "Too many sign-ins — wait a minute." }, 429);
+    return authExchange(request, env);
+  }
 
   // Share links are for anyone who has the link.
   const shared = path.match(/^\/c\/([a-z0-9]+)(?:\.(mp4|jpg))?$/);
@@ -88,7 +95,11 @@ async function route(request: Request, env: Env): Promise<Response> {
   // Anonymous on purpose: a ping never carries the account.
   if (path === "/t/ping" && method === "POST") {
     if (!(await underLimit(request, env, "ping"))) return json({ error: "Too many pings." }, 429);
-    return handlePing(request, env);
+    // Null when it is too big: handlePing refuses it without spending the day's ceiling.
+    const text = await readLimited(request, MAX_PING_BYTES);
+    // Past the ceiling the app keeps its counts and sends them with a later ping.
+    if (text !== null && !(await withinCeiling(env, "ping"))) return json({ error: "Too many pings." }, 429);
+    return handlePing(text, env);
   }
 
   const me = await authenticate(request, env.DB);
@@ -146,13 +157,31 @@ async function route(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * Within the per-address limit for routes that write without a sign-in? Each
- * route counts on its own, so a flood of pings cannot lock the same address
- * out of signing in.
+ * Within the per-address limit for routes anyone may call? Each route counts on
+ * its own, so a flood of pings cannot lock the same address out of signing in.
+ * An IPv6 address counts as its /64.
  */
-async function underLimit(request: Request, env: Env, route: "auth" | "ping"): Promise<boolean> {
+async function underLimit(request: Request, env: Env, route: "auth" | "ping" | "exchange"): Promise<boolean> {
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  return (await env.ANON_LIMIT.limit({ key: `${route}:${address}` })).success;
+  return (await env.ANON_LIMIT.limit({ key: `${route}:${addressKey(address)}` })).success;
+}
+
+/**
+ * Within today's ceiling for a route that writes without a sign-in? Counted
+ * across all addresses, one per call, after the per-address limit: many
+ * addresses together still cannot spend the database's daily writes. The
+ * counter stops at the ceiling, so a refused call writes nothing.
+ */
+async function withinCeiling(env: Env, route: "auth" | "ping"): Promise<boolean> {
+  const configured = Number(route === "ping" ? env.ANON_PINGS_PER_DAY : env.ANON_SIGNINS_PER_DAY);
+  const ceiling = Number.isInteger(configured) && configured > 0 ? configured : route === "ping" ? 6000 : 1500;
+  const result = await env.DB.prepare(
+    `INSERT INTO anon_budget (day, route, count) VALUES (?1, ?2, 1)
+     ON CONFLICT(day, route) DO UPDATE SET count = count + 1 WHERE count < ?3`,
+  )
+    .bind(utcDay(Date.now()), route, ceiling)
+    .run();
+  return result.meta.changes === 1;
 }
 
 // --- Login --------------------------------------------------------------------
@@ -168,6 +197,7 @@ async function authStart(url: URL, env: Env): Promise<Response> {
   const challenge = url.searchParams.get("challenge") ?? "";
   if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new HttpError(400, "Missing challenge.");
   if (!env.DISCORD_CLIENT_ID) throw new HttpError(503, "Discord login is not configured yet.");
+  if (!(await withinCeiling(env, "auth"))) return page("Sign-in is busy", "Too many sign-ins today. Try again later.");
   const now = Date.now();
   const state = randomToken(24);
   await env.DB.prepare("INSERT INTO logins (state, challenge, created_at) VALUES (?, ?, ?)")

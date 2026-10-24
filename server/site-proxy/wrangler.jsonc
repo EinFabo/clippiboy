@@ -11,6 +11,12 @@
     { "pattern": "www.clippiboy.com", "custom_domain": true }
   ],
   "workers_dev": false,
+  "vars": {
+    // Every ref a campaign link uses (clippiboy.com/get/<ref>), comma-separated.
+    // A ref that is not listed counts as the site, in the count and in the
+    // setup's file name — so a made-up link cannot add rows of its own.
+    "DOWNLOAD_REFS": "site"
+  },
   // Share links (clippiboy.com/c/<id>) are pages of the friends server. A
   // service binding, because one Worker cannot fetch another on the same zone.
   "services": [{ "binding": "API", "service": "clippiboy-friends" }],

@@ -13,7 +13,15 @@
   "vars": {
     // Public — it is in every authorize URL anyway. The secret is set with
     // `wrangler secret put DISCORD_CLIENT_SECRET`.
-    "DISCORD_CLIENT_ID": "1553530949491236894"
+    "DISCORD_CLIENT_ID": "1553530949491236894",
+    // Daily ceilings for the routes anyone may call, counted in anon_budget
+    // across all addresses: past them /t/ping answers 429 and /auth/start a
+    // "busy" page until midnight UTC. A new install's ping writes about 7 rows
+    // (two tables, their indexes and the counter), a sign-in start about 3;
+    // together that stays under half of D1's free 100k row writes a day. Keep
+    // both above the real daily numbers.
+    "ANON_PINGS_PER_DAY": "6000",
+    "ANON_SIGNINS_PER_DAY": "1500"
   },
   "d1_databases": [
     {
@@ -31,10 +39,11 @@
   // edge, nothing stored.
   "ratelimits": [
     { "name": "REPORT_LIMIT", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } },
-    // Routes anyone may call that write to the database: the usage ping and
-    // the start of a sign-in. Without a limit one script could spend the
+    // Routes anyone may call: the usage ping, the start of a sign-in and the
+    // exchange that ends it. Without a limit one script could spend the
     // database's daily writes and take sign-in, friends and links down for
-    // everybody. Counted per address at the edge, the address not stored.
+    // everybody. Counted per address (an IPv6 address per /64) at the edge,
+    // the address not stored.
     { "name": "ANON_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }
   ],
   "durable_objects": {

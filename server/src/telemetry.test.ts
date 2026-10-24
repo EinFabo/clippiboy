@@ -70,3 +70,9 @@ test("link previews are not downloads either", () => {
 test("the setup carries its source in the file name", () => {
   assert.equal(downloadName("0.8.3", "site"), "ClippiBoy_0.8.3_x64-setup.site.exe");
 });
+
+test("only known links count as their own source", () => {
+  assert.equal(refFromPath("/get/tiktok1", ["site", "tiktok1"]), "tiktok1");
+  assert.equal(refFromPath("/get/made-up", ["site", "tiktok1"]), "site");
+  assert.equal(refFromPath("/get/made-up"), "made-up");
+});

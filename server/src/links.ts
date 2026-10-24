@@ -6,6 +6,7 @@
 // big file never makes a second hop through the proxy.
 
 import { HttpError, json } from "./util";
+import { addressKey, readLimited } from "./limits";
 import { renderGone, renderPage } from "./page";
 import {
   byteRange,
@@ -321,12 +322,13 @@ export async function reportShare(request: Request, env: Env, id: string): Promi
   const cors = { "Access-Control-Allow-Origin": PAGE_ORIGIN };
   const answer = (body: unknown, status = 200) => Response.json(body, { status, headers: cors });
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  if (!(await env.REPORT_LIMIT.limit({ key: address })).success) {
+  if (!(await env.REPORT_LIMIT.limit({ key: addressKey(address) })).success) {
     return answer({ error: "Too many reports — try again in a minute." }, 429);
   }
   let raw: unknown = null;
   try {
-    raw = JSON.parse((await request.text()).slice(0, 2048));
+    // Over 2 KB it is not read at all; null is refused below like bad JSON.
+    raw = JSON.parse((await readLimited(request, 2048)) ?? "");
   } catch {
     // Not JSON: refused below.
   }

@@ -1,3 +1,4 @@
+import { addressKey } from "../src/limits";
 import { downloadName, isBot, refFromPath, utcDay } from "../src/telemetry";
 
 const ORIGIN = "https://einfabo.github.io/clippiboy";
@@ -8,6 +9,8 @@ interface Env {
   API: Fetcher;
   DB: D1Database;
   DOWNLOAD_LIMIT: RateLimit;
+  /** The refs campaign links use, comma-separated; any other counts as the site. */
+  DOWNLOAD_REFS: string;
 }
 
 export default {
@@ -25,7 +28,8 @@ export default {
       return env.API.fetch(request);
     }
     if (/^\/get(\/|$)/.test(url.pathname)) {
-      return download(request, env, ctx, refFromPath(url.pathname));
+      const known = (env.DOWNLOAD_REFS ?? "site").split(",").map((ref) => ref.trim().toLowerCase());
+      return download(request, env, ctx, refFromPath(url.pathname, known));
     }
     const upstream = await fetch(`${ORIGIN}${url.pathname}${url.search}`, {
       method: request.method,
@@ -69,7 +73,7 @@ async function download(request: Request, env: Env, ctx: ExecutionContext, ref: 
   if (
     request.method === "GET" &&
     !isBot(request.headers.get("User-Agent")) &&
-    (await env.DOWNLOAD_LIMIT.limit({ key: address })).success
+    (await env.DOWNLOAD_LIMIT.limit({ key: addressKey(address) })).success
   ) {
     ctx.waitUntil(
       env.DB.prepare(
