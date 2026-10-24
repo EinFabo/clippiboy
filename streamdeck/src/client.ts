@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import streamDeck from "@elgato/streamdeck";
 
-import { failureOf, timeoutFor } from "./timing.js";
+import { failureOf, keepsConnection, timeoutFor } from "./timing.js";
 
 /** What `GET /v1/status` answers — see `src-tauri/src/control.rs`. */
 export type Status = {
@@ -132,24 +132,40 @@ class Client {
 		if (answer === null || answer === "slow") {
 			return answer;
 		}
+		const payload = (await answer.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
 		if (answer.status === 403) {
-			// Most likely a regenerated token. The next attempt fetches the new one.
+			// Most likely a new token after a restart. The next attempt reads the handshake again.
 			this.forget();
 			return { ok: false, error: "ClippiBoy rejected the token" };
 		}
-		const payload = (await answer.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+		if (!keepsConnection("press", answer.status, payload)) {
+			// Not ClippiBoy on that port (any more): look for it again.
+			this.#connection = null;
+			return null;
+		}
 		return { ok: answer.ok && payload?.ok !== false, error: payload?.error };
 	}
 
 	async #poll(): Promise<void> {
 		const answer = await this.#send("GET", "/v1/status");
-		let next: Status | null = null;
-		if (answer === null || answer === "slow") {
-			// No status: gone, or too busy to answer in time.
-		} else if (answer.ok) {
-			next = (await answer.json().catch(() => null)) as Status | null;
-		} else if (answer.status === 403) {
-			this.forget();
+		// A busy app keeps its last state on the keys; only "gone" clears them.
+		let next: Status | null = this.#status;
+		if (answer === "slow") {
+			// Keep `next` as it is.
+		} else if (answer === null) {
+			next = null;
+		} else {
+			const body = (await answer.json().catch(() => null)) as unknown;
+			if (answer.status === 403) {
+				this.forget();
+				next = null;
+			} else if (keepsConnection("status", answer.status, body)) {
+				next = body as Status;
+			} else {
+				// Something else answers on that port: read the handshake again.
+				this.#connection = null;
+				next = null;
+			}
 		}
 
 		this.#status = next;
@@ -199,12 +215,14 @@ class Client {
 	 * has to set anything up at all.
 	 */
 	async #connect(): Promise<Connection | null> {
-		if (this.#connection !== null) {
-			return this.#connection;
+		const cached = this.#connection;
+		// A manual entry is only a fallback: the handshake wins as soon as it appears.
+		if (cached !== null && cached.source === "handshake") {
+			return cached;
 		}
 		// A missing app must not turn into a file read every half second.
 		if (Date.now() - this.#lookedUp < POLL_MS * 4) {
-			return null;
+			return cached;
 		}
 		this.#lookedUp = Date.now();
 
