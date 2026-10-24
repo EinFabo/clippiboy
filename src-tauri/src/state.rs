@@ -367,15 +367,20 @@ impl RestartBudget {
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        let (config, loaded) = config::load();
-        crate::watermark::set_enabled(config.watermark);
-        let library = match Library::open() {
-            Ok(lib) => Some(lib),
-            Err(err) => {
-                log::error!("could not open the clip database: {err}");
-                None
-            }
+    /// The state for this run. `first` is false for a second start, which
+    /// single-instance ends before `setup`: it reads no config — loading may
+    /// write `config.json.bak`, or move a damaged file aside — and opens no
+    /// clip database. Should it get past single-instance after all, `setup`
+    /// catches up with [`Self::load_late`].
+    ///
+    /// The audio sources are not started here but in `setup`
+    /// ([`Self::apply_audio`]): this runs on the main thread, and a device that
+    /// does not answer held the window up to five seconds per stream.
+    pub fn new(first: bool) -> Self {
+        let (config, trouble, library) = if first {
+            Self::from_disk()
+        } else {
+            (config::default_config(), None, None)
         };
         let status = EngineStatus {
             buffer_active: false,
@@ -394,27 +399,11 @@ impl AppState {
             recording_bytes: 0,
             screen_fallback: None,
         };
-
-        // The sources run from startup — that is the only way the mixer shows
-        // real levels even before the buffer is active.
         let audio = Arc::new(AudioEngine::new());
-        // Devices and processes are deliberately **not** enumerated here: this
-        // runs on the main thread, and the COM initialisation that comes with it
-        // would leave that thread in the multithreaded apartment, where Tauri's
-        // window layer refuses to start (`RPC_E_CHANGED_MODE`). So only what
-        // needs no enumeration starts right away — the first status tick, two
-        // seconds later, brings up the game and the leftovers.
-        audio.apply(&crate::audio::resolve(
-            &config.sources,
-            None,
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &crate::audio::Leftovers::default(),
-        ));
 
         Self {
             config: Mutex::new(config),
-            config_trouble: Mutex::new(loaded.message()),
+            config_trouble: Mutex::new(trouble),
             library: Mutex::new(library),
             status: Mutex::new(status),
             audio,
@@ -439,6 +428,31 @@ impl AppState {
             buffer_wanted: std::sync::atomic::AtomicBool::new(false),
             drift_seen: std::sync::atomic::AtomicU8::new(0),
         }
+    }
+
+    /// The settings, the start-up trouble with them and the clip database, as
+    /// a first start finds them.
+    fn from_disk() -> (AppConfig, Option<String>, Option<Library>) {
+        let (config, loaded) = config::load();
+        crate::watermark::set_enabled(config.watermark);
+        let library = match Library::open() {
+            Ok(lib) => Some(lib),
+            Err(err) => {
+                log::error!("could not open the clip database: {err}");
+                None
+            }
+        };
+        (config, loaded.message(), library)
+    }
+
+    /// What [`Self::new`] left out for a second start that became the app:
+    /// the other ClippiBoy quit between our check and single-instance's.
+    pub fn load_late(&self) {
+        let (config, trouble, library) = Self::from_disk();
+        self.status.lock().encoder = Some(config.recording.encoder);
+        *self.config.lock() = config;
+        *self.config_trouble.lock() = trouble;
+        *self.library.lock() = library;
     }
 
     pub fn config_snapshot(&self) -> AppConfig {
@@ -1448,7 +1462,7 @@ pub fn wait_until_idle(busy: impl Fn() -> bool, limit: std::time::Duration, step
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::new()
+        Self::new(true)
     }
 }
 

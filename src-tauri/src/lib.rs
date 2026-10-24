@@ -1390,13 +1390,43 @@ fn hide_to_tray(window: &tauri::Window) {
     );
 }
 
+/// Whether no other ClippiBoy is running, asked before anything touches a
+/// file. Single-instance answers the same question, but only once the builder
+/// runs — after the log has been set up and the state built. The name is our
+/// own, so the plugin's mutex is left alone.
+#[cfg(windows)]
+fn first_instance() -> bool {
+    claim_name("Local\\gg.clippiboy.app-first")
+}
+
+/// Take the named mutex `name`; false when it is taken already.
+#[cfg(windows)]
+fn claim_name(name: &str) -> bool {
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    // The handle is never closed: the name stays taken for as long as this runs.
+    match unsafe { CreateMutexW(None, false, windows::core::PCWSTR(wide.as_ptr())) } {
+        Ok(_) => (unsafe { GetLastError() }) != ERROR_ALREADY_EXISTS,
+        // Cannot tell: behave as the first, as before.
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(windows))]
+fn first_instance() -> bool {
+    true
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    logging::init();
+    let first = first_instance();
+    logging::init(first);
 
     let app = tauri::Builder::default()
         // First of all the plugins on purpose: a second start must find out
-        // that it is one before it has set anything up. It hands its arguments
+        // that it is one before it has set anything up (the log and the state
+        // above already asked `first_instance`). It hands its arguments
         // over here and then ends itself — the window that is already there
         // comes up instead of a second one that would fight the first over
         // hotkeys, tray icon and the replay buffer.
@@ -1424,18 +1454,33 @@ pub fn run() {
             Some(vec![AUTOSTART_ARG]),
         ))
         .manage(updater::Pending::default())
-        .manage(AppState::new())
+        // A second start builds its state without reading the config or the
+        // clip database: single-instance ends it a moment later.
+        .manage(AppState::new(first))
         // Here rather than in `setup`: the page asks for the transfers as soon
         // as it loads, and that can beat the three seconds `setup` takes.
         .manage(share::Share::default())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle();
+            // Only the start that got past single-instance gets here — also one
+            // that found another ClippiBoy running a moment ago, which quit
+            // since. That one is the app now: the log file and the settings it
+            // left alone are its own.
+            logging::attach_file();
+            if !first {
+                app.state::<AppState>().load_late();
+            }
             // Before anything reads the recording settings: put the saved screen
             // back together. `\\.\DISPLAY2` is handed out by enumeration order
             // at boot, so after a restart it can name a different panel than it
             // did yesterday — the identity saved beside it says which one was
             // meant, and the device name is corrected from it here.
             repair_screens(app.handle());
+            // The sources run from startup — that is the only way the mixer
+            // shows real levels even before the buffer is active. On a thread of
+            // its own: a device that does not answer holds a stream's start up
+            // to five seconds, and the window must not wait for it.
+            app.state::<AppState>().apply_audio();
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
             allow_existing_clip_dirs(handle);
@@ -1675,6 +1720,14 @@ mod tests {
         assert!(grant_target(&to_root.to_string_lossy()).is_none(), "{}", to_root.display());
         assert!(grant_target(&root.to_string_lossy()).is_none());
         let _ = std::fs::remove_dir_all(&inside);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_name_is_taken_once() {
+        let name = format!("Local\\gg.clippiboy.test-{}", uuid::Uuid::new_v4());
+        assert!(claim_name(&name));
+        assert!(!claim_name(&name), "a second claim finds the name taken");
     }
 
     /// A junction onto the drive reads as an ordinary folder until resolved.
