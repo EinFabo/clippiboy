@@ -153,6 +153,11 @@ pub fn handle_url(app: &AppHandle, url: &str) {
         .find_map(|pair| pair.strip_prefix("code="))
         .map(str::to_owned);
     let Some(code) = code else { return };
+    // A link nobody asked for (an old tab, a pasted URL) must not wipe a sign-in or raise a notice.
+    if app.state::<Friends>().verifier.lock().is_none() {
+        log::info!("friends: ignored an auth link, no sign-in is waiting");
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(err) = finish_sign_in(&app, &code).await {
@@ -189,13 +194,18 @@ pub fn friends_state(friends: tauri::State<'_, Friends>) -> FriendsView {
     friends.view.lock().clone()
 }
 
+/// The verifier of the sign-in that is waiting, or a new one kept in its place.
+fn pending(slot: &mut Option<String>) -> String {
+    slot.get_or_insert_with(random_token).clone()
+}
+
 #[tauri::command]
 pub fn friends_sign_in(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let verifier = random_token();
-    let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
     let friends = app.state::<Friends>();
-    *friends.verifier.lock() = Some(verifier);
+    // Pressing the button again keeps the verifier, so the first browser tab still finishes.
+    let verifier = pending(&mut friends.verifier.lock());
+    let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
     friends.view.lock().signing_in = true;
     emit(&app);
     app.opener()
@@ -286,7 +296,7 @@ pub async fn friends_delete_account(app: AppHandle) -> Result<(), String> {
 
 async fn finish_sign_in(app: &AppHandle, code: &str) -> Result<(), String> {
     let friends = app.state::<Friends>();
-    let Some(verifier) = friends.verifier.lock().take() else {
+    let Some(verifier) = friends.verifier.lock().clone() else {
         return Err("That sign-in was not started here — start it again from Friends.".into());
     };
     #[derive(Deserialize)]
@@ -303,6 +313,8 @@ async fn finish_sign_in(app: &AppHandle, code: &str) -> Result<(), String> {
         .await
         .map_err(|err| format!("The friends server is not reachable: {err}"))?;
     let session: Session = serde_json::from_value(read(response).await?).map_err(|err| err.to_string())?;
+    // Only a sign-in that worked uses the verifier up.
+    *friends.verifier.lock() = None;
     save_token(Some(&session.token));
     *friends.token.lock() = Some(session.token);
     {
@@ -862,6 +874,14 @@ fn save_token(token: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_sign_in_reuses_the_waiting_verifier() {
+        let mut slot = None;
+        let first = pending(&mut slot);
+        assert_eq!(pending(&mut slot), first);
+        assert_eq!(slot.as_deref(), Some(first.as_str()));
+    }
 
     #[test]
     fn base64url_matches_the_server() {

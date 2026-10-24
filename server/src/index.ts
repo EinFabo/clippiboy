@@ -12,6 +12,7 @@ import {
   type DiscordUser,
   type User,
 } from "./db";
+import { statesIn, withState } from "./login";
 import { base64url, body, escapeHtml, HttpError, json, normalizeCode, randomToken, sameText, sha256 } from "./util";
 import {
   applySuspensions,
@@ -75,7 +76,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/" && method === "GET") return new Response("ClippiBoy friends server");
   if (path === "/auth/start" && method === "GET") {
     if (!(await underLimit(request, env, "auth"))) return page("Too many sign-ins", "Wait a minute, then try again from ClippiBoy.");
-    return authStart(url, env);
+    return authStart(request, url, env);
   }
   if (path === "/auth/callback" && method === "GET") return authCallback(request, url, env);
   if (path === "/auth/exchange" && method === "POST") {
@@ -205,7 +206,7 @@ async function withinCeiling(env: Env, route: "auth" | "ping"): Promise<boolean>
 // cannot. The cookie ties the callback to the browser that started the login,
 // so nobody can send someone a half-finished login of their own to complete.
 
-async function authStart(url: URL, env: Env): Promise<Response> {
+async function authStart(request: Request, url: URL, env: Env): Promise<Response> {
   const challenge = url.searchParams.get("challenge") ?? "";
   if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new HttpError(400, "Missing challenge.");
   if (!env.DISCORD_CLIENT_ID) throw new HttpError(503, "Discord login is not configured yet.");
@@ -225,7 +226,7 @@ async function authStart(url: URL, env: Env): Promise<Response> {
     status: 302,
     headers: {
       Location: authorize.toString(),
-      "Set-Cookie": `${STATE_COOKIE}=${state}; Path=/auth; Max-Age=600; HttpOnly; Secure; SameSite=Lax`,
+      "Set-Cookie": `${STATE_COOKIE}=${withState(statesIn(request.headers.get("Cookie"), STATE_COOKIE), state)}; Path=/auth; Max-Age=600; HttpOnly; Secure; SameSite=Lax`,
     },
   });
 }
@@ -233,12 +234,9 @@ async function authStart(url: URL, env: Env): Promise<Response> {
 async function authCallback(request: Request, url: URL, env: Env): Promise<Response> {
   const state = url.searchParams.get("state") ?? "";
   const code = url.searchParams.get("code");
-  const cookie = (request.headers.get("Cookie") ?? "")
-    .split(";")
-    .map((part) => part.trim().split("="))
-    .find(([name]) => name === STATE_COOKIE)?.[1];
+  const states = statesIn(request.headers.get("Cookie"), STATE_COOKIE);
   if (!code) return page("Sign-in cancelled", "You can close this tab and try again from ClippiBoy.");
-  if (!cookie || !sameText(cookie, state)) {
+  if (!states.some((s) => sameText(s, state))) {
     return page("Sign-in expired", "Start the sign-in again from ClippiBoy, in this browser.");
   }
   const login = await env.DB.prepare("SELECT created_at FROM logins WHERE state = ? AND code IS NULL")
@@ -279,6 +277,7 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
     "Signed in",
     "Back to ClippiBoy — you can close this tab.",
     back,
+    true,
   );
 }
 
@@ -304,7 +303,7 @@ async function authExchange(request: Request, env: Env): Promise<Response> {
   return json({ token, me: await loadMe(env, login.user_id) });
 }
 
-function page(title: string, text: string, redirect?: string): Response {
+function page(title: string, text: string, redirect?: string, clear = false): Response {
   const link = redirect
     ? `<p><a href="${escapeHtml(redirect)}">Open ClippiBoy</a></p><script>location.href=${JSON.stringify(redirect)}</script>`
     : "";
@@ -316,7 +315,7 @@ h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;margin:0}a{display:inline-block
   return new Response(html, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Set-Cookie": `${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
+      ...(clear ? { "Set-Cookie": `${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax` } : {}),
     },
   });
 }
