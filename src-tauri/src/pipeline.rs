@@ -391,6 +391,50 @@ fn write_wav(path: &Path, data: &[i16]) -> std::io::Result<()> {
     out.flush()
 }
 
+/// The last error of one run and whether the UI has heard of it. An encoder
+/// that keeps stumbling should not flood the UI — but *once* somebody has to
+/// hear about it, otherwise the app appears to keep buffering and only the key
+/// press brings it to light.
+pub struct ErrorSlot {
+    error: Mutex<Option<String>>,
+    seen: AtomicBool,
+    reports: AtomicU64,
+}
+
+impl ErrorSlot {
+    pub fn new() -> Self {
+        Self { error: Mutex::new(None), seen: AtomicBool::new(false), reports: AtomicU64::new(0) }
+    }
+
+    /// Record a problem. A failure that repeats per frame is logged at warn
+    /// on the first report and every 500th, at debug in between.
+    pub fn report(&self, scope: &str, message: String) {
+        let n = self.reports.fetch_add(1, Ordering::Relaxed);
+        if n % 500 == 0 {
+            log::warn!("{scope}: {message}");
+        } else {
+            log::debug!("{scope}: {message}");
+        }
+        *self.error.lock() = Some(message);
+    }
+
+    /// The error not yet handed out. The flag is only taken when there is an
+    /// error, so a poll that finds none does not use up the run's one report.
+    pub fn take_unseen(&self) -> Option<String> {
+        let error = self.error.lock().clone()?;
+        if self.seen.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        Some(error)
+    }
+}
+
+impl Default for ErrorSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// State shared by capture, encoder and mixer.
 pub struct Shared {
     /// What a newly added source's ring is sized to — see [`Shared::set_buffer_seconds`].
@@ -417,12 +461,8 @@ pub struct Shared {
     pub dropped: AtomicU64,
     /// Frames the clock had to repeat because the picture stood still.
     pub duplicated: AtomicU64,
-    pub error: Mutex<Option<String>>,
-    /// Has this run's first error already been reported? An encoder that keeps
-    /// stumbling should not flood the UI — but *once* somebody has to hear about
-    /// it, otherwise the app appears to keep buffering and only the key press
-    /// brings it to light.
-    pub error_seen: AtomicBool,
+    /// The run's capture errors, handed to the UI once.
+    pub errors: ErrorSlot,
     /// The screen this capture runs on, and how the settings arrived at it —
     /// `Fallback` when the chosen one was missing and the primary stands in.
     /// `None` for a window, and until capture is up.
@@ -665,8 +705,7 @@ impl Shared {
 
     /// Record a problem with the running capture.
     pub fn report(&self, message: String) {
-        log::warn!("capture: {message}");
-        *self.error.lock() = Some(message);
+        self.errors.report("capture", message);
     }
 
     /// Why the encoder stopped working, if it has — see `EncoderStats::fail`.
@@ -683,10 +722,7 @@ impl Shared {
 
     /// Collect the first error not yet reported.
     pub fn take_unseen_error(&self) -> Option<String> {
-        if self.error_seen.swap(true, Ordering::SeqCst) {
-            return None;
-        }
-        self.error.lock().clone()
+        self.errors.take_unseen()
     }
 
     /// QPC time for a packet timestamp.
@@ -1144,8 +1180,7 @@ impl Pipeline {
             frames: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             duplicated: AtomicU64::new(0),
-            error: Mutex::new(None),
-            error_seen: AtomicBool::new(false),
+            errors: ErrorSlot::new(),
             sources_generation: AtomicU64::new(0),
             encoder: Mutex::new(None),
             rate_control: Mutex::new(None),
@@ -1306,6 +1341,24 @@ impl Drop for Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_after_a_quiet_first_poll_is_still_reported() {
+        let slot = ErrorSlot::new();
+        assert_eq!(slot.take_unseen(), None);
+        slot.report("capture", "gone".into());
+        assert_eq!(slot.take_unseen().as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn an_error_is_reported_once_per_run() {
+        let slot = ErrorSlot::new();
+        slot.report("capture", "gone".into());
+        assert_eq!(slot.take_unseen().as_deref(), Some("gone"));
+        assert_eq!(slot.take_unseen(), None);
+        slot.report("capture", "again".into());
+        assert_eq!(slot.take_unseen(), None);
+    }
 
     /// QPC (100 ns) for a frame position.
     ///
