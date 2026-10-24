@@ -80,7 +80,7 @@ pub fn set_config(
     // in between would be undone.
     config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
     config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
-    let next = state.replace_config_with(config, |next, current| {
+    let mut next = state.replace_config_with(config, |next, current| {
         crate::config::keep_core_owned(next, current);
         crate::config::keep_once_flags(next, current);
     });
@@ -160,6 +160,8 @@ pub fn set_config(
         || previous.control.port != next.control.port
     {
         crate::control::restart(&app);
+        // The restart made a new token: hand that one back, not the dead one.
+        next.control.token = state.config_snapshot().control.token;
     }
     next
 }

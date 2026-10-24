@@ -471,28 +471,10 @@ fn write_handoff(app: &tauri::AppHandle, port: u16, token: &str) {
         "version": app.package_info().version.to_string(),
     });
     let write = std::fs::create_dir_all(crate::config::data_dir())
-        .and_then(|()| write_file_whole(&path, &format!("{body:#}")));
+        .and_then(|()| crate::config::write_synced(&path, &format!("{body:#}")));
     if let Err(err) = write {
         log::warn!("could not write {}: {err}", path.display());
     }
-}
-
-/// Write `<name>.tmp`, then rename it over the target: a plugin reading at the
-/// wrong moment sees the old file or the new one, never half of either.
-fn write_file_whole(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!("{name}.tmp"));
-    let written = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
 }
 
 fn clear_handoff() {
@@ -503,20 +485,20 @@ fn clear_handoff() {
 mod tests {
     use super::*;
 
-    /// An empty token must never let anything through — that is the state of a
-    /// config written before this feature existed.
     #[test]
     fn the_handshake_is_replaced_whole() {
         let dir = std::env::temp_dir().join(format!("cb-handoff-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(HANDOFF);
-        write_file_whole(&path, "first").unwrap();
-        write_file_whole(&path, "second").unwrap();
+        crate::config::write_synced(&path, "first").unwrap();
+        crate::config::write_synced(&path, "second").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "a temp file was left behind");
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// An empty token must never let anything through — that is the state of a
+    /// config written before this feature existed.
     #[test]
     fn an_empty_token_matches_nothing() {
         assert!(!equals("", ""));

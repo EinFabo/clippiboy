@@ -289,7 +289,7 @@ impl Default for OverlayConfig {
 pub struct ControlConfig {
     pub enabled: bool,
     pub port: u16,
-    /// Empty means "not generated yet" — `control::start` fills it in.
+    /// Replaced by `control::start` at every start; empty only before the first.
     #[serde(default)]
     pub token: String,
 }

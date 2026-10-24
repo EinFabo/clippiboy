@@ -353,7 +353,7 @@ fn save_in(dir: &Path, config: &AppConfig) -> io::Result<()> {
 /// Write `text` to `path` so that the file is either the old one or the whole
 /// new one, even after a crash or a power cut: a temp name no other writer
 /// shares, flushed to disk, then renamed over it.
-fn write_synced(path: &Path, text: &str) -> io::Result<()> {
+pub(crate) fn write_synced(path: &Path, text: &str) -> io::Result<()> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let name = path
         .file_name()
@@ -476,7 +476,7 @@ mod tests {
             serde_json::from_value(written).expect("a config without 'control' no longer loads");
         assert_eq!(parsed.sources.len(), 1);
         assert_eq!(parsed.control.port, crate::model::DEFAULT_CONTROL_PORT);
-        // Nothing generated yet — `control::start` fills it in on first use.
+        // Nothing saved yet — `control::start` replaces it at every start.
         assert!(parsed.control.token.is_empty());
     }
 
