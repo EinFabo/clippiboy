@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { coalesce } from "./lib/coalesce";
 import { api, events, inTauri } from "./lib/ipc";
 import * as mock from "./lib/mock";
 import type {
@@ -342,17 +343,11 @@ export const useEngine = create<EngineState>((set, get) => ({
         configWrites++;
         set({ config });
       });
-      // Only the newest read counts; an older one landing late would undo it.
-      let reads = 0;
-      await events.onClipsChanged(() => {
-        const ticket = ++reads;
-        api
-          .listClips()
-          .then((clips) => {
-            if (ticket === reads) set({ clips });
-          })
-          .catch(() => {});
-      });
+      // One read at a time, one more after a burst: a run of changes would
+      // otherwise stack up full-list reads.
+      await events.onClipsChanged(
+        coalesce(async () => set({ clips: await api.listClips() })),
+      );
       await events.onAudioErrors((sourceErrors) => set({ sourceErrors }));
       await events.onAudioWarnings((sourceWarnings) => set({ sourceWarnings }));
       await events.onAudioTaps((taps) => set({ taps }));
@@ -648,19 +643,15 @@ export const useEngine = create<EngineState>((set, get) => ({
     }));
     if (!inTauri) return;
     try {
-      // The core only knows individual clips; one after another, so the SQLite
-      // connection does not have to fight parallel writers.
-      for (const clip of affected) {
-        await api.updateClip(clip.id, {
-          title: clip.title,
-          description: clip.description,
-          game: null,
-        });
-        // With no game the file belongs back in the clip folder.
-        await get().fileClip(clip.id);
-      }
+      await api.clearGame(game);
     } catch (err) {
       set({ lastError: String(err) });
+      // The optimistic change may not have happened; show what is stored.
+      try {
+        set({ clips: await api.listClips() });
+      } catch {
+        /* the next change event reads again */
+      }
     }
   },
 

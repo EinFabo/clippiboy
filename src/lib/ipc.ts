@@ -164,6 +164,7 @@ export const api = {
    * Deliberately separate from editing: while the clip is playing in the player,
    * nobody may pull its file out from under it.
    */
+  clearGame: (game: string) => invoke<void>("clear_game", { game }),
   fileClip: (id: string) => invoke<Clip>("file_clip", { id }),
   clipTracks: (id: string) => invoke<ClipTrack[]>("clip_tracks", { id }),
   clipWaveform: (id: string) => invoke<string>("clip_waveform", { id }),

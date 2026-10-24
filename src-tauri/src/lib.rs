@@ -1605,6 +1605,7 @@ pub fn run() {
             commands::preview_sound,
             commands::set_clip_favorite,
             commands::file_clip,
+            commands::clear_game,
             commands::copy_clip_file,
             commands::open_clip,
             commands::clipboard_write_text,

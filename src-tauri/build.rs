@@ -15,6 +15,7 @@ fn main() {
         "preview_sound",
         "set_clip_favorite",
         "file_clip",
+        "clear_game",
         "copy_clip_file",
         "open_clip",
         "clipboard_write_text",

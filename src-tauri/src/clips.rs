@@ -226,6 +226,24 @@ impl Library {
         Ok(())
     }
 
+    /// Take `game` off every clip that has exactly that game, in one
+    /// transaction. Returns those clips as they are now.
+    pub fn clear_game(&self, game: &str) -> rusqlite::Result<Vec<Clip>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM clips WHERE game = ?1")?;
+            let rows = stmt.query_map(params![game], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        tx.execute("UPDATE clips SET game = NULL WHERE game = ?1", params![game])?;
+        tx.commit()?;
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|c| ids.contains(&c.id))
+            .collect())
+    }
+
     /// Replace a clip's tags with these. Cleaned up first (`clean_tags`), so
     /// whatever the page sends, the table holds each label once.
     pub fn set_tags(&self, id: &str, tags: &[String]) -> rusqlite::Result<()> {
@@ -471,6 +489,22 @@ mod tests {
             recording: false,
             tags: Vec::new(),
         }
+    }
+
+    #[test]
+    fn clearing_a_game_takes_it_off_its_clips_only() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1000)).unwrap();
+        lib.insert(&clip("b", 2000)).unwrap();
+        lib.insert(&clip("c", 3000)).unwrap();
+        lib.set_game("a", Some("Chrome")).unwrap();
+        lib.set_game("b", Some("Chrome")).unwrap();
+
+        let cleared = lib.clear_game("Chrome").unwrap();
+        assert_eq!(cleared.len(), 2);
+        assert!(cleared.iter().all(|c| c.game.is_none()));
+        assert!(lib.list().unwrap().iter().all(|c| c.game.as_deref() != Some("Chrome")));
+        assert_eq!(lib.get("c").unwrap().unwrap().game.as_deref(), Some("CS2"));
     }
 
     #[test]

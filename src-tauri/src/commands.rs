@@ -815,7 +815,7 @@ pub fn copy_clip_image(state: State<'_, AppState>, id: String) -> Result<()> {
     crate::clipboard::copy_image(&shot.dib())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
     with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))
 }
@@ -930,6 +930,28 @@ pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) 
     })?;
     announce_change(&app);
     Ok(clip)
+}
+
+/// Take a game off every clip that has it, in one transaction, and file each
+/// clip the way `file_clip` does (with no game it belongs back in the clip
+/// folder). One announcement for all of it.
+#[tauri::command(async)]
+pub fn clear_game(state: State<'_, AppState>, app: tauri::AppHandle, game: String) -> Result<()> {
+    let clip_dir = state.config_snapshot().clip_dir;
+    with_library(&state, |lib| {
+        for clip in lib.clear_game(&game).map_err(|e| e.to_string())? {
+            match crate::filing::place(&clip, &clip_dir) {
+                Ok(Some(target)) => lib
+                    .set_path(&clip.id, &target.to_string_lossy())
+                    .map_err(|e| e.to_string())?,
+                Ok(None) => {}
+                Err(err) => log::warn!("Clip '{}' blieb liegen: {err}", clip.id),
+            }
+        }
+        Ok(())
+    })?;
+    announce_change(&app);
+    Ok(())
 }
 
 #[tauri::command]

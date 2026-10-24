@@ -369,6 +369,12 @@
           "markdownDescription": "Enables the check_update command without any pre-configured scope."
         },
         {
+          "description": "Enables the clear_game command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-game",
+          "markdownDescription": "Enables the clear_game command without any pre-configured scope."
+        },
+        {
           "description": "Enables the clip_tracks command without any pre-configured scope.",
           "type": "string",
           "const": "allow-clip-tracks",
@@ -853,6 +859,12 @@
           "type": "string",
           "const": "deny-check-update",
           "markdownDescription": "Denies the check_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_game command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-game",
+          "markdownDescription": "Denies the clear_game command without any pre-configured scope."
         },
         {
           "description": "Denies the clip_tracks command without any pre-configured scope.",

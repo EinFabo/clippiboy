@@ -28,6 +28,7 @@
     "allow-preview-sound",
     "allow-set-clip-favorite",
     "allow-file-clip",
+    "allow-clear-game",
     "allow-copy-clip-file",
     "allow-open-clip",
     "allow-clipboard-write-text",
