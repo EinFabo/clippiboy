@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::model::{AcceptClips, Clip, ClipEdit, ClipKind, TrackMix};
+use crate::model::{AcceptClips, Clip, ClipEdit, ClipKind, FriendsConfig, TrackMix};
 use crate::state::AppState;
 
 const ALPN: &[u8] = b"clippiboy/share/1";
@@ -565,6 +565,32 @@ fn offer_total(size: u64, tracks: &[TrackOffer]) -> Option<u64> {
         .filter(|_| size <= MAX_OFFER_BYTES && tracks.iter().all(|track| track.size <= MAX_TRACK_BYTES))
 }
 
+/// What to do with an offer before looking at what it holds.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    Ask,
+    Decline,
+    /// No answer at all: not while invisible — an answer would show the user is
+    /// there — and not for a second offer from a friend whose first still waits.
+    Ignore,
+}
+
+fn verdict(friends: &FriendsConfig, from: &str, asking_already: bool, sane: bool) -> Verdict {
+    if friends.invisible || asking_already {
+        return Verdict::Ignore;
+    }
+    let welcome = match friends.accept_clips {
+        AcceptClips::All => true,
+        AcceptClips::Favorites => friends.favorites.iter().any(|fav| fav == from),
+        AcceptClips::Off => false,
+    };
+    if friends.busy || !welcome || !sane {
+        Verdict::Decline
+    } else {
+        Verdict::Ask
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn offered(
     app: &AppHandle,
@@ -577,15 +603,23 @@ fn offered(
     meta: Meta,
 ) {
     let config = app.state::<AppState>().config_snapshot().friends;
-    let welcome = match config.accept_clips {
-        AcceptClips::All => true,
-        AcceptClips::Favorites => config.favorites.iter().any(|fav| fav == from),
-        AcceptClips::Off => false,
-    };
-    // Busy, or not from someone welcome: a quiet no, without anything popping up.
-    if config.busy || !welcome || id.len() > 64 || sha256.len() != 64 {
-        crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false });
-        return;
+    let asking_already = app
+        .state::<Share>()
+        .incoming
+        .lock()
+        .values()
+        .any(|entry| entry.transfer.friend_id == from && entry.transfer.stage == Stage::Asking);
+    match verdict(&config, from, asking_already, id.len() <= 64 && sha256.len() == 64) {
+        Verdict::Ask => {}
+        Verdict::Ignore => {
+            log::info!("share: offer {id} from {from} left unanswered");
+            return;
+        }
+        // Busy, or not from someone welcome: a quiet no, without anything popping up.
+        Verdict::Decline => {
+            crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false });
+            return;
+        }
     }
     let friend_name = crate::friends::friend_name(app, from).unwrap_or_else(|| "A friend".into());
     let name = meta.title.clone().unwrap_or_else(|| meta.file_name.clone());
@@ -1337,6 +1371,27 @@ mod tests {
     }
     fn level(index: u32, gain_db: f32, muted: bool) -> TrackMix {
         TrackMix { index, gain_db, muted }
+    }
+
+    #[test]
+    fn an_invisible_user_neither_asks_nor_answers() {
+        let config = FriendsConfig { invisible: true, busy: true, ..Default::default() };
+        assert_eq!(verdict(&config, "f", false, true), Verdict::Ignore);
+    }
+
+    #[test]
+    fn a_second_offer_from_the_same_friend_waits_for_the_first() {
+        assert_eq!(verdict(&FriendsConfig::default(), "f", true, true), Verdict::Ignore);
+    }
+
+    #[test]
+    fn busy_or_unwelcome_is_a_quiet_no() {
+        let favorites = FriendsConfig { accept_clips: AcceptClips::Favorites, favorites: vec!["g".into()], ..Default::default() };
+        assert_eq!(verdict(&FriendsConfig { busy: true, ..Default::default() }, "f", false, true), Verdict::Decline);
+        assert_eq!(verdict(&FriendsConfig { accept_clips: AcceptClips::Off, ..Default::default() }, "f", false, true), Verdict::Decline);
+        assert_eq!(verdict(&favorites, "f", false, true), Verdict::Decline);
+        assert_eq!(verdict(&favorites, "g", false, true), Verdict::Ask);
+        assert_eq!(verdict(&FriendsConfig::default(), "f", false, false), Verdict::Decline);
     }
 
     #[test]

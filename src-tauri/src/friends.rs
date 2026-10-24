@@ -116,6 +116,9 @@ pub struct Friends {
     outbox: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Bumped on sign-out: a connection loop from before gives up.
     generation: AtomicU64,
+    /// When a friend request from someone was last announced, ms since the
+    /// epoch, by id: withdrawing and sending again must not pop up every time.
+    announced: Mutex<HashMap<String, i64>>,
 }
 
 // --- Setup ---------------------------------------------------------------------
@@ -369,7 +372,11 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
     emit(app);
     if announce {
         let known: HashSet<&str> = previous.incoming.iter().map(|p| p.user.id.as_str()).collect();
+        let now = now_ms();
         for request in lists.incoming.iter().filter(|p| !known.contains(p.user.id.as_str())) {
+            if !first_today(&mut friends.announced.lock(), &request.user.id, now) {
+                continue;
+            }
             alert(
                 app,
                 Alert::Request,
@@ -383,6 +390,16 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Forgets what is older than a day, then notes `id`: true if it was not there.
+fn first_today(seen: &mut HashMap<String, i64>, id: &str, now: i64) -> bool {
+    seen.retain(|_, at| now - *at < 24 * 3600 * 1000);
+    if seen.contains_key(id) {
+        return false;
+    }
+    seen.insert(id.to_owned(), now);
+    true
 }
 
 // --- Connection ----------------------------------------------------------------
@@ -874,6 +891,14 @@ fn save_token(token: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_that_comes_back_is_announced_once_a_day() {
+        let (mut seen, day) = (HashMap::new(), 24 * 3600 * 1000);
+        assert!(first_today(&mut seen, "u", 0));
+        assert!(!first_today(&mut seen, "u", day - 1));
+        assert!(first_today(&mut seen, "u", day));
+    }
 
     #[test]
     fn a_second_sign_in_reuses_the_waiting_verifier() {
