@@ -88,6 +88,8 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
                 crate::wait_for_saves(&app);
                 state.abandon_recording();
                 state.stop_pipeline();
+                // The installer runs next: the handshake must not outlive the app.
+                crate::control::stop();
             }
         })
         .build()
@@ -155,6 +157,8 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
                 app.state::<AppState>()
                     .quitting
                     .store(false, std::sync::atomic::Ordering::SeqCst);
+                // The hook took the control port down with the handshake file.
+                crate::control::start(&app);
             }
             format!("could not install the update: {err}")
         })?;

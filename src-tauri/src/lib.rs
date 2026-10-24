@@ -1639,6 +1639,9 @@ pub fn run() {
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
             telemetry::flush();
+            // After the saves were waited for (`quit`); the plugin must not find
+            // a token for a port nobody serves any more.
+            control::stop();
         }
         // A hidden window must not take the process with it — quitting only
         // happens via "Quit" in the tray.

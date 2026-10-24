@@ -472,7 +472,7 @@ impl AppState {
     /// the current one under the config lock, before it is saved. What has to
     /// come from the config as it stands — the clip folder and the token,
     /// changed only by their own commands — is taken from there: from a copy
-    /// read earlier, an overlapping `set_clip_dir` or `regenerate_token` would
+    /// read earlier, an overlapping `set_clip_dir` or "New" token (`control::restart`) would
     /// be undone.
     pub fn replace_config_with(
         &self,

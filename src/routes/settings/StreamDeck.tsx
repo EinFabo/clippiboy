@@ -30,6 +30,18 @@ export function StreamDeck() {
   const [port, setPort] = useState(String(control.port));
   const [shown, setShown] = useState(false);
   const [copied, setCopied] = useState(false);
+  // The token changes with every start of ClippiBoy, and the store's copy of
+  // the config can be older than this start: read it fresh.
+  const [token, setToken] = useState(control.token);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    let alive = true;
+    api.getConfig().then((c) => alive && setToken(c.control.token)).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [control.token]);
 
   useEffect(() => setPort(String(control.port)), [control.port]);
 
@@ -46,7 +58,9 @@ export function StreamDeck() {
 
   const copy = async () => {
     if (!inTauri) return;
-    await api.clipboardWriteText(control.token);
+    const current = (await api.getConfig()).control.token;
+    setToken(current);
+    await api.clipboardWriteText(current);
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   };
@@ -84,16 +98,16 @@ export function StreamDeck() {
         </Row>
         <Row
           label="Token"
-          hint="The plugin picks this up by itself — copy it only if you are entering it by hand"
+          hint="Changes every time ClippiBoy starts — the plugin picks it up by itself"
         >
           <div className="flex items-center gap-2">
             <code className="max-w-[15rem] truncate font-mono text-xs text-ink-muted">
-              {shown ? control.token : "•".repeat(18)}
+              {shown ? token : "•".repeat(18)}
             </code>
             <Button size="sm" variant="ghost" onClick={() => setShown(!shown)}>
               {shown ? "Hide" : "Show"}
             </Button>
-            <Button size="sm" onClick={copy} disabled={!control.token}>
+            <Button size="sm" onClick={copy} disabled={!token}>
               {copied ? "Copied" : "Copy"}
             </Button>
             <Button

@@ -70,7 +70,7 @@ pub fn start(app: &tauri::AppHandle) {
     }
 
     let port = config.control.port;
-    let token = ensure_token(app);
+    let token = fresh_token(app);
     if token.is_empty() {
         log::warn!("control port has no token — not starting");
         return;
@@ -126,27 +126,12 @@ pub fn stop() {
     clear_handoff();
 }
 
-/// After a change to port or on/off in the settings.
+/// After a change to port or on/off in the settings, and for "New" token:
+/// `start` makes a new token every time, so the old one stops working right
+/// away and a plugin holding it fetches the new one from the handshake file.
 pub fn restart(app: &tauri::AppHandle) {
     stop();
     start(app);
-}
-
-/// Throw the token away and generate a new one. The old one stops working right
-/// away, so a plugin still holding it has to fetch the new one from the
-/// handshake file.
-pub fn regenerate_token(app: &tauri::AppHandle) {
-    {
-        let state = app.state::<AppState>();
-        let mut config = state.config.lock();
-        config.control.token = String::new();
-        // Only the token, and saved directly: `replace_config` would reapply
-        // the audio sources and disturb a running recording.
-        if let Err(err) = crate::config::save(&config) {
-            log::warn!("could not save the new control token: {err}");
-        }
-    }
-    restart(app);
 }
 
 /// Accept connections until told to stop. Non-blocking with a short nap, so
@@ -445,15 +430,20 @@ fn equals(a: &str, b: &str) -> bool {
     differing == 0
 }
 
-/// The token from the config, generated on first use.
-fn ensure_token(app: &tauri::AppHandle) -> String {
-    let state = app.state::<AppState>();
-    let existing = state.config_snapshot().control.token;
-    if !existing.is_empty() {
-        return existing;
-    }
-
+/// A new token for this start, saved into the config.
+///
+/// Every start makes one: the handshake file is gone after a quit, but a crash
+/// leaves it, and a token from an earlier run must open nothing — least of all
+/// for another process that took the port in the meantime. The same goes for
+/// "New" in the settings, which is a `restart`.
+///
+/// The token is set in memory first and saved second. When the save is refused
+/// (the settings file could not be read at start, see `config::save`) it still
+/// works for this session, in the handshake file and in the settings page; only
+/// the config on disk keeps the older one, which nothing accepts any more.
+fn fresh_token(app: &tauri::AppHandle) -> String {
     let token = uuid::Uuid::new_v4().to_string();
+    let state = app.state::<AppState>();
     let mut config = state.config.lock();
     config.control.token = token.clone();
     // Deliberately not `replace_config`: that reapplies the audio sources, and
@@ -481,10 +471,28 @@ fn write_handoff(app: &tauri::AppHandle, port: u16, token: &str) {
         "version": app.package_info().version.to_string(),
     });
     let write = std::fs::create_dir_all(crate::config::data_dir())
-        .and_then(|()| std::fs::write(&path, format!("{body:#}")));
+        .and_then(|()| write_file_whole(&path, &format!("{body:#}")));
     if let Err(err) = write {
         log::warn!("could not write {}: {err}", path.display());
     }
+}
+
+/// Write `<name>.tmp`, then rename it over the target: a plugin reading at the
+/// wrong moment sees the old file or the new one, never half of either.
+fn write_file_whole(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    let written = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 fn clear_handoff() {
@@ -497,6 +505,18 @@ mod tests {
 
     /// An empty token must never let anything through — that is the state of a
     /// config written before this feature existed.
+    #[test]
+    fn the_handshake_is_replaced_whole() {
+        let dir = std::env::temp_dir().join(format!("cb-handoff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(HANDOFF);
+        write_file_whole(&path, "first").unwrap();
+        write_file_whole(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "a temp file was left behind");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn an_empty_token_matches_nothing() {
         assert!(!equals("", ""));

@@ -386,7 +386,7 @@ pub fn keep_once_flags(next: &mut AppConfig, previous: &AppConfig) {
 }
 
 /// The clip folder and the control token change only through their own
-/// commands (`set_clip_dir`, `regenerate_token`). A settings write — from a
+/// commands (`set_clip_dir`, "New" token (`control::restart`)). A settings write — from a
 /// page holding stale or mock values — carries whatever it likes in them: a
 /// folder that grants a whole drive, "mock-token" for the Stream Deck's key.
 pub fn keep_core_owned(next: &mut AppConfig, previous: &AppConfig) {

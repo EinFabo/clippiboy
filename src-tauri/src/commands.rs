@@ -1638,7 +1638,7 @@ fn with_library<T>(
 /// of the handshake file by itself.
 #[tauri::command]
 pub fn regenerate_control_token(state: State<'_, AppState>, app: tauri::AppHandle) -> AppConfig {
-    crate::control::regenerate_token(&app);
+    crate::control::restart(&app);
     state.config_snapshot()
 }
 
