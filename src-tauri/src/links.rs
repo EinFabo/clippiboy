@@ -428,25 +428,30 @@ async fn upload(
         .join("temp")
         .join(format!("link-{}.mp4", clip.id));
     let _ = std::fs::create_dir_all(temp.parent().unwrap());
-    // Small enough already: the original goes, in full quality — with its index
-    // moved to the front, which a saved clip leaves at the end (see muxer.rs).
-    // Without it a browser and Discord's player fetch the file's tail before
-    // the first frame. Should that copy fail, the clip goes as it is.
-    let (file, temporary) = if size <= MAX_BYTES {
+    // Small enough already: the original's picture and its one mixed sound go,
+    // in full quality — with the index moved to the front, which a saved clip
+    // leaves at the end (see muxer.rs). Without it a browser and Discord's
+    // player fetch the file's tail before the first frame. The raw source
+    // tracks and the metadata stay home. Should that copy fail or come out too
+    // big, the clip goes the shrink route instead — never as it is.
+    let copied = if size <= MAX_BYTES {
         let moved = {
             let (source, temp) = (source.clone(), temp.clone());
             tokio::task::spawn_blocking(move || faststart(&source, &temp)).await
         };
         match moved {
-            Ok(Ok(())) if std::fs::metadata(&temp).is_ok_and(|meta| meta.len() <= MAX_BYTES) => {
-                (temp.clone(), Some(temp))
-            }
+            Ok(Ok(())) if std::fs::metadata(&temp).is_ok_and(|meta| meta.len() <= MAX_BYTES) => true,
             other => {
-                log::warn!("share link {}: sent without faststart: {other:?}", clip.id);
+                log::warn!("share link {}: copy for the link failed or too big, shrinking instead: {other:?}", clip.id);
                 let _ = std::fs::remove_file(&temp);
-                (source, None)
+                false
             }
         }
+    } else {
+        false
+    };
+    let (file, temporary) = if copied {
+        (temp.clone(), Some(temp))
     } else {
         report.emit("shrinking", 0.0, None);
         let shrinking = {
@@ -500,14 +505,31 @@ async fn upload(
     Ok(link)
 }
 
-/// Copy the clip with its index at the front. Only the container changes.
+/// The arguments of the link copy: the first picture and the first sound (the
+/// mix; a clip's raw source tracks come after it), no metadata or chapters,
+/// the index at the front. Nothing is re-encoded.
+fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = ["-y", "-hide_banner", "-loglevel", "error", "-i"]
+        .iter()
+        .map(Into::into)
+        .collect();
+    args.push(source.into());
+    args.extend(
+        [
+            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-map_chapters", "-1", "-c", "copy",
+            "-movflags", "+faststart",
+        ]
+        .iter()
+        .map(std::ffi::OsString::from),
+    );
+    args.push(output.into());
+    args
+}
+
+/// Copy the clip with its index at the front, as [`faststart_args`] says.
 fn faststart(source: &std::path::Path, output: &std::path::Path) -> Result<(), String> {
     let mut command = crate::muxer::ffmpeg();
-    command
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-        .arg(source)
-        .args(["-map", "0", "-c", "copy", "-movflags", "+faststart"])
-        .arg(output);
+    command.args(faststart_args(source, output));
     crate::muxer::run(&mut command, "preparing a clip for its link")
 }
 
@@ -671,6 +693,19 @@ async fn delete_remote(app: &AppHandle, token: &str, link_id: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn a_link_copy_keeps_one_picture_and_one_sound() {
+        let args: Vec<String> = faststart_args(Path::new("in.mp4"), Path::new("out.mp4"))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for pair in [["-map", "0:v:0"], ["-map", "0:a:0?"], ["-map_metadata", "-1"], ["-map_chapters", "-1"]] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} missing in {args:?}");
+        }
+        assert!(!args.windows(2).any(|w| w == ["-map", "0"]), "{args:?}");
+    }
 
     #[test]
     fn the_quota_message_counts_in_days_then_hours() {

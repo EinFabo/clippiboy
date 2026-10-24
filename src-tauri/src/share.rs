@@ -954,7 +954,7 @@ fn file_clip(
         original_available: false,
         screenshot: meta.screenshot,
         recording: meta.recording,
-        tags: vec![format!("from {from}")],
+        tags: vec![crate::clips::from_tag(&from)],
     };
     let state = app.state::<AppState>();
     let guard = state.library.lock();
@@ -1197,7 +1197,6 @@ fn fail(transfer: &mut Transfer, error: &str) {
     }
 }
 
-/// SHA-256 of the first `limit` bytes, as hex.
 /// The tracks that can be heard in the clip's mix, sorted by index, with the
 /// mix renumbered `0..n` in that order — the slots `cut_tracks` writes and the
 /// receiver stores. A track without a mix entry counts as 0 dB and unmuted;
@@ -1261,6 +1260,7 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
     }
 }
 
+/// SHA-256 of the first `limit` bytes, as hex.
 fn hash_file(path: &Path, limit: u64) -> Result<String, String> {
     let file = std::fs::File::open(path).map_err(|err| format!("Could not read the file: {err}"))?;
     let mut reader = std::io::BufReader::with_capacity(CHUNK, file.take(limit));
