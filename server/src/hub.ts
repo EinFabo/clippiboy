@@ -1,6 +1,18 @@
 import { DurableObject } from "cloudflare:workers";
 import { areFriends, friendIds } from "./db";
-import { mayReach, remember, type Contacts } from "./hubrules";
+import {
+  beyondCap,
+  HELLO,
+  PRESENCE,
+  RAW_MAX,
+  RELAY,
+  SOCKET_CAP,
+  mayReach,
+  remember,
+  spend,
+  type Bucket,
+  type Contacts,
+} from "./hubrules";
 
 /** What friends see. `null` means offline — or invisible, which looks the same. */
 export interface Presence {
@@ -27,6 +39,8 @@ interface Attachment {
   presence: Presence;
   /** Last message from the app, as a fallback to the ping timestamp. */
   at: number;
+  /** When the socket was accepted; the oldest go first when there are too many. */
+  opened: number;
 }
 
 /** Pings come every 30 s; three missed ones and the socket is gone. */
@@ -41,9 +55,6 @@ const LAST_SEEN = "lastSeen";
 const CONTACTS = "contacts";
 /** A relayed message is a handshake, never a file: a few KB are plenty. */
 const RELAY_MAX = 4096;
-/** Per connection, per window — a stuck loop in an app must not flood a friend. */
-const RELAY_BURST = 30;
-const RELAY_WINDOW_MS = 10_000;
 
 const NO_PRESENCE: Presence = { game: null, since: null, status: null, busy: false };
 
@@ -53,8 +64,8 @@ const NO_PRESENCE: Presence = { game: null, since: null, status: null, busy: fal
  * their own connections. Hibernates between messages.
  */
 export class Hub extends DurableObject<Env> {
-  /** Relay budget per connection; lost on hibernation, which is fine. */
-  private relayed = new Map<WebSocket, { start: number; count: number }>();
+  /** One budget per user across all connections; lost on hibernation, which only follows quiet. */
+  private buckets = new Map<"relay" | "presence" | "hello", Bucket>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -76,8 +87,18 @@ export class Hub extends DurableObject<Env> {
       invisible: false,
       presence: NO_PRESENCE,
       at: Date.now(),
+      opened: Date.now(),
     };
     server.serializeAttachment(attachment);
+    // The newest connections stay; the app dials again after a 4002.
+    const sockets = this.open().map((ws) => ({ ws, opened: (ws.deserializeAttachment() as Attachment).opened }));
+    for (const { ws } of beyondCap(sockets, SOCKET_CAP)) {
+      try {
+        ws.close(4002, "too many connections");
+      } catch {
+        // Already closed.
+      }
+    }
     if ((await this.ctx.storage.getAlarm()) === null) {
       await this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
     }
@@ -85,7 +106,7 @@ export class Hub extends DurableObject<Env> {
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (typeof message !== "string") return;
+    if (typeof message !== "string" || message.length > RAW_MAX) return;
     let data: PresenceInput & { t?: string; invisible?: unknown; to?: unknown; body?: unknown };
     try {
       data = JSON.parse(message);
@@ -94,6 +115,11 @@ export class Hub extends DurableObject<Env> {
     }
     if (data.t === "relay") return this.relayFrom(ws, data.to, data.body);
     if (data.t !== "hello" && data.t !== "presence") return;
+    if (data.t === "hello") {
+      const hello = spend(this.buckets.get("hello"), HELLO, Date.now());
+      this.buckets.set("hello", hello.bucket);
+      if (!hello.ok) return ws.close(4003, "slow down");
+    }
     const attachment = ws.deserializeAttachment() as Attachment;
     attachment.ready = true;
     attachment.invisible = data.invisible === true;
@@ -101,7 +127,7 @@ export class Hub extends DurableObject<Env> {
     attachment.at = Date.now();
     ws.serializeAttachment(attachment);
     if (data.t === "hello") await this.sendSnapshot(ws, attachment.user);
-    await this.publish(attachment.user);
+    await this.publishSoon(attachment.user);
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
@@ -111,13 +137,11 @@ export class Hub extends DurableObject<Env> {
     } catch {
       // Already closed.
     }
-    this.relayed.delete(ws);
     await this.publish(user, ws);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     const { user } = ws.deserializeAttachment() as Attachment;
-    this.relayed.delete(ws);
     await this.publish(user, ws);
   }
 
@@ -255,6 +279,20 @@ export class Hub extends DurableObject<Env> {
     );
   }
 
+  /**
+   * Publishes at once while the presence budget lasts; after that, the alarm
+   * publishes whatever is current when the next token is there, so a burst
+   * always ends on its last change.
+   */
+  private async publishSoon(user: string): Promise<void> {
+    const now = Date.now();
+    const budget = spend(this.buckets.get("presence"), PRESENCE, now);
+    this.buckets.set("presence", budget.bucket);
+    if (budget.ok) return this.publish(user);
+    const due = await this.ctx.storage.getAlarm();
+    if (due === null || due > budget.nextAt) await this.ctx.storage.setAlarm(budget.nextAt);
+  }
+
   /** Passes a message on to a friend's apps, and says so when nobody took it. */
   private async relayFrom(ws: WebSocket, to: unknown, body: unknown): Promise<void> {
     const attachment = ws.deserializeAttachment() as Attachment;
@@ -263,12 +301,9 @@ export class Hub extends DurableObject<Env> {
     const fail = (reason: string) => ws.send(JSON.stringify({ t: "relayFailed", to, ref, reason }));
 
     const now = Date.now();
-    const budget = this.relayed.get(ws);
-    if (!budget || now - budget.start > RELAY_WINDOW_MS) {
-      this.relayed.set(ws, { start: now, count: 1 });
-    } else if (++budget.count > RELAY_BURST) {
-      return fail("slow down");
-    }
+    const budget = spend(this.buckets.get("relay"), RELAY, now);
+    this.buckets.set("relay", budget.bucket);
+    if (!budget.ok) return fail("slow down");
     if (JSON.stringify(body).length > RELAY_MAX) return fail("too big");
     // Blocking ends a friendship, so a friend is never someone who blocked.
     if (!(await areFriends(this.env.DB, attachment.user, to))) return fail("not a friend");

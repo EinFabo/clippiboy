@@ -165,6 +165,26 @@ const snap2 = await waitFor(sa2.inbox, (m) => m.t === "snapshot");
 check("snapshot carries last seen", snap2?.lastSeen?.[B.id] === gone?.lastSeen, snap2);
 sa2.ws.close();
 
+const sb2 = await socket(B, "B2");
+sb2.ws.send(JSON.stringify({ t: "hello", invisible: false, game: null, since: null }));
+await waitFor(sb2.inbox, (m) => m.t === "snapshot");
+for (let i = 0; i < 15; i++) sb2.ws.send(JSON.stringify({ t: "presence", invisible: false, game: null, since: null, status: `s${i}` }));
+let lastStatus = null;
+for (const end = Date.now() + 35_000; Date.now() < end && lastStatus !== "s14"; ) {
+  const m = await waitFor(sa.inbox, (x) => x.t === "presence" && x.id === B.id, 1000);
+  if (m) lastStatus = m.presence?.status;
+}
+check("a burst of presence changes ends on the last one", lastStatus === "s14", lastStatus);
+sb2.ws.close();
+
+let closeCode = null;
+sa.ws.onclose = (e) => (closeCode = e.code);
+const more = [];
+for (let i = 0; i < 4; i++) more.push(await socket(A, "A+" + i));
+for (const end = Date.now() + 5000; Date.now() < end && closeCode === null; ) await sleep(100);
+check("a fifth connection closes the oldest", closeCode === 4002, closeCode);
+for (const m of more) m.ws.close();
+
 check("B blocks A", (await api(B, "POST", `/blocks/${A.id}`)).status === 200);
 const listA = await api(A, "GET", "/friends");
 check("friendship gone after block", listA.data.friends.length === 0, listA);

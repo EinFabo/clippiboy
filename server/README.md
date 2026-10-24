@@ -56,8 +56,12 @@ Besides presence, the socket carries `{t: "relay", to, body}`: the hub passes
 `body` on to that friend's apps as `{t: "relay", from, body}` and keeps nothing.
 It is the handshake for sending a clip (`src-tauri/src/share.rs`) — the clip
 itself goes PC to PC over iroh, never through here. Only accepted friends, at
-most 4 KB and 30 messages per 10 s per connection; otherwise, or when the
+most 4 KB and 30 messages per 10 s per user (all connections together); otherwise, or when the
 friend has no app online, the sender gets `{t: "relayFailed", to, ref, reason}`.
+
+A user has at most four connections (a fifth closes the oldest with 4002),
+and raw messages over 8 KB are dropped unread. Presence is published at most
+ten at once and then one per 30 s, the last change always.
 
 Presence also carries `status` (a line of the user's own, cut to 60 characters)
 and `busy`; going offline stamps `lastSeen` in the user's hub, which snapshots
