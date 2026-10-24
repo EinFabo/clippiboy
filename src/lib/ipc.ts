@@ -47,6 +47,8 @@ export const api = {
   /** Answers with the settings as the core keeps them — it corrects some. */
   setConfig: (config: AppConfig) => invoke<AppConfig>("set_config", { config }),
   /** Play a notification sound at `volume` (0–1), switched on or not. */
+  /** A render or promise error, for the app log. */
+  uiError: (message: string) => invoke<void>("ui_error", { message }),
   previewSound: (kind: SoundKind, volume: number) => invoke<void>("preview_sound", { kind, volume }),
   /** The download link the installer came from, if its name carried one. */
   usageSource: () => invoke<string | null>("usage_source"),

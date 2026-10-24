@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { listen } from "@tauri-apps/api/event";
 import { useEngine } from "./store";
 import { inTauri } from "./lib/ipc";
@@ -75,18 +76,20 @@ export default function App() {
               same trick the overlay uses to replay its card animation. The
               routes already unmount on a switch, so nothing is lost by it. */}
           <div key={route} className="cb-rise mx-auto w-full max-w-[1180px] px-8">
-            {route === "dashboard" && <Dashboard onNavigate={setRoute} />}
-            {route === "clips" && (
-              <Clips
-                onNavigate={setRoute}
-                focus={focusClip}
-                onFocused={() => setFocusClip(null)}
-              />
-            )}
-            {route === "audio" && <AudioMixer />}
-            {route === "recording" && <Recording onNavigate={setRoute} />}
-            {route === "friends" && <Friends />}
-            {route === "settings" && <Settings />}
+            <ErrorBoundary key={route} onBack={() => setRoute("dashboard")}>
+              {route === "dashboard" && <Dashboard onNavigate={setRoute} />}
+              {route === "clips" && (
+                <Clips
+                  onNavigate={setRoute}
+                  focus={focusClip}
+                  onFocused={() => setFocusClip(null)}
+                />
+              )}
+              {route === "audio" && <AudioMixer />}
+              {route === "recording" && <Recording onNavigate={setRoute} />}
+              {route === "friends" && <Friends />}
+              {route === "settings" && <Settings />}
+            </ErrorBoundary>
           </div>
         </main>
         <Toasts />

@@ -1603,6 +1603,7 @@ pub fn run() {
             commands::get_config,
             commands::set_config,
             commands::preview_sound,
+            commands::ui_error,
             commands::set_clip_favorite,
             commands::file_clip,
             commands::clear_game,

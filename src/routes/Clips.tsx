@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, Pill } from "@/components/ui/Card";
@@ -652,7 +653,8 @@ export function Clips({
       {/* Which of the two opens is decided per entry, not per playlist: paging
           through a gallery of both leads from a clip into a picture and back. */}
       {open !== null && playing.length > 0 && (
-        playing[Math.min(open, playing.length - 1)]?.screenshot ? (
+        <ErrorBoundary onBack={closePlayer}>
+        {playing[Math.min(open, playing.length - 1)]?.screenshot ? (
           <ShotViewer
             clips={playing}
             index={Math.min(open, playing.length - 1)}
@@ -672,7 +674,8 @@ export function Clips({
             originOf={originOf}
             startAt={startAt}
           />
-        )
+        )}
+        </ErrorBoundary>
       )}
 
       {exporting && (

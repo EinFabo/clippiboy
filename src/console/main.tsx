@@ -5,12 +5,17 @@ import "../index.css";
 import "./console.css";
 import { installLockdown } from "@/lib/lockdown";
 import { installAccent } from "@/lib/accent";
+import { rootErrorOptions, installRejectionLogging } from "@/lib/errorReporting";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 installLockdown();
+installRejectionLogging();
 installAccent();
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+ReactDOM.createRoot(document.getElementById("root")!, rootErrorOptions).render(
   <React.StrictMode>
-    <Console />
+    <ErrorBoundary>
+      <Console />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

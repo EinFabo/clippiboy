@@ -13,6 +13,7 @@ fn main() {
         "get_config",
         "set_config",
         "preview_sound",
+        "ui_error",
         "set_clip_favorite",
         "file_clip",
         "clear_game",

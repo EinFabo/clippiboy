@@ -807,6 +807,12 @@
           "markdownDescription": "Enables the trim_originals command without any pre-configured scope."
         },
         {
+          "description": "Enables the ui_error command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-ui-error",
+          "markdownDescription": "Enables the ui_error command without any pre-configured scope."
+        },
+        {
           "description": "Enables the update_audio_source command without any pre-configured scope.",
           "type": "string",
           "const": "allow-update-audio-source",
@@ -1297,6 +1303,12 @@
           "type": "string",
           "const": "deny-trim-originals",
           "markdownDescription": "Denies the trim_originals command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ui_error command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-ui-error",
+          "markdownDescription": "Denies the ui_error command without any pre-configured scope."
         },
         {
           "description": "Denies the update_audio_source command without any pre-configured scope.",

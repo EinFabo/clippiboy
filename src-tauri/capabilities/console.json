@@ -11,6 +11,7 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "allow-get-config",
+    "allow-ui-error",
     "allow-engine-status",
     "allow-close-console",
     "allow-copy-clip-file",

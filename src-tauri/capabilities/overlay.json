@@ -7,6 +7,7 @@
   ],
   "permissions": [
     "core:event:default",
-    "allow-get-config"
+    "allow-get-config",
+    "allow-ui-error"
   ]
 }

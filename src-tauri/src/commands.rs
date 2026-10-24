@@ -39,6 +39,20 @@ pub fn list_encoders() -> Vec<EncoderInfo> {
     encode::list_encoders()
 }
 
+/// The most a window may put into the log in one report.
+const UI_ERROR_MAX_CHARS: usize = 4000;
+
+fn clip_ui_error(message: &str) -> String {
+    message.chars().take(UI_ERROR_MAX_CHARS).collect()
+}
+
+/// A window's render or promise error, for `clippiboy.log`: a blank window
+/// leaves no other trace. The text is cut, so a runaway string cannot flood it.
+#[tauri::command]
+pub fn ui_error(window: tauri::Window, message: String) {
+    log::error!("ui {}: {}", window.label(), clip_ui_error(&message));
+}
+
 /// The settings' "listen" button: the sound at the level being set, whether or
 /// not it is switched on.
 #[tauri::command]
@@ -1842,5 +1856,12 @@ mod tests {
             assert!(!usable_clip_dir(dir), "{dir}");
         }
         assert!(usable_clip_dir(if cfg!(windows) { r"D:\clips" } else { "/home/me/clips" }));
+    }
+
+    #[test]
+    fn ui_error_text_is_cut() {
+        let long = "é".repeat(UI_ERROR_MAX_CHARS * 3);
+        assert_eq!(clip_ui_error(&long).chars().count(), UI_ERROR_MAX_CHARS);
+        assert_eq!(clip_ui_error("short"), "short");
     }
 }

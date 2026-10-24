@@ -24,6 +24,7 @@
     "allow-list-capture-targets",
     "allow-list-encoders",
     "allow-get-config",
+    "allow-ui-error",
     "allow-set-config",
     "allow-preview-sound",
     "allow-set-clip-favorite",

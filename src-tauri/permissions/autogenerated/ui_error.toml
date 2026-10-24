@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ui-error"
+description = "Enables the ui_error command without any pre-configured scope."
+commands.allow = ["ui_error"]
+
+[[permission]]
+identifier = "deny-ui-error"
+description = "Denies the ui_error command without any pre-configured scope."
+commands.deny = ["ui_error"]
