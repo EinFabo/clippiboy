@@ -8,49 +8,11 @@ import type { Route } from "@/components/NavBar";
 import { Select, Slider } from "@/components/ui/Controls";
 import { formatBufferSeconds } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import { autoFit, fit, fpsChoices } from "@/lib/fit";
 import type { BufferConfig, CaptureTarget, EncoderId } from "@/lib/types";
 
 /** The usual steps; only what the source supports is offered. */
 const HEIGHTS = [720, 1080, 1440, 2160];
-
-/** The usual frame rates, as long as the screen does not reveal its own. */
-const FPS = [30, 60, 120];
-
-/**
- * Which frame rates the source really supports.
- *
- * Capturing more frames than the screen puts out does not make any motion
- * smoother — it only produces duplicate frames that cost space. Hence the usual
- * steps up to the refresh rate plus that rate itself: a 165 Hz monitor should
- * offer 165 too. That is how the core computes it in `capture::fps_choices`.
- */
-function fpsChoices(source: CaptureTarget | null): number[] {
-  const refresh = source?.refreshHz ?? null;
-  if (!refresh || refresh < 20) return FPS;
-  return [...FPS.filter((fps) => fps < refresh), refresh];
-}
-
-/** Snap the configured frame rate onto an offered step — downwards, because
-    capturing more than was set would be a surprise. */
-function fitFps(fps: number, choices: number[]): number {
-  if (choices.includes(fps)) return fps;
-  return [...choices].reverse().find((step) => step <= fps) ?? choices[0];
-}
-
-/**
- * Capture size for a target height. The width comes from the source's aspect
- * ratio instead of an assumed 16:9, and both values stay even — exactly how the
- * core computes it in `capture::fit_to_target`.
- */
-function fit(height: number, source: CaptureTarget | null) {
-  const ratio =
-    source && source.width > 0 && source.height > 0
-      ? source.width / source.height
-      : 16 / 9;
-  const h = Math.max(2, Math.round(height)) & ~1;
-  const w = Math.max(2, Math.round(h * ratio)) & ~1;
-  return { width: w, height: h };
-}
 
 /**
  * What the packet ring is allowed to hold, in megabytes.
@@ -187,12 +149,10 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   // 60 Hz second screen would otherwise leave a setting standing that means
   // nothing there — the core straightens it out anyway.
   useEffect(() => {
-    if (!source) return;
-    const next = fit(Math.min(rec.height, source.height), source);
-    const fps = fitFps(rec.fps, rates);
-    const sized = next.width !== rec.width || next.height !== rec.height;
-    if (sized || fps !== rec.fps) setRec({ ...next, fps });
+    const next = autoFit(rec, source, missing);
+    if (next) setRec(next);
   }, [
+    missing,
     source?.id,
     source?.width,
     source?.height,

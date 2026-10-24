@@ -38,6 +38,7 @@ jobs:
       # Type check and bundle; tauri-build also wants `dist` to exist.
       - run: npm ci
       - run: npm run build
+      - run: npm test
       - name: Unit tests
         working-directory: src-tauri
         run: cargo test --locked --lib
