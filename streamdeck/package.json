@@ -8,6 +8,7 @@
   "scripts": {
     "setup": "npm install && npm install --prefix com.einfabo.clippiboy.sdPlugin",
     "build": "tsc",
+    "test": "node --test src/*.test.ts",
     "watch": "tsc --watch",
     "pack": "npm run build && streamdeck pack com.einfabo.clippiboy.sdPlugin --output dist --force",
     "link": "streamdeck link com.einfabo.clippiboy.sdPlugin"

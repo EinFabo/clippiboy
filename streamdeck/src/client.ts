@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import streamDeck from "@elgato/streamdeck";
 
+import { failureOf, timeoutFor } from "./timing.js";
+
 /** What `GET /v1/status` answers — see `src-tauri/src/control.rs`. */
 export type Status = {
 	version: string;
@@ -19,6 +21,8 @@ export type Status = {
 	/** Missing on ClippiBoy versions from before recordings. */
 	recording?: boolean;
 	recordingSeconds?: number;
+	/** A stopped recording is still being written. Missing on older ClippiBoy versions. */
+	finalizing?: boolean;
 };
 
 /** Manually entered in the property inspector, for the rare case the handshake file cannot be found. */
@@ -48,9 +52,6 @@ export type Reachability = {
 
 /** How often the keys ask how things stand. Fast enough that the buffer level counts up visibly. */
 const POLL_MS = 500;
-
-/** ClippiBoy answers from memory; anything past this means it is not there. */
-const TIMEOUT_MS = 2000;
 
 /**
  * The bridge to ClippiBoy: one poller for all keys, and one place that knows
@@ -104,7 +105,7 @@ class Client {
 		// opened precisely when something is not working, and by then the poller
 		// may not have been running for minutes.
 		const answer = await this.#send("GET", "/v1/status");
-		const status = answer !== null && answer.ok ? ((await answer.json().catch(() => null)) as Status | null) : null;
+		const status = answer !== null && answer !== "slow" && answer.ok ? ((await answer.json().catch(() => null)) as Status | null) : null;
 		return {
 			connected: status !== null,
 			port: this.#connection?.port ?? null,
@@ -125,11 +126,11 @@ class Client {
 		this.#lookedUp = 0;
 	}
 
-	/** Press one of the buttons. `null` means ClippiBoy did not answer at all. */
-	async post(path: string, body?: unknown): Promise<{ ok: boolean; error?: string } | null> {
+	/** Press one of the buttons. `null` means ClippiBoy is not there, `"slow"` that it is still working. */
+	async post(path: string, body?: unknown): Promise<{ ok: boolean; error?: string } | "slow" | null> {
 		const answer = await this.#send("POST", path, body);
-		if (answer === null) {
-			return null;
+		if (answer === null || answer === "slow") {
+			return answer;
 		}
 		if (answer.status === 403) {
 			// Most likely a regenerated token. The next attempt fetches the new one.
@@ -143,9 +144,11 @@ class Client {
 	async #poll(): Promise<void> {
 		const answer = await this.#send("GET", "/v1/status");
 		let next: Status | null = null;
-		if (answer !== null && answer.ok) {
+		if (answer === null || answer === "slow") {
+			// No status: gone, or too busy to answer in time.
+		} else if (answer.ok) {
 			next = (await answer.json().catch(() => null)) as Status | null;
-		} else if (answer !== null && answer.status === 403) {
+		} else if (answer.status === 403) {
 			this.forget();
 		}
 
@@ -159,7 +162,7 @@ class Client {
 		}
 	}
 
-	async #send(method: string, path: string, body?: unknown): Promise<Response | null> {
+	async #send(method: string, path: string, body?: unknown): Promise<Response | "slow" | null> {
 		const connection = await this.#connect();
 		if (connection === null) {
 			return null;
@@ -172,17 +175,17 @@ class Client {
 					...(body === undefined ? {} : { "Content-Type": "application/json" }),
 				},
 				body: body === undefined ? undefined : JSON.stringify(body),
-				signal: AbortSignal.timeout(TIMEOUT_MS),
+				signal: AbortSignal.timeout(timeoutFor(method, path)),
 			});
-		} catch {
-			// ClippiBoy is not running, or is busy with something long. Either way
-			// the keys show a dash — this is not worth a log line twice a second.
-			// Read the handshake again next time: the app may have come back on
-			// another port (its own was taken), and the old one would stay dead.
-			// Not `forget()`: the pause between two reads of the file stays.
-			if (connection.source === "handshake") {
-				this.#connection = null;
+		} catch (error) {
+			if (failureOf(error) === "slow") {
+				// The app is there, only busy: keep the connection.
+				return "slow";
 			}
+			// ClippiBoy is not running, or came back on another port or token.
+			// Whatever the source, read the handshake again next time. Not
+			// `forget()`: the pause between two reads of the file stays.
+			this.#connection = null;
 			return null;
 		}
 	}

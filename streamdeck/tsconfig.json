@@ -18,5 +18,6 @@
       "@elgato/streamdeck": ["./com.einfabo.clippiboy.sdPlugin/node_modules/@elgato/streamdeck/dist/plugin/index.d.ts"]
     }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
 }

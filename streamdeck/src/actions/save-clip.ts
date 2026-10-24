@@ -8,7 +8,8 @@ import {
 } from "@elgato/streamdeck";
 
 import { clippiboy, type Status } from "../client.js";
-import { bufferLabel, ClippiBoyKey } from "../keys.js";
+import { ClippiBoyKey } from "../keys.js";
+import { bufferLabel } from "../labels.js";
 
 /** Set per key in the property inspector. */
 export type SaveClipSettings = {

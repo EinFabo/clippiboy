@@ -1,7 +1,8 @@
 import { action, type KeyAction, type KeyDownEvent } from "@elgato/streamdeck";
 
 import type { Status } from "../client.js";
-import { bufferLabel, ClippiBoyKey } from "../keys.js";
+import { ClippiBoyKey } from "../keys.js";
+import { bufferLabel } from "../labels.js";
 
 /**
  * The replay buffer on and off.

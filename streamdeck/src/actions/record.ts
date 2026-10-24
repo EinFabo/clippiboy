@@ -1,7 +1,8 @@
 import { action, type KeyAction, type KeyDownEvent } from "@elgato/streamdeck";
 
 import type { Status } from "../client.js";
-import { ClippiBoyKey, recordingLabel } from "../keys.js";
+import { ClippiBoyKey } from "../keys.js";
+import { recordingLabel } from "../labels.js";
 
 /**
  * A recording on and off.
