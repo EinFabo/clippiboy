@@ -16,3 +16,8 @@ export function describeError(error: unknown, componentStack?: string | null): s
   if (componentStack) text += `\nin:${componentStack}`;
   return text.length > UI_ERROR_MAX ? text.slice(0, UI_ERROR_MAX) : text;
 }
+
+/** A failed boundary recovers when the thing it shows changes. */
+export function shouldReset(failed: boolean, prevKey: unknown, nextKey: unknown): boolean {
+  return failed && prevKey !== nextKey;
+}

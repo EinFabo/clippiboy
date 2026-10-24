@@ -1,17 +1,24 @@
 import { Component, type ReactNode } from "react";
+import { shouldReset } from "@/lib/uiError";
 
 /** What a render error leaves behind instead of a blank window. The core is
  *  told by the root's `onCaughtError`. `compact` is the in-game banner: no
  *  box, nothing to click. `overlay` is for the portalled viewers: the message
  *  sits fixed and centred where the viewer was, not inline below the page. */
 export class ErrorBoundary extends Component<
-  { onBack?: () => void; compact?: boolean; overlay?: boolean; children?: ReactNode },
+  { onBack?: () => void; compact?: boolean; overlay?: boolean; resetKey?: unknown; children?: ReactNode },
   { failed: boolean }
 > {
   state = { failed: false };
 
   static getDerivedStateFromError() {
     return { failed: true };
+  }
+
+  componentDidUpdate(prev: { resetKey?: unknown }) {
+    if (shouldReset(this.state.failed, prev.resetKey, this.props.resetKey)) {
+      this.setState({ failed: false });
+    }
   }
 
   render() {

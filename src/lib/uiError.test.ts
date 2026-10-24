@@ -16,3 +16,10 @@ test("anything else is stringified", () => {
 test("a huge text is cut", () => {
   assert.equal(describeError("x".repeat(UI_ERROR_MAX * 5)).length, UI_ERROR_MAX);
 });
+
+test("a failed boundary resets only when its key changes", async () => {
+  const { shouldReset } = await import("./uiError.ts");
+  assert.equal(shouldReset(true, "a", "b"), true);
+  assert.equal(shouldReset(true, "a", "a"), false);
+  assert.equal(shouldReset(false, "a", "b"), false);
+});

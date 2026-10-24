@@ -654,7 +654,7 @@ export function Clips({
           through a gallery of both leads from a clip into a picture and back. */}
       {open !== null && playing.length > 0 && (
         <ErrorBoundary
-          key={playing[Math.min(open, playing.length - 1)]?.id}
+          resetKey={playing[Math.min(open, playing.length - 1)]?.id}
           overlay
           onBack={closePlayer}
         >
