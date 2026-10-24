@@ -733,19 +733,23 @@ mod win {
     struct EncoderSink {
         encoder: Arc<VideoEncoder>,
         shared: Arc<Shared>,
-        latest: Arc<Latest>,
     }
 
     impl FrameSink for EncoderSink {
-        fn on_frame(&mut self, texture: &ID3D11Texture2D, pts_100ns: i64, duplicate: bool) {
+        fn on_frame(
+            &mut self,
+            texture: &ID3D11Texture2D,
+            pts_100ns: i64,
+            duplicate: bool,
+            qpc_100ns: i64,
+        ) {
             // On the very first frame, anchor the output timeline to the real
             // capture time. Without it nobody would know at save time which
             // stretch of audio belongs to which frame.
             if !self.shared.anchored.load(Ordering::Acquire) {
-                let qpc = self.latest.frame_qpc();
                 self.shared
                     .base_100ns
-                    .store(qpc - pts_100ns, Ordering::Release);
+                    .store(qpc_100ns - pts_100ns, Ordering::Release);
                 self.shared.anchored.store(true, Ordering::Release);
             }
             if self.encoder.submit(texture, pts_100ns) {
@@ -849,7 +853,6 @@ mod win {
             let sink = Box::new(EncoderSink {
                 encoder: encoder.clone(),
                 shared: shared.clone(),
-                latest: latest.clone(),
             });
             let fps = recording.fps;
             std::thread::Builder::new()

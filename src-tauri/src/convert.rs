@@ -595,7 +595,16 @@ pub trait FrameSink: Send {
     /// `duplicate` means no new frame has arrived since the last tick and this is
     /// a repeat. To the encoder that makes no difference; to the status display it
     /// does.
-    fn on_frame(&mut self, texture: &ID3D11Texture2D, pts_100ns: i64, duplicate: bool);
+    ///
+    /// `qpc_100ns` is the capture time of exactly this frame, read under the
+    /// same lock that picked it.
+    fn on_frame(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        pts_100ns: i64,
+        duplicate: bool,
+        qpc_100ns: i64,
+    );
 }
 
 /// What the capture callback and the clock share.
@@ -721,11 +730,6 @@ impl Latest {
         Ok(())
     }
 
-    /// QPC of the frame last converted.
-    pub fn frame_qpc(&self) -> i64 {
-        self.slot_qpc.load(Ordering::Relaxed)
-    }
-
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
     }
@@ -745,6 +749,12 @@ const CATCH_UP: Duration = Duration::from_millis(250);
 /// sleep, and a shortfall it counts is one the clip stretches.
 pub const GAP: Duration = Duration::from_micros(crate::buffer::DISCONTINUITY_US as u64);
 
+/// When tick `index` is due, counted from the start. Nanoseconds in a `u64`
+/// rather than `Duration * u32`, which wrapped after 2³² ticks.
+fn tick_offset(period: Duration, index: u64) -> Duration {
+    Duration::from_nanos((period.as_nanos() as u64).saturating_mul(index))
+}
+
 /// The clock. Runs until `Latest::stop`.
 pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
     let fps = fps.max(1) as u64;
@@ -757,7 +767,7 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
         // Sleep against the start time rather than one period at a time:
         // otherwise the wake-up delays add up and the frame rate slowly drifts
         // downwards.
-        let due = start + period * index as u32;
+        let due = start + tick_offset(period, index);
         let now = Instant::now();
         if due > now {
             std::thread::sleep(due - now);
@@ -786,6 +796,7 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
         let converter = latest.converter.lock();
         let generation = latest.generation.load(Ordering::Acquire);
         let slot = latest.slot.load(Ordering::Acquire);
+        let slot_qpc = latest.slot_qpc.load(Ordering::Relaxed);
         latest.taken.store(generation, Ordering::Release);
         index += 1;
 
@@ -804,6 +815,22 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
         let pts = (index as i64 - 1) * 10_000_000 / fps as i64;
         let texture = SendPtr(converter.texture(slot as usize).clone());
         drop(converter);
-        sink.on_frame(&texture, pts, duplicate);
+        sink.on_frame(&texture, pts, duplicate, slot_qpc);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CAP-10: `period * index as u32` wrapped after 2³² ticks (828 days at 60 fps).
+    #[test]
+    fn the_tick_schedule_does_not_wrap_after_two_to_the_thirty_two_ticks() {
+        let period = Duration::from_nanos(16_666_666);
+        assert_eq!(tick_offset(period, 3), period * 3);
+        assert_eq!(
+            tick_offset(period, 1 << 32),
+            Duration::from_nanos(16_666_666 << 32)
+        );
     }
 }
