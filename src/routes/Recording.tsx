@@ -72,6 +72,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const rec = config.recording;
   /** The buffer sliders while dragged — see there. */
   const [secondsDraft, setSecondsDraft] = useState<number | null>(null);
+  const [clipDraft, setClipDraft] = useState<number | null>(null);
   const [memoryDraft, setMemoryDraft] = useState<number | null>(null);
 
   // Windows come and go: when ClippiBoy started the game usually was not
@@ -390,18 +391,21 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 </p>
               </div>
               <span className="font-mono text-sm text-ink-muted">
-                {formatBufferSeconds(clipLength(config.buffer))}
+                {formatBufferSeconds(clipDraft ?? clipLength(config.buffer))}
               </span>
             </div>
             <div className="mt-4">
               <Slider
                 label="Clip length"
-                value={clipLength(config.buffer)}
+                value={clipDraft ?? clipLength(config.buffer)}
                 min={5}
                 max={config.buffer.seconds}
                 step={5}
-                onChange={(value) =>
-                  patchConfig({
+                onChange={setClipDraft}
+                onCommit={(value) => {
+                  setClipDraft(null);
+                  if (value === clipLength(config.buffer)) return;
+                  void patchConfig({
                     buffer: {
                       ...config.buffer,
                       // At the top end store 0, not the number: a longer buffer
@@ -409,8 +413,8 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       // leaving it standing where it was.
                       clipSeconds: value >= config.buffer.seconds ? 0 : value,
                     },
-                  })
-                }
+                  });
+                }}
               />
             </div>
             <p className="mt-3 text-xs text-ink-faint">

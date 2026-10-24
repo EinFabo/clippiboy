@@ -15,6 +15,7 @@ import {
   IconTrash,
 } from "@/components/icons";
 import { cn } from "@/lib/cn";
+import { labelToSave } from "@/lib/draft";
 import { useFlip } from "@/lib/useFlip";
 import type { AudioSource, SourceKind } from "@/lib/types";
 
@@ -29,6 +30,51 @@ import type { AudioSource, SourceKind } from "@/lib/types";
  */
 function wantsOwnTrack(kind: SourceKind): boolean {
   return kind.type !== "outputDevice";
+}
+
+/**
+ * The name field of a source. It keeps its own draft and hands the name over
+ * when the field is left or Enter is pressed — not on every keystroke, which
+ * wrote the config (and could eat characters while the core's answer landed).
+ * Escape puts the saved name back.
+ */
+function LabelField({
+  label,
+  onSave,
+}: {
+  label: string;
+  onSave: (label: string) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  // Escape blurs the field, and that would otherwise save what was cancelled.
+  const cancelled = useRef(false);
+  const commit = () => {
+    const next = labelToSave(draft, label);
+    setDraft(null);
+    if (cancelled.current) {
+      cancelled.current = false;
+      return;
+    }
+    if (next !== null) onSave(next);
+  };
+  return (
+    <input
+      aria-label={`Name of ${label}`}
+      value={draft ?? label}
+      onFocus={() => (cancelled.current = false)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        else if (e.key === "Escape") {
+          cancelled.current = true;
+          e.currentTarget.blur();
+        }
+      }}
+      className="w-44 truncate rounded-inner bg-transparent text-sm font-medium
+        outline-none hover:bg-elevated focus:bg-elevated px-1.5 py-0.5"
+    />
+  );
 }
 
 /** A new source as both "Quick setup" and "Pick a source" add it. */
@@ -138,6 +184,8 @@ export function AudioMixer() {
     })),
   );
   const [adding, setAdding] = useState(false);
+  /** The gain of the source whose knob is being dragged; written on release. */
+  const [gainDraft, setGainDraft] = useState<{ id: string; gainDb: number } | null>(null);
   /** The source being carried, and the gap it is hovering over. */
   const [drag, setDrag] = useState<Drag | null>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -251,6 +299,8 @@ export function AudioMixer() {
             const tapped = (taps[source.id] ?? []).map(processName);
             const carried = drag?.id === source.id;
             const gap = drag?.over?.id === source.id ? drag.over.before : null;
+            const shownGain =
+              gainDraft?.id === source.id ? gainDraft.gainDb : source.gainDb;
             return (
               <Card
                 key={source.id}
@@ -330,13 +380,9 @@ export function AudioMixer() {
 
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <input
-                        value={source.label}
-                        onChange={(e) =>
-                          upsertSource({ ...source, label: e.target.value })
-                        }
-                        className="w-44 truncate rounded-inner bg-transparent text-sm font-medium
-                          outline-none hover:bg-elevated focus:bg-elevated px-1.5 py-0.5"
+                      <LabelField
+                        label={source.label}
+                        onSave={(label) => upsertSource({ ...source, label })}
                       />
                       {source.separateTrack && (
                         <span className="rounded-pill bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent-bright">
@@ -383,15 +429,26 @@ export function AudioMixer() {
                   <div className="flex w-52 shrink-0 items-center gap-3">
                     <Slider
                       label={`Volume ${source.label}`}
-                      value={source.gainDb}
+                      value={
+                        gainDraft?.id === source.id
+                          ? gainDraft.gainDb
+                          : source.gainDb
+                      }
                       min={-30}
                       max={12}
                       step={0.5}
-                      onChange={(gainDb) => upsertSource({ ...source, gainDb })}
+                      onChange={(gainDb) =>
+                        setGainDraft({ id: source.id, gainDb })
+                      }
+                      onCommit={(gainDb) => {
+                        setGainDraft(null);
+                        if (gainDb !== source.gainDb)
+                          upsertSource({ ...source, gainDb });
+                      }}
                     />
                     <span className="w-14 shrink-0 text-right font-mono text-xs text-ink-muted">
-                      {source.gainDb > 0 ? "+" : ""}
-                      {source.gainDb.toFixed(1)} dB
+                      {shownGain > 0 ? "+" : ""}
+                      {shownGain.toFixed(1)} dB
                     </span>
                   </div>
 

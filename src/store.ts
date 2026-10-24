@@ -187,6 +187,46 @@ async function rereadConfig(set: (state: { config: AppConfig }) => void) {
   }
 }
 
+/**
+ * A source write takes a ticket like `patchConfig`: only the newest answer
+ * counts, and a refusal puts the core's copy back over the optimistic one.
+ */
+async function writeSources(
+  set: (state: { config?: AppConfig; lastError?: string }) => void,
+  write: () => Promise<AppConfig>,
+) {
+  const ticket = ++configWrites;
+  configPending++;
+  try {
+    const config = await write();
+    if (ticket === configWrites) set({ config });
+  } catch (err) {
+    set({ lastError: `Apply source: ${String(err)}` });
+    void rereadConfig(set);
+  } finally {
+    configPending--;
+    if (configPending === 0 && configStale) void rereadConfig(set);
+  }
+}
+
+/**
+ * True once `config` holds the core's settings. If the start could not read
+ * them it still holds the mock: read them now, or report that nothing may be
+ * written (an `Error` for the callers that show it on the row).
+ */
+async function settingsReadable(
+  set: (state: { config: AppConfig }) => void,
+): Promise<boolean> {
+  if (configLoaded) return true;
+  try {
+    set({ config: await api.getConfig() });
+    configLoaded = true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const useEngine = create<EngineState>((set, get) => ({
   ready: false,
   config: mock.mockConfig,
@@ -404,19 +444,13 @@ export const useEngine = create<EngineState>((set, get) => ({
       set({ config: { ...get().config, ...patch } });
       return;
     }
-    if (!configLoaded) {
-      // The start could not read the settings, so `config` is the mock. Read
-      // them now and put the change on top; failing that, send nothing.
-      try {
-        set({ config: await api.getConfig() });
-        configLoaded = true;
-      } catch {
-        set({
-          lastError:
-            "Apply setting: the settings could not be read, so nothing was saved",
-        });
-        return;
-      }
+    // The start may not have read the settings, so `config` can be the mock.
+    if (!(await settingsReadable(set))) {
+      set({
+        lastError:
+          "Apply setting: the settings could not be read, so nothing was saved",
+      });
+      return;
     }
     const config = { ...get().config, ...patch };
     set({ config });
@@ -453,6 +487,9 @@ export const useEngine = create<EngineState>((set, get) => ({
       }));
       return;
     }
+    if (!(await settingsReadable(set))) {
+      throw new Error("the settings could not be read, so nothing was saved");
+    }
     // Deliberately without an optimistic update: if registering fails, the old
     // assignment should stand, and the error belongs on that row.
     set({
@@ -476,24 +513,30 @@ export const useEngine = create<EngineState>((set, get) => ({
   },
 
   async upsertSource(source) {
+    if (inTauri && !(await settingsReadable(set))) {
+      set({ lastError: "Apply source: the settings could not be read, so nothing was saved" });
+      return;
+    }
     const sources = get().config.sources;
     const exists = sources.some((s) => s.id === source.id);
     const next = exists
       ? sources.map((s) => (s.id === source.id ? source : s))
       : [...sources, source];
     set({ config: { ...get().config, sources: next } });
-    if (inTauri) {
-      const config = exists
-        ? await api.updateAudioSource(source)
-        : await api.addAudioSource(source);
-      set({ config });
-    }
+    if (!inTauri) return;
+    await writeSources(set, () =>
+      exists ? api.updateAudioSource(source) : api.addAudioSource(source),
+    );
   },
 
   async removeSource(id) {
+    if (inTauri && !(await settingsReadable(set))) {
+      set({ lastError: "Remove source: the settings could not be read, so nothing was saved" });
+      return;
+    }
     const next = get().config.sources.filter((s) => s.id !== id);
     set({ config: { ...get().config, sources: next } });
-    if (inTauri) set({ config: await api.removeAudioSource(id) });
+    if (inTauri) await writeSources(set, () => api.removeAudioSource(id));
   },
 
   async toggleBuffer() {
