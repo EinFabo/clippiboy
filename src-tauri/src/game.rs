@@ -607,6 +607,22 @@ mod tests {
     }
 
     #[test]
+    fn every_user_entry_overrides_its_builtin_in_any_case() {
+        // One pair can pass by luck of the hash order; 64 cannot.
+        let base: HashMap<String, String> = (0..64)
+            .map(|i| (format!("game{i}.exe"), format!("Builtin {i}")))
+            .collect();
+        let user: HashMap<String, String> = (0..64)
+            .map(|i| (format!("GAME{i}.EXE"), format!("Mine {i}")))
+            .collect();
+        let map = layered(base, user);
+        assert_eq!(map.len(), 64);
+        for i in 0..64 {
+            assert_eq!(map[&format!("game{i}.exe")], format!("Mine {i}"));
+        }
+    }
+
+    #[test]
     fn known_exe_wins_over_the_window_title() {
         assert_eq!(
             resolve_name("cs2.exe", "Counter-Strike 2 - Direct3D 11", false).as_deref(),
