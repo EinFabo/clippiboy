@@ -1089,15 +1089,26 @@ pub fn finalize(
 
 /// A work folder with nothing to finish: no frame was written (a crash in the
 /// first half second), or the video file is missing or empty — for a TS, not
-/// even one whole packet. Decided by the files alone, never by ffprobe, which
-/// may simply be absent.
+/// even one whole packet, or its tables without a frame after them (a crash in
+/// the first frames). Decided by the files alone, never by ffprobe, which may
+/// simply be absent.
 pub fn is_empty_leftover(dir: &Path, meta: &Meta) -> bool {
     let size = |name: &str| std::fs::metadata(dir.join(name)).ok().map(|m| m.len());
     let empty = match size(VIDEO_TS) {
-        Some(len) => len < ts::PACKET as u64,
+        Some(len) => len < ts::PACKET as u64 || has_no_frame(&dir.join(VIDEO_TS), meta.fps),
         None => size(VIDEO_FILE).is_none_or(|len| len == 0),
     };
     meta.frames == Some(0) || empty
+}
+
+/// A TS in which [`ts::span_us`] finds no frame. Only a file that can be read:
+/// one that cannot — held open by a scanner, say — may be a whole recording,
+/// and an empty leftover is deleted.
+fn has_no_frame(path: &Path, fps: u32) -> bool {
+    let readable = File::open(path)
+        .and_then(|mut file| file.read(&mut [0u8; ts::PACKET]))
+        .is_ok();
+    readable && ts::span_us(path, fps).is_none()
 }
 
 /// Folders left behind by a recording that never stopped — the app crashed, or
@@ -1202,7 +1213,11 @@ mod tests {
         assert!(is_empty_leftover(&dir, &Meta::default()));
         let mut ts = ts::TsWriter::new(Vec::new());
         ts.write_frame(0, true, &[0, 0, 0, 1, 0x65]).unwrap();
-        std::fs::write(dir.join(VIDEO_TS), ts.finish().unwrap()).unwrap();
+        let whole = ts.finish().unwrap();
+        // A crash in the first frames: the tables (PAT, PMT) but no frame.
+        std::fs::write(dir.join(VIDEO_TS), &whole[..2 * ts::PACKET]).unwrap();
+        assert!(is_empty_leftover(&dir, &Meta::default()), "tables alone are nothing to finish");
+        std::fs::write(dir.join(VIDEO_TS), &whole).unwrap();
         assert!(!is_empty_leftover(&dir, &Meta::default()));
         let _ = std::fs::remove_dir_all(&dir);
     }
