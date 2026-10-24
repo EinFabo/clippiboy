@@ -202,6 +202,16 @@ const offByCode = await api(A, "POST", "/friends/request", { query: bravo.friend
 check("requests-off still says no to the friend code", offByCode.status === 403, offByCode);
 check("B switches requests back on", (await api(B, "PATCH", "/me", { allowRequests: true })).status === 200);
 
+// A pending request from someone who then turned requests off is still answered by name.
+check("B asks A", (await api(B, "POST", "/friends/request", { query: "testalpha" })).status === 200);
+await api(B, "PATCH", "/me", { allowRequests: false });
+const askBack = await api(A, "POST", "/friends/request", { query: "testbravo" });
+check("asking back by name accepts although B takes no requests", askBack.status === 200 && askBack.data.status === "accepted", askBack);
+const dup = await api(A, "POST", "/friends/request", { query: "testbravo" });
+check("an existing friend with requests off still says already friends", dup.status === 409, dup);
+await api(A, "DELETE", `/friends/${B.id}`);
+await api(B, "PATCH", "/me", { allowRequests: true });
+
 // Removing someone who was never a friend changes nothing, so it tells nobody.
 const sa3 = await socket(A, "A3");
 sa3.ws.send(JSON.stringify({ t: "hello", invisible: false, game: null, since: null }));

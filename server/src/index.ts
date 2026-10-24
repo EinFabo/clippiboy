@@ -392,10 +392,8 @@ async function sendRequest(env: Env, me: string, query: string) {
   const code = normalizeCode(text);
   const byCode = code ? await userByCode(env.DB, code) : null;
   const target = byCode ?? (await userByName(env.DB, text.toLowerCase()));
-  // Someone who blocked you, or who takes no requests and was searched for by
-  // name, looks like someone who does not exist. A friend code was handed out
-  // on purpose, so it may say no.
-  if (!target || (await isBlocked(env, target.id, me)) || (!byCode && target.allow_requests !== 1 && target.id !== me)) {
+  // Someone who blocked you looks like someone who does not exist.
+  if (!target || (await isBlocked(env, target.id, me))) {
     throw new HttpError(404, NOBODY);
   }
   if (target.id === me) throw new HttpError(400, "That's you.");
@@ -413,7 +411,12 @@ async function sendRequest(env: Env, me: string, query: string) {
     await notify(env, me, target.id);
     return { status: "accepted" as const, user: toUser(target) };
   }
-  if (target.allow_requests !== 1) throw new HttpError(403, "They don't take friend requests right now.");
+  if (target.allow_requests !== 1) {
+    // Found by name, someone who takes no requests looks like nobody too; a
+    // friend code was handed out on purpose, so it may say no. A pair that
+    // already has a row never gets here, so accepting back still works.
+    throw byCode ? new HttpError(403, "They don't take friend requests right now.") : new HttpError(404, NOBODY);
+  }
   await env.DB.prepare(
     "INSERT INTO friendships (user_a, user_b, requester, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
   )
