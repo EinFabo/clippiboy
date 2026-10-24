@@ -426,6 +426,7 @@ fn status(app: &tauri::AppHandle) -> Value {
         "fps": status.fps,
         "droppedFrames": status.dropped_frames,
         "saving": state.is_saving(),
+        "finalizing": state.is_finalizing(),
         "recording": status.recording,
         "recordingSeconds": status.recording_seconds,
     })

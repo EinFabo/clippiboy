@@ -87,6 +87,9 @@ pub struct AppState {
     pub active_recording: Mutex<Option<RecordingConfig>>,
     /// Is a save in progress right now? See `begin_save`.
     saving: std::sync::atomic::AtomicBool,
+    /// Is a stopped recording still being written out? Raised from the close
+    /// until the muxing is done; the control port reports it.
+    finalizing: std::sync::atomic::AtomicBool,
     /// Wraps starting and stopping the recording.
     ///
     /// The "already running?" check and registering the finished pipeline are
@@ -108,11 +111,20 @@ pub struct AppState {
     drift_seen: std::sync::atomic::AtomicU8,
 }
 
-/// Lives for as long as a clip is being written and releases the slot when
-/// dropped — even if a `?` strikes in between.
-pub struct SavingGuard<'a>(&'a std::sync::atomic::AtomicBool);
+/// Keeps a flag raised for as long as it lives and lowers it when dropped —
+/// even if a `?` strikes in between. Holds the save slot (`begin_save`) and
+/// the "recording is being written" mark.
+pub struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
 
-impl Drop for SavingGuard<'_> {
+impl<'a> FlagGuard<'a> {
+    /// Raise the flag; it comes down with the guard.
+    pub fn raise(flag: &'a std::sync::atomic::AtomicBool) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(flag)
+    }
+}
+
+impl Drop for FlagGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, std::sync::atomic::Ordering::SeqCst);
     }
@@ -422,6 +434,7 @@ impl AppState {
             lifecycle: Mutex::new(()),
             active_recording: Mutex::new(None),
             saving: std::sync::atomic::AtomicBool::new(false),
+            finalizing: std::sync::atomic::AtomicBool::new(false),
             recorder: Mutex::new(None),
             buffer_wanted: std::sync::atomic::AtomicBool::new(false),
             drift_seen: std::sync::atomic::AtomicU8::new(0),
@@ -515,10 +528,10 @@ impl AppState {
     /// run — and that was exactly the most common cause of "ffmpeg failed": two
     /// runs in quick succession shared target path and temp files and cleared
     /// them out from under each other.
-    pub fn begin_save(&self) -> Option<SavingGuard<'_>> {
+    pub fn begin_save(&self) -> Option<FlagGuard<'_>> {
         use std::sync::atomic::Ordering::SeqCst;
         match self.saving.compare_exchange(false, true, SeqCst, SeqCst) {
-            Ok(_) => Some(SavingGuard(&self.saving)),
+            Ok(_) => Some(FlagGuard(&self.saving)),
             Err(_) => None,
         }
     }
@@ -527,6 +540,12 @@ impl AppState {
     /// Stream Deck key can wait instead of hammering.
     pub fn is_saving(&self) -> bool {
         self.saving.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Is a stopped recording still being written out? Then the status says
+    /// "not recording" although the file does not exist yet.
+    pub fn is_finalizing(&self) -> bool {
+        self.finalizing.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Is a recording into the buffer running right now?
@@ -1215,13 +1234,17 @@ impl AppState {
     /// Stop the recording and write it out. Takes as long as the audio of the
     /// whole recording takes to encode — off the hotkey thread.
     pub fn stop_recording(&self, on_progress: &dyn Fn(f32)) -> Result<Clip, String> {
-        let (recorder, meta) = {
+        let (recorder, meta, _finalizing) = {
             let _lifecycle = self.lifecycle.lock();
             if !self.is_recording() {
                 return Err("No recording is running.".into());
             }
-            self.close_recording()
-                .ok_or_else(|| "The recording could not be closed — it is finished on the next start.".to_string())?
+            let (recorder, meta) = self.close_recording().ok_or_else(|| {
+                "The recording could not be closed — it is finished on the next start.".to_string()
+            })?;
+            // Raised before the lifecycle lock is let go, so the status never
+            // shows "not recording" without "finalizing" in between.
+            (recorder, meta, FlagGuard::raise(&self.finalizing))
         };
         self.finish_recording(&recorder.dir, &meta, on_progress)
     }
@@ -1431,6 +1454,17 @@ impl Default for AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_raised_flag_comes_down_with_its_guard() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let flag = AtomicBool::new(false);
+        {
+            let _guard = super::FlagGuard::raise(&flag);
+            assert!(flag.load(SeqCst));
+        }
+        assert!(!flag.load(SeqCst));
+    }
+
     use super::*;
 
     fn secs(n: u64) -> std::time::Duration {
