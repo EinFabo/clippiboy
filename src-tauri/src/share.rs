@@ -307,7 +307,17 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
 
     // The individual tracks lie in coordinates of the untouched recording;
     // the clip is the stretch from `original.start_ms` on.
-    let stems = if clip.screenshot { None } else { crate::stems::stored(&clip.id) };
+    // Tracks the user muted or turned right down stay home. A mix saved into
+    // the file leaves no trace of what was muted, so a baked clip sends none.
+    let baked = clip.edit.as_ref().is_some_and(|edit| edit.baked);
+    let (stems, mix) = match crate::stems::stored(&clip.id) {
+        Some(stems) if !clip.screenshot && !baked => {
+            let levels = clip.edit.as_ref().map(|edit| edit.tracks.as_slice()).unwrap_or(&[]);
+            let (kept, mix) = audible_stems(stems, levels);
+            ((!kept.is_empty()).then_some(kept), mix)
+        }
+        _ => (None, Vec::new()),
+    };
     let start_ms = clip.original.map(|original| original.start_ms).unwrap_or(0);
     let length_ms = clip.duration_ms;
     let cut_id = id.clone();
@@ -337,7 +347,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
             .iter()
             .map(|cut| TrackOffer { label: cut.label.clone(), size: cut.size, sha256: cut.sha256.clone() })
             .collect();
-        meta.mix = clip.edit.as_ref().map(|edit| edit.tracks.clone()).unwrap_or_default();
+        meta.mix = mix;
         let extra: u64 = tracks.iter().map(|cut| cut.size).sum();
         if let Some(entry) = app.state::<Share>().outgoing.lock().get_mut(&id) {
             entry.transfer.size = size + extra;
@@ -1188,6 +1198,29 @@ fn fail(transfer: &mut Transfer, error: &str) {
 }
 
 /// SHA-256 of the first `limit` bytes, as hex.
+/// The tracks that can be heard in the clip's mix, sorted by index, with the
+/// mix renumbered `0..n` in that order — the slots `cut_tracks` writes and the
+/// receiver stores. A track without a mix entry counts as 0 dB and unmuted;
+/// with no mix at all everything stays.
+fn audible_stems(mut stems: Vec<crate::model::ClipTrack>, mix: &[TrackMix]) -> (Vec<crate::model::ClipTrack>, Vec<TrackMix>) {
+    stems.sort_by_key(|track| track.index);
+    if mix.is_empty() {
+        return (stems, Vec::new());
+    }
+    let mut kept = Vec::new();
+    let mut levels = Vec::new();
+    for track in stems {
+        let entry = mix.iter().find(|entry| entry.index == track.index);
+        let (gain_db, muted) = entry.map(|entry| (entry.gain_db, entry.muted)).unwrap_or((0.0, false));
+        if muted || !crate::stems::audible(gain_db) {
+            continue;
+        }
+        levels.push(TrackMix { index: levels.len() as u32, gain_db, muted: false });
+        kept.push(track);
+    }
+    (kept, levels)
+}
+
 /// The individual tracks cut to the clip, into the temp folder. Best effort:
 /// whatever goes wrong, the clip still goes — only without its tracks.
 fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length_ms: u64) -> Vec<Cut> {
@@ -1297,6 +1330,36 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ClipTrack;
+
+    fn stem(index: u32, label: &str) -> ClipTrack {
+        ClipTrack { index, label: label.into(), channels: 2, preview_path: Some(format!("{index}.m4a")) }
+    }
+    fn level(index: u32, gain_db: f32, muted: bool) -> TrackMix {
+        TrackMix { index, gain_db, muted }
+    }
+
+    #[test]
+    fn muted_and_silent_tracks_stay_home() {
+        let stems = vec![stem(0, "Game"), stem(1, "Mic"), stem(2, "Discord"), stem(3, "Music")];
+        let mix = [level(0, 0.0, false), level(1, -3.0, true), level(2, -60.0, false), level(3, 4.0, false)];
+        let (kept, mix) = audible_stems(stems, &mix);
+        assert_eq!(kept.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(), ["Game", "Music"]);
+        assert_eq!(mix, [level(0, 0.0, false), level(1, 4.0, false)]);
+    }
+
+    #[test]
+    fn without_a_mix_every_track_goes() {
+        let (kept, mix) = audible_stems(vec![stem(1, "Mic"), stem(0, "Game")], &[]);
+        assert_eq!(kept.iter().map(|t| t.index).collect::<Vec<_>>(), [0, 1]);
+        assert!(mix.is_empty());
+    }
+
+    #[test]
+    fn a_clip_with_every_track_muted_goes_without_tracks() {
+        let (kept, mix) = audible_stems(vec![stem(0, "Game")], &[level(0, 0.0, true)]);
+        assert!(kept.is_empty() && mix.is_empty());
+    }
 
     #[test]
     fn room_is_checked_for_the_clip_and_its_tracks_together_on_one_drive() {
