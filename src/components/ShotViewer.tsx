@@ -40,6 +40,7 @@ import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
 import { EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
+import { typesText } from "@/lib/viewer";
 import {
   PictureViewContext,
   WHOLE,
@@ -383,9 +384,10 @@ export function ShotViewer({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      // While a name is being typed the keys belong to the field.
-      const target = event.target as HTMLElement | null;
-      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      // An open menu took this key.
+      if (event.defaultPrevented) return;
+      // While a name is being typed the keys belong to the field (a slider is not one).
+      if (typesText(event.target as HTMLElement | null)) return;
       // A save is running: it rebuilds the marks and the picture under them
       // when it is done, and closing or paging now would land it elsewhere.
       if (busy) return;

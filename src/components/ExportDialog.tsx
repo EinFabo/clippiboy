@@ -73,6 +73,7 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
   // behind with nothing saying so.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       if (event.key === "Escape" && !busy) onClose();
     };
     window.addEventListener("keydown", onKey);

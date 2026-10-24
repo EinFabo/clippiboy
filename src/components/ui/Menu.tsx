@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/cn";
+import { menuOwns } from "@/lib/viewer";
 
 /** One entry in the menu. Separators carry nothing but themselves. */
 export type MenuEntry =
@@ -154,6 +155,10 @@ function Surface({
       onClose();
     };
     const onKey = (event: KeyboardEvent) => {
+      // The menu owns these keys: the viewer underneath must not also close
+      // or change its volume. Not stopImmediatePropagation, the lockdown
+      // listener on window must still run.
+      if (menuOwns(event.key, active)) event.stopPropagation();
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();

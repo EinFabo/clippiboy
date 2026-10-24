@@ -24,6 +24,7 @@ import { formatAgo, formatSize } from "@/lib/format";
 import { useClipMix } from "@/lib/useClipMix";
 import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
+import { typesText } from "@/lib/viewer";
 import type { Clip, ClipEdit } from "@/lib/types";
 
 interface Props {
@@ -468,16 +469,12 @@ export function ClipPlayer({
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
+      // An open menu took this key.
+      if (event.defaultPrevented) return;
       // In text fields, space and letters stay what they are.
       // Sliders are not text: the volume keeps the focus after a drag, and
       // would otherwise swallow every shortcut.
-      const target = event.target;
-      if (
-        (target instanceof HTMLInputElement && target.type !== "range") ||
-        target instanceof HTMLTextAreaElement
-      ) {
-        return;
-      }
+      if (typesText(event.target as HTMLElement | null)) return;
       const handlers: Record<string, () => void> = {
         " ": toggle,
         k: toggle,
