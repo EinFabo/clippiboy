@@ -166,6 +166,18 @@ fn provide(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<(), Str
     if PROGRAMS.iter().all(|(name, _)| target.join(name).is_file()) {
         return Ok(());
     }
+    // A folder with one program gone (antivirus, a cleanup tool) would make
+    // the final rename fail on every retry, so it goes before anything new.
+    let missing = clear_incomplete(target)?;
+    if !missing.is_empty() {
+        let names = missing.join(", ");
+        log::warn!("ffmpeg folder was incomplete ({names} missing) - antivirus quarantine is the usual cause; fetching it again");
+        crate::notify(
+            app,
+            "error",
+            format!("{names} was missing - often an antivirus quarantine. Fetching it again."),
+        );
+    }
     std::fs::create_dir_all(root).map_err(|err| format!("could not create {}: {err}", root.display()))?;
     if adopt_bundled(app, root, target) {
         log::info!("ffmpeg taken over from the old installation");
@@ -173,6 +185,29 @@ fn provide(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<(), Str
     }
     log::info!("downloading ffmpeg {VERSION}");
     tauri::async_runtime::block_on(download(app, root, target))
+}
+
+/// The programs of `target` that are not there.
+fn missing_programs(target: &Path) -> Vec<&'static str> {
+    PROGRAMS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !target.join(name).is_file())
+        .collect()
+}
+
+/// Remove a version folder that exists but lacks a program, and name what was
+/// missing. An absent folder is nothing to clear.
+fn clear_incomplete(target: &Path) -> Result<Vec<&'static str>, String> {
+    if !target.exists() {
+        return Ok(Vec::new());
+    }
+    let missing = missing_programs(target);
+    if !missing.is_empty() {
+        std::fs::remove_dir_all(target)
+            .map_err(|err| format!("could not clear {}: {err}", target.display()))?;
+    }
+    Ok(missing)
 }
 
 /// Installations up to 0.4.7 brought the programs along in their resource
@@ -332,4 +367,35 @@ fn copy_hashing(from: &mut impl Read, to: &mut impl Write) -> std::io::Result<St
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh scratch folder under the system temp dir, never the real one.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("clippiboy-tools-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_incomplete_ffmpeg_folder_is_cleared_and_named() {
+        let dir = scratch("incomplete");
+        let target = dir.join("9.0.1");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("ffprobe.exe"), b"x").unwrap();
+        assert_eq!(clear_incomplete(&target).unwrap(), ["ffmpeg.exe"]);
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_folder_is_nothing_to_clear() {
+        let dir = scratch("absent");
+        assert!(clear_incomplete(&dir.join("absent")).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
