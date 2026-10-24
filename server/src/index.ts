@@ -104,6 +104,15 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const me = await authenticate(request, env.DB);
 
+  // Everything that changes something is counted per user; reads and the
+  // sign-out are not. A script holding one session cannot spend the day's
+  // database writes or flood the friends' sockets with notices.
+  if (method !== "GET" && !(path === "/auth/logout" && method === "POST")) {
+    if (!(await env.USER_LIMIT.limit({ key: me })).success) {
+      throw new HttpError(429, "Slow down — try again in a minute.");
+    }
+  }
+
   if (path === "/shares/quota" && method === "GET") return shareQuota(env, me);
   if (path === "/shares" && method === "POST") return createShare(request, env, me);
   const share = path.match(/^\/shares\/([a-z0-9]+)(\/poster)?$/);
@@ -127,7 +136,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/me" && method === "PATCH") {
     const { allowRequests } = await body<{ allowRequests?: boolean }>(request);
     if (typeof allowRequests === "boolean") {
-      await env.DB.prepare("UPDATE users SET allow_requests = ? WHERE id = ?").bind(allowRequests ? 1 : 0, me).run();
+      // Only a real change writes.
+      await env.DB.prepare("UPDATE users SET allow_requests = ? WHERE id = ? AND allow_requests != ?")
+        .bind(allowRequests ? 1 : 0, me, allowRequests ? 1 : 0)
+        .run();
     }
     return json(await loadMe(env, me));
   }
@@ -372,14 +384,19 @@ async function isBlocked(env: Env, blocker: string, blocked: string): Promise<bo
   return row !== null;
 }
 
+const NOBODY = "Nobody with that name or code uses ClippiBoy.";
+
 async function sendRequest(env: Env, me: string, query: string) {
   const text = query.trim().replace(/^@/, "");
   if (!text) throw new HttpError(400, "Enter a Discord name or a friend code.");
   const code = normalizeCode(text);
-  const target = (code && (await userByCode(env.DB, code))) || (await userByName(env.DB, text.toLowerCase()));
-  // Someone who blocked you looks like someone who does not exist.
-  if (!target || (await isBlocked(env, target.id, me))) {
-    throw new HttpError(404, "Nobody with that name or code uses ClippiBoy.");
+  const byCode = code ? await userByCode(env.DB, code) : null;
+  const target = byCode ?? (await userByName(env.DB, text.toLowerCase()));
+  // Someone who blocked you, or who takes no requests and was searched for by
+  // name, looks like someone who does not exist. A friend code was handed out
+  // on purpose, so it may say no.
+  if (!target || (await isBlocked(env, target.id, me)) || (!byCode && target.allow_requests !== 1 && target.id !== me)) {
+    throw new HttpError(404, NOBODY);
   }
   if (target.id === me) throw new HttpError(400, "That's you.");
   if (await isBlocked(env, me, target.id)) throw new HttpError(409, "You blocked them — unblock them first.");
@@ -421,8 +438,8 @@ async function acceptRequest(env: Env, me: string, other: string) {
 /** Declines, withdraws or unfriends — whatever the pair had, it is gone. */
 async function removeFriend(env: Env, me: string, other: string) {
   const [a, b] = pair(me, other);
-  await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
-  await notify(env, me, other);
+  const result = await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
+  if (result.meta.changes > 0) await notify(env, me, other);
   return { ok: true };
 }
 
@@ -430,7 +447,7 @@ async function blockUser(env: Env, me: string, other: string) {
   if (other === me) throw new HttpError(400, "That's you.");
   if (!(await userById(env.DB, other))) throw new HttpError(404, "Not found.");
   const [a, b] = pair(me, other);
-  await env.DB.batch([
+  const [unfriended, blocked] = await env.DB.batch([
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b),
     env.DB.prepare("INSERT OR IGNORE INTO blocks (blocker, blocked, created_at) VALUES (?, ?, ?)").bind(
       me,
@@ -438,7 +455,9 @@ async function blockUser(env: Env, me: string, other: string) {
       Date.now(),
     ),
   ]);
-  await notify(env, me, other);
+  // The other side learns only of a friendship that went; a repeat tells nobody.
+  if (unfriended.meta.changes > 0) await notify(env, me, other);
+  else if (blocked.meta.changes > 0) await notify(env, me);
   return { ok: true };
 }
 

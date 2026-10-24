@@ -194,6 +194,23 @@ const listB2 = await api(B, "GET", "/friends");
 check("B's block list has A", listB2.data.blocked[0]?.id === A.id, listB2);
 check("B unblocks", (await api(B, "DELETE", `/blocks/${A.id}`)).status === 200);
 
+// Requests switched off: a search by name finds nobody, the friend code still says no.
+check("B switches requests off", (await api(B, "PATCH", "/me", { allowRequests: false })).status === 200);
+const offByName = await api(A, "POST", "/friends/request", { query: "testbravo" });
+check("requests-off looks like nobody by name", offByName.status === 404, offByName);
+const offByCode = await api(A, "POST", "/friends/request", { query: bravo.friendCode });
+check("requests-off still says no to the friend code", offByCode.status === 403, offByCode);
+check("B switches requests back on", (await api(B, "PATCH", "/me", { allowRequests: true })).status === 200);
+
+// Removing someone who was never a friend changes nothing, so it tells nobody.
+const sa3 = await socket(A, "A3");
+sa3.ws.send(JSON.stringify({ t: "hello", invisible: false, game: null, since: null }));
+await waitFor(sa3.inbox, (m) => m.t === "snapshot");
+const stray = await api(A, "DELETE", `/friends/${crypto.randomUUID()}`);
+check("unfriending a stranger is fine", stray.status === 200, stray);
+check("unfriending a stranger tells nobody", (await waitFor(sa3.inbox, (m) => m.t === "friends", 2000)) === null);
+sa3.ws.close();
+
 check("exchange with junk refused", (await fetch(BASE + "/auth/exchange", { method: "POST", body: JSON.stringify({ code: "x", verifier: "y" }) })).status === 400);
 const start = await fetch(BASE + "/auth/start?challenge=" + "a".repeat(43), { redirect: "manual" });
 check("auth/start sends the browser to Discord", start.status === 302 && start.headers.get("location")?.startsWith("https://discord.com/"), start.status);

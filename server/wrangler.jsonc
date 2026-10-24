@@ -44,7 +44,9 @@
     // database's daily writes and take sign-in, friends and links down for
     // everybody. Counted per address (an IPv6 address per /64) at the edge,
     // the address not stored.
-    { "name": "ANON_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }
+    { "name": "ANON_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } },
+    // Signed-in routes that change something, counted per user id.
+    { "name": "USER_LIMIT", "namespace_id": "1004", "simple": { "limit": 30, "period": 60 } }
   ],
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]
