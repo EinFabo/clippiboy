@@ -93,27 +93,36 @@ function avatarUrl(user: DiscordUser): string {
 export async function upsertDiscordUser(db: D1Database, discord: DiscordUser): Promise<string> {
   const displayName = discord.global_name || discord.username;
   const avatar = avatarUrl(discord);
+  // Discord hands a released name to someone else: the stale row gives it up first,
+  // since a name belongs to one account.
+  const releaseName = db
+    .prepare("UPDATE users SET username = '' WHERE username = ? AND discord_id != ?")
+    .bind(discord.username, discord.id);
   const existing = await db
     .prepare("SELECT id FROM users WHERE discord_id = ?")
     .bind(discord.id)
     .first<{ id: string }>();
   if (existing) {
-    await db
-      .prepare("UPDATE users SET username = ?, display_name = ?, avatar = ? WHERE id = ?")
-      .bind(discord.username, displayName, avatar, existing.id)
-      .run();
+    await db.batch([
+      releaseName,
+      db
+        .prepare("UPDATE users SET username = ?, display_name = ?, avatar = ? WHERE id = ?")
+        .bind(discord.username, displayName, avatar, existing.id),
+    ]);
     return existing.id;
   }
   const id = crypto.randomUUID();
   // A collision among 31^8 codes is unlikely, not impossible.
   for (let attempt = 0; attempt < 5; attempt++) {
-    const result = await db
-      .prepare(
-        "INSERT INTO users (id, discord_id, username, display_name, avatar, friend_code, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (friend_code) DO NOTHING",
-      )
-      .bind(id, discord.id, discord.username, displayName, avatar, friendCode(), Date.now())
-      .run();
-    if (result.meta.changes === 1) return id;
+    const results = await db.batch([
+      releaseName,
+      db
+        .prepare(
+          "INSERT INTO users (id, discord_id, username, display_name, avatar, friend_code, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (friend_code) DO NOTHING",
+        )
+        .bind(id, discord.id, discord.username, displayName, avatar, friendCode(), Date.now()),
+    ]);
+    if (results[1].meta.changes === 1) return id;
   }
   throw new HttpError(500, "Could not create the account.");
 }
