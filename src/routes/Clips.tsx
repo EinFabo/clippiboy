@@ -653,28 +653,32 @@ export function Clips({
       {/* Which of the two opens is decided per entry, not per playlist: paging
           through a gallery of both leads from a clip into a picture and back. */}
       {open !== null && playing.length > 0 && (
-        <ErrorBoundary onBack={closePlayer}>
-        {playing[Math.min(open, playing.length - 1)]?.screenshot ? (
-          <ShotViewer
-            clips={playing}
-            index={Math.min(open, playing.length - 1)}
-            onIndexChange={openIndex}
-            onClose={closePlayer}
-            onDelete={deleteFromPlayer}
-            originOf={originOf}
-          />
-        ) : (
-          <ClipPlayer
-            clips={playing}
-            index={Math.min(open, playing.length - 1)}
-            onIndexChange={openIndex}
-            onClose={closePlayer}
-            onDelete={deleteFromPlayer}
-            onOpenMixer={() => onNavigate("audio")}
-            originOf={originOf}
-            startAt={startAt}
-          />
-        )}
+        <ErrorBoundary
+          key={playing[Math.min(open, playing.length - 1)]?.id}
+          overlay
+          onBack={closePlayer}
+        >
+          {playing[Math.min(open, playing.length - 1)]?.screenshot ? (
+            <ShotViewer
+              clips={playing}
+              index={Math.min(open, playing.length - 1)}
+              onIndexChange={openIndex}
+              onClose={closePlayer}
+              onDelete={deleteFromPlayer}
+              originOf={originOf}
+            />
+          ) : (
+            <ClipPlayer
+              clips={playing}
+              index={Math.min(open, playing.length - 1)}
+              onIndexChange={openIndex}
+              onClose={closePlayer}
+              onDelete={deleteFromPlayer}
+              onOpenMixer={() => onNavigate("audio")}
+              originOf={originOf}
+              startAt={startAt}
+            />
+          )}
         </ErrorBoundary>
       )}
 

@@ -2,9 +2,10 @@ import { Component, type ReactNode } from "react";
 
 /** What a render error leaves behind instead of a blank window. The core is
  *  told by the root's `onCaughtError`. `compact` is the in-game banner: no
- *  box, nothing to click. */
+ *  box, nothing to click. `overlay` is for the portalled viewers: the message
+ *  sits fixed and centred where the viewer was, not inline below the page. */
 export class ErrorBoundary extends Component<
-  { onBack?: () => void; compact?: boolean; children?: ReactNode },
+  { onBack?: () => void; compact?: boolean; overlay?: boolean; children?: ReactNode },
   { failed: boolean }
 > {
   state = { failed: false };
@@ -20,7 +21,11 @@ export class ErrorBoundary extends Component<
     return (
       <div
         role="alert"
-        className="mx-auto my-16 flex max-w-sm flex-col items-center gap-3 rounded-lg border border-white/10 bg-black/40 p-6 text-center text-sm text-white"
+        className={`${
+          this.props.overlay
+            ? "fixed left-1/2 top-1/2 z-[100] w-80 -translate-x-1/2 -translate-y-1/2 bg-neutral-900"
+            : "mx-auto my-16 max-w-sm"
+        } flex flex-col items-center gap-3 rounded-lg border border-white/10 bg-black/40 p-6 text-center text-sm text-white`}
       >
         <p>Something broke here.</p>
         <div className="flex gap-2">
