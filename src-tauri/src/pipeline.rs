@@ -57,9 +57,39 @@ pub(crate) const AUDIO_SLACK_SECONDS: u32 = 10;
 /// A clip as long as the buffer starts on the keyframe before
 /// `newest − buffer_seconds`, up to one keyframe interval earlier; a ring of
 /// only the buffer's length had already let that start go, and the clip began
-/// mute (BUF-1). An interval of 0 counts as one second.
+/// mute (BUF-1). The interval comes from the config unchecked: it counts as 1
+/// to 10 seconds (the settings offer 1, 2 and 4), and the sum saturates.
 pub(crate) fn ring_seconds(buffer_seconds: u32, keyframe_seconds: u32) -> u32 {
-    buffer_seconds + keyframe_seconds.max(1) + AUDIO_SLACK_SECONDS
+    buffer_seconds
+        .saturating_add(keyframe_seconds.clamp(1, 10))
+        .saturating_add(AUDIO_SLACK_SECONDS)
+}
+
+/// The longest hole a clip's MPEG-TS may carry. ffmpeg's CLI takes a break in
+/// a TS's timestamps above its `-dts_delta_threshold` (10 s by default) for a
+/// discontinuity and closes it up: the freeze comes out shorter than its sound
+/// and the picture after it runs ahead. 8 s stays clear of that; a longer hole
+/// takes the raw path, whose ends still meet.
+const TS_HOLE_LIMIT_US: i64 = 8_000_000;
+
+/// The longest step between frames a clip still keeps its own timestamps
+/// across: the ring's jump limit ([`crate::buffer::jump_limit_us`]), but never
+/// more than ffmpeg leaves alone in a TS ([`TS_HOLE_LIMIT_US`]).
+fn ts_jump_limit_us(keyframe_seconds: u32) -> i64 {
+    crate::buffer::jump_limit_us(keyframe_seconds).min(TS_HOLE_LIMIT_US)
+}
+
+/// How much audio a clip gets, in 48 kHz frames: as long as its picture lasts.
+/// With its own timestamps that is the span they cover (`span`, falling back
+/// to `timing`'s); spread evenly, it is the span `muxer::timing` settled on.
+fn clip_audio_frames(timestamped: bool, span: Option<u64>, timing: &crate::muxer::Timing) -> usize {
+    let span_us = if timestamped {
+        span.unwrap_or(timing.span_us)
+    } else {
+        timing.span_us
+    };
+    let frames = span_us as i64 * SAMPLE_RATE as i64 / 1_000_000;
+    frames.max(0) as usize
 }
 
 /// Exactly `seconds` of audio, in samples. The slack is [`ring_seconds`]'s.
@@ -1220,7 +1250,7 @@ impl Pipeline {
         let timestamped = crate::muxer::keeps_timestamps(
             &pts,
             largest_step_us,
-            crate::buffer::jump_limit_us(self.shared.keyframe_seconds),
+            ts_jump_limit_us(self.shared.keyframe_seconds),
         );
 
         // The picture lasts the time its timestamps span, and the audio is cut
@@ -1238,12 +1268,7 @@ impl Pipeline {
             Some(largest_step_us),
             self.shared.fps,
         );
-        let span_us = if timestamped {
-            span.unwrap_or(timing.span_us)
-        } else {
-            timing.span_us
-        };
-        let audio_frames = span_us as i64 * SAMPLE_RATE as i64 / 1_000_000;
+        let audio_frames = clip_audio_frames(timestamped, span, &timing);
 
         // The assignment as it stands **now**, not as it stood while recording:
         // every source has a ring of its own, so a ⧉ flipped a minute ago still
@@ -1262,7 +1287,7 @@ impl Pipeline {
             main_mix,
             sequence_header: self.shared.sequence_header.lock().clone(),
             start_100ns: self.shared.qpc_of(first_pts),
-            audio_frames: audio_frames.max(0) as usize,
+            audio_frames,
             rate: timing.rate,
             timestamped,
             largest_step_us,
@@ -1442,6 +1467,31 @@ mod tests {
         assert_eq!(ring_seconds(120, 2), 132);
         assert_eq!(ring_seconds(120, 4), 134);
         assert_eq!(ring_seconds(30, 0), 41, "an interval of 0 counts as one second");
+        assert_eq!(ring_seconds(120, 600), 140, "an interval from the config counts at most 10 s");
+        assert_eq!(ring_seconds(u32::MAX, 4), u32::MAX, "a huge buffer saturates");
+    }
+
+    /// ffmpeg closes up a TS hole above 10 s (`-dts_delta_threshold`), so a
+    /// clip keeps its own timestamps only across steps up to 8 s — with 4 s
+    /// keyframes too, whose ring limit is 12 s.
+    #[test]
+    fn a_clip_keeps_its_timestamps_only_across_holes_ffmpeg_leaves_alone() {
+        assert_eq!(ts_jump_limit_us(4), 8_000_000);
+        assert_eq!(ts_jump_limit_us(2), 6_000_000, "below the cap the ring's limit holds");
+        assert_eq!(ts_jump_limit_us(1), 3_000_000);
+        let pts = [0, 16_666, 11_016_666, 11_033_333];
+        let step = crate::muxer::largest_step_us(&pts);
+        assert!(!crate::muxer::keeps_timestamps(&pts, step, ts_jump_limit_us(4)), "an 11 s freeze takes the raw path");
+    }
+
+    /// Final review: with its own timestamps the audio is as long as the span
+    /// they cover, not the span spread evenly over the frames.
+    #[test]
+    fn a_timestamped_clip_takes_its_audio_length_from_the_span() {
+        let timing = crate::muxer::Timing { rate: "60".into(), span_us: 1_000_000 };
+        assert_eq!(clip_audio_frames(true, Some(1_500_000), &timing), 72_000);
+        assert_eq!(clip_audio_frames(false, Some(1_500_000), &timing), 48_000);
+        assert_eq!(clip_audio_frames(true, None, &timing), 48_000, "no span: the timing's");
     }
 
     /// BUF-1, the tail: a save waits for the mixer to pass the clip's end, so the

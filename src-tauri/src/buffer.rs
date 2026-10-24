@@ -24,7 +24,8 @@ pub const DISCONTINUITY_US: i64 = 2_000_000;
 /// time that passed: three keyframe intervals, and at least a second. A hang
 /// up to this long stays in the clip as a held frame, in sync with its sound
 /// (`muxer::keeps_timestamps`); a longer one is a break the ring is meant to
-/// cut (BUF-5), not something to play back.
+/// cut (BUF-5), not something to play back. A clip caps it further at what
+/// ffmpeg leaves alone in a TS (`pipeline::ts_jump_limit_us`).
 pub fn jump_limit_us(keyframe_seconds: u32) -> i64 {
     (3 * keyframe_seconds as i64 * 1_000_000).max(1_000_000)
 }
