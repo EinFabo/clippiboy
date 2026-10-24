@@ -90,7 +90,8 @@ pub const BUFFER_FLAG_TIMESTAMP_ERROR: u32 = 0x4;
 /// Using `now` itself put the first packet of a burst after a stall a whole
 /// stall late, which left a fake dropout and then a source that sat late until
 /// the ring pulled it back. The distrust rule of [`usable_stamp`] runs only on
-/// stamps that are unflagged and non-zero.
+/// stamps that are unflagged and non-zero. The queue comes from
+/// [`burst_times`].
 pub fn capture_time(
     stamped: i64,
     flags: u32,
@@ -107,6 +108,51 @@ pub fn capture_time(
         }
     }
     now - queued_frames as i64 * 10_000_000 / device_rate.max(1) as i64
+}
+
+/// One packet of a burst the reader drained in one go — what [`burst_times`]
+/// needs of it.
+#[derive(Debug, Clone, Copy)]
+pub struct Drained {
+    /// The device's stamp, `pu64QPCPosition`.
+    pub stamped: i64,
+    pub flags: u32,
+    /// In the device's own frames.
+    pub frames: u32,
+}
+
+/// When was each packet of a drained burst captured? Into `times`, one per
+/// packet.
+///
+/// A packet with a usable stamp keeps it ([`capture_time`]). Every other one is
+/// placed by what came after it: the reader drains the queue oldest packet
+/// first until nothing is left, so packet k was captured the frames of k and
+/// of every later packet in the burst before `now`, read when the last one
+/// came out. `GetCurrentPadding` cannot say this — on a capture stream it
+/// counts only the next packet, which left a burst after a stall stamped near
+/// `now`.
+///
+/// Returns the stamp that turned the device's trust off, if one did.
+pub fn burst_times(
+    burst: &[Drained],
+    now: i64,
+    device_rate: u32,
+    trust: &mut bool,
+    times: &mut Vec<i64>,
+) -> Option<i64> {
+    times.clear();
+    let mut distrusted = None;
+    let mut to_end: u64 = burst.iter().map(|packet| packet.frames as u64).sum();
+    for packet in burst {
+        let trusted = *trust;
+        let queued = u32::try_from(to_end).unwrap_or(u32::MAX);
+        times.push(capture_time(packet.stamped, packet.flags, now, queued, device_rate, trust));
+        if trusted && !*trust {
+            distrusted = Some(packet.stamped);
+        }
+        to_end -= packet.frames as u64;
+    }
+    distrusted
 }
 
 pub struct StreamHandle {
@@ -696,8 +742,16 @@ mod win {
         // See `usable_stamp` — not every device reports usable times.
         let mut trust_qpc = true;
 
+        // One burst: every packet that is waiting when the reader wakes, drained
+        // before any of it is placed (`burst_times`). Converted in order, so the
+        // resampler's phase runs on as before.
+        let mut burst: Vec<Drained> = Vec::new();
+        let mut burst_samples: Vec<f32> = Vec::with_capacity(4096);
+        let mut burst_ends: Vec<usize> = Vec::new();
+        let mut times: Vec<i64> = Vec::new();
+
         let mut outcome = Attempt::Stopped;
-        'pump: while !stop.load(Ordering::Relaxed) {
+        while !stop.load(Ordering::Relaxed) {
             match event {
                 Some(handle) => unsafe {
                     WaitForSingleObject(handle, 200);
@@ -705,6 +759,11 @@ mod win {
                 None => std::thread::sleep(std::time::Duration::from_millis(5)),
             }
 
+            burst.clear();
+            burst_samples.clear();
+            burst_ends.clear();
+            let mut now = 0i64;
+            let mut lost = None;
             loop {
                 // Not "nothing waiting" — this call only fails when the stream
                 // itself is in trouble, and a device that has gone fails it every
@@ -713,8 +772,8 @@ mod win {
                 let available = match unsafe { capture.GetNextPacketSize() } {
                     Ok(frames) => frames,
                     Err(err) => {
-                        outcome = Attempt::Lost(err.to_string());
-                        break 'pump;
+                        lost = Some(err.to_string());
+                        break;
                     }
                 };
                 if available == 0 {
@@ -740,32 +799,12 @@ mod win {
                         Some(&mut qpc_100ns),
                     )
                 } {
-                    outcome = Attempt::Lost(err.to_string());
-                    break 'pump;
+                    lost = Some(err.to_string());
+                    break;
                 }
-                // The clock is the same, only read a little later.
-                let now = now_100ns();
-                let stamped = qpc_100ns as i64;
-                // Valid, unread data in the endpoint buffer, this packet
-                // included — the queue the stamp is estimated from.
-                let queued = unsafe { client.GetCurrentPadding() }.unwrap_or(frames).max(frames);
-                let trusted = trust_qpc;
-                let qpc_100ns = capture_time(
-                    stamped,
-                    flags,
-                    now,
-                    queued,
-                    format.sample_rate,
-                    &mut trust_qpc,
-                );
-                if trusted && !trust_qpc {
-                    fallback_clock.store(true, Ordering::Relaxed);
-                    log::warn!(
-                        "audio source {kind:?} reports unusable timestamps \
-                         ({stamped} instead of roughly {now}) — falling back to \
-                         the system clock."
-                    );
-                }
+                // The clock is the same, only read a little later. The last
+                // packet's reading is the burst's end.
+                now = now_100ns();
 
                 if frames > 0 {
                     // BUFFER_FLAG_SILENT — ignore the buffer and
@@ -779,10 +818,37 @@ mod win {
                         };
                         convert(raw, frames as usize, &format, &mut resampler, &mut converted);
                     }
-                    ring.write(&converted, qpc_100ns);
+                    burst_samples.extend_from_slice(&converted);
                 }
+                burst_ends.push(burst_samples.len());
+                burst.push(Drained { stamped: qpc_100ns as i64, flags, frames });
 
                 let _ = unsafe { capture.ReleaseBuffer(frames) };
+            }
+
+            // What was drained before a failure is still written.
+            if !burst.is_empty() {
+                let distrusted =
+                    burst_times(&burst, now, format.sample_rate, &mut trust_qpc, &mut times);
+                if let Some(stamped) = distrusted {
+                    fallback_clock.store(true, Ordering::Relaxed);
+                    log::warn!(
+                        "audio source {kind:?} reports unusable timestamps \
+                         ({stamped} instead of roughly {now}) — falling back to \
+                         the system clock."
+                    );
+                }
+                let mut from = 0;
+                for ((packet, time), end) in burst.iter().zip(&times).zip(&burst_ends) {
+                    if packet.frames > 0 {
+                        ring.write(&burst_samples[from..*end], *time);
+                    }
+                    from = *end;
+                }
+            }
+            if let Some(err) = lost {
+                outcome = Attempt::Lost(err);
+                break;
             }
         }
 
@@ -943,20 +1009,25 @@ mod tests {
     }
 
     /// AUD-2: on the fallback clock, a stalled reader stamped the first queued
-    /// packet "now": 150 ms of fake dropout, then the source sat late for over a minute.
+    /// packet "now": 150 ms of fake dropout, then the source sat late for over a
+    /// minute. The reader drains each burst whole and places it by
+    /// [`burst_times`].
     #[test]
     fn a_stalled_reader_on_the_fallback_clock_does_not_drag_the_source_late() {
         let ring = SampleRing::new(48_000, 2);
         let block = vec![0.5f32; 480 * CHANNELS];
         let mut trust = false; // a device on the fallback clock
+        let mut times = Vec::new();
         let mut k = 0i64; // packet k covers [k*10 ms, (k+1)*10 ms)
         while k < 600 {
             // Read 2 ms after a packet completes. At 5.2 s the reader stalls and
             // then drains the 16 packets that piled up.
             let burst: i64 = if k == 520 { 16 } else { 1 };
             let now = (k + burst) * 100_000 + 20_000;
-            for queued in (1..=burst).rev() {
-                ring.write(&block, capture_time(0, 0, now, queued as u32 * 480, 48_000, &mut trust));
+            let drained = vec![Drained { stamped: 0, flags: 0, frames: 480 }; burst as usize];
+            burst_times(&drained, now, 48_000, &mut trust, &mut times);
+            for time in &times {
+                ring.write(&block, *time);
                 k += 1;
             }
         }
@@ -965,5 +1036,39 @@ mod tests {
         let mut out = vec![0.0f32; 480 * CHANNELS];
         ring.read_window(52_500_000, &mut out);
         assert!(out.iter().all(|s| *s == 0.5), "a fake dropout was filled in after the stall");
+    }
+
+    /// AUD-2, final review: a drained burst is placed backwards from `now` by the
+    /// frames from each packet to the burst's end, whatever their sizes; packets
+    /// with a usable stamp in the same burst keep it.
+    #[test]
+    fn a_drained_burst_is_placed_back_from_its_end() {
+        let mut trust = true;
+        let mut times = Vec::new();
+        let burst = [
+            Drained { stamped: 0, flags: 0, frames: 441 },
+            Drained { stamped: NOW - 150_000, flags: 0, frames: 441 },
+            Drained { stamped: NOW + 3_000_000, flags: BUFFER_FLAG_TIMESTAMP_ERROR, frames: 882 },
+            Drained { stamped: 0, flags: BUFFER_FLAG_SILENT, frames: 441 },
+        ];
+        assert_eq!(burst_times(&burst, NOW, 44_100, &mut trust, &mut times), None);
+        assert_eq!(times, vec![NOW - 500_000, NOW - 150_000, NOW - 300_000, NOW - 100_000]);
+        assert!(trust, "a flagged or empty stamp says nothing about the device");
+    }
+
+    /// A stamp from another timeline turns the trust off for the rest of the
+    /// burst, and the caller learns which one it was.
+    #[test]
+    fn a_burst_reports_the_stamp_that_cost_the_trust() {
+        let mut trust = true;
+        let mut times = Vec::new();
+        let burst = [
+            Drained { stamped: NOW - 200_000, flags: 0, frames: 480 },
+            Drained { stamped: 5_000, flags: 0, frames: 480 },
+            Drained { stamped: NOW - 100_000, flags: 0, frames: 480 },
+        ];
+        assert_eq!(burst_times(&burst, NOW, 48_000, &mut trust, &mut times), Some(5_000));
+        assert!(!trust);
+        assert_eq!(times, vec![NOW - 200_000, NOW - 200_000, NOW - 100_000]);
     }
 }
