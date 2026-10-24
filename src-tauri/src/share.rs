@@ -38,6 +38,10 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(60);
 /// Dialling again after a dropped line; a clip that cannot get through in
 /// this many tries will not in the next.
 const ATTEMPTS: u32 = 6;
+/// How long a peer may take to open the stream or send the header or the ask.
+const HANDSHAKE: Duration = Duration::from_secs(10);
+/// How long a peer may go without sending or taking a chunk before it is given up on.
+const IDLE: Duration = Duration::from_secs(30);
 const CHUNK: usize = 256 * 1024;
 /// Progress reaches the page at most this often.
 const EMIT_EVERY: Duration = Duration::from_millis(250);
@@ -927,14 +931,14 @@ async fn fetch(
         .await
         .map_err(|_| "could not reach them".to_string())?
         .map_err(net)?;
-    let (mut send, mut recv) = connection.open_bi().await.map_err(|err| err.to_string())?;
+    let (mut send, mut recv) = within(HANDSHAKE, "opening the stream", connection.open_bi()).await?;
     let ask = serde_json::to_vec(&Ask { id: id.into(), secret: secret.into(), offset, track }).map_err(net)?;
     send.write_all(&(ask.len() as u32).to_be_bytes()).await.map_err(net)?;
     send.write_all(&ask).await.map_err(net)?;
     let _ = send.finish();
 
     let mut header = [0u8; 8];
-    recv.read_exact(&mut header).await.map_err(net)?;
+    within(HANDSHAKE, "reading the header", recv.read_exact(&mut header)).await?;
     let rest = u64::from_be_bytes(header);
     if offset.checked_add(rest) != Some(size) {
         return Err("they offered a different file".into());
@@ -948,7 +952,7 @@ async fn fetch(
             connection.close(2u32.into(), b"cancelled");
             return Err("cancelled".into());
         }
-        let n = match recv.read(&mut buf).await.map_err(net)? {
+        let n = match within(IDLE, "they stopped sending", recv.read(&mut buf)).await? {
             Some(n) => n,
             None => break,
         };
@@ -1061,15 +1065,15 @@ impl ProtocolHandler for Serve {
 
 /// A receiver dialled in: check the ask, then stream the file from its offset.
 async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
-    let (mut send, mut recv) = connection.accept_bi().await.map_err(net)?;
+    let (mut send, mut recv) = within(HANDSHAKE, "waiting for the ask", connection.accept_bi()).await?;
     let mut length = [0u8; 4];
-    recv.read_exact(&mut length).await.map_err(net)?;
+    within(HANDSHAKE, "reading the ask", recv.read_exact(&mut length)).await?;
     let length = u32::from_be_bytes(length) as usize;
     if length > 4096 {
         return Err("ask too long".into());
     }
     let mut ask = vec![0u8; length];
-    recv.read_exact(&mut ask).await.map_err(net)?;
+    within(HANDSHAKE, "reading the ask", recv.read_exact(&mut ask)).await?;
     let ask: Ask = serde_json::from_slice(&ask).map_err(net)?;
 
     let (path, size, base) = {
@@ -1114,7 +1118,7 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         if n == 0 {
             break;
         }
-        send.write_all(&buf[..n]).await.map_err(net)?;
+        within(IDLE, "they stopped receiving", send.write_all(&buf[..n])).await?;
         moved += n as u64;
         if last_emit.elapsed() >= EMIT_EVERY {
             last_emit = std::time::Instant::now();
@@ -1402,6 +1406,19 @@ fn open_part(part: &Path, offset: u64) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+/// Runs one network await under a limit: a peer that goes quiet becomes an error,
+/// which the retry loop treats like any lost connection (and checks Cancel first).
+async fn within<T, E: std::fmt::Debug>(
+    limit: Duration,
+    what: &str,
+    work: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(limit, work).await {
+        Ok(done) => done.map_err(net),
+        Err(_) => Err(format!("{what} timed out")),
+    }
+}
+
 /// A network error with its cause — "connection lost" alone says nothing.
 fn net(err: impl std::fmt::Debug) -> String {
     format!("{err:?}")
@@ -1452,6 +1469,13 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::model::ClipTrack;
+
+    #[test]
+    fn a_peer_that_goes_quiet_is_given_up_on() {
+        let quiet = std::future::pending::<Result<(), String>>();
+        let outcome = tauri::async_runtime::block_on(within(Duration::from_millis(50), "reading", quiet));
+        assert_eq!(outcome, Err("reading timed out".to_string()));
+    }
 
     fn stem(index: u32, label: &str) -> ClipTrack {
         ClipTrack { index, label: label.into(), channels: 2, preview_path: Some(format!("{index}.m4a")) }
