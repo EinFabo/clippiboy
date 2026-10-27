@@ -125,8 +125,9 @@ export function ClipPlayer({
   /** Whether trim or mix are not applied yet; `close` is defined above `dirty`. */
   const dirtyRef = useRef(false);
   const [askingDiscard, setAskingDiscard] = useState(false);
-  /** Which way to page once the discard question is confirmed; 0 means close. */
-  const [pendingStep, setPendingStep] = useState(0);
+  /** What follows once the discard question is confirmed: which way to page,
+   *  0 to close, or "mixer" to go set up tracks in the mixer. */
+  const [pendingStep, setPendingStep] = useState<number | "mixer">(0);
   writing.current = saving || restoring;
   const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
@@ -290,6 +291,16 @@ export function ClipPlayer({
       setAskingDiscard(true);
     } else if (next === "go") close();
   }, [close]);
+
+  /** Off to the mixer — a navigation that drops the player, so unapplied trim
+   *  or mix are asked about first, as on closing. */
+  const requestMixer = useCallback(() => {
+    const next = closing(writing.current, dirtyRef.current);
+    if (next === "ask") {
+      setPendingStep("mixer");
+      setAskingDiscard(true);
+    } else if (next === "go") onOpenMixer();
+  }, [onOpenMixer]);
 
   const step = useCallback(
     (delta: number, confirmed = false) => {
@@ -737,7 +748,8 @@ export function ClipPlayer({
             cancelTitle="Back to the player — Escape does the same"
             onConfirm={() => {
               setAskingDiscard(false);
-              if (pendingStep) step(pendingStep, true);
+              if (pendingStep === "mixer") onOpenMixer();
+              else if (pendingStep) step(pendingStep, true);
               else close();
             }}
             onCancel={() => setAskingDiscard(false)}
@@ -956,7 +968,7 @@ export function ClipPlayer({
           saving={saving}
           justSaved={showSaved}
           onSave={save}
-          onOpenMixer={onOpenMixer}
+          onOpenMixer={requestMixer}
         />
       </div>
 

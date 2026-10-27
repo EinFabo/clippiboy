@@ -445,6 +445,7 @@ export function AudioMixer() {
                         if (gainDb !== source.gainDb)
                           upsertSource({ ...source, gainDb });
                       }}
+                      onRelease={() => setGainDraft(null)}
                     />
                     <span className="w-14 shrink-0 text-right font-mono text-xs text-ink-muted">
                       {shownGain > 0 ? "+" : ""}

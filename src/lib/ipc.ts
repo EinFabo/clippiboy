@@ -161,12 +161,13 @@ export const api = {
   /** Set or take away the heart. The file stays where it is. */
   setClipFavorite: (id: string, favorite: boolean) =>
     invoke<Clip>("set_clip_favorite", { id, favorite }),
+  /** Take a game off every clip that has it and file those clips back. */
+  clearGame: (game: string) => invoke<void>("clear_game", { game }),
   /**
    * Move the file into the folder it belongs in (game or `Favorites`).
    * Deliberately separate from editing: while the clip is playing in the player,
    * nobody may pull its file out from under it.
    */
-  clearGame: (game: string) => invoke<void>("clear_game", { game }),
   fileClip: (id: string) => invoke<Clip>("file_clip", { id }),
   clipTracks: (id: string) => invoke<ClipTrack[]>("clip_tracks", { id }),
   clipWaveform: (id: string) => invoke<string>("clip_waveform", { id }),

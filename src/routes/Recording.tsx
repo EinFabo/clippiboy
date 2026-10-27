@@ -364,6 +364,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 max={600}
                 step={15}
                 onChange={setSecondsDraft}
+                onRelease={() => setSecondsDraft(null)}
                 onCommit={(seconds) => {
                   setSecondsDraft(null);
                   if (seconds === config.buffer.seconds) return;
@@ -402,6 +403,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 max={config.buffer.seconds}
                 step={5}
                 onChange={setClipDraft}
+                onRelease={() => setClipDraft(null)}
                 onCommit={(value) => {
                   setClipDraft(null);
                   if (value === clipLength(config.buffer)) return;
@@ -446,6 +448,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 max={4096}
                 step={64}
                 onChange={setMemoryDraft}
+                onRelease={() => setMemoryDraft(null)}
                 onCommit={(memoryMb) => {
                   setMemoryDraft(null);
                   void patchConfig({ buffer: { ...config.buffer, memoryMb } });

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { settlesWithoutChange } from "@/lib/draft";
 import { SLIDE, SlidingIndicator } from "./SlidingIndicator";
 
 export function Toggle({
@@ -95,6 +96,7 @@ export function Slider({
   step = 1,
   onChange,
   onCommit,
+  onRelease,
   label,
 }: {
   value: number;
@@ -109,21 +111,58 @@ export function Slider({
    * a Tab onto it must not write the value shown.
    */
   onCommit?: (v: number) => void;
+  /**
+   * The knob was let go where it was pressed, or the slider lost the focus —
+   * no `onCommit` follows. A draft kept for `onCommit` goes here, or it would
+   * stay and hide the stored value.
+   */
+  onRelease?: () => void;
   label?: string;
 }) {
   const pct = ((value - min) / (max - min)) * 100;
   const input = useRef<HTMLInputElement>(null);
   const commit = useRef(onCommit);
   commit.current = onCommit;
+  const release = useRef(onRelease);
+  release.current = onRelease;
   // The browser's own `change`, not React's `onChange` (which is `input`): it
   // fires once the knob is let go — wherever the pointer is by then — or a key
-  // moved it, and only when the value differs from where it started.
+  // moved it, and only when the value differs from where it started. When it
+  // does not differ, the release is told instead.
   useEffect(() => {
     const element = input.current;
     if (!element) return;
     const committed = () => commit.current?.(Number(element.value));
+    let start: string | null = null;
+    const stopWatching = () => {
+      window.removeEventListener("pointerup", letGo);
+      window.removeEventListener("pointercancel", letGo);
+    };
+    const letGo = () => {
+      stopWatching();
+      if (settlesWithoutChange(start, element.value)) release.current?.();
+      start = null;
+    };
+    const pressed = () => {
+      start = element.value;
+      window.addEventListener("pointerup", letGo);
+      window.addEventListener("pointercancel", letGo);
+    };
+    // Focus gone — mid-drag too, after which no release may ever come.
+    const left = () => {
+      stopWatching();
+      start = null;
+      release.current?.();
+    };
     element.addEventListener("change", committed);
-    return () => element.removeEventListener("change", committed);
+    element.addEventListener("pointerdown", pressed);
+    element.addEventListener("blur", left);
+    return () => {
+      element.removeEventListener("change", committed);
+      element.removeEventListener("pointerdown", pressed);
+      element.removeEventListener("blur", left);
+      stopWatching();
+    };
   }, []);
   return (
     <input

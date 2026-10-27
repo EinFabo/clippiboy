@@ -31,8 +31,8 @@ export class ErrorBoundary extends Component<
         className={`${
           this.props.overlay
             ? "fixed left-1/2 top-1/2 z-[100] w-80 -translate-x-1/2 -translate-y-1/2 bg-neutral-900"
-            : "mx-auto my-16 max-w-sm"
-        } flex flex-col items-center gap-3 rounded-lg border border-white/10 bg-black/40 p-6 text-center text-sm text-white`}
+            : "mx-auto my-16 max-w-sm bg-black/40"
+        } flex flex-col items-center gap-3 rounded-lg border border-white/10 p-6 text-center text-sm text-white`}
       >
         <p>Something broke here.</p>
         <div className="flex gap-2">
