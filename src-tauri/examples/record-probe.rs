@@ -826,7 +826,7 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool, hole: bool) {
         samples.push(health);
     }
 
-    if let Some(err) = pipeline.shared.error.lock().take() {
+    if let Some(err) = pipeline.shared.errors.take_unseen() {
         println!("error from the recording: {err}");
     }
 
