@@ -710,9 +710,18 @@ impl AppState {
     }
 }
 
+/// Whether a finished start is announced: only the call that really started
+/// the buffer says so. One that found it running — a slow start overtaken by
+/// the next tick, a second hotkey — stays quiet.
+pub fn announce_start(started: bool) -> bool {
+    started
+}
+
 impl AppState {
-    /// Starts recording into the replay buffer.
-    pub fn start_pipeline(&self) -> Result<(), String> {
+    /// Starts recording into the replay buffer. `Ok(true)` only when this call
+    /// brought the pipeline up or turned a recording-only one into a buffer;
+    /// `Ok(false)` when the buffer was running already (see [`announce_start`]).
+    pub fn start_pipeline(&self) -> Result<bool, String> {
         let _lifecycle = self.lifecycle.lock();
         if self.pipeline.lock().is_some() {
             // Running for a recording only: the buffer just gets its length
@@ -728,10 +737,12 @@ impl AppState {
                 let game = self.current_game.lock().clone();
                 *self.buffering_game.lock() = game;
                 self.status.lock().buffer_active = true;
+                return Ok(true);
             }
-            return Ok(());
+            return Ok(false);
         }
-        self.launch_pipeline(true)
+        self.launch_pipeline(true)?;
+        Ok(true)
     }
 
     /// Bring the capture stack up. `for_buffer` false means a recording is the
@@ -1625,6 +1636,12 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_start_that_found_the_buffer_running_is_not_announced() {
+        assert!(announce_start(true));
+        assert!(!announce_start(false));
+    }
 
     #[test]
     fn a_raised_flag_comes_down_with_its_guard() {

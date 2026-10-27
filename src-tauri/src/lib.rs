@@ -423,19 +423,35 @@ pub fn restart_buffer_for_settings(app: &tauri::AppHandle) {
 /// Start the buffer and report the result.
 pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
     match app.state::<AppState>().start_pipeline() {
-        Ok(()) => buffer_started(app),
+        Ok(started) => announce_started(app, started),
         Err(err) => buffer_failed(app, err),
     }
 }
+
+/// Say the buffer is running — only when this start made it so. One that
+/// found it running already (the slow start of an earlier tick, a second
+/// hotkey) says nothing, or the banner and sound came twice.
+fn announce_started(app: &tauri::AppHandle, started: bool) {
+    if state::announce_start(started) {
+        buffer_started(app);
+    } else {
+        log::info!("buffer: start found the buffer already running");
+    }
+}
+
+/// Set while a start the automation spawned runs. A start brings up the whole
+/// capture stack and can outlast several two-second ticks; without this each
+/// tick would see "not running" and start again, and count a failure again.
+static AUTO_STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The automation's start. Reports a failure once, not on every retry — see
 /// `AutoBuffer::start_failed`.
 fn auto_start_buffer(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     match state.start_pipeline() {
-        Ok(()) => {
+        Ok(started) => {
             state.auto.start_succeeded();
-            buffer_started(app);
+            announce_started(app, started);
         }
         Err(err) => {
             let first = state.auto.start_failures() == 0;
@@ -703,7 +719,7 @@ fn watch_screen(app: &tauri::AppHandle) {
             repair_screens(&app);
             state.stop_pipeline();
             match state.start_pipeline() {
-                Ok(()) => {
+                Ok(_) => {
                     let screen = state.status_snapshot().screen_fallback;
                     let title = match drift {
                         capture::Drift::Resized => "Recording follows the new resolution",
@@ -810,7 +826,7 @@ fn watch_encoder(app: &tauri::AppHandle) {
         if state.is_buffering() {
             state.stop_pipeline();
             match state.start_pipeline() {
-                Ok(()) => {
+                Ok(_) => {
                     // Announced again should it ever have to give up later on.
                     GAVE_UP.store(false, Ordering::SeqCst);
                     // One banner stands at a time: the ended recording is the
@@ -858,6 +874,9 @@ fn watch_encoder(app: &tauri::AppHandle) {
 /// follow the foreground or an alt-tab into the browser would leave the buffer
 /// and its encoder running until the game is closed.
 fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
+    if AUTO_STARTING.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let state = app.state::<AppState>();
     let config = state.config_snapshot();
     let active = state.status.lock().buffer_active;
@@ -887,8 +906,14 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     // Do not do it on the status tick: bringing up the recording takes a moment,
     // and stopping waits, if need be, for a save in progress.
     let app = app.clone();
+    if action == state::AutoAction::Start {
+        AUTO_STARTING.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     std::thread::spawn(move || match action {
-        state::AutoAction::Start => auto_start_buffer(&app),
+        state::AutoAction::Start => {
+            auto_start_buffer(&app);
+            AUTO_STARTING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         state::AutoAction::Stop => stop_buffer_and_notify(&app),
         state::AutoAction::Nothing => {}
     });
