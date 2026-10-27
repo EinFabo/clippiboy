@@ -432,7 +432,7 @@ pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
 /// found it running already (the slow start of an earlier tick, a second
 /// hotkey) says nothing, or the banner and sound came twice.
 fn announce_started(app: &tauri::AppHandle, started: bool) {
-    if state::announce_start(started) {
+    if started {
         buffer_started(app);
     } else {
         log::info!("buffer: start found the buffer already running");
@@ -875,6 +875,8 @@ fn watch_encoder(app: &tauri::AppHandle) {
 /// and its encoder running until the game is closed.
 fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     if AUTO_STARTING.load(std::sync::atomic::Ordering::SeqCst) {
+        // Deliberately delays lock and auto-stop polling until the running
+        // start finishes; the counters keep their state meanwhile.
         return;
     }
     let state = app.state::<AppState>();
@@ -906,13 +908,13 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     // Do not do it on the status tick: bringing up the recording takes a moment,
     // and stopping waits, if need be, for a save in progress.
     let app = app.clone();
-    if action == state::AutoAction::Start {
-        AUTO_STARTING.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+    // Raised here, lowered by the thread's end on any exit.
+    let starting = (action == state::AutoAction::Start)
+        .then(|| state::FlagGuard::raise(&AUTO_STARTING));
     std::thread::spawn(move || match action {
         state::AutoAction::Start => {
+            let _starting = starting;
             auto_start_buffer(&app);
-            AUTO_STARTING.store(false, std::sync::atomic::Ordering::SeqCst);
         }
         state::AutoAction::Stop => stop_buffer_and_notify(&app),
         state::AutoAction::Nothing => {}

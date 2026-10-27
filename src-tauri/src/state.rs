@@ -710,23 +710,51 @@ impl AppState {
     }
 }
 
-/// Whether a finished start is announced: only the call that really started
-/// the buffer says so. One that found it running — a slow start overtaken by
-/// the next tick, a second hotkey — stays quiet.
-pub fn announce_start(started: bool) -> bool {
-    started
+/// What a start has to do, given whether a pipeline runs and whether it
+/// already serves as the buffer.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum StartStep {
+    /// Nothing runs: bring the capture stack up.
+    Launch,
+    /// Running for a recording only: the buffer gets its length back.
+    Promote,
+    /// The buffer runs already — a slow start overtaken by the next tick, a
+    /// second hotkey. Nothing to do and nothing to announce.
+    AlreadyRunning,
+}
+
+impl StartStep {
+    /// Whether this start made the buffer run, and so is announced.
+    pub fn started(self) -> bool {
+        self != StartStep::AlreadyRunning
+    }
+}
+
+pub fn start_step(pipeline_running: bool, buffer_wanted: bool) -> StartStep {
+    match (pipeline_running, buffer_wanted) {
+        (false, _) => StartStep::Launch,
+        (true, false) => StartStep::Promote,
+        (true, true) => StartStep::AlreadyRunning,
+    }
 }
 
 impl AppState {
     /// Starts recording into the replay buffer. `Ok(true)` only when this call
     /// brought the pipeline up or turned a recording-only one into a buffer;
-    /// `Ok(false)` when the buffer was running already (see [`announce_start`]).
+    /// `Ok(false)` when the buffer was running already (see [`start_step`]).
     pub fn start_pipeline(&self) -> Result<bool, String> {
         let _lifecycle = self.lifecycle.lock();
-        if self.pipeline.lock().is_some() {
-            // Running for a recording only: the buffer just gets its length
-            // back, and fills from here.
-            if !self.buffer_wanted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let step = start_step(
+            self.pipeline.lock().is_some(),
+            self.buffer_wanted.load(std::sync::atomic::Ordering::SeqCst),
+        );
+        match step {
+            StartStep::Launch => self.launch_pipeline(true)?,
+            StartStep::Promote => {
+                // Running for a recording only: the buffer just gets its
+                // length back, and fills from here.
+                self.buffer_wanted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 let config = self.config_snapshot();
                 let running = self.active_recording.lock().clone();
                 let memory = memory_budget(running.as_ref(), &config);
@@ -737,12 +765,10 @@ impl AppState {
                 let game = self.current_game.lock().clone();
                 *self.buffering_game.lock() = game;
                 self.status.lock().buffer_active = true;
-                return Ok(true);
             }
-            return Ok(false);
+            StartStep::AlreadyRunning => {}
         }
-        self.launch_pipeline(true)?;
-        Ok(true)
+        Ok(step.started())
     }
 
     /// Bring the capture stack up. `for_buffer` false means a recording is the
@@ -1639,8 +1665,12 @@ mod tests {
 
     #[test]
     fn a_start_that_found_the_buffer_running_is_not_announced() {
-        assert!(announce_start(true));
-        assert!(!announce_start(false));
+        assert_eq!(start_step(false, false), StartStep::Launch);
+        assert_eq!(start_step(true, false), StartStep::Promote);
+        assert_eq!(start_step(true, true), StartStep::AlreadyRunning);
+        assert!(StartStep::Launch.started());
+        assert!(StartStep::Promote.started());
+        assert!(!StartStep::AlreadyRunning.started());
     }
 
     #[test]
