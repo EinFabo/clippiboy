@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isTrimmed, singleTrackVolume, snapTrim } from "./editRules.ts";
+import { isTrimmed, sameCut, singleTrackVolume, snapTrim } from "./editRules.ts";
 
 test("a cut of a quarter second or less snaps to the edge, as the core drops it", () => {
   assert.deepEqual(snapTrim(0.2, 29.9, 30), { start: 0, end: 30 });
@@ -16,4 +16,15 @@ test("a muted single track is silent in the preview too", () => {
   assert.equal(singleTrackVolume(1, 0, true), 0);
   assert.equal(singleTrackVolume(0.8, -6, false).toFixed(3), (0.8 * 10 ** (-6 / 20)).toFixed(3));
   assert.equal(singleTrackVolume(1, 6, false), 1, "the element cannot boost");
+});
+
+test("a real move of the cut is a change, an edge cut under a quarter second is not", () => {
+  assert.equal(sameCut({ start: 0.4, end: 30 }, { start: 0.55, end: 30 }, 30), false);
+  assert.equal(sameCut({ start: 0.1, end: 30 }, { start: 0, end: 30 }, 30), true);
+  assert.equal(sameCut({ start: 0, end: 29.9 }, { start: 0, end: 30 }, 30), true);
+  assert.equal(sameCut({ start: 0.4, end: 30 }, { start: 0.42, end: 30 }, 30), true);
+});
+test("a track at or below the core's silence threshold is silent", () => {
+  assert.equal(singleTrackVolume(1, -59, false), 0);
+  assert.ok(singleTrackVolume(1, -58, false) > 0);
 });

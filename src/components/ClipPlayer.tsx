@@ -24,7 +24,7 @@ import { formatAgo, formatSize } from "@/lib/format";
 import { useClipMix } from "@/lib/useClipMix";
 import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
-import { EDGE_S, snapTrim } from "@/lib/editRules";
+import { sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, typesText } from "@/lib/viewer";
 import type { Clip, ClipEdit } from "@/lib/types";
 
@@ -588,8 +588,8 @@ export function ClipPlayer({
     !mix.loading &&
     !mix.failed &&
     (mix.tracks.length > 0
-      ? !sameEdit(current, saved)
-      : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }));
+      ? !sameEdit(current, saved, duration)
+      : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration));
   dirtyRef.current = dirty;
   // Edits that were applied meanwhile need no question any more.
   useEffect(() => {
@@ -629,7 +629,7 @@ export function ClipPlayer({
       // is stored as level zero: the sliders follow, or the next save would
       // apply the same −6 dB a second time.
       const kept = written?.edit?.tracks;
-      if (kept && !sameEdit({ ...current, tracks: kept }, current)) mix.adopt(kept);
+      if (kept && !sameEdit({ ...current, tracks: kept }, current, duration)) mix.adopt(kept);
       setJustSaved(true);
     } catch {
       // The store has already raised the error as a notice. All that counts here
@@ -1149,15 +1149,18 @@ function savedEdit(
 }
 
 /**
- * Same state? Start and end within the core's edge tolerance (250 ms): the length the
+ * Same state? The cut is compared as the core would save it (an edge cut under
+ * a quarter second is no cut), with a few milliseconds of slack: the length the
  * video element reports varies by fractions between two loads — without slack
  * every freshly opened clip would count as changed.
  */
-function sameEdit(a: ClipEdit, b: ClipEdit): boolean {
-  const near = (x: number, y: number) => Math.abs(x - y) <= EDGE_S * 1000;
+function sameEdit(a: ClipEdit, b: ClipEdit, duration: number): boolean {
   return (
-    near(a.startMs, b.startMs) &&
-    near(a.endMs, b.endMs) &&
+    sameCut(
+      { start: a.startMs / 1000, end: a.endMs / 1000 },
+      { start: b.startMs / 1000, end: b.endMs / 1000 },
+      duration,
+    ) &&
     a.tracks.length === b.tracks.length &&
     a.tracks.every((track, i) => {
       const other = b.tracks[i];

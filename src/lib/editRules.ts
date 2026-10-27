@@ -6,6 +6,9 @@
 /** Mirrors `edit::EDGE_TOLERANCE_MS`: a cut this close to an edge is dropped on save. */
 export const EDGE_S = 0.25;
 
+/** Mirrors `stems::SILENT_DB`: at or below this a track is dropped on save. */
+export const SILENT_DB = -59;
+
 /** A cut of `EDGE_S` or less snaps to the edge, as the core treats it. */
 export function snapTrim(
   start: number,
@@ -28,5 +31,20 @@ export function isTrimmed(start: number, end: number, duration: number): boolean
  * the level applies, and the element cannot boost above 1.
  */
 export function singleTrackVolume(master: number, gainDb: number, muted: boolean): number {
-  return muted ? 0 : Math.min(1, master * 10 ** (gainDb / 20));
+  return muted || gainDb <= SILENT_DB ? 0 : Math.min(1, master * 10 ** (gainDb / 20));
+}
+
+/**
+ * Do two selections save the same cut? Both are snapped by the edge rule first
+ * (a cut under a quarter second is no cut), then compared with a small slack:
+ * the length the video element reports varies by fractions between two loads.
+ */
+export function sameCut(
+  a: { start: number; end: number },
+  b: { start: number; end: number },
+  duration: number,
+): boolean {
+  const x = snapTrim(a.start, a.end, duration);
+  const y = snapTrim(b.start, b.end, duration);
+  return Math.abs(x.start - y.start) <= 0.05 && Math.abs(x.end - y.end) <= 0.05;
 }

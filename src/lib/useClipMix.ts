@@ -285,10 +285,11 @@ export function useClipMix(
     // sound, so the level and the mute act on it, as they do on save.
     if (video.current) {
       const only = !separate && tracks.length === 1 ? tracks[0] : null;
+      const state = only ? (mix[only.index] ?? NEUTRAL) : NEUTRAL;
       video.current.volume = separate
         ? 0
         : only
-          ? singleTrackVolume(master, (mix[only.index] ?? NEUTRAL).gainDb, !audible(mix[only.index] ?? NEUTRAL, anySolo))
+          ? singleTrackVolume(master, state.gainDb, !audible(state, anySolo))
           : master;
     }
 
