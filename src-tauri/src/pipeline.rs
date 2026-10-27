@@ -445,6 +445,9 @@ pub struct Shared {
     /// How far the mixer has got. A save waits for it to pass the clip's end.
     pub mixed: Arc<MixPosition>,
     pub fps: u32,
+    /// Width and height the encoder runs at — the size of every clip cut
+    /// from this ring.
+    pub size: (u32, u32),
     /// The encoded video packets.
     pub packets: Mutex<ReplayBuffer>,
     /// One ring per enabled source — the main mix is not among them, it is
@@ -759,6 +762,9 @@ pub struct ClipSnapshot {
     /// How far the mixer has got — the rings are read only once it passed
     /// [`Self::end_100ns`].
     pub mixed: Arc<MixPosition>,
+    /// The picture's size, from the pipeline the packets came out of.
+    pub width: u32,
+    pub height: u32,
 }
 
 impl ClipSnapshot {
@@ -945,7 +951,19 @@ mod win {
             std::thread::Builder::new()
                 .name("clippiboy-mixer".into())
                 .spawn(move || super::mix_loop(shared, stop))
-                .map_err(|err| format!("Mischer: {err}"))?
+        };
+        let mixer = match mixer {
+            Ok(mixer) => mixer,
+            Err(err) => {
+                // The clock is already running. Left alone it ran on detached,
+                // kept the encoder and `Shared` alive and encoded the last
+                // frame forever (BUF-10). Same order as `stop`.
+                latest.stop();
+                let _ = pacer.join();
+                drop(capture);
+                drop(encoder);
+                return Err(format!("Could not start the audio mixer: {err}"));
+            }
         };
 
         Ok(Running {
@@ -1187,6 +1205,7 @@ impl Pipeline {
             keyframe_seconds: recording.keyframe_seconds,
             mixed: Arc::new(MixPosition::default()),
             fps: recording.fps.max(1),
+            size: (recording.width, recording.height),
             packets: Mutex::new(packets),
             tracks: Mutex::new(tracks),
             sources: Mutex::new(sources),
@@ -1343,6 +1362,8 @@ impl Pipeline {
             timestamped,
             largest_step_us,
             mixed: self.shared.mixed.clone(),
+            width: self.shared.size.0,
+            height: self.shared.size.1,
             packets,
         })
     }

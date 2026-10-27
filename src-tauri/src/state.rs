@@ -15,6 +15,24 @@ use crate::recorder::{self, Recorder};
 /// for a keyframe to begin on — the ring always keeps its last one anyway.
 const IDLE_RING_SECONDS: u32 = 2;
 
+/// The packet ring's memory budget. Worked out from the recording the
+/// pipeline really runs — fitted to the source, with its bitrate — when there
+/// is one: from the config's, an automatic budget changed size with every
+/// length change against the one it started with (BUF-V2).
+pub fn memory_budget(running: Option<&RecordingConfig>, config: &AppConfig) -> u64 {
+    config::effective_memory_bytes(running.unwrap_or(&config.recording), &config.buffer)
+}
+
+/// Seconds and bytes for the packet ring. Kept for a recording alone, it
+/// stays small whatever the buffer is set to.
+pub fn ring_size(for_buffer: bool, seconds: u32, memory: u64) -> (u32, u64) {
+    if for_buffer {
+        (seconds, memory)
+    } else {
+        (IDLE_RING_SECONDS, u64::MAX)
+    }
+}
+
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     /// The last configs handed out, by revision, for merging a write built on
@@ -533,16 +551,18 @@ impl AppState {
         // here, shorter is cut down. Without this it kept the length it was
         // started with until the next start, and a Stream Deck key on 3:00
         // saved the old 1:30.
-        let memory = config::effective_memory_bytes(&next.recording, &next.buffer);
+        // The budget comes from the bitrate the pipeline runs with on both
+        // sides, so a bitrate changed in the settings alone moves nothing.
+        let running = self.active_recording.lock().clone();
+        let memory = memory_budget(running.as_ref(), &next);
         if next.buffer.seconds != previous.buffer.seconds
-            || memory != config::effective_memory_bytes(&previous.recording, &previous.buffer)
+            || memory != memory_budget(running.as_ref(), &previous)
         {
             if let Some(shared) = self.shared.lock().as_ref() {
                 shared.set_buffer_seconds(next.buffer.seconds);
-                // Kept for a recording alone, the ring stays small.
-                if self.buffer_wanted() {
-                    shared.packets.lock().set_capacity(next.buffer.seconds, memory);
-                }
+                let (seconds, bytes) =
+                    ring_size(self.buffer_wanted(), next.buffer.seconds, memory);
+                shared.packets.lock().set_capacity(seconds, bytes);
             }
         }
         // If a recording is running it has to learn about the changed sources
@@ -635,11 +655,11 @@ impl AppState {
             // back, and fills from here.
             if !self.buffer_wanted.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let config = self.config_snapshot();
+                let running = self.active_recording.lock().clone();
+                let memory = memory_budget(running.as_ref(), &config);
                 if let Some(shared) = self.shared.lock().as_ref() {
-                    shared.packets.lock().set_capacity(
-                        config.buffer.seconds,
-                        config::effective_memory_bytes(&config.recording, &config.buffer),
-                    );
+                    let (seconds, bytes) = ring_size(true, config.buffer.seconds, memory);
+                    shared.packets.lock().set_capacity(seconds, bytes);
                 }
                 let game = self.current_game.lock().clone();
                 *self.buffering_game.lock() = game;
@@ -670,18 +690,30 @@ impl AppState {
         let pipeline = Pipeline::start(
             &config.recording,
             config.buffer.seconds,
-            config::effective_memory_bytes(&config.recording, &config.buffer),
+            memory_budget(Some(&config.recording), &config),
             config.sources.clone(),
             self.audio.clone(),
         )?;
-        if !for_buffer {
-            pipeline.shared.packets.lock().set_capacity(IDLE_RING_SECONDS, u64::MAX);
-        }
         self.buffer_wanted
             .store(for_buffer, std::sync::atomic::Ordering::SeqCst);
-        *self.shared.lock() = Some(pipeline.shared.clone());
-        *self.pipeline.lock() = Some(pipeline);
+        // Before `shared`: a config change that finds the pipeline registered
+        // sizes the ring from the recording it really runs.
         *self.active_recording.lock() = Some(config.recording.clone());
+        let shared = pipeline.shared.clone();
+        *self.shared.lock() = Some(shared.clone());
+        *self.pipeline.lock() = Some(pipeline);
+        // A length or a source changed during the seconds `Pipeline::start`
+        // took found no pipeline to pass it to (BUF-9). Read once more now
+        // that it is registered — what comes later reaches it by itself.
+        let fresh = self.config_snapshot();
+        shared.set_buffer_seconds(fresh.buffer.seconds);
+        let (seconds, bytes) = ring_size(
+            for_buffer,
+            fresh.buffer.seconds,
+            memory_budget(Some(&config.recording), &fresh),
+        );
+        shared.packets.lock().set_capacity(seconds, bytes);
+        shared.set_sources(fresh.sources.clone());
         // Copy first, then set: holding both locks at once would run against
         // the reverse order in `save_clip`, and the two hotkey threads could
         // deadlock each other.
@@ -729,7 +761,12 @@ impl AppState {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.shared.lock().take();
         self.active_recording.lock().take();
-        if let Some(mut pipeline) = self.pipeline.lock().take() {
+        // Taken out first, stopped after: in the `if let` the guard lived
+        // through the joins and the encoder's drain, and the status tick — the
+        // meters — and every save waited on it (BUF-7). `lifecycle`, held by
+        // the caller, keeps a start out meanwhile.
+        let taken = self.pipeline.lock().take();
+        if let Some(mut pipeline) = taken {
             pipeline.stop();
         }
         let mut status = self.status.lock();
@@ -1034,14 +1071,6 @@ impl AppState {
             pipeline.snapshot(seconds)?
         };
 
-        // The file's dimensions come from the running recording, not from the
-        // config: what gets saved is what the encoder really received.
-        let recording = self
-            .active_recording
-            .lock()
-            .clone()
-            .unwrap_or_else(|| config.recording.clone());
-
         // Not the snapshot but the game detected while buffering — when saving
         // via the button, ClippiBoy is in the foreground.
         let game = self.game_for(std::time::Duration::from_secs(seconds.into()));
@@ -1050,6 +1079,10 @@ impl AppState {
         // The id already here: the muxer files the individual tracks under it,
         // and those come out of the same ffmpeg run as the clip.
         let id = uuid::Uuid::new_v4().to_string();
+        // The file's dimensions are what the encoder received, taken with the
+        // packets: read afterwards, a restart in between gave the row the next
+        // pipeline's size (BUF-8).
+        let (width, height) = (snapshot.width, snapshot.height);
         let result = crate::muxer::build(crate::muxer::ClipRequest {
             snapshot,
             clip_id: id.clone(),
@@ -1065,8 +1098,8 @@ impl AppState {
                 .unwrap_or(0),
             duration_ms: result.duration_ms,
             game,
-            width: recording.width,
-            height: recording.height,
+            width,
+            height,
             size_bytes: result.size_bytes,
             thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
             title: None,
@@ -1513,6 +1546,28 @@ mod tests {
             assert!(flag.load(SeqCst));
         }
         assert!(!flag.load(SeqCst));
+    }
+
+    #[test]
+    fn the_memory_budget_follows_the_bitrate_the_pipeline_started_with() {
+        let mut config = crate::config::default_config();
+        config.buffer.memory_mb = 0;
+        let mut running = config.recording.clone();
+        running.bitrate_kbps = config.recording.bitrate_kbps * 2;
+        assert_eq!(
+            memory_budget(Some(&running), &config),
+            crate::config::effective_memory_bytes(&running, &config.buffer)
+        );
+        assert_eq!(
+            memory_budget(None, &config),
+            crate::config::effective_memory_bytes(&config.recording, &config.buffer)
+        );
+    }
+
+    #[test]
+    fn a_ring_kept_only_for_a_recording_stays_small() {
+        assert_eq!(ring_size(false, 300, 1 << 30), (IDLE_RING_SECONDS, u64::MAX));
+        assert_eq!(ring_size(true, 300, 1 << 30), (300, 1 << 30));
     }
 
     fn secs(n: u64) -> std::time::Duration {
