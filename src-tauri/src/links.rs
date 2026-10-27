@@ -437,7 +437,7 @@ async fn upload(
     let copied = if size <= MAX_BYTES {
         let moved = {
             let (source, temp) = (source.clone(), temp.clone());
-            tokio::task::spawn_blocking(move || faststart(&source, &temp)).await
+            tokio::task::spawn_blocking(move || faststart(&source, &temp, "preparing a clip for its link")).await
         };
         match moved {
             Ok(Ok(())) if std::fs::metadata(&temp).is_ok_and(|meta| meta.len() <= MAX_BYTES) => true,
@@ -527,10 +527,12 @@ fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std
 }
 
 /// Copy the clip with its index at the front, as [`faststart_args`] says.
-fn faststart(source: &std::path::Path, output: &std::path::Path) -> Result<(), String> {
+/// Sending to a friend makes the same copy of a clip that still carries its
+/// source tracks (`share.rs`). `doing` names the step in an error.
+pub(crate) fn faststart(source: &std::path::Path, output: &std::path::Path, doing: &str) -> Result<(), String> {
     let mut command = crate::muxer::ffmpeg();
     command.args(faststart_args(source, output));
-    crate::muxer::run(&mut command, "preparing a clip for its link")
+    crate::muxer::run(&mut command, doing)
 }
 
 /// Stream the file up, reporting as the chunks leave.

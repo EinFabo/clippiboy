@@ -302,11 +302,18 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         recording: clip.recording,
     };
     let secret = uuid::Uuid::new_v4().simple().to_string();
-    let share = app.state::<Share>();
-    share.outgoing.lock().insert(
-        id.clone(),
-        Outgoing { transfer, path: path.clone(), size, secret: secret.clone(), tracks: Vec::new() },
-    );
+    {
+        // Checked and entered under one lock, so two quick clicks cannot both pass.
+        let share = app.state::<Share>();
+        let mut outgoing = share.outgoing.lock();
+        if let Some(waiting) = unanswered(outgoing.values().map(|o| &o.transfer), &friend_id) {
+            return Err(format!("Wait until {} has answered the last {}.", waiting.friend_name, waiting.noun()));
+        }
+        outgoing.insert(
+            id.clone(),
+            Outgoing { transfer, path: path.clone(), size, secret: secret.clone(), tracks: Vec::new() },
+        );
+    }
     emit(&app);
 
     // The individual tracks lie in coordinates of the untouched recording;
@@ -325,21 +332,23 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     let start_ms = clip.original.map(|original| original.start_ms).unwrap_or(0);
     let length_ms = clip.duration_ms;
     let cut_id = id.clone();
+    let copy = copy_path(&id);
+    let (screenshot, what) = (clip.screenshot, noun(clip.screenshot, clip.recording));
     let prepared = async {
-        let hashing = tokio::task::spawn_blocking(move || hash_file(&path, u64::MAX));
+        let hashing = tokio::task::spawn_blocking(move || file_to_send(&path, &copy, screenshot, what));
         let cutting = tokio::task::spawn_blocking(move || match stems {
             Some(stems) => cut_tracks(&cut_id, &stems, start_ms, length_ms),
             None => Vec::new(),
         });
         let router = router(&app).await;
-        let sha256 = hashing.await.map_err(|err| err.to_string()).and_then(|hash| hash);
+        let file = hashing.await.map_err(|err| err.to_string()).and_then(|file| file);
         // The cutter is always awaited, error or not: it must be done before
         // a failure clears its folder, or it would make the folder again.
         let tracks = cutting.await.unwrap_or_default();
         let router = router?;
-        Ok::<_, String>((router.endpoint().addr(), sha256?, tracks))
+        Ok::<_, String>((router.endpoint().addr(), file?, tracks))
     };
-    let (addr, sha256, tracks) = match prepared.await {
+    let (addr, (sent, size, sha256), tracks) = match prepared.await {
         Ok(ok) => ok,
         Err(err) => {
             set_out(&app, &id, |t| fail(t, &err));
@@ -357,13 +366,17 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
             .map(|cut| TrackOffer { label: cut.label.clone(), size: cut.size, sha256: cut.sha256.clone() })
             .collect();
         meta.mix = mix;
-        let extra: u64 = tracks.iter().map(|cut| cut.size).sum();
-        if let Some(entry) = app.state::<Share>().outgoing.lock().get_mut(&id) {
-            entry.transfer.size = size + extra;
-            entry.tracks = tracks;
-        }
-        emit(&app);
     }
+    // What goes may be a copy of the clip (`file_to_send`), and the tracks
+    // count too.
+    let extra: u64 = tracks.iter().map(|cut| cut.size).sum();
+    if let Some(entry) = app.state::<Share>().outgoing.lock().get_mut(&id) {
+        entry.path = sent;
+        entry.size = size;
+        entry.transfer.size = size + extra;
+        entry.tracks = tracks;
+    }
+    emit(&app);
     let offer = Signal::ShareOffer { id: id.clone(), size, sha256, secret, addr, meta };
     if !crate::friends::send_relay(&app, &friend_id, &offer) {
         let err = "Not connected to the friends server.".to_string();
@@ -1278,6 +1291,59 @@ fn audible_stems(mut stems: Vec<crate::model::ClipTrack>, mix: &[TrackMix]) -> (
     (kept, levels)
 }
 
+/// The offer to `friend` that still waits for their answer, if there is one.
+/// Their side ignores a second offer from us meanwhile (`verdict`, the
+/// backstop against a flood), so a second one would only end in "didn't
+/// answer" — and that clip would be lost without a word.
+fn unanswered<'a>(outgoing: impl IntoIterator<Item = &'a Transfer>, friend: &str) -> Option<&'a Transfer> {
+    outgoing
+        .into_iter()
+        .find(|t| t.friend_id == friend && matches!(t.stage, Stage::Preparing | Stage::Asking))
+}
+
+/// Whether a clip with `audio_streams` sound tracks in its file (`None`: could
+/// not be read) goes as a copy. Clips from before the track store carry the
+/// raw source tracks — microphone, Discord — next to the mix inside the MP4,
+/// and muted tracks stay home: those go as a copy with the mix only.
+fn sends_a_copy(audio_streams: Option<usize>) -> bool {
+    audio_streams.is_none_or(|count| count > 1)
+}
+
+/// Where the copy of a clip to send lies — in the scratch folder startup
+/// clears, should a crash leave it there.
+fn copy_path(id: &str) -> PathBuf {
+    crate::config::data_dir()
+        .join("temp")
+        .join(format!("share-{}.mp4", crate::muxer::sanitize(id)))
+}
+
+/// The file that goes to the friend, its size and its hash: the clip itself,
+/// or — when it still carries its source tracks — a copy at `copy` with the
+/// picture and the mix only, made the way a link's copy is. A copy that fails
+/// stops the send: the file itself would take the tracks along.
+fn file_to_send(source: &Path, copy: &Path, screenshot: bool, what: &str) -> Result<(PathBuf, u64, String), String> {
+    let streams = (!screenshot).then(|| crate::stems::tracks_in_file(source).ok().map(|tracks| tracks.len()));
+    let path = match streams {
+        Some(streams) if sends_a_copy(streams) => {
+            if let Some(dir) = copy.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(err) = crate::links::faststart(source, copy, "copying a clip to send") {
+                log::warn!("share: no copy of {} to send: {err}", source.display());
+                let _ = std::fs::remove_file(copy);
+                return Err(format!("Could not get the {what} ready to send."));
+            }
+            copy.to_path_buf()
+        }
+        _ => source.to_path_buf(),
+    };
+    let size = std::fs::metadata(&path)
+        .map_err(|_| format!("The {what}'s file is missing."))?
+        .len();
+    let sha256 = hash_file(&path, u64::MAX)?;
+    Ok((path, size, sha256))
+}
+
 /// Where an outgoing transfer's cut tracks lie.
 fn cuts_dir(id: &str) -> PathBuf {
     std::env::temp_dir().join("clippiboy-share").join(crate::muxer::sanitize(id))
@@ -1289,9 +1355,11 @@ fn may_drop_cuts(stage: Option<Stage>) -> bool {
     stage.is_none_or(|stage| stage.over())
 }
 
-/// Removes the cut tracks of a transfer that has ended, in whatever way.
+/// Removes the cut tracks of a transfer that has ended, in whatever way, and
+/// the copy of the clip if one was sent.
 fn drop_cuts(id: &str) {
     let _ = std::fs::remove_dir_all(cuts_dir(id));
+    let _ = std::fs::remove_file(copy_path(id));
 }
 
 /// The part file of an incoming offer, in the folder the clip will go to.
@@ -1493,6 +1561,60 @@ mod tests {
     #[test]
     fn a_second_offer_from_the_same_friend_waits_for_the_first() {
         assert_eq!(verdict(&FriendsConfig::default(), "f", true, true), Verdict::Ignore);
+    }
+
+    fn outgoing(friend: &str, stage: Stage) -> Transfer {
+        Transfer {
+            id: format!("{friend}-{stage:?}"),
+            direction: Direction::Out,
+            friend_id: friend.into(),
+            friend_name: friend.into(),
+            name: "clip".into(),
+            size: 1,
+            moved: 0,
+            stage,
+            error: None,
+            clip_id: None,
+            game: None,
+            duration_ms: 0,
+            screenshot: false,
+            recording: false,
+        }
+    }
+
+    /// Their side ignores a second offer while the first still asks — so this
+    /// side does not make one: it would only end in "didn't answer".
+    #[test]
+    fn a_second_clip_waits_until_the_friend_answered_the_first() {
+        for stage in [Stage::Preparing, Stage::Asking] {
+            assert!(unanswered([&outgoing("f", stage)], "f").is_some(), "{stage:?}");
+        }
+        for stage in [Stage::Moving, Stage::Done, Stage::Declined, Stage::Expired, Stage::Cancelled, Stage::Failed] {
+            assert!(unanswered([&outgoing("f", stage)], "f").is_none(), "{stage:?}");
+        }
+        assert!(unanswered([&outgoing("g", Stage::Asking)], "f").is_none());
+        assert!(unanswered([], "f").is_none());
+    }
+
+    /// An old clip still carries its raw source tracks (microphone, Discord)
+    /// next to the mix; those must not reach a friend inside the file.
+    #[test]
+    fn a_clip_with_its_source_tracks_inside_goes_as_a_copy() {
+        assert!(!sends_a_copy(Some(0)));
+        assert!(!sends_a_copy(Some(1)));
+        assert!(sends_a_copy(Some(2)));
+        assert!(sends_a_copy(Some(5)));
+        // Unreadable: no way to tell what is inside, so not the file itself.
+        assert!(sends_a_copy(None));
+    }
+
+    /// Where startup clears whatever a crash left, one file per transfer.
+    #[test]
+    fn the_copy_to_send_lies_in_the_scratch_folder() {
+        let copy = copy_path("abc");
+        assert!(copy.starts_with(crate::config::data_dir().join("temp")), "{}", copy.display());
+        assert_ne!(copy, copy_path("abd"));
+        assert!(copy_path("../x").starts_with(crate::config::data_dir().join("temp")));
     }
 
     #[test]
