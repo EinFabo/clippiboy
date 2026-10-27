@@ -131,7 +131,7 @@ pub fn is_scratch_name(name: &str) -> bool {
     if let Some((head, tail)) = name.split_once(".part.") {
         let kind = match tail.strip_suffix(".wav") {
             Some(track) => !track.is_empty() && track.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
-            None => tail == "ts" || tail == "h264" || tail == "mp4",
+            None => tail == "ts" || tail == "h264" || tail == "mp4" || tail == "png",
         };
         return kind && ends_in_clip_id(head);
     }
@@ -283,6 +283,7 @@ mod tests {
             format!("Valorant_2026-10-22_12-00-00-123_{ID}.part.mix.wav"),
             format!("{ID}.part.mp4"),
             format!("{ID}.part.ts"),
+            format!("{ID}.part.png"),
             format!("Valorant_2026-10-22_12-00-00-123_{ID}.part.ts"),
             format!("{ID}.part.game_1.wav"),
             "Valorant_2026-10-22_12-00-00-123.4711.neu.mp4".into(),
@@ -311,6 +312,14 @@ mod tests {
         ] {
             assert!(!is_scratch_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_screenshot_cut_short_is_swept() {
+        assert!(is_scratch_name(&crate::muxer::scratch_name(
+            "0b8f2a4e-1c2d-4e5f-8a9b-0c1d2e3f4a5b",
+            "png"
+        )));
     }
 
     /// What the first sweep (in `muxer`, up to this one) turned down.

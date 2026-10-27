@@ -1427,14 +1427,19 @@ impl AppState {
 
         // Ein Bild ist ein Augenblick: es gehört zu dem Spiel, das jetzt läuft.
         let game = self.current_game.lock().clone();
-        let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)?;
+        let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)
+            .and_then(|path| claim_file(&path).map_err(|err| format!("could not create '{}': {err}", path.display())))?;
         // Into the file itself. What lay under it goes into the editor's store:
         // an edit lays it back and stamps the result anew, so the mark can be
         // neither painted over nor cropped away.
         let id = uuid::Uuid::new_v4().to_string();
         let under = crate::watermark::stamp(&mut shot);
         let size = (shot.width, shot.height);
-        shot.write_png(&path)?;
+        if let Err(err) = shot.write_png(&path, &id) {
+            // The name was reserved with an empty file; it is not a picture.
+            let _ = std::fs::remove_file(&path);
+            return Err(err);
+        }
         if let Some((at, piece)) = under {
             let at = crate::shot::Rect {
                 x: at.x,
@@ -1857,6 +1862,27 @@ fn destination(
     Ok(dir.join(name))
 }
 
+/// Reserve a free file name: creates `path` empty, or `<stem> (2).<ext>`,
+/// `(3)` … when it exists. Two screenshots in the same millisecond (hotkey plus
+/// Stream Deck) would otherwise write into one file.
+pub fn claim_file(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    for n in 1..=1000 {
+        let candidate = if n == 1 {
+            path.to_path_buf()
+        } else {
+            path.with_file_name(format!("{stem} ({n}){ext}"))
+        };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free file name"))
+}
+
 /// A game name as the front of a file name: at most [`crate::filing::MAX_LEN`]
 /// characters, like its folder. Unknown games are named after their window
 /// title, and a title that is a whole sentence made every save fail on a path
@@ -1898,6 +1924,19 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REC-9: two pictures in one millisecond get two files.
+    #[test]
+    fn two_screenshots_in_the_same_millisecond_get_two_files() {
+        let dir = std::env::temp_dir().join(format!("clippiboy-claim-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot_2026-10-24_12-00-00-123.png");
+        let a = claim_file(&path).unwrap();
+        let b = claim_file(&path).unwrap();
+        assert_ne!(a, b);
+        assert!(b.to_string_lossy().ends_with("shot_2026-10-24_12-00-00-123 (2).png"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// REC-12: a stop still writing its folder out and the recovery that runs
     /// once ffmpeg has arrived must not both finish it.

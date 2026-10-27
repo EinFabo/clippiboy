@@ -780,7 +780,7 @@ fn edit_screenshot(
     let base = crate::shot::base_path(&clip.id);
     let base_part = base.with_extension("png.part");
     if let Some(shot) = &ground {
-        shot.write_png(&base_part)?;
+        shot.write_png(&base_part, &clip.id)?;
     }
     let written = match write_picture(&state, &clip, &picture) {
         Ok(written) => written,
@@ -839,7 +839,7 @@ fn write_picture(
 ) -> Result<Clip> {
     let target = std::path::PathBuf::from(&clip.path);
     let temp = target.with_extension(format!("{}.new.png", std::process::id()));
-    picture.write_png(&temp)?;
+    picture.write_png(&temp, &clip.id)?;
     if let Err(err) = crate::muxer::replace_file(&temp, &target) {
         let _ = std::fs::remove_file(&temp);
         return Err(err);

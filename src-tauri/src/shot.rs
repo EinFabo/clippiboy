@@ -257,8 +257,23 @@ impl Shot {
         out
     }
 
-    /// Write the picture as a PNG.
-    pub fn write_png(&self, path: &Path) -> Result<(), String> {
+    /// Write the picture as a PNG. It is written beside `path` under a part
+    /// name (`<clip id>.part.png`, which [`crate::sweep`] clears) and renamed
+    /// onto `path` when whole, so a crash or a failed write leaves no
+    /// half-picture under the real name.
+    pub fn write_png(&self, path: &Path, clip_id: &str) -> Result<(), String> {
+        let part = path.with_file_name(crate::muxer::scratch_name(clip_id, "png"));
+        let result = self.write_png_to(&part).and_then(|()| {
+            std::fs::rename(&part, path)
+                .map_err(|err| format!("could not write '{}': {err}", path.display()))
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+        result
+    }
+
+    fn write_png_to(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| {
                 format!("could not create folder '{}': {err}", parent.display())
@@ -400,7 +415,7 @@ pub fn write_under(
 ) -> Result<(), String> {
     std::fs::create_dir_all(crate::edit::dir(clip_id))
         .map_err(|err| format!("could not create folder: {err}"))?;
-    piece.write_png(&under_path(clip_id))?;
+    piece.write_png(&under_path(clip_id), clip_id)?;
     let note = UnderNote {
         at,
         picture: Some(picture),
@@ -538,7 +553,13 @@ pub fn grab(kind: TargetKind, id: Option<&str>, stable: Option<&str>) -> Result<
         {
             let gpu = gpu.clone();
             let sender = sender.clone();
+            // Frames can arrive faster than the first one is received; only
+            // that one is read back off the GPU.
+            let taken = std::sync::atomic::AtomicBool::new(false);
             move |frame| {
+                if taken.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
                 let _ = sender.try_send(read_back(&gpu, frame.texture));
             }
         },
