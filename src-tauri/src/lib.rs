@@ -584,6 +584,7 @@ fn repair_screens(app: &tauri::AppHandle) {
     if !(fixed_source || fixed_banner || fixed_console) {
         return;
     }
+    state.note_direct_write(&mut config);
     if config::save(&config).is_err() {
         log::warn!("the corrected screen was not saved");
     }
@@ -1378,6 +1379,7 @@ fn hide_to_tray(window: &tauri::Window) {
             return;
         }
         config.tray_hint_shown = true;
+        state.note_direct_write(&mut config);
         if let Err(err) = config::save(&config) {
             log::warn!("could not remember the tray hint: {err}");
         }

@@ -437,19 +437,51 @@ pub fn default_clip_dir() -> String {
         .to_string()
 }
 
-#[tauri::command]
-pub fn add_audio_source(state: State<'_, AppState>, source: AudioSource) -> AppConfig {
-    state.upsert_source(source)
+/// Hand the main window a config it did not write itself. It keeps its copy
+/// for the next write; without this a source muted in the console stayed
+/// unmuted there, and that copy is what the mixer's own rows are built from.
+/// Only to `main`, and only for changes it did not start: an echo of its own
+/// write would land on its newer, not yet answered edits.
+pub(crate) fn tell_main(app: &tauri::AppHandle, config: &AppConfig) {
+    use tauri::Emitter;
+    let _ = app.emit_to("main", "config-changed", config);
+}
+
+/// The answer of a source command, and the main window told when another
+/// window (the console) sent it.
+fn source_written(webview: &tauri::WebviewWindow, config: AppConfig) -> AppConfig {
+    use tauri::Manager;
+    if webview.label() != "main" {
+        tell_main(webview.app_handle(), &config);
+    }
+    config
 }
 
 #[tauri::command]
-pub fn update_audio_source(state: State<'_, AppState>, source: AudioSource) -> AppConfig {
-    state.upsert_source(source)
+pub fn add_audio_source(
+    state: State<'_, AppState>,
+    webview: tauri::WebviewWindow,
+    source: AudioSource,
+) -> AppConfig {
+    source_written(&webview, state.upsert_source(source))
 }
 
 #[tauri::command]
-pub fn remove_audio_source(state: State<'_, AppState>, id: String) -> AppConfig {
-    state.remove_source(&id)
+pub fn update_audio_source(
+    state: State<'_, AppState>,
+    webview: tauri::WebviewWindow,
+    source: AudioSource,
+) -> AppConfig {
+    source_written(&webview, state.upsert_source(source))
+}
+
+#[tauri::command]
+pub fn remove_audio_source(
+    state: State<'_, AppState>,
+    webview: tauri::WebviewWindow,
+    id: String,
+) -> AppConfig {
+    source_written(&webview, state.remove_source(&id))
 }
 
 #[tauri::command(async)]

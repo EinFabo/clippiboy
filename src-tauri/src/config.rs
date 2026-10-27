@@ -1,9 +1,12 @@
 //! Persistent configuration, stored as JSON next to the app database.
 
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+use serde_json::{Map, Value};
 
 use crate::encode;
 use crate::model::{
@@ -76,6 +79,7 @@ pub fn default_config() -> AppConfig {
         rgb_speed: crate::model::RgbSpeed::default(),
         friends: crate::model::FriendsConfig::default(),
         sounds: crate::model::SoundConfig::default(),
+        revision: 0,
     }
 }
 
@@ -394,6 +398,158 @@ pub fn keep_core_owned(next: &mut AppConfig, previous: &AppConfig) {
     next.control.token = previous.control.token.clone();
 }
 
+/// How many earlier configs the core keeps to merge a stale write against.
+/// A window more than this many changes behind is taken as it stands.
+pub const HISTORY_LEN: usize = 16;
+
+/// Keep `config` as one a window may build its next write on, the oldest
+/// falling out past [`HISTORY_LEN`].
+pub fn remember(history: &mut VecDeque<AppConfig>, config: &AppConfig) {
+    history.push_back(config.clone());
+    while history.len() > HISTORY_LEN {
+        history.pop_front();
+    }
+}
+
+/// A write from a window, put onto the config the core holds.
+///
+/// A window that holds the current revision replaces the config, as it always
+/// did. One that holds an older copy — the main window while the console muted
+/// a source — would undo every change made since with values it never touched:
+/// it is merged against the copy it was given (`merge_stale`). A revision no
+/// longer in the history is taken as it stands. The result always counts up.
+pub fn accept(current: &AppConfig, history: &VecDeque<AppConfig>, incoming: AppConfig) -> AppConfig {
+    let mut next = if incoming.revision >= current.revision {
+        incoming
+    } else {
+        match history.iter().rev().find(|old| old.revision == incoming.revision) {
+            Some(base) => merge_stale(base, &incoming, current),
+            None => {
+                log::warn!(
+                    "a settings write from revision {} (now {}) is too old to merge — taken as it stands",
+                    incoming.revision,
+                    current.revision
+                );
+                incoming
+            }
+        }
+    };
+    next.revision = current.revision + 1;
+    next
+}
+
+/// Three-way merge of a window's write: `base` is the copy the window was
+/// given, `incoming` what it sent back, `current` what the core holds now.
+///
+/// Over the JSON form: what the window left as it was keeps `current`; objects
+/// merge key by key; lists of items with a string `id` (the audio sources)
+/// merge item by item; any other value the window changed is the window's.
+pub fn merge_stale(base: &AppConfig, incoming: &AppConfig, current: &AppConfig) -> AppConfig {
+    let (Ok(base_json), Ok(incoming_json), Ok(current_json)) = (
+        serde_json::to_value(base),
+        serde_json::to_value(incoming),
+        serde_json::to_value(current),
+    ) else {
+        return incoming.clone();
+    };
+    let merged = merge_value(&base_json, &incoming_json, &current_json);
+    serde_json::from_value(merged).unwrap_or_else(|err| {
+        log::warn!("a merged settings write is no config ({err}) — the window's taken as it stands");
+        incoming.clone()
+    })
+}
+
+fn merge_value(base: &Value, incoming: &Value, current: &Value) -> Value {
+    if incoming == base {
+        return current.clone();
+    }
+    match (base, incoming, current) {
+        (Value::Object(base), Value::Object(incoming), Value::Object(current)) => {
+            // A tagged enum (a source's kind) whose variant changed is one value:
+            // its fields mean nothing on another variant.
+            let tag = |object: &Map<String, Value>| object.get("type").cloned();
+            if tag(base) != tag(incoming) {
+                return Value::Object(incoming.clone());
+            }
+            if tag(base) != tag(current) {
+                return Value::Object(current.clone());
+            }
+            Value::Object(merge_objects(base, incoming, current))
+        }
+        (Value::Array(base), Value::Array(incoming), Value::Array(current))
+            if [base, incoming, current].iter().all(|list| list.iter().all(|item| item_id(item).is_some())) =>
+        {
+            Value::Array(merge_by_id(base, incoming, current))
+        }
+        _ => incoming.clone(),
+    }
+}
+
+fn merge_objects(
+    base: &Map<String, Value>,
+    incoming: &Map<String, Value>,
+    current: &Map<String, Value>,
+) -> Map<String, Value> {
+    let mut merged = Map::new();
+    for (key, value) in incoming {
+        match (base.get(key), current.get(key)) {
+            (Some(was), Some(now)) => {
+                merged.insert(key.clone(), merge_value(was, value, now));
+            }
+            // Gone elsewhere and untouched here: stays gone.
+            (Some(was), None) if was == value => {}
+            _ => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    for (key, value) in current {
+        // Removed in the window when the base had it; added elsewhere when not.
+        if !incoming.contains_key(key) && !base.contains_key(key) {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    merged
+}
+
+fn item_id(item: &Value) -> Option<&str> {
+    item.get("id").and_then(Value::as_str)
+}
+
+/// The sources, item by item: removed in the window → removed, added in the
+/// window → appended, in all three → merged, removed elsewhere → stays
+/// removed. The order is the current one, unless the window reordered.
+fn merge_by_id(base: &[Value], incoming: &[Value], current: &[Value]) -> Vec<Value> {
+    let find = |list: &[Value], id: &str| list.iter().find(|item| item_id(item) == Some(id)).cloned();
+    let ids = |list: &[Value]| -> Vec<String> {
+        list.iter().filter_map(item_id).map(str::to_owned).collect()
+    };
+    let (base_ids, incoming_ids) = (ids(base), ids(incoming));
+    let kept_order = |list: &[String], other: &[String]| -> Vec<String> {
+        list.iter().filter(|id| other.contains(id)).cloned().collect()
+    };
+    let reordered = kept_order(&base_ids, &incoming_ids) != kept_order(&incoming_ids, &base_ids);
+    let (first, then) = if reordered {
+        (incoming_ids, ids(current))
+    } else {
+        (ids(current), incoming_ids)
+    };
+    let extra: Vec<String> = then.into_iter().filter(|id| !first.contains(id)).collect();
+    let order = first.into_iter().chain(extra);
+
+    order
+        .filter_map(|id| match (find(base, &id), find(incoming, &id), find(current, &id)) {
+            (Some(was), Some(value), Some(now)) => Some(merge_value(&was, &value, &now)),
+            // Removed in the window, or elsewhere.
+            (Some(_), _, _) => None,
+            // Added in the window (here and there both: the window's).
+            (None, Some(value), _) => Some(value),
+            // Added elsewhere.
+            (None, None, now) => now,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +810,215 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temps, 0);
+    }
+
+    fn revision(mut config: AppConfig, revision: u64) -> AppConfig {
+        config.revision = revision;
+        config
+    }
+
+    fn muted(mut source: AudioSource) -> AudioSource {
+        source.muted = true;
+        source
+    }
+
+    fn json(config: &AppConfig) -> serde_json::Value {
+        serde_json::to_value(config).unwrap()
+    }
+
+    fn ids(config: &AppConfig) -> Vec<&str> {
+        config.sources.iter().map(|source| source.id.as_str()).collect()
+    }
+
+    fn mic() -> AudioSource {
+        source("mic", SourceKind::InputDevice { device_id: "dev-mic".into() }, true)
+    }
+
+    fn game() -> AudioSource {
+        source("game", SourceKind::Game, true)
+    }
+
+    /// CFG-1: the console mutes the mic; the main window, still holding the
+    /// copy from before, flips a banner switch and sends all of it back.
+    #[test]
+    fn a_stale_window_write_keeps_the_consoles_mute() {
+        let base = revision(with(vec![mic()]), 4);
+        let current = revision(with(vec![muted(mic())]), 5);
+        let mut incoming = base.clone();
+        incoming.overlay.enabled = !base.overlay.enabled;
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert!(merged.sources[0].muted, "the console's mute came undone");
+        assert_eq!(merged.overlay.enabled, !base.overlay.enabled);
+
+        let history = VecDeque::from([base.clone(), current.clone()]);
+        let accepted = accept(&current, &history, incoming);
+        assert!(accepted.sources[0].muted);
+        assert_eq!(accepted.overlay.enabled, !base.overlay.enabled);
+        assert_eq!(accepted.revision, 6);
+    }
+
+    /// The same, end to end the way the core runs it: the console's write
+    /// (`upsert_source` on a snapshot) and the main window's `set_config`
+    /// both go through `accept` and then `set_config`'s settle, and every
+    /// result is remembered.
+    #[test]
+    fn the_consoles_mute_survives_the_main_windows_next_switch() {
+        let mut history = VecDeque::new();
+        let mut core = revision(with(vec![mic(), game()]), 4);
+        core.control.token = "real".into();
+        remember(&mut history, &core);
+        // What the main window holds: the config as it was read at start.
+        let window = core.clone();
+
+        // The console mutes the mic.
+        let mut snapshot = core.clone();
+        snapshot.sources[0] = muted(mic());
+        core = accept(&core, &history, snapshot);
+        remember(&mut history, &core);
+
+        // The main window flips a banner switch on its old copy.
+        let mut incoming = window.clone();
+        incoming.overlay.on_clip_saved = !window.overlay.on_clip_saved;
+        let mut next = accept(&core, &history, incoming);
+        keep_core_owned(&mut next, &core);
+        keep_once_flags(&mut next, &core);
+        remember(&mut history, &next);
+
+        assert!(next.sources[0].muted, "the mic is recorded again");
+        assert!(!next.sources[1].muted);
+        assert_eq!(next.overlay.on_clip_saved, !window.overlay.on_clip_saved);
+        assert_eq!(next.control.token, "real");
+        assert_eq!(next.revision, 6);
+    }
+
+    #[test]
+    fn two_changes_to_one_source_merge_field_by_field() {
+        let base = revision(with(vec![mic()]), 4);
+        let current = revision(with(vec![muted(mic())]), 5);
+        let mut incoming = base.clone();
+        incoming.sources[0].gain_db = -6.0;
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert!(merged.sources[0].muted);
+        assert_eq!(merged.sources[0].gain_db, -6.0);
+    }
+
+    #[test]
+    fn a_source_added_in_the_window_survives_a_stale_write() {
+        let base = revision(with(vec![mic()]), 4);
+        let current = revision(with(vec![muted(mic())]), 5);
+        let incoming = revision(with(vec![mic(), game()]), 4);
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert_eq!(ids(&merged), ["mic", "game"]);
+        assert!(merged.sources[0].muted);
+    }
+
+    #[test]
+    fn a_source_added_elsewhere_survives_a_stale_write() {
+        let base = revision(with(vec![mic()]), 4);
+        let current = revision(with(vec![mic(), game()]), 5);
+        let mut incoming = base.clone();
+        incoming.watermark = !base.watermark;
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert_eq!(ids(&merged), ["mic", "game"]);
+        assert_eq!(merged.watermark, !base.watermark);
+    }
+
+    #[test]
+    fn a_source_removed_in_the_window_stays_removed() {
+        let base = revision(with(vec![mic(), game()]), 4);
+        // Changed elsewhere meanwhile — removing it still wins.
+        let current = revision(with(vec![mic(), muted(game())]), 5);
+        let incoming = revision(with(vec![mic()]), 4);
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert_eq!(ids(&merged), ["mic"]);
+    }
+
+    #[test]
+    fn a_source_removed_elsewhere_is_not_brought_back() {
+        let base = revision(with(vec![mic(), game()]), 4);
+        let current = revision(with(vec![mic()]), 5);
+        // The window touched the removed source on its old copy.
+        let mut incoming = base.clone();
+        incoming.sources[1].gain_db = 3.0;
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert_eq!(ids(&merged), ["mic"]);
+    }
+
+    /// The mixer reorders by sending the sources in their new order — that
+    /// order is the change, and a mute from elsewhere rides along.
+    #[test]
+    fn a_reorder_in_the_window_keeps_its_order() {
+        let base = revision(with(vec![mic(), game()]), 4);
+        let current = revision(with(vec![muted(mic()), game()]), 5);
+        let incoming = revision(with(vec![game(), mic()]), 4);
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert_eq!(ids(&merged), ["game", "mic"]);
+        assert!(merged.sources[1].muted);
+    }
+
+    /// A value both changed: the window's is what the user just did.
+    #[test]
+    fn a_value_both_changed_takes_the_windows() {
+        let base = revision(with(vec![mic()]), 4);
+        let mut current = revision(with(vec![mic()]), 5);
+        current.sources[0].gain_db = 3.0;
+        let mut incoming = base.clone();
+        incoming.sources[0].gain_db = -6.0;
+
+        let merged = merge_stale(&base, &incoming, &current);
+        assert_eq!(merged.sources[0].gain_db, -6.0);
+    }
+
+    #[test]
+    fn a_write_on_the_current_revision_replaces_and_counts_up() {
+        let current = revision(with(vec![muted(mic())]), 7);
+        let history = VecDeque::from([current.clone()]);
+        let mut incoming = revision(with(vec![mic()]), 7);
+        incoming.watermark = !current.watermark;
+
+        let accepted = accept(&current, &history, incoming.clone());
+        incoming.revision = 8;
+        assert_eq!(json(&accepted), json(&incoming));
+    }
+
+    #[test]
+    fn a_write_from_an_unknown_revision_is_taken_as_it_stands() {
+        let current = revision(with(vec![muted(mic())]), 9);
+        let history = VecDeque::from([revision(with(vec![mic()]), 8), current.clone()]);
+        let incoming = revision(with(vec![mic(), game()]), 2);
+
+        let accepted = accept(&current, &history, incoming.clone());
+        assert_eq!(accepted.revision, 10);
+        let mut expected = incoming;
+        expected.revision = 10;
+        assert_eq!(json(&accepted), json(&expected));
+    }
+
+    #[test]
+    fn the_history_keeps_the_last_sixteen() {
+        let mut history = VecDeque::new();
+        for n in 0..20 {
+            remember(&mut history, &revision(default_config(), n));
+        }
+        assert_eq!(history.len(), 16);
+        assert_eq!(history.front().unwrap().revision, 4);
+        assert_eq!(history.back().unwrap().revision, 19);
+    }
+
+    /// A config written before the revision existed loads at revision 0.
+    #[test]
+    fn a_configuration_without_a_revision_loads_at_zero() {
+        let mut written = json(&default_config());
+        written.as_object_mut().unwrap().remove("revision").expect("called 'revision'");
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(parsed.revision, 0);
     }
 
     /// What the banner says, one line per case.

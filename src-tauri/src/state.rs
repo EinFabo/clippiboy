@@ -17,6 +17,10 @@ const IDLE_RING_SECONDS: u32 = 2;
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
+    /// The last configs handed out, by revision, for merging a write built on
+    /// an older one (`config::accept`). Only ever locked inside `config`,
+    /// never the other way round.
+    config_history: Mutex<std::collections::VecDeque<AppConfig>>,
     /// What went wrong reading the config file at start, worded for the
     /// start-up banner; `None` when it loaded fine.
     pub config_trouble: Mutex<Option<String>>,
@@ -400,9 +404,12 @@ impl AppState {
             screen_fallback: None,
         };
         let audio = Arc::new(AudioEngine::new());
+        let mut history = std::collections::VecDeque::new();
+        config::remember(&mut history, &config);
 
         Self {
             config: Mutex::new(config),
+            config_history: Mutex::new(history),
             config_trouble: Mutex::new(trouble),
             library: Mutex::new(library),
             status: Mutex::new(status),
@@ -450,7 +457,13 @@ impl AppState {
     pub fn load_late(&self) {
         let (config, trouble, library) = Self::from_disk();
         self.status.lock().encoder = Some(config.recording.encoder);
-        *self.config.lock() = config;
+        let mut guard = self.config.lock();
+        let mut history = self.config_history.lock();
+        history.clear();
+        config::remember(&mut history, &config);
+        drop(history);
+        *guard = config;
+        drop(guard);
         *self.config_trouble.lock() = trouble;
         *self.library.lock() = library;
     }
@@ -488,21 +501,29 @@ impl AppState {
     /// changed only by their own commands — is taken from there: from a copy
     /// read earlier, an overlapping `set_clip_dir` or "New" token (`control::restart`) would
     /// be undone.
+    ///
+    /// Before that, `incoming` is put onto the current config by its revision
+    /// (`config::accept`): one built on an older copy — a window that has not
+    /// heard of a change made elsewhere, or a snapshot taken before another
+    /// writer got the lock — is merged instead of undoing that change.
     pub fn replace_config_with(
         &self,
-        mut next: AppConfig,
+        mut incoming: AppConfig,
         settle: impl FnOnce(&mut AppConfig, &AppConfig),
     ) -> AppConfig {
-        next.recording.encoder = crate::encode::resolve(next.recording.encoder);
-        let previous = {
+        incoming.recording.encoder = crate::encode::resolve(incoming.recording.encoder);
+        let (previous, next) = {
             let mut guard = self.config.lock();
+            let mut history = self.config_history.lock();
+            let mut next = config::accept(&guard, &history, incoming);
             settle(&mut next, &guard);
             // Saved under the lock, as every other writer does — two saves
             // never run at once, and the file always ends on the newest config.
             if let Err(err) = config::save(&next) {
                 log::error!("could not save the config: {err}");
             }
-            std::mem::replace(&mut *guard, next.clone())
+            config::remember(&mut history, &next);
+            (std::mem::replace(&mut *guard, next.clone()), next)
         };
         // Takes effect with the next frame, no restart.
         crate::watermark::set_enabled(next.watermark);
@@ -574,6 +595,14 @@ impl AppState {
     /// Is a recording started by hand running right now?
     pub fn is_recording(&self) -> bool {
         self.recorder.lock().is_some()
+    }
+
+    /// For a writer that changes the config in place under its guard: count
+    /// the revision up and remember the result, as `replace_config` does, so
+    /// a window's next write is merged onto this change rather than over it.
+    pub fn note_direct_write(&self, config: &mut AppConfig) {
+        config.revision += 1;
+        config::remember(&mut self.config_history.lock(), config);
     }
 
     pub fn upsert_source(&self, source: AudioSource) -> AppConfig {

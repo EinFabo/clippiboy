@@ -151,6 +151,7 @@ export const mockConfig: AppConfig = {
     clipReceived: { on: true, volume: 1 },
     error: { on: true, volume: 1 },
   },
+  revision: 0,
 };
 
 export const mockClips: Clip[] = [

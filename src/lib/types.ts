@@ -236,6 +236,11 @@ export interface AppConfig {
   rgbSpeed: RgbSpeed;
   friends: FriendsConfig;
   sounds: SoundConfig;
+  /**
+   * Counts up with every change the core takes in. Sent back as it came: a
+   * write from an older copy is merged onto what changed since, not over it.
+   */
+  revision: number;
 }
 
 /** One notification's sound. `volume` is 0–1, on top of `SoundConfig.volume`. */

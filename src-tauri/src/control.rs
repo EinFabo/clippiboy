@@ -446,6 +446,7 @@ fn fresh_token(app: &tauri::AppHandle) -> String {
     let state = app.state::<AppState>();
     let mut config = state.config.lock();
     config.control.token = token.clone();
+    state.note_direct_write(&mut config);
     // Deliberately not `replace_config`: that reapplies the audio sources, and
     // this runs while the buffer may already be recording.
     if let Err(err) = crate::config::save(&config) {

@@ -546,6 +546,12 @@ pub struct AppConfig {
     /// The notification sounds — see [`SoundConfig`].
     #[serde(default)]
     pub sounds: SoundConfig,
+    /// Counts up with every change the core takes in. A window sends back the
+    /// one it was given, so a write built on an older copy can be told apart
+    /// and merged onto what changed since (`config::accept`) instead of
+    /// replacing it.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// One notification's sound: on or off, and how loud against the others.

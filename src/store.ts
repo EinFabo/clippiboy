@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { coalesce } from "./lib/coalesce";
+import { later, takes } from "./lib/revision";
 import { api, events, inTauri } from "./lib/ipc";
 import * as mock from "./lib/mock";
 import type {
@@ -165,25 +166,53 @@ let configWrites = 0;
 /** Writes of the settings still waiting for the core's answer. */
 let configPending = 0;
 /**
- * The core corrected the settings while a write was on its way. Its copy may
- * be from before that write; read anew once every answer is in.
+ * The newest settings the core handed over unasked (or for a write without a
+ * ticket) while a write was on its way. Taken then, they would show the
+ * setting just changed rolled back until its answer came; once every answer
+ * is in, they count if their revision is the later one.
  */
-let configStale = false;
+let configHeld: AppConfig | null = null;
 /**
  * The real settings were read from the core. Until then `config` is the mock;
  * writing it would put its values (a made-up token, say) over the real ones.
  */
 let configLoaded = false;
 
+type ConfigSet = (state: { config: AppConfig }) => void;
+
+/**
+ * Settings from the core, put in place unless the copy held is from later —
+ * see `takes`. Every write carries the revision it was built on, so the core
+ * merges one from an older copy instead of undoing what changed since.
+ */
+function adopt(set: ConfigSet, config: AppConfig, orSame = false) {
+  if (takes(useEngine.getState().config, config, orSame)) set({ config });
+}
+
+/** Settings from the core that no ticket orders: held while a write is on its way. */
+function offer(set: ConfigSet, config: AppConfig) {
+  if (configPending > 0) configHeld = later(configHeld, config);
+  else adopt(set, config);
+}
+
+/** A ticketed write is answered (or failed): the last one lets the held copy in. */
+function writeSettled(set: ConfigSet) {
+  configPending--;
+  if (configPending > 0 || !configHeld) return;
+  const held = configHeld;
+  configHeld = null;
+  adopt(set, held);
+}
+
 /** The settings as the core now holds them, unless a newer write came since. */
-async function rereadConfig(set: (state: { config: AppConfig }) => void) {
-  configStale = false;
+async function rereadConfig(set: ConfigSet) {
   const ticket = ++configWrites;
   try {
     const config = await api.getConfig();
-    if (ticket === configWrites) set({ config });
+    // Its own revision too: it replaces the optimistic copy built on it.
+    if (ticket === configWrites) adopt(set, config, true);
   } catch {
-    // The event's copy stands; the next write answers with the right one.
+    // The copy held stands; the next write answers with the right one.
   }
 }
 
@@ -199,13 +228,12 @@ async function writeSources(
   configPending++;
   try {
     const config = await write();
-    if (ticket === configWrites) set({ config });
+    if (ticket === configWrites) adopt(set, config);
   } catch (err) {
     set({ lastError: `Apply source: ${String(err)}` });
     void rereadConfig(set);
   } finally {
-    configPending--;
-    if (configPending === 0 && configStale) void rereadConfig(set);
+    writeSettled(set);
   }
 }
 
@@ -373,16 +401,11 @@ export const useEngine = create<EngineState>((set, get) => ({
       await events.onClipDeleted((id) =>
         set((st) => ({ clips: st.clips.filter((c) => c.id !== id) })),
       );
-      // The core corrected the settings by itself; a write still on its way
-      // answers with the same correction.
-      await events.onConfigChanged((config) => {
-        if (configPending > 0) {
-          configStale = true;
-          return;
-        }
-        configWrites++;
-        set({ config });
-      });
+      // The core changed the settings without this window asking: the
+      // console muted a source, a screen went away. Never an echo of a write
+      // from here, so it takes no ticket and an answer in flight still counts;
+      // whichever has the later revision wins (`offer`).
+      await events.onConfigChanged((config) => offer(set, config));
       // One read at a time, one more after a burst: a run of changes would
       // otherwise stack up full-list reads.
       await events.onClipsChanged(
@@ -461,15 +484,15 @@ export const useEngine = create<EngineState>((set, get) => ({
       // mid-recording, swaps an encoder that is not there, cleans colours.
       // Kept as sent, the uncorrected copy went back with the next change.
       // Only the newest answer counts — an older one landing late would undo it.
+      // An answer from before a change made elsewhere is older news (`adopt`).
       const kept = await api.setConfig(config);
-      if (ticket === configWrites) set({ config: kept });
+      if (ticket === configWrites) adopt(set, kept);
     } catch (err) {
       // The selection already stands in the UI — if the core does not accept it,
       // somebody has to see that rather than have it fail silently.
       set({ lastError: `Apply setting: ${String(err)}` });
     } finally {
-      configPending--;
-      if (configPending === 0 && configStale) void rereadConfig(set);
+      writeSettled(set);
     }
   },
 
@@ -492,16 +515,14 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
     // Deliberately without an optimistic update: if registering fails, the old
     // assignment should stand, and the error belongs on that row.
-    set({
-      config: await api.setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey),
-    });
+    offer(set, await api.setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey));
   },
 
   async regenerateControlToken() {
     if (!inTauri) return;
     // Without an optimistic update: the token is generated by the core, so
     // there is nothing here to guess at.
-    set({ config: await api.regenerateControlToken() });
+    offer(set, await api.regenerateControlToken());
   },
 
   async setClipDir(dir) {
@@ -509,7 +530,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       set((st) => ({ config: { ...st.config, clipDir: dir } }));
       return;
     }
-    set({ config: await api.setClipDir(dir) });
+    offer(set, await api.setClipDir(dir));
   },
 
   async upsertSource(source) {
