@@ -151,7 +151,9 @@ export function ClipPlayer({
    */
   const [settling, setSettling] = useState(false);
   /** Where to jump back to after reloading. */
-  const resumeAt = useRef<{ time: number; playing: boolean } | null>(null);
+  const resumeAt = useRef<{ time: number; playing: boolean; shift: number } | null>(null);
+  /** A save failed: the file is unchanged, so the trim stays as the user left it. */
+  const keepTrim = useRef(false);
   /**
    * Die übergebene Startzeit, einmal zu verbrauchen. Ohne das Aufbrauchen
    * spränge auch der nächste Clip beim Weiterblättern auf dieselbe Sekunde.
@@ -334,6 +336,7 @@ export function ClipPlayer({
     setBroken(false);
     // Otherwise the next clip would jump to where the previous one stood.
     resumeAt.current = null;
+    keepTrim.current = false;
     loadFailures.current = 0;
     setTime(0);
     setDuration(0);
@@ -344,19 +347,26 @@ export function ClipPlayer({
   // The picture of the audio track for the timeline. It arrives later than the
   // video and then simply appears — if it is missing, the bar stays as it is.
   const clipId = clip?.id;
+  const sizeBytes = clip?.sizeBytes;
   // The core reports how far along it is. Without this the button would stand
   // there for minutes with no sign of life on a cut at the start.
   useEffect(() => {
     if (!clipId || !inTauri) return;
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     void events
       .onClipProgress((update) => {
         if (update.clipId === clipId) setWriteProgress(update.progress);
       })
       .then((off) => {
-        unlisten = off;
+        // Closed before the listener was registered: let go of it at once.
+        if (cancelled) off();
+        else unlisten = off;
       });
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [clipId]);
 
   useEffect(() => {
@@ -364,12 +374,13 @@ export function ClipPlayer({
     let cancelled = false;
     api
       .clipWaveform(clipId)
-      .then((path) => !cancelled && setWaveform(fileUrl(path)))
+      .then((path) => !cancelled && setWaveform(`${fileUrl(path)}?v=${sizeBytes ?? 0}`))
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [clipId]);
+    // A cut or undo changes the file: the picture is drawn again for the new length.
+  }, [clipId, sizeBytes, reload]);
 
   // While playing, the position is drawn without React: the frame loop writes
   // bar, handle and clock straight into the DOM.
@@ -608,10 +619,12 @@ export function ClipPlayer({
     const element = video.current;
     // After a real cut the file is shorter and starts elsewhere — the same number
     // of seconds would then sit past the new end. The offset is exactly the start
-    // that was cut away.
+    // that was cut away, and only counts once the save went through.
+    keepTrim.current = false;
     resumeAt.current = {
-      time: Math.max(0, (element?.currentTime ?? 0) - trim.start),
+      time: element?.currentTime ?? 0,
       playing: element ? !element.paused : false,
+      shift: 0,
     };
 
     setSaving(true);
@@ -630,10 +643,13 @@ export function ClipPlayer({
       // apply the same −6 dB a second time.
       const kept = written?.edit?.tracks;
       if (kept && !sameEdit({ ...current, tracks: kept }, current, duration)) mix.adopt(kept);
+      if (resumeAt.current) resumeAt.current.shift = trim.start;
       setJustSaved(true);
     } catch {
-      // The store has already raised the error as a notice. All that counts here
-      // is that the player gets a playable element back below.
+      // The store has already raised the error as a notice. The file is
+      // unchanged, so selection and playhead stay as they were; the player gets
+      // a playable element back below.
+      keepTrim.current = true;
     } finally {
       setSaving(false);
       setSettling(true);
@@ -657,6 +673,7 @@ export function ClipPlayer({
     resumeAt.current = {
       time: (element?.currentTime ?? 0) + (clip.original?.startMs ?? 0) / 1000,
       playing: false,
+      shift: 0,
     };
 
     setRestoring(true);
@@ -838,13 +855,14 @@ export function ClipPlayer({
                 const restored = Number.isFinite(length)
                   ? restoreTrim(clip.edit, length)
                   : null;
-                if (restored) setTrim(restored);
+                if (keepTrim.current) keepTrim.current = false;
+                else if (restored) setTrim(restored);
 
                 // After saving, carry on where you were.
                 const resume = resumeAt.current;
                 if (resume) {
                   resumeAt.current = null;
-                  element.currentTime = resume.time;
+                  element.currentTime = Math.max(0, resume.time - resume.shift);
                   if (resume.playing) void element.play();
                   else element.pause();
                 } else if (startOnce.current !== null) {
