@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::clips::Library;
+use crate::clips::{fresh, passes_stopped, with_library, Library};
 use crate::config;
 use crate::muxer::{ffmpeg, run, sanitize};
 
@@ -73,8 +73,8 @@ pub fn remove(clip_id: &str) {
 /// Up to 0.1.4 the picture sat as a `.jpg` next to the `.mp4` in the clip
 /// folder. At startup it moves here — otherwise every existing clip would leave
 /// an image file behind in the user's folder, forever.
-pub fn migrate(library: &Library) {
-    let clips = match library.list() {
+pub fn migrate(library: &parking_lot::Mutex<Option<Library>>) {
+    let clips = match with_library(library, |lib| lib.list()).unwrap_or(Ok(Vec::new())) {
         Ok(clips) => clips,
         Err(err) => {
             log::warn!("thumbnails not migrated: {err}");
@@ -87,7 +87,18 @@ pub fn migrate(library: &Library) {
         return;
     }
 
-    for clip in clips {
+    for listed in clips {
+        if passes_stopped() {
+            break;
+        }
+        if listed.thumb_path.is_none() {
+            continue;
+        }
+        let lock = crate::edit::clip_lock(&listed.id);
+        let _own = lock.lock();
+        let Some(clip) = fresh(library, &listed.id) else {
+            continue;
+        };
         let Some(old) = clip.thumb_path.as_deref().map(PathBuf::from) else {
             continue;
         };
@@ -112,7 +123,7 @@ pub fn migrate(library: &Library) {
             None
         };
         let value = target.map(|path| path.to_string_lossy().to_string());
-        if let Err(err) = library.set_thumb(&clip.id, value.as_deref()) {
+        if let Some(Err(err)) = with_library(library, |lib| lib.set_thumb(&clip.id, value.as_deref())) {
             log::warn!("thumbnail of '{}' not recorded: {err}", clip.id);
         }
     }

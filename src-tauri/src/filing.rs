@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::clips::Library;
+use crate::clips::{fresh, passes_stopped, with_library, Library};
 use crate::model::{Clip, ClipKind};
 
 /// Folder for the clips marked with a heart.
@@ -119,7 +119,9 @@ fn inside(clip_dir: &Path, file: &Path) -> bool {
 pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
     let file = PathBuf::from(&clip.path);
     let clip_dir = Path::new(clip_dir);
-    if !file.is_file() || !inside(clip_dir, &file) {
+    // The text decides first: a path outside the folder (an old share, a NAS
+    // that is asleep) is never asked of the file system.
+    if !inside(clip_dir, &file) || !file.is_file() {
         return Ok(None);
     }
     let dir = dir_for(clip_dir, clip.game.as_deref(), clip.favorite, clip.kind());
@@ -154,8 +156,8 @@ pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
 /// folders that empties.
 ///
 /// Returns how many clips were rewritten.
-pub fn normalize_games(library: &Library) -> usize {
-    let clips = match library.list() {
+pub fn normalize_games(library: &parking_lot::Mutex<Option<Library>>) -> usize {
+    let clips = match with_library(library, |lib| lib.list()).unwrap_or(Ok(Vec::new())) {
         Ok(clips) => clips,
         Err(err) => {
             log::warn!("game names not normalised: {err}");
@@ -167,7 +169,19 @@ pub fn normalize_games(library: &Library) -> usize {
     let mut after: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut changed = 0usize;
 
-    for clip in clips {
+    for listed in clips {
+        if passes_stopped() {
+            break;
+        }
+        if listed.game.is_none() {
+            continue;
+        }
+        // This clip alone, and its row as it is now.
+        let lock = crate::edit::clip_lock(&listed.id);
+        let _own = lock.lock();
+        let Some(clip) = fresh(library, &listed.id) else {
+            continue;
+        };
         let Some(game) = clip.game.as_deref() else {
             continue;
         };
@@ -180,9 +194,10 @@ pub fn normalize_games(library: &Library) -> usize {
         if target.as_deref() == Some(game) {
             continue;
         }
-        match library.set_game(&clip.id, target.as_deref()) {
-            Ok(()) => changed += 1,
-            Err(err) => log::warn!("game of '{}' not corrected: {err}", clip.id),
+        match with_library(library, |lib| lib.set_game(&clip.id, target.as_deref())) {
+            Some(Ok(())) => changed += 1,
+            Some(Err(err)) => log::warn!("game of '{}' not corrected: {err}", clip.id),
+            None => {}
         }
     }
 
@@ -201,8 +216,8 @@ pub fn normalize_games(library: &Library) -> usize {
 /// Runs at startup: a move that failed because the file was open at the time is
 /// caught up here — and clips from older versions find their way into their
 /// game folder without anyone doing anything.
-pub fn tidy(library: &Library, clip_dir: &str) {
-    let clips = match library.list() {
+pub fn tidy(library: &parking_lot::Mutex<Option<Library>>, clip_dir: &str) {
+    let clips = match with_library(library, |lib| lib.list()).unwrap_or(Ok(Vec::new())) {
         Ok(clips) => clips,
         Err(err) => {
             log::warn!("clips not filed: {err}");
@@ -210,15 +225,24 @@ pub fn tidy(library: &Library, clip_dir: &str) {
         }
     };
     let mut moved = 0usize;
-    for clip in clips {
+    for listed in clips {
+        if passes_stopped() {
+            break;
+        }
+        // The clip's lock for its move, the library's only for the row: a
+        // folder on a sleeping disk makes this one clip wait, not the app.
+        let lock = crate::edit::clip_lock(&listed.id);
+        let _own = lock.lock();
+        let Some(clip) = fresh(library, &listed.id) else {
+            continue;
+        };
         match place(&clip, clip_dir) {
             Ok(None) => {}
             Ok(Some(target)) => {
                 let path = target.to_string_lossy().to_string();
-                if let Err(err) = library.set_path(&clip.id, &path) {
-                    log::warn!("new path of '{}' not recorded: {err}", clip.id);
-                } else {
-                    moved += 1;
+                match with_library(library, |lib| lib.set_path(&clip.id, &path)) {
+                    Some(Err(err)) => log::warn!("new path of '{}' not recorded: {err}", clip.id),
+                    _ => moved += 1,
                 }
             }
             Err(err) => log::warn!("clip '{}' left in place: {err}", clip.id),
@@ -331,6 +355,14 @@ mod tests {
         assert_eq!(folder_name("\u{200b}\u{feff}\u{200b}"), None);
     }
 
+    fn shared() -> parking_lot::Mutex<Option<Library>> {
+        parking_lot::Mutex::new(Some(Library::in_memory().unwrap()))
+    }
+
+    fn db(lib: &parking_lot::Mutex<Option<Library>>) -> parking_lot::MappedMutexGuard<'_, Library> {
+        parking_lot::MutexGuard::map(lib.lock(), |lib| lib.as_mut().unwrap())
+    }
+
     fn clip_with_game(id: &str, game: Option<&str>) -> Clip {
         Clip {
             id: id.into(),
@@ -354,21 +386,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_clip_outside_the_folder_is_not_even_looked_at() {
+        let mut c = clip_with_game("far", Some("Game"));
+        c.path = "\\\\nas-gone\\share\\x.mp4".into();
+        // No file system access: the path is outside, decided by its text alone.
+        assert_eq!(place(&c, "C:\\Users\\me\\Videos\\ClippiBoy").unwrap(), None);
+    }
+
     /// The whole point of the migration: twenty-four clips spread over four
     /// categories that were always the same game end up under one name.
     #[test]
     fn the_four_categories_become_one() {
-        let lib = Library::in_memory().unwrap();
+        let lib = shared();
         for (n, game) in ARC_RAIDERS.iter().enumerate() {
-            lib.insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
+            db(&lib).insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
         }
         // One that was never broken must not be touched.
-        lib.insert(&clip_with_game("plain", Some("Bodycam"))).unwrap();
+        db(&lib).insert(&clip_with_game("plain", Some("Bodycam"))).unwrap();
 
         assert_eq!(normalize_games(&lib), 4);
 
         let names: std::collections::HashSet<Option<String>> =
-            lib.list().unwrap().into_iter().map(|c| c.game).collect();
+            db(&lib).list().unwrap().into_iter().map(|c| c.game).collect();
         assert_eq!(
             names,
             ["ARC Raiders", "Bodycam"]
@@ -380,9 +420,9 @@ mod tests {
 
     #[test]
     fn a_second_run_changes_nothing() {
-        let lib = Library::in_memory().unwrap();
+        let lib = shared();
         for (n, game) in ARC_RAIDERS.iter().enumerate() {
-            lib.insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
+            db(&lib).insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
         }
         assert_eq!(normalize_games(&lib), 4);
         assert_eq!(normalize_games(&lib), 0, "the pass is not idempotent");
@@ -390,18 +430,18 @@ mod tests {
 
     #[test]
     fn a_game_of_nothing_but_invisibles_becomes_no_game() {
-        let lib = Library::in_memory().unwrap();
-        lib.insert(&clip_with_game("ghost", Some("\u{200b}\u{feff}"))).unwrap();
+        let lib = shared();
+        db(&lib).insert(&clip_with_game("ghost", Some("\u{200b}\u{feff}"))).unwrap();
         assert_eq!(normalize_games(&lib), 1);
-        assert_eq!(lib.list().unwrap()[0].game, None);
+        assert_eq!(db(&lib).list().unwrap()[0].game, None);
     }
 
     #[test]
     fn a_clip_without_a_game_is_left_alone() {
-        let lib = Library::in_memory().unwrap();
-        lib.insert(&clip_with_game("none", None)).unwrap();
+        let lib = shared();
+        db(&lib).insert(&clip_with_game("none", None)).unwrap();
         assert_eq!(normalize_games(&lib), 0);
-        assert_eq!(lib.list().unwrap()[0].game, None);
+        assert_eq!(db(&lib).list().unwrap()[0].game, None);
     }
 
     /// Windows creates neither a folder ending in a dot nor one named like a

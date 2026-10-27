@@ -165,7 +165,13 @@ const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// for would be lost and its scratch files left for the next start.
 pub fn wait_for_saves(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    let busy = || state.is_saving() || edit::is_busy();
+    // The start-up passes over the library stop after the clip they are on.
+    clips::STOP_PASSES.store(true, std::sync::atomic::Ordering::SeqCst);
+    let busy = || {
+        state.is_saving()
+            || edit::is_busy()
+            || clips::PASSES_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+    };
     if !busy() {
         return;
     }
@@ -1459,12 +1465,9 @@ pub fn grantable_dir(path: &std::path::Path) -> bool {
 ///
 /// Whoever changes the storage location leaves their existing clips elsewhere —
 /// without this, half the gallery would be a black frame on the next start.
-fn allow_existing_clip_dirs(app: &tauri::AppHandle) {
-    let state = app.state::<AppState>();
-    let clips = match state.library.lock().as_ref() {
-        Some(library) => library.list().unwrap_or_default(),
-        None => return,
-    };
+///
+/// Resolving a folder asks the disk, so this runs on the library thread.
+fn allow_existing_clip_dirs(app: &tauri::AppHandle, clips: &[model::Clip]) {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for clip in clips {
         let Some(dir) = std::path::Path::new(&clip.path).parent() else {
@@ -1474,6 +1477,49 @@ fn allow_existing_clip_dirs(app: &tauri::AppHandle) {
         if seen.insert(dir.clone()) {
             allow_clip_dir(app, &dir);
         }
+    }
+}
+
+/// The start-up passes over the library, in this order, on a thread of their
+/// own: the other clip folders granted to the player, `edit::repair`, the
+/// thumbnail move, the game names, the filing. One thread, so none of them
+/// rewrites a file another one is moving; each takes a clip's lock and the
+/// library only for that clip. The sweep, the recovery and the originals store
+/// they sit beside work on scratch names and new ids, not on these clips.
+/// Ends with one `clips-changed`, so a gallery that read the list half way
+/// reads it again.
+fn maintain_library(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    clips::PASSES_RUNNING.store(true, Ordering::SeqCst);
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("clippiboy-library".into()).spawn({
+        let app = app.clone();
+        move || {
+            let state = app.state::<AppState>();
+            let clip_dir = state.config_snapshot().clip_dir;
+            let listed = clips::with_library(&state.library, |lib| lib.list());
+            if let Some(Ok(rows)) = &listed {
+                allow_existing_clip_dirs(&app, rows);
+            }
+            drop(listed);
+            edit::repair(&state.library);
+            // Pictures from older versions still sit next to the videos.
+            thumbs::migrate(&state.library);
+            // Game names first, folders second: a name that differs only in
+            // characters nobody can see has to become the one name before
+            // `tidy` works out where its clips belong — otherwise it would
+            // dutifully file them into the four folders they came from.
+            filing::normalize_games(&state.library);
+            // And whatever has not found its way into its game folder since
+            // last time moves there now.
+            filing::tidy(&state.library, &clip_dir);
+            clips::PASSES_RUNNING.store(false, Ordering::SeqCst);
+            let _ = app.emit("clips-changed", ());
+        }
+    });
+    if let Err(err) = spawned {
+        log::warn!("the library passes could not start: {err}");
+        clips::PASSES_RUNNING.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1599,7 +1645,6 @@ pub fn run() {
             app.state::<AppState>().apply_audio();
             let config = app.state::<AppState>().config_snapshot();
             allow_clip_dir(handle, &config.clip_dir);
-            allow_existing_clip_dirs(handle);
             discard_leftovers();
             // Throwaway files from an old session: clear first, then grant.
             preview::clear();
@@ -1618,19 +1663,9 @@ pub fn run() {
             // without this the WebView refuses to load it.
             let _ = std::fs::create_dir_all(edit::root());
             allow_clip_dir(handle, &edit::root().to_string_lossy());
-            if let Some(library) = app.state::<AppState>().library.lock().as_ref() {
-                edit::repair(library);
-                // Pictures from older versions still sit next to the videos.
-                thumbs::migrate(library);
-                // Game names first, folders second: a name that differs only in
-                // characters nobody can see has to become the one name before
-                // `tidy` works out where its clips belong — otherwise it would
-                // dutifully file them into the four folders they came from.
-                filing::normalize_games(library);
-                // And whatever has not found its way into its game folder since
-                // last time moves there now.
-                filing::tidy(library, &config.clip_dir);
-            }
+            // The passes over the library touch every clip's file — on a thread
+            // of its own, so a clip folder on a sleeping disk holds no window.
+            maintain_library(handle);
             // What saves, edits and exports cut short left in the clip folder
             // and the data folder — on a thread of its own.
             sweep::run(handle);

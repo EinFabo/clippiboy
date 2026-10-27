@@ -13,6 +13,33 @@ pub struct Library {
     conn: Connection,
 }
 
+/// Set when Quit or an update restart begins: the start-up passes over the
+/// library stop after the clip they are on.
+pub static STOP_PASSES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Is a start-up pass still working through the library?
+pub static PASSES_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn passes_stopped() -> bool {
+    STOP_PASSES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Run `work` on the library for as long as it takes and not a moment longer.
+/// `None` when there is no library. The start-up passes do their file work
+/// outside of this, so the lock is never held across a disk that may be asleep.
+pub fn with_library<R>(
+    library: &parking_lot::Mutex<Option<Library>>,
+    work: impl FnOnce(&Library) -> R,
+) -> Option<R> {
+    library.lock().as_ref().map(work)
+}
+
+/// One clip's row as it is now — the list a pass started from may be minutes
+/// old by the time a slow disk gets to this clip.
+pub fn fresh(library: &parking_lot::Mutex<Option<Library>>, id: &str) -> Option<Clip> {
+    with_library(library, |library| library.get(id)).and_then(Result::ok).flatten()
+}
+
 impl Library {
     pub fn open() -> rusqlite::Result<Self> {
         let dir = config::data_dir();

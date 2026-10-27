@@ -34,6 +34,7 @@ use std::sync::{Arc, Weak};
 
 use parking_lot::{Mutex, ReentrantMutex};
 
+use crate::clips::{fresh, passes_stopped, with_library};
 use crate::config;
 use crate::model::{Clip, ClipEdit, ClipOriginal, EncoderId, TrackMix};
 use crate::muxer::{ffmpeg, probe_duration_ms, replace_file, sanitize};
@@ -946,7 +947,7 @@ fn is_the_whole_recording(original: Option<&ClipOriginal>, actual_ms: u64) -> bo
 /// So this asks the file. The size is the cheap tell — [`crate::clips::Library::set_file_state`]
 /// writes it with every rewrite, so one `stat` per clip settles the usual case,
 /// and only a mismatch is worth an ffprobe.
-fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOriginal>) {
+fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Option<ClipOriginal>) {
     let target = Path::new(&clip.path);
     let Ok(actual_bytes) = std::fs::metadata(target).map(|meta| meta.len()) else {
         return;
@@ -961,7 +962,7 @@ fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOrigina
     if is_the_whole_recording(clip.original.as_ref(), actual_ms) {
         log::info!("undo of '{}' recorded after the fact", clip.id);
         remove(&clip.id);
-        let _ = library.set_original(&clip.id, None);
+        let _ = with_library(library, |lib| lib.set_original(&clip.id, None));
     } else if let Some(note) = note {
         // A cut whose bookkeeping did not land. The note is the newer truth —
         // it is written in the same breath as the file — and its end follows
@@ -971,7 +972,7 @@ fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOrigina
             end_ms: note.start_ms + actual_ms,
             ..note
         };
-        let _ = library.set_original(&clip.id, Some(&corrected));
+        let _ = with_library(library, |lib| lib.set_original(&clip.id, Some(&corrected)));
     }
 
     log::info!(
@@ -987,7 +988,7 @@ fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOrigina
     // record keeps it that way: `None` means "untouched", and an empty one in
     // its place would make the editor count that clip as changed for good.
     if let Some(edit) = clip.edit.as_ref() {
-        let _ = library.set_edit(
+        let _ = with_library(library, |lib| lib.set_edit(
             &clip.id,
             Some(&ClipEdit {
                 start_ms: 0,
@@ -995,9 +996,9 @@ fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOrigina
                 tracks: edit.tracks.clone(),
                 baked: edit.baked,
             }),
-        );
+        ));
     }
-    let _ = library.set_file_state(&clip.id, actual_ms, actual_bytes);
+    let _ = with_library(library, |lib| lib.set_file_state(&clip.id, actual_ms, actual_bytes));
 }
 
 /// Clean up at startup whatever a crash in the middle of the swap left behind.
@@ -1006,15 +1007,28 @@ fn settle(library: &crate::clips::Library, clip: &Clip, note: Option<ClipOrigina
 /// **the record on the clip must never be lost while the file is trimmed** — it
 /// carries the offset the individual tracks sit at, and without it the preview
 /// would run out of sync forever.
-pub fn repair(library: &crate::clips::Library) {
-    let clips = match library.list() {
+///
+/// Takes the library one clip at a time: the list is read once, then each clip
+/// is handled under its own lock with the library held only for its rows — the
+/// file checks in between may sit on a disk that is asleep.
+pub fn repair(library: &Mutex<Option<crate::clips::Library>>) {
+    let clips = match with_library(library, |lib| lib.list()).unwrap_or(Ok(Vec::new())) {
         Ok(clips) => clips,
         Err(err) => {
             log::warn!("originals store not checkable: {err}");
             return;
         }
     };
-    for clip in clips {
+    for listed in clips {
+        if passes_stopped() {
+            break;
+        }
+        let lock = clip_lock(&listed.id);
+        let _own = lock.lock();
+        // The row as it is now, not as the list had it.
+        let Some(clip) = fresh(library, &listed.id) else {
+            continue;
+        };
         let note = read_note(&clip.id);
         let video = video_path(&clip.id);
         let target = Path::new(&clip.path);
@@ -1029,7 +1043,7 @@ pub fn repair(library: &crate::clips::Library) {
                 if move_across(&video, target).is_ok() {
                     log::info!("clip '{}' recovered from the originals store", clip.id);
                     remove(&clip.id);
-                    let _ = library.set_original(&clip.id, None);
+                    let _ = with_library(library, |lib| lib.set_original(&clip.id, None));
                     wrote = true;
                 }
             }
@@ -1044,10 +1058,10 @@ pub fn repair(library: &crate::clips::Library) {
                 remove(&clip.id);
                 if clip.duration_ms == note.duration_ms {
                     log::info!("note without an original at '{}' — cleared away", clip.id);
-                    let _ = library.set_original(&clip.id, None);
+                    let _ = with_library(library, |lib| lib.set_original(&clip.id, None));
                 } else {
                     log::warn!("original of '{}' is gone — the clip stays trimmed", clip.id);
-                    let _ = library.set_original(&clip.id, Some(&note));
+                    let _ = with_library(library, |lib| lib.set_original(&clip.id, Some(&note)));
                 }
             }
 
@@ -1066,7 +1080,7 @@ pub fn repair(library: &crate::clips::Library) {
                     remove(&clip.id);
                 } else {
                     log::info!("original of '{}' recorded after the fact", clip.id);
-                    let _ = library.set_original(&clip.id, Some(&note));
+                    let _ = with_library(library, |lib| lib.set_original(&clip.id, Some(&note)));
                     wrote = true;
                 }
             }
@@ -1101,8 +1115,8 @@ pub fn repair(library: &crate::clips::Library) {
         // from the list is still the truth. The note is read afresh either way.
         if !clip.screenshot {
             if wrote {
-                if let Ok(Some(fresh)) = library.get(&clip.id) {
-                    settle(library, &fresh, read_note(&clip.id));
+                if let Some(again) = fresh(library, &clip.id) {
+                    settle(library, &again, read_note(&clip.id));
                 }
             } else {
                 settle(library, &clip, read_note(&clip.id));
@@ -1149,6 +1163,14 @@ mod tests {
             recording: false,
             tags: Vec::new(),
         }
+    }
+
+    #[test]
+    fn repair_takes_the_library_one_clip_at_a_time() {
+        let lib = Mutex::new(Some(crate::clips::Library::in_memory().unwrap()));
+        lib.lock().as_ref().unwrap().insert(&plain_clip(None, None)).unwrap();
+        repair(&lib);
+        assert!(lib.try_lock().is_some(), "nothing holds it afterwards");
     }
 
     #[test]
@@ -1660,7 +1682,7 @@ mod tests {
     fn a_thousand_clips_repair_quickly() {
         let dir = std::env::temp_dir().join(format!("clippiboy-repair-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let lib = crate::clips::Library::in_memory().unwrap();
+        let lib = Mutex::new(Some(crate::clips::Library::in_memory().unwrap()));
         for n in 0..1000 {
             let path = dir.join(format!("{n}.mp4"));
             std::fs::write(&path, b"0123456789").unwrap();
@@ -1669,7 +1691,7 @@ mod tests {
             clip.path = path.to_string_lossy().into_owned();
             clip.created_at = n;
             clip.size_bytes = 10;
-            lib.insert(&clip).unwrap();
+            lib.lock().as_ref().unwrap().insert(&clip).unwrap();
         }
         let started = std::time::Instant::now();
         repair(&lib);
