@@ -203,6 +203,30 @@ fn await_ready(
     answer
 }
 
+/// How often a back-off looks at the stop flag.
+const REST_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Sleeps out a back-off in short slices, looking at `stop` between them.
+/// `true` if the source was stopped before the wait was over.
+///
+/// One plain sleep of up to five seconds was what `StreamHandle::stop` had to
+/// wait out when a source in back-off (an unplugged device) was switched to
+/// another one — and the replacement waited with it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn rest(wait: std::time::Duration, stop: &AtomicBool) -> bool {
+    let until = std::time::Instant::now() + wait;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        if now >= until {
+            return false;
+        }
+        std::thread::sleep((until - now).min(REST_SLICE));
+    }
+}
+
 /// Starts capturing one source. An error means the device is gone, the process
 /// has ended or there is no permission — the caller reports that to the UI.
 pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, String> {
@@ -337,11 +361,41 @@ mod win {
     /// WAVE_FORMAT_EXTENSIBLE
     const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
+    /// An event handle that closes itself, so no early return can leak it.
+    ///
+    /// Before this, only the normal end of `attempt` and the two waits in
+    /// `process_client` closed theirs: a process tap that kept failing in
+    /// `GetService`, `Start` or `ActivateAudioInterfaceAsync` left one handle
+    /// behind per retry — thousands a day.
+    struct OwnedEvent(HANDLE);
+
+    impl OwnedEvent {
+        /// Auto-reset, unsignalled.
+        fn new() -> windows::core::Result<Self> {
+            unsafe { CreateEventW(None, false, false, None) }.map(Self)
+        }
+    }
+
+    // A kernel event may be signalled, waited on and closed from any thread —
+    // the activation calls back on one of its own.
+    unsafe impl Send for OwnedEvent {}
+    unsafe impl Sync for OwnedEvent {}
+
+    impl Drop for OwnedEvent {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+
     /// Completion handler for `ActivateAudioInterfaceAsync` — only signals an
     /// event; the evaluation happens on the calling thread.
+    ///
+    /// It shares the event rather than borrowing its value: after a timed-out
+    /// wait the operation may still call back, and the handle must not be
+    /// closed (and its value handed out again) under it.
     #[implement(IActivateAudioInterfaceCompletionHandler)]
     struct ActivationHandler {
-        event: HANDLE,
+        event: Arc<OwnedEvent>,
     }
 
     impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
@@ -350,7 +404,7 @@ mod win {
             _operation: Option<&IActivateAudioInterfaceAsyncOperation>,
         ) -> windows::core::Result<()> {
             unsafe {
-                let _ = SetEvent(self.event);
+                let _ = SetEvent(self.event.0);
             }
             Ok(())
         }
@@ -507,9 +561,9 @@ mod win {
 
     fn process_client(pid: u32, include: bool) -> windows::core::Result<(IAudioClient, Format)> {
         unsafe {
-            let event = CreateEventW(None, false, false, None)?;
+            let event = Arc::new(OwnedEvent::new()?);
             let handler: IActivateAudioInterfaceCompletionHandler =
-                ActivationHandler { event }.into();
+                ActivationHandler { event: event.clone() }.into();
 
             let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
                 ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -541,11 +595,9 @@ mod win {
                 &handler,
             )?;
 
-            if WaitForSingleObject(event, ACTIVATION_WAIT_MS) != WAIT_OBJECT_0 {
-                let _ = CloseHandle(event);
+            if WaitForSingleObject(event.0, ACTIVATION_WAIT_MS) != WAIT_OBJECT_0 {
                 return Err(windows::core::Error::from_win32());
             }
-            let _ = CloseHandle(event);
 
             let mut activate_result = S_OK;
             let mut interface: Option<IUnknown> = None;
@@ -651,7 +703,9 @@ mod win {
                     wait = FIRST_RETRY;
                 }
             }
-            std::thread::sleep(wait);
+            if rest(wait, &stop) {
+                return;
+            }
         }
     }
 
@@ -688,16 +742,17 @@ mod win {
             }
         };
 
+        // Closed by its guard on every way out of here, `Stopped` included.
         let event = if matches!(kind, SourceKind::Process { .. }) {
-            match unsafe { CreateEventW(None, false, false, None) } {
-                Ok(handle) => {
-                    if let Err(err) = unsafe { client.SetEventHandle(handle) } {
+            match OwnedEvent::new() {
+                Ok(event) => {
+                    if let Err(err) = unsafe { client.SetEventHandle(event.0) } {
                         if let Some(ready) = ready {
                             let _ = ready.send(Err(format!("SetEventHandle: {err}")));
                         }
                         return Attempt::Unavailable(err.to_string());
                     }
-                    Some(handle)
+                    Some(event)
                 }
                 Err(err) => {
                     if let Some(ready) = ready {
@@ -752,9 +807,9 @@ mod win {
 
         let mut outcome = Attempt::Stopped;
         while !stop.load(Ordering::Relaxed) {
-            match event {
-                Some(handle) => unsafe {
-                    WaitForSingleObject(handle, 200);
+            match &event {
+                Some(event) => unsafe {
+                    WaitForSingleObject(event.0, 200);
                 },
                 None => std::thread::sleep(std::time::Duration::from_millis(5)),
             }
@@ -853,9 +908,6 @@ mod win {
         }
 
         let _ = unsafe { client.Stop() };
-        if let Some(handle) = event {
-            let _ = unsafe { CloseHandle(handle) };
-        }
         outcome
     }
 }
@@ -879,6 +931,38 @@ mod tests {
         let stop = AtomicBool::new(false);
         assert!(await_ready(&waiting, std::time::Duration::from_millis(20), &stop).is_ok());
         assert!(!stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_stopped_source_does_not_sleep_out_its_back_off() {
+        let stop = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        assert!(rest(std::time::Duration::from_secs(5), &stop));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_stop_during_the_back_off_ends_it_within_a_slice() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                stop.store(true, Ordering::Relaxed);
+            })
+        };
+        let started = std::time::Instant::now();
+        assert!(rest(std::time::Duration::from_secs(5), &stop));
+        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+        setter.join().unwrap();
+    }
+
+    #[test]
+    fn a_back_off_nobody_stops_runs_its_full_length() {
+        let stop = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        assert!(!rest(std::time::Duration::from_millis(120), &stop));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(120));
     }
 
     #[test]

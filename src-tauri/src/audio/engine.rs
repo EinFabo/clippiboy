@@ -77,8 +77,12 @@ impl AudioEngine {
             .map(|stream| (stream_key(stream), stream))
             .collect();
 
-        // Collect streams that are no longer wanted …
-        let stale: Vec<Running> = {
+        // Take the streams that are no longer wanted out first: from this moment
+        // the mixer and the meters no longer read their rings, so an old stream
+        // and its replacement (the same source on another device, the same
+        // application under another source) never feed a track at the same
+        // time. Their threads are told to stop right away …
+        let stale: Vec<StreamHandle> = {
             let mut running = self.running.lock();
             let keys: Vec<String> = running
                 .keys()
@@ -86,16 +90,14 @@ impl AudioEngine {
                 .cloned()
                 .collect();
             keys.into_iter()
-                .filter_map(|key| running.remove(&key))
+                .filter_map(|key| running.remove(&key).and_then(|run| run.handle))
                 .collect()
         };
-        // … and let them drain outside the lock: `stop` waits on the source's
-        // thread.
-        for mut run in stale {
-            if let Some(handle) = run.handle.take() {
-                handle.stop();
-            }
+        for handle in &stale {
+            handle.stop.store(true, Ordering::Relaxed);
         }
+        // … but only waited for once the missing streams are up (below), so a
+        // thread winding down cannot hold up its replacement.
 
         let missing: Vec<(String, &Stream)> = {
             let running = self.running.lock();
@@ -142,6 +144,10 @@ impl AudioEngine {
             }
         }
         *self.errors.lock() = failures;
+        // Outside the lock: `stop` waits on the source's thread.
+        for handle in stale {
+            handle.stop();
+        }
         // Sorted, because session enumeration does not promise an order and the
         // comparison in `refresh` would otherwise see a change in every
         // reshuffle.
