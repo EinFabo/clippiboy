@@ -85,6 +85,51 @@ impl RestartQueue {
             }
         }
     }
+
+    /// The worker died mid-pass: the next request starts a new one. A
+    /// request it left pending is kept for that one.
+    pub fn abandon(&self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Does the capture have to be rebuilt to match `fitted` — the configured
+/// recording fitted to its source, as a start would make it? Against what
+/// actually runs, so a write that only spells out the size the capture was
+/// already fitted to (the Video page does that on opening) empties nothing.
+pub fn restart_needed(running: Option<&RecordingConfig>, fitted: &RecordingConfig) -> bool {
+    running.is_none_or(|running| capture_changed(running, fitted))
+}
+
+/// What a settings restart does.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SettingsStep {
+    Nothing,
+    /// A recording holds the capture: after it (`settings_waiting`).
+    Wait,
+    Restart,
+}
+
+/// The rule for a settings restart. A recording comes first, buffer on or
+/// off: switched on during the recording, the buffer takes over its capture
+/// as it stands, and only the recording's end can bring the new settings in.
+/// `needed` (see [`restart_needed`]) is asked only when it decides.
+pub fn settings_step(
+    pipeline_running: bool,
+    recording: bool,
+    buffer_wanted: bool,
+    needed: impl FnOnce() -> bool,
+) -> SettingsStep {
+    if !pipeline_running {
+        SettingsStep::Nothing
+    } else if recording {
+        SettingsStep::Wait
+    } else if buffer_wanted && needed() {
+        SettingsStep::Restart
+    } else {
+        SettingsStep::Nothing
+    }
 }
 
 pub struct AppState {
@@ -857,32 +902,63 @@ impl AppState {
     }
 
     /// Restart a running buffer on the settings as they stand now. `Ok(false)`
-    /// when there is nothing to restart: the buffer is off, or a recording
-    /// holds it — then the restart waits for its end (`settings_waiting`).
+    /// when there is nothing to restart: the buffer is off, the capture runs
+    /// on these settings already, or a recording holds it — then the restart
+    /// waits for its end (`settings_waiting`).
     ///
     /// Decided under `lifecycle`, which is what keeps a "Stop buffer" pressed
     /// right after a change from being undone (R9): either the stop ran first
     /// and nothing is wanted here, or this ran first and the stop follows it.
     pub fn restart_if_buffering(&self) -> Result<bool, String> {
         let _lifecycle = self.lifecycle.lock();
-        if !self.buffer_wanted() || self.pipeline.lock().is_none() {
-            return Ok(false);
+        self.restart_for_settings()
+    }
+
+    /// [`Self::restart_if_buffering`]; the caller holds `lifecycle`.
+    fn restart_for_settings(&self) -> Result<bool, String> {
+        // Read one at a time: no guard may be held while `needed` enumerates
+        // the capture targets.
+        let pipeline_running = self.pipeline.lock().is_some();
+        let recording = self.is_recording();
+        let needed = || {
+            let mut fitted = self.config_snapshot().recording;
+            crate::capture::fit_to_target(&mut fitted);
+            let running = self.active_recording.lock().clone();
+            restart_needed(running.as_ref(), &fitted)
+        };
+        match settings_step(pipeline_running, recording, self.buffer_wanted(), needed) {
+            SettingsStep::Nothing => Ok(false),
+            SettingsStep::Wait => {
+                // Under `lifecycle`, before the stop can close the recording:
+                // its end is sure to see this.
+                self.settings_waiting
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(false)
+            }
+            SettingsStep::Restart => {
+                log::info!("capture settings changed — restarting the buffer");
+                // Counted as on throughout: a "Stop buffer" or the toggle
+                // hotkey meanwhile reads the status, and seeing it off they
+                // did nothing, or started it. Now they stop it, once this
+                // has let go of `lifecycle`.
+                self.take_down(true);
+                if let Err(err) = self.launch_pipeline(true) {
+                    self.status.lock().buffer_active = false;
+                    return Err(err);
+                }
+                Ok(true)
+            }
         }
-        if self.is_recording() {
-            // Under `lifecycle`, before the stop can close the recording: its
-            // end is sure to see this.
-            self.settings_waiting
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            return Ok(false);
-        }
-        log::info!("capture settings changed — restarting the buffer");
-        self.halt_pipeline();
-        self.launch_pipeline(true)?;
-        Ok(true)
     }
 
     /// Take the capture stack down. The caller holds `lifecycle`.
     fn halt_pipeline(&self) {
+        self.take_down(false);
+    }
+
+    /// [`Self::halt_pipeline`]; `counted_on` leaves the buffer shown as
+    /// running, for a restart that brings it straight back.
+    fn take_down(&self, counted_on: bool) {
         self.buffer_wanted
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.shared.lock().take();
@@ -896,7 +972,7 @@ impl AppState {
             pipeline.stop();
         }
         let mut status = self.status.lock();
-        status.buffer_active = false;
+        status.buffer_active = counted_on;
         status.buffered_seconds = 0.0;
         status.buffer_bytes = 0;
         status.fps = 0.0;
@@ -1440,8 +1516,16 @@ impl AppState {
 
     /// Stop the recording and write it out. Takes as long as the audio of the
     /// whole recording takes to encode — off the hotkey thread.
-    pub fn stop_recording(&self, on_progress: &dyn Fn(f32)) -> Result<Clip, String> {
-        let (recorder, meta, _finalizing) = {
+    ///
+    /// Video settings changed during the recording reach the buffer right
+    /// after the close, before the writing out; `on_restart` hears how that
+    /// went, off the lock.
+    pub fn stop_recording(
+        &self,
+        on_progress: &dyn Fn(f32),
+        on_restart: &dyn Fn(Result<bool, String>),
+    ) -> Result<Clip, String> {
+        let (recorder, meta, _finalizing, restarted) = {
             let _lifecycle = self.lifecycle.lock();
             if !self.is_recording() {
                 return Err("No recording is running.".into());
@@ -1451,8 +1535,16 @@ impl AppState {
             })?;
             // Raised before the lifecycle lock is let go, so the status never
             // shows "not recording" without "finalizing" in between.
-            (recorder, meta, FlagGuard::raise(&self.finalizing))
+            let finalizing = FlagGuard::raise(&self.finalizing);
+            let restarted = self
+                .settings_waiting
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                .then(|| self.restart_for_settings());
+            (recorder, meta, finalizing, restarted)
         };
+        if let Some(outcome) = restarted {
+            on_restart(outcome);
+        }
         self.finish_recording(&recorder.dir, &meta, on_progress)
     }
 
@@ -1720,6 +1812,40 @@ mod tests {
         assert!(queue.next(), "both coalesce into one more pass");
         assert!(!queue.next(), "then the worker ends");
         assert!(queue.request(), "a later request starts a new one");
+    }
+
+    #[test]
+    fn a_worker_that_died_does_not_block_the_next_one() {
+        let queue = RestartQueue::default();
+        assert!(queue.request());
+        assert!(queue.next());
+        queue.abandon();
+        assert!(queue.request(), "the next request starts a worker again");
+    }
+
+    #[test]
+    fn the_page_fitting_the_stored_size_to_the_source_restarts_nothing() {
+        let running = crate::config::default_config().recording;
+        // What the Video page writes on opening: the size the capture was
+        // already fitted to — and a bitrate that does not count.
+        let mut fitted = running.clone();
+        fitted.bitrate_kbps += 1000;
+        assert!(!restart_needed(Some(&running), &fitted));
+        fitted.fps = 30;
+        assert!(restart_needed(Some(&running), &fitted));
+        assert!(restart_needed(None, &fitted));
+    }
+
+    #[test]
+    fn a_settings_change_waits_for_a_recording_even_with_the_buffer_off() {
+        use SettingsStep::*;
+        let never = || -> bool { panic!("nothing to compare when nothing restarts") };
+        assert_eq!(settings_step(true, true, false, never), Wait);
+        assert_eq!(settings_step(true, true, true, never), Wait);
+        assert_eq!(settings_step(false, false, true, never), Nothing);
+        assert_eq!(settings_step(true, false, false, never), Nothing);
+        assert_eq!(settings_step(true, false, true, || false), Nothing);
+        assert_eq!(settings_step(true, false, true, || true), Restart);
     }
 
     #[test]

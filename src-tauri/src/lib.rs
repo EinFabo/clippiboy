@@ -286,14 +286,10 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
     let state = app.state::<AppState>();
     overlay::set_recording(app, false);
     overlay::show(app, BannerKind::Recording, "Saving recording…", None);
-    let outcome = state.stop_recording(&|share| recording_progress(app, share));
-    // Video settings changed during the recording reach the buffer now.
-    if state
-        .settings_waiting
-        .swap(false, std::sync::atomic::Ordering::SeqCst)
-    {
-        restart_buffer_for_settings(app);
-    }
+    let outcome = state.stop_recording(
+        &|share| recording_progress(app, share),
+        &|restarted| settings_restarted(app, restarted),
+    );
     // Always the closing 1, success or not — the window takes it as "done"
     // and drops the bar.
     recording_progress(app, 1.0);
@@ -410,14 +406,41 @@ pub fn restart_buffer_for_settings(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        while state.restarts.next() {
-            match state.restart_if_buffering() {
-                Ok(true) => buffer_started(&app),
-                Ok(false) => {}
-                Err(err) => buffer_failed(&app, err),
+        // Should a pass panic, the queue must not go on believing a worker
+        // runs: no request would ever start one again.
+        struct Ended<'a>(&'a state::RestartQueue);
+        impl Drop for Ended<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.abandon();
+                }
             }
         }
+        let _ended = Ended(&state.restarts);
+        while state.restarts.next() {
+            settings_restarted(&app, state.restart_if_buffering());
+        }
     });
+}
+
+/// How a restart for changed settings went — quietly: the change was the
+/// user's own, and was answered when it was made; a banner here would
+/// replace a "Recording saved" just shown. Only a buffer that did not come
+/// back is worth a word.
+fn settings_restarted(app: &tauri::AppHandle, outcome: Result<bool, String>) {
+    match &outcome {
+        Ok(false) => return,
+        Ok(true) => log::info!("buffer restarted on the new video settings"),
+        Err(err) => log::warn!("buffer did not restart on the new video settings: {err}"),
+    }
+    // Right away, not with the next tick: the window and the tray show the
+    // buffer as it now is.
+    let status = app.state::<AppState>().status_snapshot();
+    tray::refresh(app, &status);
+    let _ = app.emit("engine-status", status);
+    if let Err(err) = outcome {
+        notify(app, "error", format!("The replay buffer stopped: {err}"));
+    }
 }
 
 /// Start the buffer and report the result.

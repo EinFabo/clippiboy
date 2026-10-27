@@ -126,9 +126,12 @@ pub fn set_config(
     // picked from lists, so a restart per change is what the user asked for.
     // Asked for even while the buffer looks off: during its start it does, and
     // the change would be lost (CFG-8). The worker decides under the lifecycle
-    // lock and leaves a stopped buffer stopped.
+    // lock, on what really runs, and leaves a stopped buffer stopped.
     if crate::state::capture_changed(&previous.recording, &next.recording) {
-        if state.is_recording() {
+        // Against what runs: the Video page writes the fitted size on opening,
+        // and that is no change worth a word.
+        let running = state.active_recording.lock().clone();
+        if state.is_recording() && crate::state::restart_needed(running.as_ref(), &next.recording) {
             crate::notify(&app, "ok", "The new video settings apply once the recording stops.");
         }
         // Not here: this runs on the main thread, and stopping waits for a
