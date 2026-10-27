@@ -70,6 +70,16 @@ pub struct ReplayBuffer {
     /// An encoder with B-frames does that, and its stream cannot go into a
     /// TS without DTS ([`crate::ts`]).
     reorders: bool,
+    /// A step forward between neighbouring packets longer than this is a
+    /// break in time (BUF-5), not a stall: the PC slept with the buffer
+    /// running. `i64::MAX`, the default, never sees one.
+    jump_us: i64,
+    /// Sequence number of the first packet after the latest break in time,
+    /// while no keyframe has followed it yet. Nothing before it may be cut,
+    /// and the first video keyframe at or after it drops everything older.
+    cut_seq: Option<u64>,
+    /// Has the stream that flags only its first keyframe been reported?
+    warned_about_one_keyframe: bool,
 }
 
 impl ReplayBuffer {
@@ -85,7 +95,16 @@ impl ReplayBuffer {
             bytes: 0,
             newest_pts: 0,
             reorders: false,
+            jump_us: i64::MAX,
+            cut_seq: None,
+            warned_about_one_keyframe: false,
         }
+    }
+
+    /// The longest step forward that is still time passing; see
+    /// [`jump_limit_us`] for the game ring's.
+    pub fn set_jump_limit_us(&mut self, us: i64) {
+        self.jump_us = us;
     }
 
     pub fn set_capacity(&mut self, seconds: u32, bytes: u64) {
@@ -104,11 +123,31 @@ impl ReplayBuffer {
                 "the encoder reorders its frames (B-frames) — recordings keep the raw stream"
             );
         }
+        let seq = self.next_seq;
+        let step = packet.pts_us.saturating_sub(self.newest_pts);
+        if !self.packets.is_empty() && step > self.jump_us {
+            // A later jump replaces an earlier one still waiting: what lies
+            // between the two is from before a break in time as well.
+            self.cut_seq = Some(seq);
+            log::info!(
+                "the stream jumped {:.1} s ahead (the PC slept?) — the buffer starts over at the next keyframe",
+                step as f64 / 1_000_000.0
+            );
+        }
+        if packet.is_video() && packet.keyframe {
+            if self.cut_seq.is_some_and(|cut| seq >= cut) {
+                // Every packet so far lies before this one, and every one
+                // from before the jump goes.
+                self.packets.clear();
+                self.keyframes.clear();
+                self.bytes = 0;
+                self.head_seq = seq;
+                self.cut_seq = None;
+            }
+            self.keyframes.push_back((seq, packet.pts_us));
+        }
         self.newest_pts = self.newest_pts.max(packet.pts_us);
         self.bytes += packet.data.len() as u64;
-        if packet.is_video() && packet.keyframe {
-            self.keyframes.push_back((self.next_seq, packet.pts_us));
-        }
         self.packets.push_back(packet);
         self.next_seq += 1;
         self.trim();
@@ -138,7 +177,69 @@ impl ReplayBuffer {
             self.keyframes.pop_front();
         }
 
+        self.give_up_a_lone_keyframe();
         self.enforce_budget_without_keyframes();
+    }
+
+    /// The safety valve for a stream that flags its first keyframe and none
+    /// after (BUF-4): the loop above needs a second one to cut at, the floor
+    /// below needs none, so with exactly one the ring would ignore both limits
+    /// until the machine gives out.
+    ///
+    /// Once that keyframe is older than the ring is long — and either the ring
+    /// is twice over its budget or the keyframe is 10 s past the length, more
+    /// than any keyframe interval — its entry goes, and the floor holds the
+    /// ring until another one arrives. A young last keyframe is never given
+    /// up, whatever the budget: that is the group of pictures a save needs.
+    ///
+    /// A jump waiting for its keyframe is the same fault seen from the other
+    /// side: if none follows within the same time, what lies before the jump
+    /// goes and the floor takes over.
+    fn give_up_a_lone_keyframe(&mut self) {
+        let long_past = self.capacity_us.saturating_add(10_000_000);
+        if let Some(cut) = self.cut_seq {
+            let Some(jump_pts) = cut
+                .checked_sub(self.head_seq)
+                .and_then(|i| self.packets.get(i as usize))
+                .map(|p| p.pts_us)
+            else {
+                return;
+            };
+            if self.newest_pts - jump_pts <= long_past {
+                return;
+            }
+            for _ in self.head_seq..cut {
+                if let Some(p) = self.packets.pop_front() {
+                    self.bytes -= p.data.len() as u64;
+                }
+            }
+            self.head_seq = cut;
+            self.cut_seq = None;
+            // Every keyframe left lay before the jump. None since: the
+            // floor's own line is the true one here.
+            self.keyframes.clear();
+            return;
+        }
+        if self.keyframes.len() != 1 {
+            return;
+        }
+        let age = self.newest_pts - self.keyframes[0].1;
+        let too_big =
+            age >= self.capacity_us && self.bytes > self.capacity_bytes.saturating_mul(2);
+        if !too_big && age <= long_past {
+            return;
+        }
+        self.keyframes.clear();
+        // The floor's own line ("not flagging any keyframes") would be wrong
+        // here: the encoder did flag one.
+        self.warned_about_keyframes = true;
+        if !self.warned_about_one_keyframe {
+            self.warned_about_one_keyframe = true;
+            log::warn!(
+                "the encoder flags only its first keyframe — the buffer is being held to its \
+                 budget by force"
+            );
+        }
     }
 
     /// The safety valve for a stream that never declares a keyframe.
@@ -186,6 +287,7 @@ impl ReplayBuffer {
         self.head_seq = self.next_seq;
         self.newest_pts = 0;
         self.reorders = false;
+        self.cut_seq = None;
     }
 
     /// Does the encoder hand out pictures out of order (B-frames)? Then a
@@ -198,6 +300,11 @@ impl ReplayBuffer {
         self.bytes
     }
 
+    /// The latest pts the ring has seen, in µs.
+    pub fn newest_pts(&self) -> i64 {
+        self.newest_pts
+    }
+
     pub fn len(&self) -> usize {
         self.packets.len()
     }
@@ -207,24 +314,40 @@ impl ReplayBuffer {
     }
 
     /// Duration actually buffered, in seconds (from the first keyframe).
+    /// Nothing while a jump in time waits for its keyframe: none of it can
+    /// be saved.
     pub fn buffered_seconds(&self) -> f32 {
+        if self.cut_seq.is_some() {
+            return 0.0;
+        }
         match self.keyframes.front() {
             Some((_, pts)) => (self.newest_pts - pts) as f32 / 1_000_000.0,
             None => 0.0,
         }
     }
 
+    /// The keyframes a cut may begin on: none from before a jump in time.
+    fn usable_keyframes(&self) -> impl DoubleEndedIterator<Item = &(u64, i64)> {
+        let cut = self.cut_seq.unwrap_or(0);
+        self.keyframes.iter().filter(move |(seq, _)| *seq >= cut)
+    }
+
     /// Snapshot of the last `seconds` seconds, starting at the last keyframe
     /// *before* that point in time (so the video is decodable).
     pub fn snapshot(&self, seconds: u32) -> Vec<EncodedPacket> {
-        let want_from = self.newest_pts - seconds as i64 * 1_000_000;
+        self.snapshot_range(self.newest_pts - seconds as i64 * 1_000_000, i64::MAX)
+    }
+
+    /// The packets from `from_us` to `to_us`, starting at the newest keyframe
+    /// at or before `from_us` (else the front keyframe), so the cut is
+    /// decodable. Absolute times, for a ring cut by another ring's window.
+    pub fn snapshot_range(&self, from_us: i64, to_us: i64) -> Vec<EncodedPacket> {
         let start_pts = self
-            .keyframes
-            .iter()
+            .usable_keyframes()
             .rev()
             .map(|(_, pts)| *pts)
-            .find(|pts| *pts <= want_from)
-            .or_else(|| self.keyframes.front().map(|(_, pts)| *pts));
+            .find(|pts| *pts <= from_us)
+            .or_else(|| self.usable_keyframes().next().map(|(_, pts)| *pts));
 
         let Some(start_pts) = start_pts else {
             return Vec::new();
@@ -232,13 +355,15 @@ impl ReplayBuffer {
 
         self.packets
             .iter()
-            .filter(|p| p.pts_us >= start_pts)
+            .filter(|p| p.pts_us >= start_pts && p.pts_us <= to_us)
             .cloned()
             .collect()
     }
-    /// Is there a keyframe to begin a recording on?
+
+    /// Is there a keyframe to begin a recording on? Not one from before a
+    /// jump in time.
     pub fn has_keyframe(&self) -> bool {
-        !self.keyframes.is_empty()
+        self.usable_keyframes().next().is_some()
     }
 
     /// Everything from the newest keyframe on — where a recording begins.
@@ -248,7 +373,7 @@ impl ReplayBuffer {
     /// keyframe interval. Waiting for the next one instead would lose that
     /// much at the start.
     pub fn from_last_keyframe(&self) -> Vec<EncodedPacket> {
-        let Some(&(seq, _)) = self.keyframes.back() else {
+        let Some(&(seq, _)) = self.usable_keyframes().next_back() else {
             return Vec::new();
         };
         self.packets
@@ -461,5 +586,147 @@ mod tests {
     fn snapshot_of_empty_buffer_is_empty() {
         let buf = ReplayBuffer::new(30, NO_LIMIT);
         assert!(buf.snapshot(10).is_empty());
+    }
+
+    /// `count` video packets at 60 fps from `from_ms` on, keyframes where
+    /// `key` says.
+    fn video_from(buf: &mut ReplayBuffer, from_ms: i64, count: i64, key: impl Fn(i64) -> bool) {
+        for frame in 0..count {
+            buf.push(packet(VIDEO_TRACK, from_ms + frame * 1000 / 60, key(frame), 1000));
+        }
+    }
+
+    /// The cam is cut by the game clip's absolute window, not by "the last N
+    /// seconds" of its own ring.
+    #[test]
+    fn a_cut_from_a_time_starts_on_the_keyframe_before_it() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        fill(&mut buf, 30);
+
+        let cut = buf.snapshot_range(5_000_000, 9_000_000);
+        assert!(cut[0].keyframe && cut[0].pts_us == 4_000_000, "started at {}", cut[0].pts_us);
+        assert!(cut.iter().all(|p| (4_000_000..=9_000_000).contains(&p.pts_us)));
+    }
+
+    #[test]
+    fn a_cut_before_the_ring_starts_on_its_first_keyframe() {
+        let mut buf = ReplayBuffer::new(10, NO_LIMIT);
+        fill(&mut buf, 30);
+
+        let cut = buf.snapshot_range(0, i64::MAX);
+        let front = buf.packets.front().unwrap();
+        assert_eq!(cut[0].pts_us, front.pts_us);
+        assert!(cut[0].is_video() && cut[0].keyframe);
+    }
+
+    #[test]
+    fn the_old_cut_is_a_range_up_to_now() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        fill(&mut buf, 30);
+
+        let old = buf.snapshot(10);
+        let range = buf.snapshot_range(buf.newest_pts() - 10_000_000, i64::MAX);
+        assert_eq!(old.len(), range.len());
+        assert_eq!(old[0].pts_us, range[0].pts_us);
+    }
+
+    /// Review Focus, BUF-4: an encoder that flags its first keyframe and none
+    /// after. The trim needs a second keyframe, the floor needs none, so with
+    /// exactly one the ring used to grow until the allocation failed.
+    #[test]
+    fn a_stream_with_one_keyframe_still_obeys_its_budget() {
+        let mut buf = ReplayBuffer::new(2, 100_000);
+        video_from(&mut buf, 0, 601, |frame| frame == 0);
+        assert!(buf.bytes() <= 200_000, "the ring grew to {} bytes", buf.bytes());
+        assert!(!buf.is_empty(), "and it must not have thrown everything away");
+    }
+
+    #[test]
+    fn a_young_single_keyframe_is_kept_whatever_the_budget() {
+        let mut buf = ReplayBuffer::new(30, 1);
+        video_from(&mut buf, 0, 61, |frame| frame == 0);
+        let front = buf.packets.front().unwrap();
+        assert!(front.keyframe && front.pts_us == 0);
+    }
+
+    /// Review Focus, BUF-5: the PC slept with the buffer running. The pts jump
+    /// by the sleep, and a clip that reaches back over it comes out silent and
+    /// hours long. Everything before the jump goes at the first keyframe after.
+    #[test]
+    fn a_jump_in_time_drops_what_lies_before_it() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        buf.set_jump_limit_us(6_000_000);
+        fill(&mut buf, 10);
+        video_from(&mut buf, 610_000, 180, |frame| frame % 120 == 0);
+
+        assert!(buf.snapshot_range(0, i64::MAX)[0].pts_us >= 610_000_000);
+        assert!(buf.buffered_seconds() < 4.0, "held {} s", buf.buffered_seconds());
+    }
+
+    #[test]
+    fn nothing_from_before_a_jump_is_cut_until_the_next_keyframe() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        buf.set_jump_limit_us(6_000_000);
+        fill(&mut buf, 10);
+        video_from(&mut buf, 610_000, 30, |_| false);
+
+        assert!(buf.snapshot_range(0, i64::MAX).is_empty());
+        assert_eq!(buf.buffered_seconds(), 0.0);
+    }
+
+    #[test]
+    fn a_stall_under_the_limit_is_no_jump() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        buf.set_jump_limit_us(6_000_000);
+        fill(&mut buf, 10);
+        video_from(&mut buf, 12_000, 120, |frame| frame == 0);
+
+        assert_eq!(buf.snapshot(30)[0].pts_us, 0);
+    }
+
+    /// A recording takes the ring's backlog from its newest keyframe. Across
+    /// a pending cut that keyframe lies before the jump, so there is nothing
+    /// to begin on until the next one (`attach_recorder` waits for it).
+    #[test]
+    fn a_recording_waits_for_the_keyframe_after_a_jump() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        buf.set_jump_limit_us(6_000_000);
+        fill(&mut buf, 10);
+        video_from(&mut buf, 610_000, 30, |_| false);
+        assert!(!buf.has_keyframe());
+        assert!(buf.from_last_keyframe().is_empty());
+
+        video_from(&mut buf, 610_500, 30, |frame| frame == 0);
+        assert!(buf.has_keyframe());
+        let start = buf.from_last_keyframe();
+        assert!(start[0].keyframe && start[0].pts_us == 610_500_000);
+        assert_eq!(start.len(), 30);
+    }
+
+    #[test]
+    fn a_clear_forgets_a_pending_cut() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        buf.set_jump_limit_us(6_000_000);
+        fill(&mut buf, 10);
+        video_from(&mut buf, 610_000, 30, |_| false);
+        buf.clear();
+
+        fill(&mut buf, 5);
+        assert_eq!(buf.snapshot_range(0, i64::MAX)[0].pts_us, 0);
+        assert!(buf.buffered_seconds() > 4.0);
+    }
+
+    /// Both faults at once: the jump waits for a keyframe that never comes.
+    /// The ring must not grow while it waits.
+    #[test]
+    fn a_jump_without_a_keyframe_after_it_still_obeys_the_length() {
+        let mut buf = ReplayBuffer::new(2, NO_LIMIT);
+        buf.set_jump_limit_us(6_000_000);
+        video_from(&mut buf, 0, 60, |frame| frame == 0);
+        video_from(&mut buf, 610_000, 60 * 30, |_| false);
+
+        assert!(buf.len() <= 130, "the ring held {} packets for a two-second buffer", buf.len());
+        assert!(buf.packets.front().unwrap().pts_us >= 610_000_000);
+        assert!(buf.snapshot_range(0, i64::MAX).is_empty());
     }
 }

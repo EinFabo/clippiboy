@@ -1166,12 +1166,17 @@ impl Pipeline {
         // nobody collected.
         audio.reset_rings();
 
+        // A step longer than a clip keeps as a held frame is a break in time:
+        // the ring drops what lies before it (BUF-5).
+        let mut packets = ReplayBuffer::new(buffer_seconds, buffer_bytes);
+        packets.set_jump_limit_us(crate::buffer::jump_limit_us(recording.keyframe_seconds));
+
         let shared = Arc::new(Shared {
             buffer_seconds: AtomicU32::new(buffer_seconds),
             keyframe_seconds: recording.keyframe_seconds,
             mixed: Arc::new(MixPosition::default()),
             fps: recording.fps.max(1),
-            packets: Mutex::new(ReplayBuffer::new(buffer_seconds, buffer_bytes)),
+            packets: Mutex::new(packets),
             tracks: Mutex::new(tracks),
             sources: Mutex::new(sources),
             audio,
