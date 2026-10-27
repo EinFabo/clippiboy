@@ -119,24 +119,22 @@ pub fn set_config(
     }
     crate::apply_autostart(&app, next.auto_start_with_windows);
 
-    // A running capture is bound to its monitor or window. Without a restart
-    // the selection in the UI would have no effect: the buffer would keep
-    // recording the old source. Only on a real source change — resolution and
-    // bitrate are dragged on a slider, and a restart per mouse move would be
-    // fatal there.
-    let target_changed = next.recording.target_kind != previous.recording.target_kind
-        || next.recording.target_id != previous.recording.target_id
-        || next.recording.target_stable_id != previous.recording.target_stable_id;
-    if target_changed && state.is_buffering() {
-        log::info!("capture source changed — restarting the buffer");
+    // A running capture is bound to its monitor or window, and its encoder to
+    // the size, rate, quality and keyframe interval it was built with. Without
+    // a restart the choice in the UI would have no effect: the buffer would
+    // keep recording the old source, at the old size (CFG-7). All of these are
+    // picked from lists, so a restart per change is what the user asked for.
+    // Asked for even while the buffer looks off: during its start it does, and
+    // the change would be lost (CFG-8). The worker decides under the lifecycle
+    // lock and leaves a stopped buffer stopped.
+    if crate::state::capture_changed(&previous.recording, &next.recording) {
+        if state.is_recording() {
+            crate::notify(&app, "ok", "The new video settings apply once the recording stops.");
+        }
         // Not here: this runs on the main thread, and stopping waits for a
         // save while starting brings up the whole capture — every window
         // stood still meanwhile.
-        let app = app.clone();
-        std::thread::spawn(move || {
-            tauri::Manager::state::<AppState>(&app).stop_pipeline();
-            crate::start_buffer_and_notify(&app);
-        });
+        crate::restart_buffer_for_settings(&app);
     }
 
     // Hotkeys normally go through `set_hotkeys`; if they do come through here

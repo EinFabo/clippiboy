@@ -287,6 +287,13 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
     overlay::set_recording(app, false);
     overlay::show(app, BannerKind::Recording, "Saving recording…", None);
     let outcome = state.stop_recording(&|share| recording_progress(app, share));
+    // Video settings changed during the recording reach the buffer now.
+    if state
+        .settings_waiting
+        .swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        restart_buffer_for_settings(app);
+    }
     // Always the closing 1, success or not — the window takes it as "done"
     // and drops the bar.
     recording_progress(app, 1.0);
@@ -390,6 +397,27 @@ pub fn toggle_buffer_and_notify(app: &tauri::AppHandle) {
         state.auto.manual_start();
         start_buffer_and_notify(app);
     }
+}
+
+/// Restart a running buffer for changed video settings, off the caller's
+/// thread. Requests while one runs coalesce into one more pass, so quick
+/// changes in a row end on the last one; a buffer that is off — or was
+/// switched off right after the change — stays off.
+pub fn restart_buffer_for_settings(app: &tauri::AppHandle) {
+    if !app.state::<AppState>().restarts.request() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        while state.restarts.next() {
+            match state.restart_if_buffering() {
+                Ok(true) => buffer_started(&app),
+                Ok(false) => {}
+                Err(err) => buffer_failed(&app, err),
+            }
+        }
+    });
 }
 
 /// Start the buffer and report the result.

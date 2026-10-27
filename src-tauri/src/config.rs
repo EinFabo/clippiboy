@@ -116,6 +116,19 @@ pub fn effective_memory_bytes(recording: &RecordingConfig, buffer: &BufferConfig
     (plain * 3 / 2).max(64 * 1024 * 1024)
 }
 
+/// The derived and bounded parts of the recording settings, put right on every
+/// write and at load.
+///
+/// The bitrate follows the picture: from a write that changed only the
+/// resolution or the frame rate it kept the old number until the next start,
+/// and the "MB per clip" and memory estimates with it (CFG-7). The keyframe
+/// interval stays within what the ring and the encoder are built for.
+pub fn normalize_recording(recording: &mut RecordingConfig) {
+    recording.bitrate_kbps =
+        encode::bitrate_for(recording.width, recording.height, recording.fps);
+    recording.keyframe_seconds = recording.keyframe_seconds.clamp(1, 10);
+}
+
 /// Undo the detour where the leftovers were briefly a source kind of their own,
 /// limited to one, with the other endpoint sources switched off.
 ///
@@ -304,11 +317,7 @@ pub fn load() -> (AppConfig, Loaded) {
             // a config from when it was a slider carries a number that means
             // nothing now (40 Mbit/s at any resolution, as it happens). It
             // would otherwise still size the memory budget.
-            config.recording.bitrate_kbps = encode::bitrate_for(
-                config.recording.width,
-                config.recording.height,
-                config.recording.fps,
-            );
+            normalize_recording(&mut config.recording);
             migrate_sources(&mut config);
             config
         }
@@ -1163,5 +1172,21 @@ mod tests {
             held.message().unwrap(),
             "The settings file could not be opened (in use). ClippiBoy runs on default settings for now and leaves the file alone until the next start."
         );
+    }
+
+    #[test]
+    fn every_write_recomputes_the_bitrate_and_bounds_the_keyframe_interval() {
+        let mut rec = default_config().recording;
+        rec.width = 1280;
+        rec.height = 720;
+        rec.fps = 30;
+        rec.bitrate_kbps = 99_000;
+        rec.keyframe_seconds = 60;
+        normalize_recording(&mut rec);
+        assert_eq!(rec.bitrate_kbps, encode::bitrate_for(1280, 720, 30));
+        assert_eq!(rec.keyframe_seconds, 10);
+        rec.keyframe_seconds = 0;
+        normalize_recording(&mut rec);
+        assert_eq!(rec.keyframe_seconds, 1);
     }
 }

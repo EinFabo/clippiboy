@@ -33,6 +33,60 @@ pub fn ring_size(for_buffer: bool, seconds: u32, memory: u64) -> (u32, u64) {
     }
 }
 
+/// Does going from `a` to `b` need the capture restarted? The source and
+/// everything the encoder is built with. Not the bitrate: it is derived from
+/// the picture (`config::normalize_recording`), so it moves with the fields
+/// that already count here.
+pub fn capture_changed(a: &RecordingConfig, b: &RecordingConfig) -> bool {
+    a.target_kind != b.target_kind
+        || a.target_id != b.target_id
+        || a.target_stable_id != b.target_stable_id
+        || a.width != b.width
+        || a.height != b.height
+        || a.fps != b.fps
+        || a.quality != b.quality
+        || a.encoder != b.encoder
+        || a.keyframe_seconds != b.keyframe_seconds
+}
+
+/// Restarts asked for by settings changes, run by one worker at a time.
+///
+/// Every request after the worker began a pass makes it run one more, so a
+/// change made while the capture was starting is not left behind — clicking
+/// window A, then window B, ends on B (CFG-8) — and any number of them in a
+/// row cost a single extra pass, not one restart each.
+#[derive(Default)]
+pub struct RestartQueue {
+    pending: std::sync::atomic::AtomicBool,
+    running: std::sync::atomic::AtomicBool,
+}
+
+impl RestartQueue {
+    /// Ask for a restart. True: no worker runs, the caller has to start one.
+    pub fn request(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.pending.store(true, SeqCst);
+        !self.running.swap(true, SeqCst)
+    }
+
+    /// For the worker: true runs one more pass, false means it has ended.
+    pub fn next(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        loop {
+            if self.pending.swap(false, SeqCst) {
+                return true;
+            }
+            self.running.store(false, SeqCst);
+            // A request between the two lines above found the worker still
+            // running and started none: this one takes it on, unless a new
+            // worker already has.
+            if !self.pending.load(SeqCst) || self.running.swap(true, SeqCst) {
+                return false;
+            }
+        }
+    }
+}
+
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     /// The last configs handed out, by revision, for merging a write built on
@@ -131,6 +185,11 @@ pub struct AppState {
     /// How many screen checks in a row found the capture on the wrong screen —
     /// see `screen_drift`.
     drift_seen: std::sync::atomic::AtomicU8,
+    /// Restarts for changed video settings, see `lib::restart_buffer_for_settings`.
+    pub restarts: RestartQueue,
+    /// Video settings changed while a recording held the buffer: it restarts
+    /// with them once the recording has stopped.
+    pub settings_waiting: std::sync::atomic::AtomicBool,
 }
 
 /// Keeps a flag raised for as long as it lives and lowers it when dropped —
@@ -452,6 +511,8 @@ impl AppState {
             recorder: Mutex::new(None),
             buffer_wanted: std::sync::atomic::AtomicBool::new(false),
             drift_seen: std::sync::atomic::AtomicU8::new(0),
+            restarts: RestartQueue::default(),
+            settings_waiting: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -506,8 +567,8 @@ impl AppState {
     }
 
     /// Replace the config, write it to disk and pull the dependent parts along
-    /// (buffer length and audio sources). The video source of a running
-    /// recording is changed by `commands::set_config` — the restart can be
+    /// (buffer length and audio sources). The video settings of a running
+    /// buffer are changed by `commands::set_config` — the restart can be
     /// reported there too.
     pub fn replace_config(&self, next: AppConfig) -> AppConfig {
         self.replace_config_with(next, |_, _| {})
@@ -535,6 +596,9 @@ impl AppState {
             let mut history = self.config_history.lock();
             let mut next = config::accept(&guard, &history, incoming);
             settle(&mut next, &guard);
+            // On the merged result: a bitrate carried over from either side
+            // would belong to a picture that is no longer configured.
+            config::normalize_recording(&mut next.recording);
             // Saved under the lock, as every other writer does — two saves
             // never run at once, and the file always ends on the newest config.
             if let Err(err) = config::save(&next) {
@@ -753,6 +817,31 @@ impl AppState {
             return;
         }
         self.halt_pipeline();
+    }
+
+    /// Restart a running buffer on the settings as they stand now. `Ok(false)`
+    /// when there is nothing to restart: the buffer is off, or a recording
+    /// holds it — then the restart waits for its end (`settings_waiting`).
+    ///
+    /// Decided under `lifecycle`, which is what keeps a "Stop buffer" pressed
+    /// right after a change from being undone (R9): either the stop ran first
+    /// and nothing is wanted here, or this ran first and the stop follows it.
+    pub fn restart_if_buffering(&self) -> Result<bool, String> {
+        let _lifecycle = self.lifecycle.lock();
+        if !self.buffer_wanted() || self.pipeline.lock().is_none() {
+            return Ok(false);
+        }
+        if self.is_recording() {
+            // Under `lifecycle`, before the stop can close the recording: its
+            // end is sure to see this.
+            self.settings_waiting
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(false);
+        }
+        log::info!("capture settings changed — restarting the buffer");
+        self.halt_pipeline();
+        self.launch_pipeline(true)?;
+        Ok(true)
     }
 
     /// Take the capture stack down. The caller holds `lifecycle`.
@@ -1562,6 +1651,28 @@ mod tests {
             memory_budget(None, &config),
             crate::config::effective_memory_bytes(&config.recording, &config.buffer)
         );
+    }
+
+    #[test]
+    fn a_new_resolution_needs_a_restart_and_a_bitrate_alone_does_not() {
+        let a = crate::config::default_config().recording;
+        let mut b = a.clone();
+        b.bitrate_kbps += 1000;
+        assert!(!capture_changed(&a, &b));
+        b.height = 720;
+        assert!(capture_changed(&a, &b));
+    }
+
+    #[test]
+    fn requests_during_a_restart_make_one_more_pass() {
+        let queue = RestartQueue::default();
+        assert!(queue.request(), "the first request starts a worker");
+        assert!(queue.next(), "and the worker runs once");
+        assert!(!queue.request(), "a request while it runs starts no second worker");
+        assert!(!queue.request());
+        assert!(queue.next(), "both coalesce into one more pass");
+        assert!(!queue.next(), "then the worker ends");
+        assert!(queue.request(), "a later request starts a new one");
     }
 
     #[test]
