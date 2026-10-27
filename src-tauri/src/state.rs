@@ -213,6 +213,9 @@ pub struct AppState {
     /// two can run at once, and the first to end must not lower it for the
     /// other. The control port reports it.
     finalizing: std::sync::atomic::AtomicUsize,
+    /// A stop is closing the recording: it is no longer "recording", but a
+    /// toggle pressed now still means "stop" — see [`Self::recording_or_closing`].
+    closing: std::sync::atomic::AtomicBool,
     /// Wraps starting and stopping the recording.
     ///
     /// The "already running?" check and registering the finished pipeline are
@@ -240,7 +243,8 @@ pub struct AppState {
 }
 
 /// Keeps a flag raised for as long as it lives and lowers it when dropped —
-/// even if a `?` strikes in between. Holds the save slot (`begin_save`).
+/// even if a `?` strikes in between. Holds the save slot (`begin_save`) and
+/// the "closing" mark of a stop.
 pub struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl<'a> FlagGuard<'a> {
@@ -618,6 +622,7 @@ impl AppState {
             active_recording: Mutex::new(None),
             saving: std::sync::atomic::AtomicBool::new(false),
             finalizing: std::sync::atomic::AtomicUsize::new(0),
+            closing: std::sync::atomic::AtomicBool::new(false),
             recorder: Mutex::new(None),
             buffer_wanted: std::sync::atomic::AtomicBool::new(false),
             drift_seen: std::sync::atomic::AtomicU8::new(0),
@@ -782,6 +787,14 @@ impl AppState {
     /// "not recording" although the file does not exist yet.
     pub fn is_finalizing(&self) -> bool {
         self.finalizing.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    /// What a toggle goes by. The close takes the recorder first and then
+    /// flushes the writer: a second press in that moment saw "not recording"
+    /// and started a new one. Counted as recording, it becomes a stop that
+    /// finds nothing and stays quiet.
+    pub fn recording_or_closing(&self) -> bool {
+        self.is_recording() || self.closing.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Is a recording into the buffer running right now?
@@ -1624,6 +1637,8 @@ impl AppState {
         if !self.is_recording() {
             return Err(NOT_RECORDING.into());
         }
+        // Raised before the recorder is taken, lowered as this returns.
+        let _closing = FlagGuard::raise(&self.closing);
         let (recorder, meta) = self.close_recording().ok_or_else(|| {
             "The recording could not be closed — it is finished on the next start.".to_string()
         })?;
@@ -1893,6 +1908,45 @@ mod tests {
         assert!(Finalizing::claim(&dir).is_none(), "a second finalize of the same folder waits its turn");
         drop(first);
         assert!(Finalizing::claim(&dir).is_some(), "free again once the first is done");
+    }
+
+    /// REC-8: a stop with nothing to stop leaves no mark behind; a press
+    /// while a stop closes still counts as recording, for the toggle.
+    #[test]
+    fn a_stop_with_nothing_running_is_refused_without_a_trace() {
+        let state = AppState::new(false);
+        assert_eq!(state.begin_stop().err().as_deref(), Some(NOT_RECORDING));
+        assert!(!state.is_finalizing());
+        assert!(!state.recording_or_closing());
+        let closing = FlagGuard::raise(&state.closing);
+        assert!(state.recording_or_closing(), "a press during the close is a stop");
+        drop(closing);
+        assert!(!state.recording_or_closing());
+    }
+
+    /// REC-12: the recovery leaves a folder alone while a stop holds it. An
+    /// empty one shows it best: unclaimed, the recovery clears it.
+    #[test]
+    fn the_recovery_skips_a_folder_a_stop_is_writing_out() {
+        let clip_dir = std::env::temp_dir().join("clippiboy-state-recover-claimed");
+        let _ = std::fs::remove_dir_all(&clip_dir);
+        std::fs::create_dir_all(&clip_dir).unwrap();
+        let folder = |id: &str| {
+            let meta = recorder::Meta { id: id.into(), fps: 60, ..recorder::Meta::default() };
+            let recorder = Recorder::start(&clip_dir, meta, &[], Vec::new(), 0, true).unwrap();
+            recorder.finish(Vec::new(), None);
+            recorder.dir.clone()
+        };
+        let (held, free) = (folder("held"), folder("free"));
+        let state = AppState::new(false);
+        state.config.lock().clip_dir = clip_dir.to_string_lossy().to_string();
+
+        let claim = Finalizing::claim(&held).expect("free");
+        assert!(state.recover_recordings(&|_| {}).is_empty(), "nothing finished");
+        assert_eq!(recorder::leftovers(&clip_dir), vec![held.clone()], "the stop's folder is untouched");
+        assert!(!free.exists(), "an unclaimed empty folder is cleared");
+        drop(claim);
+        let _ = std::fs::remove_dir_all(&clip_dir);
     }
 
     /// A stop and the recovery can write out at the same time: the first to

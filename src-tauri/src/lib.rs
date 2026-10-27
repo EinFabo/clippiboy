@@ -252,7 +252,7 @@ pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip,
 /// Start or stop a recording and report the result — hotkey, tray, button and
 /// Stream Deck all come through here.
 pub fn toggle_recording_and_notify(app: &tauri::AppHandle) {
-    if app.state::<AppState>().is_recording() {
+    if app.state::<AppState>().recording_or_closing() {
         let _ = stop_recording_and_notify(app);
     } else {
         start_recording_and_notify(app);
@@ -851,12 +851,16 @@ fn watch_encoder(app: &tauri::AppHandle) {
         let state = app.state::<AppState>();
         // A recording runs on the same encoder. What it wrote up to the
         // failure is kept; a restart under it would cut the file anyway.
-        let stopped_recording = state.is_recording();
-        if stopped_recording {
-            if let Err(err) = stop_recording_and_notify(&app) {
-                log::warn!("could not close the recording before the restart: {err}");
-            }
-        }
+        // Not when a stop by hand got there first: that one was no failure.
+        let stopped_recording = state.is_recording()
+            && match stop_recording_and_notify(&app) {
+                Ok(_) => true,
+                Err(err) if err == state::NOT_RECORDING => false,
+                Err(err) => {
+                    log::warn!("could not close the recording before the restart: {err}");
+                    true
+                }
+            };
         // "Recording saved" alone reads as a normal stop, and the restart
         // after it as the recording going on: it has ended, and says so.
         let stop_body = format!("The video encoder failed ({why}). Start the recording again.");
@@ -1357,17 +1361,23 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 // likely. Stop it while what is there is still whole. Once:
                 // the failure stays set until the stop has closed the
                 // recording, and that can take longer than a second (CORE-13).
+                // Free again as soon as no failing recording is left — the
+                // close, not the long write-out after it — so a next one that
+                // fails meanwhile is stopped too.
                 static STOPPING_FOR_FAILURE: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
-                if let Some(err) = state.recording_failure() {
-                    if !STOPPING_FOR_FAILURE.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                        notify(&handle, "error", format!("Recording stopped: {err}"));
-                        let handle = handle.clone();
-                        std::thread::spawn(move || {
-                            let _ = stop_recording_and_notify(&handle);
-                            STOPPING_FOR_FAILURE.store(false, std::sync::atomic::Ordering::SeqCst);
-                        });
+                match state.recording_failure() {
+                    Some(err) => {
+                        if !STOPPING_FOR_FAILURE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            notify(&handle, "error", format!("Recording stopped: {err}"));
+                            let handle = handle.clone();
+                            std::thread::spawn(move || {
+                                let _stopping = state::FlagGuard::raise(&STOPPING_FOR_FAILURE);
+                                let _ = stop_recording_and_notify(&handle);
+                            });
+                        }
                     }
+                    None => STOPPING_FOR_FAILURE.store(false, std::sync::atomic::Ordering::SeqCst),
                 }
             }
             // Every 5 s while something is recording: what the pipeline is

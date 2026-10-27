@@ -537,8 +537,12 @@ pub fn stop_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<
 /// writes the whole recording out.
 #[tauri::command(async)]
 pub fn toggle_recording(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<bool> {
-    if state.is_recording() {
-        crate::stop_recording_and_notify(&app)?;
+    if state.recording_or_closing() {
+        match crate::stop_recording_and_notify(&app) {
+            // A second click while the first stop closed: it has stopped.
+            Err(err) if err != crate::state::NOT_RECORDING => return Err(err),
+            _ => {}
+        }
     } else {
         crate::start_recording_and_notify(&app);
     }

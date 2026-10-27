@@ -367,10 +367,19 @@ fn handle(app: &tauri::AppHandle, request: &Request, token: &str) -> (u16, Value
             // Answered once the work is done — for "stop" that is when the
             // file is written, so the key can show the check mark.
             action @ ("toggle" | "start" | "stop") => {
-                let running = app.state::<AppState>().is_recording();
+                // A toggle during a stop's close is a stop, as for the hotkey.
+                let state = app.state::<AppState>();
+                let running = match action {
+                    "toggle" => state.recording_or_closing(),
+                    _ => state.is_recording(),
+                };
                 let outcome = match (action, running) {
                     ("start", true) | ("stop", false) => Ok(()),
-                    (_, true) => crate::stop_recording_and_notify(app).map(|_| ()),
+                    (_, true) => match crate::stop_recording_and_notify(app) {
+                        // Another stop got there first: stopped all the same.
+                        Err(err) if err == crate::state::NOT_RECORDING => Ok(()),
+                        other => other.map(|_| ()),
+                    },
                     (_, false) => {
                         crate::start_recording_and_notify(app);
                         Ok(())
