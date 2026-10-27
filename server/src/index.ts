@@ -1,5 +1,6 @@
 import {
   authenticate,
+  departStatement,
   pair,
   relatedIds,
   toMe,
@@ -27,6 +28,7 @@ import {
   sweep,
 } from "./links";
 import { addressKey, readLimited } from "./limits";
+import { departedCutoff, fingerprint } from "./departed";
 import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
 
 export { Hub } from "./hub";
@@ -59,6 +61,8 @@ export default {
         env.DB.prepare("DELETE FROM logins WHERE created_at < ?").bind(Date.now() - LOGIN_TTL_MS).run(),
         // Yesterday's count stays readable a day; older ones are done.
         env.DB.prepare("DELETE FROM anon_budget WHERE day < ?").bind(utcDay(Date.now() - DAY_MS)).run(),
+        // What a deleted account left behind is kept for seven days.
+        env.DB.prepare("DELETE FROM departed WHERE left_at <= ?").bind(departedCutoff(Date.now())).run(),
       ]).then((outcomes) => {
         for (const outcome of outcomes) {
           if (outcome.status === "rejected") console.error("cron", outcome.reason);
@@ -266,7 +270,8 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
     headers: { Authorization: `Bearer ${access_token}` },
   });
   if (!userResponse.ok) return page("Discord said no", "Could not read your Discord profile.");
-  const userId = await upsertDiscordUser(env.DB, (await userResponse.json()) as DiscordUser);
+  const discord = (await userResponse.json()) as DiscordUser;
+  const userId = await upsertDiscordUser(env.DB, discord, await departedHash(env, discord.id));
   const banned = await env.DB.prepare("SELECT 1 FROM users WHERE id = ? AND banned_at IS NOT NULL").bind(userId).first();
   if (banned) return page("Account suspended", "This ClippiBoy account has been suspended.");
 
@@ -463,11 +468,25 @@ async function blockUser(env: Env, me: string, other: string) {
   return { ok: true };
 }
 
+/** The fingerprint a deleted account leaves behind, or null when the secret is missing. */
+async function departedHash(env: Env, discordId: string): Promise<string | null> {
+  const hash = await fingerprint(env.DEPARTED_PEPPER, discordId);
+  // Accounts still come and go without it; only the week's limit and a
+  // suspension no longer outlive a deletion.
+  if (hash === null) console.error("DEPARTED_PEPPER is not set: deleted accounts leave nothing behind");
+  return hash;
+}
+
 async function deleteAccount(env: Env, me: string): Promise<Response> {
   const related = await relatedIds(env.DB, me);
+  const row = await env.DB.prepare("SELECT discord_id FROM users WHERE id = ?").bind(me).first<{ discord_id: string }>();
+  const departed = row ? await departedHash(env, row.discord_id) : null;
   await deleteSharesOf(env, me);
-  // Cascades to sessions, friendships and blocks.
-  await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(me).run();
+  // Cascades to sessions, friendships, blocks and shares. In one batch with
+  // what outlives it, read at that moment: a suspension set a second earlier
+  // still goes along.
+  const remove = env.DB.prepare("DELETE FROM users WHERE id = ?").bind(me);
+  await env.DB.batch(departed ? [departStatement(env.DB, me, departed, Date.now()), remove] : [remove]);
   await notify(env, ...related);
   await env.HUB.getByName(me).closeAll();
   return json({ ok: true });

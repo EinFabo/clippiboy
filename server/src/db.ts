@@ -1,4 +1,6 @@
 import { friendCode, HttpError, sha256, base64url } from "./util";
+import { carryOver, KEPT_LINKS, type DepartedRow } from "./departed";
+import { newId, PENDING_MS, WEEK_MS } from "./shares";
 
 export interface User {
   id: string;
@@ -89,8 +91,13 @@ function avatarUrl(user: DiscordUser): string {
   return `https://cdn.discordapp.com/embed/avatars/${Number((BigInt(user.id) >> 22n) % 6n)}.png`;
 }
 
-/** Creates the account on the first login and keeps name and avatar in step after. */
-export async function upsertDiscordUser(db: D1Database, discord: DiscordUser): Promise<string> {
+/**
+ * Creates the account on the first login and keeps name and avatar in step
+ * after. `departed` is the fingerprint of the Discord id (null without the
+ * pepper): a new account takes over what an account deleted within the week
+ * left behind — its links still count against the week, its suspension holds.
+ */
+export async function upsertDiscordUser(db: D1Database, discord: DiscordUser, departed: string | null): Promise<string> {
   const displayName = discord.global_name || discord.username;
   const avatar = avatarUrl(discord);
   // Discord hands a released name to someone else: the stale row gives it up first,
@@ -112,6 +119,30 @@ export async function upsertDiscordUser(db: D1Database, discord: DiscordUser): P
     return existing.id;
   }
   const id = crypto.randomUUID();
+  const now = Date.now();
+  const left = departed
+    ? await db.prepare("SELECT link_times, banned_at, left_at FROM departed WHERE hash = ?").bind(departed).first<DepartedRow>()
+    : null;
+  const carried = carryOver(left, now);
+  // Only once the account is in: each statement checks for it, since a
+  // friend-code collision leaves the insert undone.
+  const created = "EXISTS (SELECT 1 FROM users WHERE id = ?)";
+  const takeOver = [
+    // Each counting link comes back as a deleted one — a deleted link counts
+    // against the week like any other, and the sweep forgets it after two.
+    ...(carried?.linkTimes ?? []).map((at) =>
+      db
+        .prepare(
+          `INSERT INTO shares (id, owner, bytes, title, created_at, expires_at, deleted_at) SELECT ?, ?, 0, '', ?, ?, ? WHERE ${created}`,
+        )
+        .bind(newId(), id, at, at, now, id),
+    ),
+    ...(carried?.bannedAt != null
+      ? [db.prepare("UPDATE users SET banned_at = ? WHERE id = ?").bind(carried.bannedAt, id)]
+      : []),
+    // Taken over, or past its week: either way the row is done with.
+    ...(left ? [db.prepare(`DELETE FROM departed WHERE hash = ? AND ${created}`).bind(departed, id)] : []),
+  ];
   // A collision among 31^8 codes is unlikely, not impossible.
   for (let attempt = 0; attempt < 5; attempt++) {
     const results = await db.batch([
@@ -120,11 +151,37 @@ export async function upsertDiscordUser(db: D1Database, discord: DiscordUser): P
         .prepare(
           "INSERT INTO users (id, discord_id, username, display_name, avatar, friend_code, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (friend_code) DO NOTHING",
         )
-        .bind(id, discord.id, discord.username, displayName, avatar, friendCode(), Date.now()),
+        .bind(id, discord.id, discord.username, displayName, avatar, friendCode(), now),
+      ...takeOver,
     ]);
     if (results[1].meta.changes === 1) return id;
   }
   throw new HttpError(500, "Could not create the account.");
+}
+
+/**
+ * The statement that, run in one batch before the account's row is deleted,
+ * leaves behind what must outlive it: the times of its links that still count
+ * against the week (the newest few) and its suspension, under the fingerprint
+ * of its Discord id. Nothing when there is neither.
+ */
+export function departStatement(db: D1Database, me: string, departed: string, now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO departed (hash, link_times, banned_at, left_at)
+       SELECT ?1, links, banned_at, ?2 FROM (
+         SELECT u.banned_at, (
+           SELECT json_group_array(created_at) FROM (
+             SELECT s.created_at FROM shares s JOIN users o ON o.id = s.owner
+              WHERE s.owner = ?3 AND s.created_at > MAX(?4, o.links_reset_at) AND (s.pending = 0 OR s.created_at > ?5)
+              ORDER BY s.created_at DESC LIMIT ?6
+           )
+         ) AS links
+         FROM users u WHERE u.id = ?3
+       ) WHERE banned_at IS NOT NULL OR links != '[]'
+       ON CONFLICT (hash) DO UPDATE SET link_times = excluded.link_times, banned_at = excluded.banned_at, left_at = excluded.left_at`,
+    )
+    .bind(departed, now, me, now - WEEK_MS, now - PENDING_MS, KEPT_LINKS);
 }
 
 export async function tokenHash(token: string): Promise<string> {

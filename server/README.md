@@ -27,6 +27,26 @@ Sign-in needs a Discord application (https://discord.com/developers/applications
 
 Until then `/auth/start` answers 503 and the app shows the error.
 
+## Deleted accounts
+
+Deleting an account keeps, for seven days, a fingerprint of its Discord id
+(HMAC-SHA256 under a secret pepper) with the times of its links that still
+count against the week and a suspension if one stood (`departed`, migration
+0010). Signing in again with that Discord account takes them over, so deleting
+and coming back neither starts the weekly link limit over nor lifts a
+suspension. The hourly cron deletes rows older than seven days.
+
+The pepper is a secret of its own; set it once before deploying, and keep it —
+a new one makes every row left so far unmatchable:
+
+```sh
+openssl rand -base64 32 | npx wrangler secret put DEPARTED_PEPPER
+```
+
+Without it accounts still sign in and delete as before, but nothing outlives a
+deletion (the log says so). For `wrangler dev`, put a local value in
+`.dev.vars` (ignored by git): `DEPARTED_PEPPER="local-dev-pepper-not-a-secret"`.
+
 ## How sign-in works
 
 The app opens `/auth/start?challenge=…` with the hash of a verifier it keeps.
