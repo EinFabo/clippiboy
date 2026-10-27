@@ -16,8 +16,9 @@ use std::path::Path;
 
 use crate::model::EncoderId;
 
-/// The usual steps down. Anything taller than the first is left where it is —
-/// the source height caps everything.
+/// The usual steps down. The source's own height is always tried first, so a
+/// source taller than 1080p keeps its height when the budget allows, and
+/// nothing is ever scaled up.
 const HEIGHTS: [u32; 3] = [1080, 720, 480];
 
 /// What one audio track costs. 128 kbit/s AAC is transparent enough for game
@@ -61,12 +62,14 @@ impl Recipe {
     }
 }
 
-/// Video bitrate left over for a target, in kbit/s.
-fn video_budget(bytes: u64, seconds: u64) -> u32 {
+/// Video bitrate left over for a target, in kbit/s. The clip's real length in
+/// milliseconds: kbit/s times ms is bits, so a 5.9 s clip is budgeted for 5.9 s
+/// and not rounded down to 5.
+fn video_budget(bytes: u64, duration_ms: u64) -> u32 {
     let usable_bits = bytes.saturating_mul(8) * (100 - CONTAINER_OVERHEAD) / 100;
-    let audio_bits = AUDIO_KBPS as u64 * 1000 * seconds;
+    let audio_bits = AUDIO_KBPS as u64 * duration_ms;
     let video_bits = usable_bits.saturating_sub(audio_bits);
-    (video_bits / seconds / 1000).min(u32::MAX as u64) as u32
+    (video_bits / duration_ms.max(1000)).min(u32::MAX as u64) as u32
 }
 
 /// Work out how to hit a target size.
@@ -76,15 +79,11 @@ fn video_budget(bytes: u64, seconds: u64) -> u32 {
 /// starve 480p is going to look poor whatever happens, and saying so with a
 /// picture is better than not producing one.
 pub fn recipe(target: &Target) -> Recipe {
-    let seconds = (target.duration_ms / 1000).max(1);
-    let budget = video_budget(target.bytes, seconds);
+    let budget = video_budget(target.bytes, target.duration_ms);
 
-    // Never upscale: the source height is the ceiling.
+    // Never upscale: the source height is the ceiling and the first try.
     let mut height = target.height;
-    for step in HEIGHTS {
-        if step > target.height {
-            continue;
-        }
+    for step in std::iter::once(target.height).chain(HEIGHTS.into_iter().filter(|h| *h < target.height)) {
         height = step;
         let wants = crate::encode::bitrate_for(width_for(target, step), step, 30);
         if budget >= wants / STARVED {
@@ -337,5 +336,26 @@ mod tests {
             assert!(args.contains(&"-b:v".to_string()), "{encoder:?}: {args:?}");
             assert!(args.contains(&"-pix_fmt".to_string()), "{encoder:?}: {args:?}");
         }
+    }
+
+    #[test]
+    fn a_short_clip_stays_under_its_target() {
+        for ms in [1_900u64, 5_900, 15_900] {
+            let plan = recipe(&target(10 * MB, ms, 1920, 1080));
+            let bits = (plan.video_kbps + plan.audio_kbps) as u64 * ms;
+            assert!(bits / 8 <= 10 * MB, "{ms} ms: {} bytes", bits / 8);
+        }
+    }
+
+    #[test]
+    fn a_1440p_clip_with_room_keeps_its_height() {
+        let plan = recipe(&target(100 * MB, 30_000, 2560, 1440));
+        assert_eq!(plan.height, 1440);
+    }
+
+    #[test]
+    fn a_portrait_clip_on_a_thin_budget_goes_to_480() {
+        let plan = recipe(&target((6.1 * MB as f64) as u64, 60_000, 1080, 1920));
+        assert_eq!((plan.width, plan.height), (270, 480));
     }
 }

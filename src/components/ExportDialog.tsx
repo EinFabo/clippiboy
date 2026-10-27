@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { BusyRing } from "@/components/ui/BusyVeil";
 import { api, events, inTauri } from "@/lib/ipc";
 import { clipName } from "@/lib/format";
+import { planExport } from "@/lib/exportPlan";
 import { cn } from "@/lib/cn";
 import type { Clip } from "@/lib/types";
 
@@ -19,37 +20,6 @@ const PRESETS: Array<{ mb: number; label: string; hint: string }> = [
   { mb: 25, label: "25 MB", hint: "Discord Nitro" },
   { mb: 100, label: "100 MB", hint: "Most other places" },
 ];
-
-/** The steps the export scales down to, mirroring `export::HEIGHTS`. */
-const HEIGHTS = [1080, 720, 480];
-
-/**
- * What the export will do, worked out the same way `export::recipe` does it.
- *
- * Deliberately duplicated rather than asked of the core: this runs on every
- * keystroke in the size field, and a round trip per character to tell somebody
- * what they are about to get would be a poor trade. The two must be kept in
- * step — the tests in `export.rs` are the ones that matter.
- */
-function preview(clip: Clip, targetMb: number) {
-  const seconds = Math.max(1, Math.round(clip.durationMs / 1000));
-  const usableBits = targetMb * MB * 8 * 0.97;
-  const videoKbps = Math.max(
-    200,
-    Math.floor((usableBits - 128 * 1000 * seconds) / seconds / 1000),
-  );
-  let height = clip.height;
-  for (const step of HEIGHTS) {
-    if (step > clip.height) continue;
-    height = step;
-    // `bitrate_for` at 30 fps, halved — see `export::STARVED`.
-    const width = Math.max(2, Math.round((clip.width * step) / clip.height)) & ~1;
-    const wants = Math.round((width * step * 30 * 0.15) / 1000 / 1000) * 1000;
-    if (videoKbps >= wants / 2) break;
-  }
-  const width = Math.max(2, Math.round((clip.width * height) / clip.height)) & ~1;
-  return { videoKbps, width, height, seconds };
-}
 
 /**
  * Ask for a size, then write a copy that fits it.
@@ -67,7 +37,8 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
   const [stage, setStage] = useState<"idle" | "choosing" | "writing">("idle");
   const busy = stage !== "idle";
   const [progress, setProgress] = useState(0);
-  const plan = preview(clip, targetMb);
+  const [error, setError] = useState<string | null>(null);
+  const plan = planExport(clip, Math.floor(targetMb * MB));
 
   // Escape closes — but not mid-run, where it would leave a half-written file
   // behind with nothing saying so.
@@ -106,14 +77,17 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
     const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} - ${targetMb} MB.mp4`;
     setStage("choosing");
     setProgress(0);
+    setError(null);
     try {
       // The core opens the save dialog itself and only takes the name as a
       // suggestion; `null` means it was cancelled, which leaves this open.
-      const written = await api.exportClip(clip.id, targetMb * MB, suggested);
+      const written = await api.exportClip(clip.id, Math.floor(targetMb * MB), suggested);
       if (written === null) setStage("idle");
       else onClose();
-    } catch {
-      // The core has already raised the failure as a notice.
+    } catch (failure) {
+      // The core raises its own notice for a failure after it started, so this
+      // is only a rejection that came before (serde, IPC).
+      setError(`The export did not start: ${String(failure)}`);
       setStage("idle");
     }
   }
@@ -173,6 +147,7 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
               <input
                 id="export-size"
                 type="number"
+                step="any"
                 min={1}
                 max={4096}
                 disabled={busy}
@@ -212,6 +187,12 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
             progress={progress > 0 ? progress : null}
             label="The copy is being written."
           />
+        )}
+
+        {error && (
+          <p role="alert" className="mt-4 text-xs text-red-400">
+            {error}
+          </p>
         )}
 
         <div className="mt-6 flex justify-end gap-2">

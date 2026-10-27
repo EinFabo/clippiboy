@@ -152,8 +152,6 @@ export const api = {
     marks: string,
   ) => invoke<Clip>("write_screenshot", { id, crop, steps, marks }),
   screenshotEdit: (id: string) => invoke<ShotEdit>("screenshot_edit", { id }),
-  screenshotHasOriginal: (id: string) =>
-    invoke<boolean>("screenshot_has_original", { id }),
   /** Open the clip in the Windows default player. */
   openClip: (id: string) => invoke<void>("open_clip", { id }),
   clipboardWriteText: (text: string) =>
@@ -208,7 +206,11 @@ export const api = {
    * path written, `null` when the user cancelled.
    */
   exportClip: (id: string, targetBytes: number, suggestedName: string) =>
-    invoke<string | null>("export_clip", { id, targetBytes, suggestedName }),
+    invoke<string | null>("export_clip", {
+      id,
+      targetBytes: Math.floor(targetBytes),
+      suggestedName,
+    }),
 };
 
 export const events = {
