@@ -947,16 +947,16 @@ fn is_the_whole_recording(original: Option<&ClipOriginal>, actual_ms: u64) -> bo
 /// So this asks the file. The size is the cheap tell — [`crate::clips::Library::set_file_state`]
 /// writes it with every rewrite, so one `stat` per clip settles the usual case,
 /// and only a mismatch is worth an ffprobe.
-fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Option<ClipOriginal>) {
+fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Option<ClipOriginal>) -> bool {
     let target = Path::new(&clip.path);
     let Ok(actual_bytes) = std::fs::metadata(target).map(|meta| meta.len()) else {
-        return;
+        return false;
     };
     if actual_bytes == clip.size_bytes {
-        return;
+        return false;
     }
     let Some(actual_ms) = probe_duration_ms(target) else {
-        return;
+        return false;
     };
 
     if is_the_whole_recording(clip.original.as_ref(), actual_ms) {
@@ -999,6 +999,7 @@ fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Opt
         ));
     }
     let _ = with_library(library, |lib| lib.set_file_state(&clip.id, actual_ms, actual_bytes));
+    true
 }
 
 /// Clean up at startup whatever a crash in the middle of the swap left behind.
@@ -1011,14 +1012,16 @@ fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Opt
 /// Takes the library one clip at a time: the list is read once, then each clip
 /// is handled under its own lock with the library held only for its rows — the
 /// file checks in between may sit on a disk that is asleep.
-pub fn repair(library: &Mutex<Option<crate::clips::Library>>) {
+/// Returns how many clips it changed.
+pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
     let clips = match with_library(library, |lib| lib.list()).unwrap_or(Ok(Vec::new())) {
         Ok(clips) => clips,
         Err(err) => {
             log::warn!("originals store not checkable: {err}");
-            return;
+            return 0;
         }
     };
+    let mut changed = 0usize;
     for listed in clips {
         if passes_stopped() {
             break;
@@ -1116,13 +1119,17 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) {
         if !clip.screenshot {
             if wrote {
                 if let Some(again) = fresh(library, &clip.id) {
-                    settle(library, &again, read_note(&clip.id));
+                    wrote |= settle(library, &again, read_note(&clip.id));
                 }
             } else {
-                settle(library, &clip, read_note(&clip.id));
+                wrote |= settle(library, &clip, read_note(&clip.id));
             }
         }
+        if wrote {
+            changed += 1;
+        }
     }
+    changed
 }
 
 #[cfg(test)]
@@ -1171,6 +1178,50 @@ mod tests {
         lib.lock().as_ref().unwrap().insert(&plain_clip(None, None)).unwrap();
         repair(&lib);
         assert!(lib.try_lock().is_some(), "nothing holds it afterwards");
+    }
+
+    /// A pass on its own thread, waiting on `id`'s lock held here: the closure
+    /// runs while it waits, the lock is released, and the pass's result comes back.
+    fn pass_waiting_on_a_held_clip(
+        lib: &std::sync::Arc<Mutex<Option<crate::clips::Library>>>,
+        id: &str,
+        pass: fn(&Mutex<Option<crate::clips::Library>>) -> usize,
+        meanwhile: impl FnOnce(),
+    ) -> usize {
+        let lock = clip_lock(id);
+        let held = lock.lock();
+        let worker = {
+            let lib = lib.clone();
+            std::thread::spawn(move || pass(&lib))
+        };
+        // Long enough for the pass to have listed the clip and stand at its lock.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!worker.is_finished(), "the pass ran past the clip's lock");
+        meanwhile();
+        drop(held);
+        worker.join().unwrap()
+    }
+
+    #[test]
+    fn a_clip_deleted_while_the_pass_waits_is_skipped() {
+        let lib = std::sync::Arc::new(Mutex::new(Some(crate::clips::Library::in_memory().unwrap())));
+        let clip = Clip { id: "pass-skip-test-clip".into(), ..plain_clip(None, None) };
+        lib.lock().as_ref().unwrap().insert(&clip).unwrap();
+        let changed = pass_waiting_on_a_held_clip(&lib, &clip.id, repair, || {
+            lib.lock().as_ref().unwrap().delete("pass-skip-test-clip").unwrap();
+        });
+        assert_eq!(changed, 0, "a vanished clip was touched");
+        assert!(lib.lock().as_ref().unwrap().get("pass-skip-test-clip").unwrap().is_none());
+    }
+
+    #[test]
+    fn the_library_is_free_while_a_pass_waits_on_a_clip() {
+        let lib = std::sync::Arc::new(Mutex::new(Some(crate::clips::Library::in_memory().unwrap())));
+        let clip = Clip { id: "pass-free-test-clip".into(), ..plain_clip(None, None) };
+        lib.lock().as_ref().unwrap().insert(&clip).unwrap();
+        pass_waiting_on_a_held_clip(&lib, &clip.id, repair, || {
+            assert!(lib.try_lock().is_some(), "the pass holds the library across its wait");
+        });
     }
 
     #[test]

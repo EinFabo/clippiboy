@@ -175,12 +175,21 @@ pub fn wait_for_saves(app: &tauri::AppHandle) {
     if !busy() {
         return;
     }
-    overlay::show(
-        app,
-        BannerKind::Clip,
-        "Finishing the clip…",
-        Some("ClippiBoy quits once it is saved".into()),
-    );
+    if state.is_saving() || edit::is_busy() {
+        overlay::show(
+            app,
+            BannerKind::Clip,
+            "Finishing the clip…",
+            Some("ClippiBoy quits once it is saved".into()),
+        );
+    } else {
+        overlay::show(
+            app,
+            BannerKind::Clip,
+            "Finishing library upkeep…",
+            Some("ClippiBoy quits in a moment".into()),
+        );
+    }
     if !state::wait_until_idle(busy, QUIT_WAIT, std::time::Duration::from_millis(100)) {
         log::warn!("still saving after {} s — quitting anyway", QUIT_WAIT.as_secs());
     }
@@ -1490,31 +1499,49 @@ fn allow_existing_clip_dirs(app: &tauri::AppHandle, clips: &[model::Clip]) {
 /// reads it again.
 fn maintain_library(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
+
+    /// On any exit, a panic included: the passes count as finished and the
+    /// gallery reads the list once more.
+    struct Finished(tauri::AppHandle);
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            clips::PASSES_RUNNING.store(false, Ordering::SeqCst);
+            let _ = self.0.emit("clips-changed", ());
+        }
+    }
+
     clips::PASSES_RUNNING.store(true, Ordering::SeqCst);
-    let app = app.clone();
     let spawned = std::thread::Builder::new().name("clippiboy-library".into()).spawn({
         let app = app.clone();
         move || {
+            let _finished = Finished(app.clone());
             let state = app.state::<AppState>();
             let clip_dir = state.config_snapshot().clip_dir;
+            // The folder the clips are filed into first, then the older ones.
+            allow_clip_dir(&app, &clip_dir);
             let listed = clips::with_library(&state.library, |lib| lib.list());
             if let Some(Ok(rows)) = &listed {
                 allow_existing_clip_dirs(&app, rows);
             }
             drop(listed);
-            edit::repair(&state.library);
+            // After a pass that changed something, the gallery learns of it
+            // at once rather than at the very end.
+            let announce = |changed: usize| {
+                if changed > 0 {
+                    let _ = app.emit("clips-changed", ());
+                }
+            };
+            announce(edit::repair(&state.library));
             // Pictures from older versions still sit next to the videos.
-            thumbs::migrate(&state.library);
+            announce(thumbs::migrate(&state.library));
             // Game names first, folders second: a name that differs only in
             // characters nobody can see has to become the one name before
             // `tidy` works out where its clips belong — otherwise it would
             // dutifully file them into the four folders they came from.
-            filing::normalize_games(&state.library);
+            announce(filing::normalize_games(&state.library));
             // And whatever has not found its way into its game folder since
             // last time moves there now.
-            filing::tidy(&state.library, &clip_dir);
-            clips::PASSES_RUNNING.store(false, Ordering::SeqCst);
-            let _ = app.emit("clips-changed", ());
+            announce(filing::tidy(&state.library, &clip_dir));
         }
     });
     if let Err(err) = spawned {
@@ -1644,7 +1671,8 @@ pub fn run() {
             // to five seconds, and the window must not wait for it.
             app.state::<AppState>().apply_audio();
             let config = app.state::<AppState>().config_snapshot();
-            allow_clip_dir(handle, &config.clip_dir);
+            // The clip folder is granted on the library thread: resolving it asks
+            // the disk, which may be asleep or a share that is gone.
             discard_leftovers();
             // Throwaway files from an old session: clear first, then grant.
             preview::clear();

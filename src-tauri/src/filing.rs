@@ -216,12 +216,13 @@ pub fn normalize_games(library: &parking_lot::Mutex<Option<Library>>) -> usize {
 /// Runs at startup: a move that failed because the file was open at the time is
 /// caught up here — and clips from older versions find their way into their
 /// game folder without anyone doing anything.
-pub fn tidy(library: &parking_lot::Mutex<Option<Library>>, clip_dir: &str) {
+/// Returns how many clips moved.
+pub fn tidy(library: &parking_lot::Mutex<Option<Library>>, clip_dir: &str) -> usize {
     let clips = match with_library(library, |lib| lib.list()).unwrap_or(Ok(Vec::new())) {
         Ok(clips) => clips,
         Err(err) => {
             log::warn!("clips not filed: {err}");
-            return;
+            return 0;
         }
     };
     let mut moved = 0usize;
@@ -242,7 +243,8 @@ pub fn tidy(library: &parking_lot::Mutex<Option<Library>>, clip_dir: &str) {
                 let path = target.to_string_lossy().to_string();
                 match with_library(library, |lib| lib.set_path(&clip.id, &path)) {
                     Some(Err(err)) => log::warn!("new path of '{}' not recorded: {err}", clip.id),
-                    _ => moved += 1,
+                    None => log::warn!("new path of '{}' not recorded: no library", clip.id),
+                    Some(Ok(())) => moved += 1,
                 }
             }
             Err(err) => log::warn!("clip '{}' left in place: {err}", clip.id),
@@ -251,6 +253,7 @@ pub fn tidy(library: &parking_lot::Mutex<Option<Library>>, clip_dir: &str) {
     if moved > 0 {
         log::info!("filed {moved} clip(s) into their folder");
     }
+    moved
 }
 
 /// Clear away a subfolder that has become empty, and the one above it if that

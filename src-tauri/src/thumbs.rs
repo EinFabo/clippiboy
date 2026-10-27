@@ -73,20 +73,22 @@ pub fn remove(clip_id: &str) {
 /// Up to 0.1.4 the picture sat as a `.jpg` next to the `.mp4` in the clip
 /// folder. At startup it moves here — otherwise every existing clip would leave
 /// an image file behind in the user's folder, forever.
-pub fn migrate(library: &parking_lot::Mutex<Option<Library>>) {
+/// Returns how many records were corrected.
+pub fn migrate(library: &parking_lot::Mutex<Option<Library>>) -> usize {
     let clips = match with_library(library, |lib| lib.list()).unwrap_or(Ok(Vec::new())) {
         Ok(clips) => clips,
         Err(err) => {
             log::warn!("thumbnails not migrated: {err}");
-            return;
+            return 0;
         }
     };
     let dir = dir();
     if let Err(err) = std::fs::create_dir_all(&dir) {
         log::warn!("thumbnail folder not created: {err}");
-        return;
+        return 0;
     }
 
+    let mut changed = 0usize;
     for listed in clips {
         if passes_stopped() {
             break;
@@ -123,10 +125,13 @@ pub fn migrate(library: &parking_lot::Mutex<Option<Library>>) {
             None
         };
         let value = target.map(|path| path.to_string_lossy().to_string());
-        if let Some(Err(err)) = with_library(library, |lib| lib.set_thumb(&clip.id, value.as_deref())) {
-            log::warn!("thumbnail of '{}' not recorded: {err}", clip.id);
+        match with_library(library, |lib| lib.set_thumb(&clip.id, value.as_deref())) {
+            Some(Ok(())) => changed += 1,
+            Some(Err(err)) => log::warn!("thumbnail of '{}' not recorded: {err}", clip.id),
+            None => {}
         }
     }
+    changed
 }
 
 /// Moving across drive boundaries: the clip folder likes to sit on a different
