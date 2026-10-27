@@ -1322,16 +1322,17 @@ pub fn apply_clip_edit(
     let (encoder, quality) = encoder_for(&state);
     let trim = edit::Trim { start_ms, end_ms };
 
+    let loaded = std::cell::Cell::new(false);
     let applied = edit::apply(
         &id,
-        load_editable(&state, &id),
+        load_editable(&state, &id, &loaded),
         trim,
         &tracks,
         encoder,
         quality,
         progress(&app, &id),
     );
-    let stored = store(&state, &app, applied, tracks);
+    let stored = store(&state, &app, applied, tracks, loaded.get());
     if stored.is_ok() {
         crate::telemetry::used(crate::telemetry::Feature::Editor);
     }
@@ -1358,9 +1359,10 @@ pub fn restore_clip_original(
     // be found would leave the preview out of sync forever.
     //
     // The mix kept is the one stored on the clip as the run finds it.
+    let loaded = std::cell::Cell::new(false);
     let applied = edit::restore(
         &id,
-        load_editable(&state, &id),
+        load_editable(&state, &id, &loaded),
         None,
         encoder,
         quality,
@@ -1370,18 +1372,22 @@ pub fn restore_clip_original(
         Ok((clip, _)) => clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    store(&state, &app, applied, tracks)
+    store(&state, &app, applied, tracks, loaded.get())
 }
 
 /// The row an edit plans on, read by the run once it has the clip to itself.
+/// `loaded` is set once it got one: an edit that failed before that has
+/// nothing to announce — the caller shows the reason itself.
 fn load_editable<'a>(
     state: &'a State<'_, AppState>,
     id: &'a str,
+    loaded: &'a std::cell::Cell<bool>,
 ) -> impl FnOnce() -> Result<Clip> + 'a {
     move || {
         let clip = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))?
             .ok_or_else(|| "clip not found".to_string())?;
         refuse_still(&clip)?;
+        loaded.set(true);
         Ok(clip)
     }
 }
@@ -1733,11 +1739,17 @@ fn store(
     app: &tauri::AppHandle,
     applied: Result<(Clip, edit::Applied)>,
     tracks: Vec<TrackMix>,
+    loaded: bool,
 ) -> Result<Clip> {
     let (clip, applied) = match applied {
         Ok(applied) => applied,
         Err(err) => {
-            crate::notify(app, "error", err.clone());
+            // The file is untouched. A clip that could not even be read (gone,
+            // or a still) is answered without a notice, as it always was: the
+            // editor shows that reason itself.
+            if loaded {
+                crate::notify(app, "error", err.clone());
+            }
             return Err(err);
         }
     };
@@ -1781,26 +1793,55 @@ fn store(
     // `export_for_discord` alone would let them through. The file is swapped
     // either way, so they go even if the record could not follow.
     remove_discord_copies(&discord_root(), &clip.id);
-    let stored = match stored {
-        Ok(stored) => stored,
-        Err(err) => {
+    let (stored, notice) = answer_after_swap(
+        stored,
+        || {
             // The file is the new one, the row may still describe the old:
             // left alone, the preview's tracks run off by the cut and the next
             // save cuts at the old offsets until a restart repairs it. So the
             // record is brought in line with the file now, as far as the
-            // database lets it.
-            crate::notify(
-                app,
-                "error",
-                format!("The clip was written, but its record could not be updated: {err}"),
-            );
+            // database lets it, and read again.
             edit::heal(&state.library, &clip.id);
-            announce_change(app);
-            return Err(err);
-        }
-    };
+            with_library(state, |lib| lib.get(&clip.id).map_err(|e| e.to_string()))
+                .ok()
+                .flatten()
+        },
+        || Clip {
+            duration_ms: applied.duration_ms,
+            size_bytes: applied.size_bytes,
+            edit: Some(edit.clone()),
+            original: applied.original,
+            original_available: edit::has_original(&clip.id),
+            ..clip.clone()
+        },
+    );
+    if let Some(notice) = notice {
+        crate::notify(app, "error", notice);
+    }
     announce_change(app);
     Ok(stored)
+}
+
+/// What a save answers once its file is swapped: always the clip, never an
+/// error. The file *is* the edit now — answered with an error, the editor
+/// would take the file for unchanged, keep the old selection over the cut
+/// file, and the next save would cut it again.
+///
+/// When the record did not follow, the row is read again after `reread` has
+/// repaired what it can (or, with the database gone, the clip as written is
+/// made up from what is known), and the notice says so.
+fn answer_after_swap(
+    stored: Result<Clip>,
+    reread: impl FnOnce() -> Option<Clip>,
+    written: impl FnOnce() -> Clip,
+) -> (Clip, Option<String>) {
+    match stored {
+        Ok(stored) => (stored, None),
+        Err(err) => (
+            reread().unwrap_or_else(written),
+            Some(format!("The clip was written, but its record could not be updated: {err}")),
+        ),
+    }
 }
 
 /// Show any file in Explorer.
@@ -1888,6 +1929,64 @@ pub fn retry_ffmpeg() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved_clip(id: &str, duration_ms: u64) -> Clip {
+        Clip {
+            id: id.into(),
+            path: "C:/clips/x.mp4".into(),
+            created_at: 0,
+            duration_ms,
+            game: None,
+            width: 1920,
+            height: 1080,
+            size_bytes: 1,
+            thumb_path: None,
+            title: None,
+            description: None,
+            edit: None,
+            original: None,
+            original_available: false,
+            favorite: false,
+            screenshot: false,
+            recording: false,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stored_save_answers_with_its_row_and_no_notice() {
+        let (clip, notice) = answer_after_swap(
+            Ok(saved_clip("stored", 20_000)),
+            || panic!("nothing to repair"),
+            || panic!("nothing to make up"),
+        );
+        assert_eq!(clip.duration_ms, 20_000);
+        assert!(notice.is_none());
+    }
+
+    /// The file is swapped, so the editor must hear "done" — an error would
+    /// keep the old selection over the cut file.
+    #[test]
+    fn a_save_whose_record_failed_still_answers_with_the_clip() {
+        let (clip, notice) = answer_after_swap(
+            Err("disk I/O error".into()),
+            || Some(saved_clip("healed", 20_000)),
+            || panic!("the row could be read"),
+        );
+        assert_eq!(clip.id, "healed");
+        assert_eq!(
+            notice.as_deref(),
+            Some("The clip was written, but its record could not be updated: disk I/O error")
+        );
+
+        let (clip, notice) = answer_after_swap(
+            Err("database is locked".into()),
+            || None,
+            || saved_clip("as-written", 20_000),
+        );
+        assert_eq!(clip.id, "as-written", "no row to read: the clip as written");
+        assert!(notice.is_some());
+    }
 
     #[test]
     fn an_export_goes_to_an_mp4_outside_clippiboys_data() {

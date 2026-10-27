@@ -595,8 +595,12 @@ fn run(
     // From the swap on the file *is* the edit, so nothing after it may fail
     // the run: an error here would leave the database describing the file
     // from before, and the next save would cut at the wrong place. A note
-    // that cannot be written only loses `end_ms` precision until the next
-    // start, where `repair` and `settle` measure the file again.
+    // that cannot be written keeps the previous cut's bounds — on a second
+    // front cut its `start_ms` too, not only the end. That is harmless while
+    // the database writes after the run succeed: the record is the truth, and
+    // `repair` takes the note's word only where the clip has no record
+    // (`clip.original` is none), `settle` only where the record no longer
+    // matches the file.
     if let Some(original) = original.as_ref() {
         if video_path(&clip.id).is_file() {
             if let Err(err) = write_note(&clip.id, original) {
