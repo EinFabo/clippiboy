@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use windows::core::{Interface, GUID, VARIANT};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::*;
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
 
 use crate::buffer::{EncodedPacket, VIDEO_TRACK};
 use crate::gpu::{GpuDevice, SendPtr};
@@ -213,6 +213,9 @@ pub struct EncoderSettings {
     pub quality: u32,
     pub keyframe_seconds: u32,
     pub requested: EncoderId,
+    /// Which encoder this is ("game", later "cam"): in the thread's name, the
+    /// profile and the shutdown line of the log.
+    pub label: &'static str,
 }
 
 /// Bring Media Foundation up once per process.
@@ -613,6 +616,12 @@ fn media_type_video(
 
 struct Transform {
     transform: IMFTransform,
+    /// The activation object `transform` came from. Media Foundation asks for
+    /// `ShutdownObject` on it once the transform is done with.
+    activate: IMFActivate,
+    label: &'static str,
+    /// Set by [`Transform::shut_down`]; a shut-down transform is never used again.
+    is_shut_down: bool,
     events: Option<IMFMediaEventGenerator>,
     provides_samples: bool,
     chosen: EncoderId,
@@ -647,7 +656,7 @@ fn profile(
     report: Option<&CodecReport>,
     bframes: Option<(u32, bool)>,
 ) {
-    let mut lines = vec!["encoder profile".to_string()];
+    let mut lines = vec![format!("encoder profile ({})", settings.label)];
 
     lines.push(format!("  requested        {:?}", settings.requested));
     lines.push(format!(
@@ -783,8 +792,32 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     .unwrap_or(0);
     let chosen = candidates[pick].id.unwrap_or(EncoderId::X264);
 
-    let transform: IMFTransform = unsafe { candidates[pick].activate.ActivateObject() }
+    let activate = candidates[pick].activate.clone();
+    let transform: IMFTransform = unsafe { activate.ActivateObject() }
         .map_err(|err| format!("Encoder starten: {err}"))?;
+
+    // From here on every way out has to give the hardware session back: a
+    // half-built transform is shut down like a finished one.
+    match set_up(gpu, settings, &candidates, pick, chosen, &transform, &activate) {
+        Ok(built) => Ok(built),
+        Err(err) => {
+            shut_down(&transform, &activate, settings.label);
+            Err(err)
+        }
+    }
+}
+
+/// Everything after `ActivateObject`: types, rate control, streaming.
+fn set_up(
+    gpu: &GpuDevice,
+    settings: &EncoderSettings,
+    candidates: &[Candidate],
+    pick: usize,
+    chosen: EncoderId,
+    transform: &IMFTransform,
+    activate: &IMFActivate,
+) -> Result<Transform, String> {
+    let transform = transform.clone();
 
     // Hardware encoders are asynchronous and have to be unlocked for that first —
     // otherwise `SetOutputType` rejects them.
@@ -885,7 +918,7 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     profile(
         gpu,
         settings,
-        &candidates,
+        candidates,
         pick,
         chosen,
         is_async,
@@ -912,12 +945,54 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
 
     Ok(Transform {
         transform,
+        activate: activate.clone(),
+        label: settings.label,
+        is_shut_down: false,
         events,
         provides_samples,
         chosen,
         rate_control,
         sequence_header,
     })
+}
+
+/// `IMFShutdown::Shutdown` on the transform (asynchronous MFTs are to be shut
+/// down this way), then `ShutdownObject` on its activation object. Both are
+/// documented as required; without them a vendor MFT whose worker threads still
+/// hold a reference keeps its hardware session past the restart, and GeForce
+/// cards allow only eight.
+fn shut_down(transform: &IMFTransform, activate: &IMFActivate, label: &str) {
+    unsafe {
+        if let Ok(shutdown) = transform.cast::<IMFShutdown>() {
+            let _ = shutdown.Shutdown();
+        }
+        let _ = activate.ShutdownObject();
+    }
+    log::info!("encoder ({label}) shut down");
+}
+
+impl Transform {
+    /// End the stream and release the session. Runs once; the transform must not
+    /// be asked for anything afterwards, so the drain comes first.
+    fn shut_down(&mut self) {
+        if self.is_shut_down {
+            return;
+        }
+        self.is_shut_down = true;
+        unsafe {
+            let _ = self
+                .transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        }
+        shut_down(&self.transform, &self.activate, self.label);
+    }
+}
+
+impl Drop for Transform {
+    /// Safety net for a path that never reached the end of `run`.
+    fn drop(&mut self) {
+        self.shut_down();
+    }
 }
 
 /// One frame on its way to the encoder.
@@ -1181,8 +1256,13 @@ impl VideoEncoder {
             let gpu = gpu.clone();
             let stats = stats.clone();
             std::thread::Builder::new()
-                .name("clippiboy-encoder".into())
+                .name(format!("clippiboy-encoder-{}", settings.label))
                 .spawn(move || {
+                    // The thread brings its own apartment instead of leaning on
+                    // whatever another thread left behind; without one,
+                    // `ActivateObject` fails with CO_E_NOTINITIALIZED. Only a
+                    // successful init (S_OK or S_FALSE) is balanced.
+                    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
                     let transform = match build(&gpu, &settings) {
                         Ok(transform) => {
                             let _ = ready_tx.send(Ok((
@@ -1194,10 +1274,19 @@ impl VideoEncoder {
                         }
                         Err(err) => {
                             let _ = ready_tx.send(Err(err));
+                            if com {
+                                unsafe { CoUninitialize() };
+                            }
                             return;
                         }
                     };
+                    // `run` owns the transform and has shut it down and dropped
+                    // it by the time it returns, so every COM object of this
+                    // thread is gone before the apartment is.
                     run(transform, settings, jobs_rx, running, stats, on_packet, on_header);
+                    if com {
+                        unsafe { CoUninitialize() };
+                    }
                 })
                 .map_err(|err| format!("Encoder-Faden: {err}"))?
         };
@@ -1310,7 +1399,7 @@ impl Drop for VideoEncoder {
 
 /// The loop on the encoder thread.
 fn run<F, H>(
-    transform: Transform,
+    mut transform: Transform,
     settings: EncoderSettings,
     jobs: crossbeam_channel::Receiver<Job>,
     running: Arc<AtomicBool>,
@@ -1569,11 +1658,8 @@ fn run<F, H>(
             }
         }
     }
-    unsafe {
-        let _ = transform
-            .transform
-            .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-    }
+    // After the drain above, never before: a shut-down transform answers nothing.
+    transform.shut_down();
 }
 
 #[cfg(test)]

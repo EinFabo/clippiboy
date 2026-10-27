@@ -855,6 +855,7 @@ mod win {
                     quality: recording.quality,
                     keyframe_seconds: recording.keyframe_seconds,
                     requested: wanted,
+                    label: "game",
                 },
                 move |packet| {
                     let mut ring = for_packets.packets.lock();
