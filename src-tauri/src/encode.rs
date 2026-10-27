@@ -12,13 +12,36 @@
 use crate::model::{EncoderId, EncoderInfo};
 
 #[cfg(windows)]
-fn hardware_encoders() -> Vec<EncoderId> {
+fn enumerate_hardware() -> Vec<EncoderId> {
     crate::mft::available_encoders()
 }
 
 #[cfg(not(windows))]
-fn hardware_encoders() -> Vec<EncoderId> {
+fn enumerate_hardware() -> Vec<EncoderId> {
     Vec::new()
+}
+
+/// What Media Foundation offered at the last look. Asking it costs an
+/// `MFTEnumEx` per encoder, and every settings write used to ask (twice when
+/// the encoder was missing) on the main thread.
+static HARDWARE: parking_lot::Mutex<Option<Vec<EncoderId>>> = parking_lot::Mutex::new(None);
+
+/// The hardware encoders, read once on first use and then from the cache.
+fn hardware_encoders() -> Vec<EncoderId> {
+    if let Some(known) = HARDWARE.lock().as_ref() {
+        return known.clone();
+    }
+    // Enumerated outside the lock: it is slow, and a second caller doing the
+    // same work is harmless.
+    let found = enumerate_hardware();
+    HARDWARE.lock().get_or_insert(found).clone()
+}
+
+/// Looks again. The Video page asks through `list_encoders`, so a driver
+/// installed while the app runs still shows up.
+pub fn refresh_encoders() {
+    let found = enumerate_hardware();
+    *HARDWARE.lock() = Some(found);
 }
 
 pub fn list_encoders() -> Vec<EncoderInfo> {
@@ -85,10 +108,13 @@ pub fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
 
 /// Best available encoder — hardware before CPU.
 pub fn preferred_encoder() -> EncoderId {
-    list_encoders()
+    preferred_among(&hardware_encoders())
+}
+
+fn preferred_among(hardware: &[EncoderId]) -> EncoderId {
+    [EncoderId::Nvenc, EncoderId::Amf, EncoderId::Qsv]
         .into_iter()
-        .find(|e| e.available && e.hardware)
-        .map(|e| e.id)
+        .find(|id| hardware.contains(id))
         .unwrap_or(EncoderId::X264)
 }
 
@@ -162,11 +188,16 @@ pub fn for_recording(requested: EncoderId) -> EncoderId {
 /// Falls back to an available encoder if the requested one is missing (a
 /// config carried over from another machine, for instance).
 pub fn resolve(requested: EncoderId) -> EncoderId {
-    let available = list_encoders();
-    if available.iter().any(|e| e.id == requested && e.available) {
+    resolve_among(requested, &hardware_encoders())
+}
+
+/// [`resolve`] against a given hardware list: the request if it is there
+/// (software always is), else the best hardware, else software.
+pub fn resolve_among(requested: EncoderId, hardware: &[EncoderId]) -> EncoderId {
+    if requested == EncoderId::X264 || hardware.contains(&requested) {
         requested
     } else {
-        preferred_encoder()
+        preferred_among(hardware)
     }
 }
 
@@ -197,6 +228,18 @@ mod tests {
     fn the_result_stays_in_range() {
         assert_eq!(bitrate_for(2, 2, 1), 2_000);
         assert_eq!(bitrate_for(7680, 4320, 120), 100_000);
+    }
+
+    #[test]
+    fn a_missing_encoder_falls_back_to_hardware_then_software() {
+        use EncoderId::*;
+        assert_eq!(resolve_among(Amf, &[Amf]), Amf);
+        assert_eq!(resolve_among(Nvenc, &[Amf]), Amf);
+        assert_eq!(resolve_among(Nvenc, &[]), X264);
+        assert_eq!(resolve_among(X264, &[Amf]), X264, "software is always there");
+        assert_eq!(resolve_among(X264, &[]), X264);
+        assert_eq!(resolve_among(Qsv, &[Qsv, Amf]), Qsv);
+        assert_eq!(preferred_among(&[Qsv, Amf]), Amf, "list order decides");
     }
 
     #[test]

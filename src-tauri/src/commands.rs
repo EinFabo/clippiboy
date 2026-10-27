@@ -34,8 +34,11 @@ pub fn list_capture_targets() -> Vec<CaptureTarget> {
     capture::list_targets()
 }
 
-#[tauri::command]
+/// Async so the Media Foundation enumeration runs off the main thread. It
+/// looks again, so a driver installed while the app runs shows up.
+#[tauri::command(async)]
 pub fn list_encoders() -> Vec<EncoderInfo> {
+    encode::refresh_encoders();
     encode::list_encoders()
 }
 
@@ -117,7 +120,10 @@ pub fn set_config(
     if state.is_recording() {
         crate::overlay::set_recording(&app, true);
     }
-    crate::apply_autostart(&app, next.auto_start_with_windows);
+    // The registry key is read only when its switch changed.
+    if previous.auto_start_with_windows != next.auto_start_with_windows {
+        crate::apply_autostart(&app, next.auto_start_with_windows);
+    }
 
     // A running capture is bound to its monitor or window, and its encoder to
     // the size, rate, quality and keyframe interval it was built with. Without

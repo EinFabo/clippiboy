@@ -655,7 +655,12 @@ impl AppState {
         // Takes effect with the next frame, no restart.
         crate::watermark::set_enabled(next.watermark);
         crate::telemetry::on_config(&next);
-        self.apply_audio();
+        // Only a changed source list needs the streams brought in line: a gain
+        // step is one, a clip-length or sound change is not.
+        let sources_changed = previous.sources != next.sources;
+        if sources_changed {
+            self.apply_audio();
+        }
         // A running buffer takes a new length right away — longer fills up from
         // here, shorter is cut down. Without this it kept the length it was
         // started with until the next start, and a Stream Deck key on 3:00
@@ -679,8 +684,10 @@ impl AppState {
         // the **unresolved** ones: it only needs id, gain, mute, solo and the
         // track flag, and that way a game source keeps its track even while no
         // game is running.
-        if let Some(shared) = self.shared.lock().as_ref() {
-            shared.set_sources(next.sources.clone());
+        if sources_changed {
+            if let Some(shared) = self.shared.lock().as_ref() {
+                shared.set_sources(next.sources.clone());
+            }
         }
         next
     }
