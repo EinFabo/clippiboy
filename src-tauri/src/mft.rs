@@ -631,6 +631,10 @@ struct Transform {
     /// anyway; if they are missing, the elementary stream is not decodable
     /// without this preamble. A duplicate does no harm; an absence does.
     sequence_header: Vec<u8>,
+    /// The output type as set up, with bitrate, profile and keyframe spacing on
+    /// it. A stream change carries those over from here — see
+    /// [`carry_output_settings`].
+    output_type: IMFMediaType,
 }
 
 /// Everything about this encoder, as one record in the log.
@@ -953,6 +957,7 @@ fn set_up(
         chosen,
         rate_control,
         sequence_header,
+        output_type: output,
     })
 }
 
@@ -1089,8 +1094,50 @@ fn opens_a_gop(data: &[u8]) -> bool {
     false
 }
 
+/// Whether a frame used up the encoder's `METransformNeedInput`.
+///
+/// Only `ProcessInput` answers a request, whatever it returns. A frame that
+/// failed before it got there (no surface buffer, no sample — out of memory, a
+/// removed device) has answered nothing, and the encoder will not ask a second
+/// time: it sends one request and waits for it. Counting such a frame as an
+/// answer left the loop with no request to serve and the encoder waiting for
+/// input that never came, until a restart.
+pub(crate) fn input_answered(prepared: bool) -> bool {
+    prepared
+}
+
+/// The output attributes `set_up` chose, copied onto the type the encoder
+/// offers after a stream change — where `from` has them.
+///
+/// `GetOutputAvailableType` describes what the encoder would like, not what was
+/// asked of it: set as it comes, it drops the bitrate, High profile and the
+/// keyframe spacing NVIDIA goes by.
+fn carry_output_settings(from: &IMFMediaType, to: &IMFMediaType) {
+    for key in [
+        &MF_MT_AVG_BITRATE,
+        &MF_MT_MPEG2_PROFILE,
+        &MF_MT_MAX_KEYFRAME_SPACING,
+    ] {
+        if let Ok(value) = unsafe { from.GetUINT32(key) } {
+            let _ = unsafe { to.SetUINT32(key, value) };
+        }
+    }
+}
+
+/// What one `ProcessOutput` came back with.
+enum Taken {
+    Packet(EncodedPacket),
+    /// Nothing right now.
+    Nothing,
+    /// The encoder changed its output type; it has been set again, and the
+    /// SPS/PPS may be new.
+    StreamChanged,
+}
+
 impl Transform {
-    fn feed(&self, job: &Job, duration_100ns: i64) -> Result<(), String> {
+    /// Wrap a texture in a sample for the encoder. Nothing is handed over yet:
+    /// an error here leaves the encoder's request for input standing.
+    fn prepare(&self, job: &Job, duration_100ns: i64) -> Result<IMFSample, String> {
         unsafe {
             let buffer = MFCreateDXGISurfaceBuffer(
                 &ID3D11Texture2D::IID,
@@ -1098,7 +1145,7 @@ impl Transform {
                 0,
                 false,
             )
-            .map_err(|err| format!("Texturpuffer: {err}"))?;
+            .map_err(|err| format!("texture buffer: {err}"))?;
 
             // Without a length set the encoder takes the buffer for empty.
             if let Ok(two_d) = buffer.cast::<IMF2DBuffer>() {
@@ -1107,7 +1154,7 @@ impl Transform {
                 }
             }
 
-            let sample = MFCreateSample().map_err(|err| format!("Sample: {err}"))?;
+            let sample = MFCreateSample().map_err(|err| format!("sample: {err}"))?;
             sample
                 .AddBuffer(&buffer)
                 .map_err(|err| format!("fill sample: {err}"))?;
@@ -1115,15 +1162,22 @@ impl Transform {
                 .SetSampleTime(job.pts_100ns)
                 .map_err(|err| format!("sample time: {err}"))?;
             let _ = sample.SetSampleDuration(duration_100ns);
+            Ok(sample)
+        }
+    }
 
+    /// Hand a prepared sample to the encoder. Called, it answers one
+    /// `METransformNeedInput` whether it succeeds or not.
+    fn submit_sample(&self, sample: &IMFSample) -> Result<(), String> {
+        unsafe {
             self.transform
-                .ProcessInput(0, &sample, 0)
+                .ProcessInput(0, sample, 0)
                 .map_err(|err| format!("submit frame: {err}"))
         }
     }
 
-    /// Collect a finished packet. `Ok(None)` means there is nothing right now.
-    fn take_output(&self, duration_100ns: i64) -> Result<Option<EncodedPacket>, String> {
+    /// Collect a finished packet.
+    fn take_output(&self, duration_100ns: i64) -> Result<Taken, String> {
         unsafe {
             let mut data = MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: 0,
@@ -1156,21 +1210,44 @@ impl Transform {
 
             match result {
                 Ok(()) => {}
-                Err(err) if err.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                Err(err) if err.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                    return Ok(Taken::Nothing)
+                }
                 Err(err) if err.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-                    // The encoder changed its output type (some drivers do this
-                    // once at the beginning). Fetch it again and ask once more —
-                    // otherwise the stream stalls.
-                    if let Ok(media) = self.transform.GetOutputAvailableType(0, 0) {
-                        let _ = self.transform.SetOutputType(0, &media, 0);
+                    // The encoder changed its output type (encoders are not
+                    // supposed to; some drivers do, once at the beginning). Set
+                    // the type it now offers, with the settings from `set_up`
+                    // carried over, and report it so the new SPS/PPS is fetched.
+                    // No second `ProcessOutput` from here: an asynchronous
+                    // transform answers that with E_UNEXPECTED unless it has
+                    // announced output — the next packet comes with its own
+                    // `METransformHaveOutput`.
+                    let result = self
+                        .transform
+                        .GetOutputAvailableType(0, 0)
+                        .and_then(|media| {
+                            carry_output_settings(&self.output_type, &media);
+                            self.transform.SetOutputType(0, &media, 0)
+                        });
+                    match result {
+                        Ok(()) => log::warn!(
+                            "encoder ({}) changed its output type; set again with bitrate, \
+                             profile and keyframe spacing kept",
+                            self.label
+                        ),
+                        Err(err) => log::warn!(
+                            "encoder ({}) changed its output type and the new one could \
+                             not be set: {err}",
+                            self.label
+                        ),
                     }
-                    return Ok(None);
+                    return Ok(Taken::StreamChanged);
                 }
                 Err(err) => return Err(format!("Paket abholen: {err}")),
             }
 
             let Some(sample) = sample else {
-                return Ok(None);
+                return Ok(Taken::Nothing);
             };
 
             let flagged = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
@@ -1193,7 +1270,7 @@ impl Transform {
             // that can be cut and one that cannot.
             let keyframe = flagged || opens_a_gop(&bytes);
 
-            Ok(Some(EncodedPacket {
+            Ok(Taken::Packet(EncodedPacket {
                 track: VIDEO_TRACK,
                 pts_us: pts_100ns / 10,
                 duration_us: duration_100ns / 10,
@@ -1228,10 +1305,11 @@ pub struct VideoEncoder {
 impl VideoEncoder {
     /// `on_packet` runs on the encoder thread and has to be short.
     ///
-    /// `on_header` runs there too, at most once, as soon as the encoder will part
-    /// with its SPS/PPS — which is generally not before it has produced its first
-    /// packet. Whatever [`Self::sequence_header`] held from setup is superseded
-    /// by it; see `catch_up_on_header`.
+    /// `on_header` runs there too, once, as soon as the encoder will part with
+    /// its SPS/PPS — which is generally not before it has produced its first
+    /// packet — and once more after each change of its output type. Whatever
+    /// [`Self::sequence_header`] held from setup is superseded by it; see
+    /// `catch_up_on_header`.
     pub fn start<F, H>(
         gpu: Arc<GpuDevice>,
         settings: EncoderSettings,
@@ -1482,7 +1560,7 @@ fn run<F, H>(
                         pending_input += 1;
                     } else if kind == METransformHaveOutput.0 as u32 {
                         match transform.take_output(duration) {
-                            Ok(Some(packet)) => {
+                            Ok(Taken::Packet(packet)) => {
                                 output_streak.succeeded();
                                 if let Some(since) = sent.pop_front() {
                                     took(&stats, since, sent.len());
@@ -1495,7 +1573,11 @@ fn run<F, H>(
                                     &mut on_header,
                                 );
                             }
-                            Ok(None) => {}
+                            Ok(Taken::Nothing) => {}
+                            Ok(Taken::StreamChanged) => {
+                                header_pending = true;
+                                header_tries = 0;
+                            }
                             Err(err) => {
                                 log::warn!("{err}");
                                 if output_streak.failed() {
@@ -1530,8 +1612,20 @@ fn run<F, H>(
                     // so a packet announced meanwhile is not left lying about.
                     match jobs.recv_timeout(Duration::from_millis(2)) {
                         Ok(job) => {
-                            match transform.feed(&job, duration) {
-                                Ok(()) => {
+                            let submitted = match transform.prepare(&job, duration) {
+                                Ok(sample) => Some(transform.submit_sample(&sample)),
+                                // The frame is lost, the request is not: the
+                                // next job answers it.
+                                Err(err) => {
+                                    log::warn!("{err}");
+                                    if feed_streak.failed() {
+                                        stats.fail(format!("the encoder keeps failing: {err}"));
+                                    }
+                                    None
+                                }
+                            };
+                            match &submitted {
+                                Some(Ok(())) => {
                                     feed_streak.succeeded();
                                     sent.push_back(Instant::now());
                                     // Written on the way in as well as on the way
@@ -1543,14 +1637,17 @@ fn run<F, H>(
                                         .in_flight
                                         .store(sent.len() as u64, Ordering::Relaxed);
                                 }
-                                Err(err) => {
+                                Some(Err(err)) => {
                                     log::warn!("{err}");
                                     if feed_streak.failed() {
                                         stats.fail(format!("the encoder keeps failing: {err}"));
                                     }
                                 }
+                                None => {}
                             }
-                            pending_input -= 1;
+                            if input_answered(submitted.is_some()) {
+                                pending_input -= 1;
+                            }
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -1569,7 +1666,10 @@ fn run<F, H>(
                     continue;
                 };
                 let since = Instant::now();
-                if let Err(err) = transform.feed(&job, duration) {
+                let fed = transform
+                    .prepare(&job, duration)
+                    .and_then(|sample| transform.submit_sample(&sample));
+                if let Err(err) = fed {
                     log::warn!("{err}");
                     if feed_streak.failed() {
                         stats.fail(format!("the encoder keeps failing: {err}"));
@@ -1579,7 +1679,7 @@ fn run<F, H>(
                 feed_streak.succeeded();
                 loop {
                     match transform.take_output(duration) {
-                        Ok(Some(packet)) => {
+                        Ok(Taken::Packet(packet)) => {
                             output_streak.succeeded();
                             took(&stats, since, 0);
                             on_packet(packet);
@@ -1590,7 +1690,15 @@ fn run<F, H>(
                                 &mut on_header,
                             );
                         }
-                        Ok(None) => break,
+                        Ok(Taken::Nothing) => break,
+                        // Asked again with the next frame, as before: a
+                        // transform that keeps reporting a change whose new
+                        // type it will not take must not spin this loop.
+                        Ok(Taken::StreamChanged) => {
+                            header_pending = true;
+                            header_tries = 0;
+                            break;
+                        }
                         Err(err) => {
                             log::warn!("{err}");
                             if output_streak.failed() {
@@ -1639,8 +1747,8 @@ fn run<F, H>(
                 let kind = unsafe { event.GetType() }.unwrap_or(0);
                 if kind == METransformHaveOutput.0 as u32 {
                     match transform.take_output(duration) {
-                        Ok(Some(packet)) => on_packet(packet),
-                        Ok(None) => {}
+                        Ok(Taken::Packet(packet)) => on_packet(packet),
+                        Ok(Taken::Nothing | Taken::StreamChanged) => {}
                         Err(err) => {
                             log::warn!("{err}");
                             break;
@@ -1653,7 +1761,7 @@ fn run<F, H>(
         }
         // Synchronous: it hands everything back on the spot.
         None => {
-            while let Ok(Some(packet)) = transform.take_output(duration) {
+            while let Ok(Taken::Packet(packet)) = transform.take_output(duration) {
                 on_packet(packet);
             }
         }
@@ -1773,5 +1881,49 @@ mod tests {
         stats.fail("the encoder stopped on its own".into());
         stats.fail("something later".into());
         assert_eq!(stats.failure().as_deref(), Some("the encoder stopped on its own"));
+    }
+
+    #[test]
+    fn a_frame_that_never_reached_the_encoder_keeps_its_request() {
+        assert!(!input_answered(false), "prepare failed: the NeedInput still stands");
+        assert!(input_answered(true), "ProcessInput was called, whatever it answered");
+    }
+
+    #[test]
+    fn a_new_output_type_keeps_bitrate_profile_and_keyframe_spacing() {
+        startup().unwrap();
+        unsafe {
+            let old = MFCreateMediaType().unwrap();
+            old.SetUINT32(&MF_MT_AVG_BITRATE, 19_000_000).unwrap();
+            old.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32).unwrap();
+            old.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 120).unwrap();
+            let new = MFCreateMediaType().unwrap();
+            carry_output_settings(&old, &new);
+            assert_eq!(new.GetUINT32(&MF_MT_AVG_BITRATE).unwrap(), 19_000_000);
+            assert_eq!(
+                new.GetUINT32(&MF_MT_MPEG2_PROFILE).unwrap(),
+                eAVEncH264VProfile_High.0 as u32
+            );
+            assert_eq!(new.GetUINT32(&MF_MT_MAX_KEYFRAME_SPACING).unwrap(), 120);
+        }
+    }
+
+    #[test]
+    fn a_setting_the_old_type_lacks_is_not_invented() {
+        startup().unwrap();
+        unsafe {
+            let old = MFCreateMediaType().unwrap();
+            old.SetUINT32(&MF_MT_AVG_BITRATE, 8_000_000).unwrap();
+            let new = MFCreateMediaType().unwrap();
+            new.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 60).unwrap();
+            carry_output_settings(&old, &new);
+            assert_eq!(new.GetUINT32(&MF_MT_AVG_BITRATE).unwrap(), 8_000_000);
+            assert!(new.GetUINT32(&MF_MT_MPEG2_PROFILE).is_err());
+            assert_eq!(
+                new.GetUINT32(&MF_MT_MAX_KEYFRAME_SPACING).unwrap(),
+                60,
+                "what the driver put on the new type stays where the old one says nothing"
+            );
+        }
     }
 }
