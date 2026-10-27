@@ -72,12 +72,20 @@ use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 /// real queue near zero on AMD and Intel today, and NVENC's is shallow, so the
 /// headroom mostly goes unused — but it is bought for what was actually measured,
 /// not for what the queue is assumed to be. At 1080p an NV12 slot is 3.1 MB.
-pub const SLOTS: usize = crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX + 2;
+///
+/// `depth` is the encoder's real queue (`CLIPPIBOY_QUEUE_DEPTH` may move it), so
+/// the slots grow with it instead of the guard starving every frame.
+pub fn slots_for(depth: usize) -> usize {
+    depth + crate::mft::ENCODER_HOLD_MAX + 2
+}
 
 /// The rotation only holds if there are more textures than there can be frames
 /// referring to them. Stated here so that lowering either figure it is built from
 /// has to be a deliberate act rather than a quiet one.
-const _: () = assert!(SLOTS > crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX);
+const _: () = assert!(
+    crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX + 2
+        > crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX
+);
 
 /// Colour space bitfield from `d3d11.h`:
 /// bit 0 `Usage`, bit 1 `RGB_Range`, bit 2 `YCbCr_Matrix`, bit 3 `YCbCr_Xvycc`,
@@ -126,7 +134,9 @@ pub struct Converter {
 }
 
 impl Converter {
-    pub fn new(gpu: &GpuDevice, width: u32, height: u32, fps: u32) -> Result<Self, String> {
+    pub fn new(gpu: &GpuDevice, width: u32, height: u32, fps: u32,
+        slots: usize,
+    ) -> Result<Self, String> {
         let video_device: ID3D11VideoDevice = gpu
             .device
             .cast()
@@ -167,11 +177,14 @@ impl Converter {
             );
             video_context
                 .VideoProcessorSetOutputColorSpace(&processor, &color_space(true, RANGE_STUDIO));
+            // Off: by default the driver may apply edge enhancement, noise
+            // reduction or skin tone inside the Blt, and clips would differ per machine.
+            video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
         }
 
-        let mut slots = Vec::with_capacity(SLOTS);
-        for _ in 0..SLOTS {
-            slots.push(Self::make_slot(
+        let mut slot_list = Vec::with_capacity(slots);
+        for _ in 0..slots {
+            slot_list.push(Self::make_slot(
                 &gpu.device,
                 &video_device,
                 &enumerator,
@@ -193,7 +206,7 @@ impl Converter {
             video_context,
             enumerator,
             processor,
-            slots,
+            slots: slot_list,
             next_slot: 0,
             last_slot: None,
             input_views: Vec::new(),
@@ -202,6 +215,10 @@ impl Converter {
             width,
             height,
         })
+    }
+
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
     }
 
     fn make_slot(
@@ -623,12 +640,15 @@ pub struct Latest {
     pub duplicated: AtomicU64,
     /// Captured frames let go because no NV12 slot was free — see
     /// [`Self::submit`]. Anything above zero means the encoder is holding more
-    /// frames than [`SLOTS`] was sized for, and the picture is being thinned to
+    /// frames than [`slots_for`] sized the slots for, and the picture is being thinned to
     /// keep it from being corrupted.
     pub starved: AtomicU64,
     /// The encoder's counters and the depth of its job channel, once it runs.
     /// Both are needed to tell how many frames are still holding a slot.
     encoder: Mutex<Option<(Arc<crate::mft::EncoderStats>, usize)>>,
+    /// How many NV12 slots the converter rotates through; read here so the
+    /// guard needs no converter lock.
+    slot_count: usize,
     /// How often a tick was already late when it came round.
     ///
     /// This is the other half of the picture next to [`Self::duplicated`]: a
@@ -650,6 +670,7 @@ pub struct Latest {
 impl Latest {
     pub fn new(converter: Converter) -> Arc<Self> {
         Arc::new(Self {
+            slot_count: converter.slot_count(),
             converter: Mutex::new(converter),
             slot: AtomicU64::new(u64::MAX),
             slot_qpc: AtomicI64::new(0),
@@ -681,7 +702,7 @@ impl Latest {
     fn slot_would_be_snatched(&self) -> bool {
         match self.encoder.lock().as_ref() {
             Some((stats, depth)) => {
-                *depth as u64 + stats.in_flight.load(Ordering::Relaxed) >= SLOTS as u64
+                *depth as u64 + stats.in_flight.load(Ordering::Relaxed) >= self.slot_count as u64
             }
             None => false,
         }
@@ -822,6 +843,17 @@ pub fn pace(latest: Arc<Latest>, fps: u32, mut sink: Box<dyn FrameSink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CAP-6: the slots follow the queue the encoder really has.
+    #[test]
+    fn a_deeper_queue_gets_the_slots_to_match() {
+        assert_eq!(slots_for(crate::mft::QUEUE_DEPTH), 22, "the default is what was measured");
+        let depth = 30;
+        assert!(
+            slots_for(depth) > depth + crate::mft::ENCODER_HOLD_MAX,
+            "the guard can never starve from the first frame"
+        );
+    }
 
     /// CAP-10: `period * index as u32` wrapped after 2³² ticks (828 days at 60 fps).
     #[test]

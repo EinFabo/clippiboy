@@ -199,13 +199,18 @@ where
         .map_err(|err| format!("Capture-Sitzung: {err}"))?;
 
     let _ = session.SetIsCursorCaptureEnabled(true);
-    // Both only exist from Windows 11 on. If they are missing, the default
-    // behaviour stands — no reason to let the capture fail.
+    // The border switch needs Windows 11, the update interval Windows 11 24H2
+    // (build 26100) and later. If they are missing, the default behaviour stands
+    // — no reason to let the capture fail.
     let _ = session.SetIsBorderRequired(false);
     if fps > 0 {
         let interval: windows::Foundation::TimeSpan =
             Duration::from_nanos(1_000_000_000 / fps as u64).into();
-        let _ = session.SetMinUpdateInterval(interval);
+        if let Err(err) = session.SetMinUpdateInterval(interval) {
+            // CAP-5, left open on purpose: on older builds every extra monitor
+            // frame is converted, then thrown away at the tick.
+            log::info!("Windows cannot limit the capture rate here ({err}) — every frame is converted");
+        }
     }
 
     let width = AtomicI32::new(size.Width);

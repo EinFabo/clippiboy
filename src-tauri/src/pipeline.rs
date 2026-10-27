@@ -839,7 +839,16 @@ mod win {
         let wanted = crate::encode::for_recording(recording.encoder);
 
         let gpu = Arc::new(GpuDevice::new(Some(wanted))?);
-        let converter = Converter::new(&gpu, recording.width, recording.height, recording.fps)?;
+        // Read once: the slots are sized from the same depth the encoder's job
+        // channel gets.
+        let queue_depth = crate::mft::queue_depth();
+        let converter = Converter::new(
+            &gpu,
+            recording.width,
+            recording.height,
+            recording.fps,
+            crate::convert::slots_for(queue_depth),
+        )?;
         let latest = Latest::new(converter);
 
         let encoder = {
@@ -856,6 +865,7 @@ mod win {
                     keyframe_seconds: recording.keyframe_seconds,
                     requested: wanted,
                     label: "game",
+                    queue_depth,
                 },
                 move |packet| {
                     let mut ring = for_packets.packets.lock();
@@ -878,7 +888,7 @@ mod win {
         *shared.pacer.lock() = Some(latest.clone());
         // The rotation of NV12 slots has to know how many frames the encoder is
         // holding on to, or it writes over one it is still reading — see
-        // `convert::SLOTS`.
+        // `convert::slots_for`.
         latest.watch_encoder(encoder.stats.clone(), encoder.queue_depth);
 
         let capture = {

@@ -36,12 +36,40 @@ fn vendor_tag(id: u32) -> String {
 /// 66 ms of headroom for a brief stall of the encoder.
 pub const QUEUE_DEPTH: usize = 4;
 
+/// The deepest job channel `CLIPPIBOY_QUEUE_DEPTH` may ask for. Every frame in
+/// it holds an NV12 slot (see [`crate::convert::slots_for`]); beyond this the
+/// textures cost more than any diagnosis is worth.
+pub const MAX_QUEUE_DEPTH: usize = 32;
+
+/// The job channel's depth: `CLIPPIBOY_QUEUE_DEPTH` held to `1..=MAX_QUEUE_DEPTH`.
+///
+/// Read once by whoever builds the converter and passed on to both it and the
+/// encoder — the slots have to be sized from the same figure the channel gets.
+pub fn queue_depth() -> usize {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let raw = env_opt_u32("CLIPPIBOY_QUEUE_DEPTH");
+    let depth = queue_depth_from(raw);
+    if let Some(raw) = raw {
+        if raw as usize != depth && !WARNED.swap(true, Ordering::Relaxed) {
+            log::warn!("CLIPPIBOY_QUEUE_DEPTH={raw} is outside 1..={MAX_QUEUE_DEPTH} — using {depth}");
+        }
+    }
+    depth
+}
+
+fn queue_depth_from(raw: Option<u32>) -> usize {
+    match raw {
+        None => QUEUE_DEPTH,
+        Some(raw) => (raw as usize).clamp(1, MAX_QUEUE_DEPTH),
+    }
+}
+
 /// The deepest queue a transform has been caught holding, in frames.
 ///
 /// Measured on a Radeon RX 7600 XT at the default quality preset — see
 /// [`low_latency_default`], which exists because of it. It is quoted here for a
 /// second reason: every one of those frames is still holding one of
-/// [`crate::convert::SLOTS`] NV12 textures, and the encoder reads them where they
+/// [`crate::convert::slots_for`] NV12 textures, and the encoder reads them where they
 /// lie. The rotation must not come round again before the encoder has let go.
 pub const ENCODER_HOLD_MAX: usize = 16;
 
@@ -216,6 +244,9 @@ pub struct EncoderSettings {
     /// Which encoder this is ("game", later "cam"): in the thread's name, the
     /// profile and the shutdown line of the log.
     pub label: &'static str,
+    /// How deep the job channel is, from [`queue_depth`]. The caller reads it
+    /// because it sizes the converter's slots from the same figure.
+    pub queue_depth: usize,
 }
 
 /// Bring Media Foundation up once per process.
@@ -1295,7 +1326,7 @@ pub struct VideoEncoder {
     /// SPS/PPS that belong in front of the stream when saving.
     pub sequence_header: Vec<u8>,
     /// How deep the job channel really is — `CLIPPIBOY_QUEUE_DEPTH` may have
-    /// moved it. Frames sitting in there hold NV12 slots just as the ones inside
+    /// moved it (see [`queue_depth`]). Frames sitting in there hold NV12 slots just as the ones inside
     /// the transform do, so the rotation has to count them.
     pub queue_depth: usize,
     /// What it is costing while it runs — see [`EncoderStats`].
@@ -1320,7 +1351,7 @@ impl VideoEncoder {
         F: FnMut(EncodedPacket) + Send + 'static,
         H: FnMut(Vec<u8>) + Send + 'static,
     {
-        let depth = env_u32("CLIPPIBOY_QUEUE_DEPTH", QUEUE_DEPTH as u32).max(1) as usize;
+        let depth = settings.queue_depth.clamp(1, MAX_QUEUE_DEPTH);
         let (jobs_tx, jobs_rx) = crossbeam_channel::bounded::<Job>(depth);
         let stats = Arc::new(EncoderStats::default());
         let (ready_tx, ready_rx) =
@@ -1773,6 +1804,14 @@ fn run<F, H>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_queue_depth_knob_stays_in_range() {
+        assert_eq!(queue_depth_from(None), QUEUE_DEPTH);
+        assert_eq!(queue_depth_from(Some(0)), 1);
+        assert_eq!(queue_depth_from(Some(22)), 22);
+        assert_eq!(queue_depth_from(Some(500)), MAX_QUEUE_DEPTH);
+    }
 
     /// One NAL with an Annex-B start code in front of it.
     fn nal(kind: u8, long_start_code: bool) -> Vec<u8> {
