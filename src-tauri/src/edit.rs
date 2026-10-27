@@ -1207,9 +1207,15 @@ mod tests {
         let lib = std::sync::Arc::new(Mutex::new(Some(crate::clips::Library::in_memory().unwrap())));
         let clip = Clip { id: "pass-skip-test-clip".into(), ..plain_clip(None, None) };
         lib.lock().as_ref().unwrap().insert(&clip).unwrap();
+        // A note with no recording: a pass working from the listed row would
+        // take that arm and report a change; one working from the fresh row
+        // finds the clip gone and skips it.
+        let note = ClipOriginal { duration_ms: 60_000, start_ms: 0, end_ms: 30_000 };
+        write_note(&clip.id, &note).unwrap();
         let changed = pass_waiting_on_a_held_clip(&lib, &clip.id, repair, || {
             lib.lock().as_ref().unwrap().delete("pass-skip-test-clip").unwrap();
         });
+        remove(&clip.id);
         assert_eq!(changed, 0, "a vanished clip was touched");
         assert!(lib.lock().as_ref().unwrap().get("pass-skip-test-clip").unwrap().is_none());
     }
