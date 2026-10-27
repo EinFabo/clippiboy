@@ -307,7 +307,19 @@ struct Candidate {
     activate: IMFActivate,
 }
 
-fn enumerate() -> Result<Vec<Candidate>, String> {
+/// The 64-bit value `MFT_ENUM_ADAPTER_LUID` wants: the LUID as DXGI states it
+/// (`HighPart` signed in the upper half), reinterpreted bit for bit.
+fn luid_attribute(luid: i64) -> u64 {
+    luid as u64
+}
+
+/// The registry's H.264 encoders, optionally only those of one adapter.
+///
+/// `MFTEnumEx` lists every adapter's transform, and the first one of a make
+/// need not belong to the card the device lives on. `MFTEnum2` with the LUID
+/// asks for that card's own. If it fails or finds nothing, the plain listing is
+/// used, so an old driver loses nothing.
+fn enumerate(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -316,19 +328,56 @@ fn enumerate() -> Result<Vec<Candidate>, String> {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_H264,
     };
+    let flags = MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER;
 
     let mut array: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
-    unsafe {
-        MFTEnumEx(
-            MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
-            Some(&input),
-            Some(&output),
-            &mut array,
-            &mut count,
-        )
-        .map_err(|err| format!("Encoder suchen: {err}"))?;
+    if let Some(luid) = adapter {
+        let listed = unsafe {
+            let mut attributes: Option<IMFAttributes> = None;
+            MFCreateAttributes(&mut attributes, 1)
+                .and_then(|()| {
+                    let attributes = attributes.as_ref().ok_or_else(windows::core::Error::empty)?;
+                    attributes.SetUINT64(&MFT_ENUM_ADAPTER_LUID, luid_attribute(luid))?;
+                    MFTEnum2(
+                        MFT_CATEGORY_VIDEO_ENCODER,
+                        flags,
+                        Some(&input),
+                        Some(&output),
+                        attributes,
+                        &mut array,
+                        &mut count,
+                    )
+                })
+        };
+        match listed {
+            Ok(()) if count > 0 => {}
+            other => {
+                release_array(array, count);
+                array = std::ptr::null_mut();
+                count = 0;
+                log::info!(
+                    "no encoder listed for adapter luid {luid:x} ({}) — listing all adapters",
+                    match other {
+                        Err(err) => err.to_string(),
+                        Ok(()) => "none there".into(),
+                    }
+                );
+            }
+        }
+    }
+    if array.is_null() {
+        unsafe {
+            MFTEnumEx(
+                MFT_CATEGORY_VIDEO_ENCODER,
+                flags,
+                Some(&input),
+                Some(&output),
+                &mut array,
+                &mut count,
+            )
+            .map_err(|err| format!("Encoder suchen: {err}"))?;
+        }
     }
 
     let mut found = Vec::new();
@@ -340,13 +389,22 @@ fn enumerate() -> Result<Vec<Candidate>, String> {
                 found.push(Candidate { id, name, activate });
             }
         }
-        // The array is ours; we cloned the references in it above.
+    }
+    release_array(array, count);
+    Ok(found)
+}
+
+/// The array an enumeration hands out is ours to free, references included.
+fn release_array(array: *mut Option<IMFActivate>, count: u32) {
+    if array.is_null() {
+        return;
+    }
+    unsafe {
         for index in 0..count as usize {
             let _ = (*array.add(index)).take();
         }
         CoTaskMemFree(Some(array as *const _));
     }
-    Ok(found)
 }
 
 /// Which hardware encoders really exist on this machine.
@@ -354,7 +412,7 @@ fn enumerate() -> Result<Vec<Candidate>, String> {
 /// Replaces the earlier guess based on the DXGI vendor id: an NVIDIA card in the
 /// machine does not yet mean its encoder MFT is registered.
 pub fn available_encoders() -> Vec<EncoderId> {
-    let Ok(list) = enumerate() else {
+    let Ok(list) = enumerate(None) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -794,7 +852,7 @@ fn profile(
 
 fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, String> {
     startup()?;
-    let candidates = enumerate()?;
+    let candidates = enumerate(gpu.adapter.as_ref().map(|info| info.luid))?;
     if candidates.is_empty() {
         return Err("no H.264 encoder found".into());
     }
@@ -1804,6 +1862,13 @@ fn run<F, H>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_adapter_luid_goes_into_the_attribute_unchanged() {
+        let luid: i64 = (0x0000_0001_i64 << 32) | 0x0000_d3a7;
+        assert_eq!(luid_attribute(luid), 0x0000_0001_0000_d3a7);
+        assert_eq!(luid_attribute(-1), u64::MAX, "the high part is signed in the LUID");
+    }
 
     #[test]
     fn the_queue_depth_knob_stays_in_range() {

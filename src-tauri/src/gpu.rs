@@ -61,6 +61,9 @@ pub struct AdapterInfo {
     pub name: String,
     pub vendor_id: u32,
     pub device_id: u32,
+    /// The adapter's locally unique id, high part in the upper 32 bits. Media
+    /// Foundation takes it to list only the encoders that belong to this card.
+    pub luid: i64,
     /// Memory on the card itself. Nought means the GPU borrows main memory,
     /// which is how an integrated one looks.
     pub dedicated_vram: u64,
@@ -70,11 +73,12 @@ impl std::fmt::Display for AdapterInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "#{} {} ({:04x}:{:04x}, {} MB dedicated)",
+            "#{} {} ({:04x}:{:04x}, luid {:x}, {} MB dedicated)",
             self.index,
             self.name,
             self.vendor_id,
             self.device_id,
+            self.luid,
             self.dedicated_vram / (1024 * 1024)
         )
     }
@@ -118,6 +122,7 @@ pub fn adapters() -> Vec<(AdapterInfo, IDXGIAdapter1)> {
                 name: String::from_utf16_lossy(&desc.Description[..end]),
                 vendor_id: desc.VendorId,
                 device_id: desc.DeviceId,
+                luid: ((desc.AdapterLuid.HighPart as i64) << 32) | desc.AdapterLuid.LowPart as i64,
                 dedicated_vram: desc.DedicatedVideoMemory as u64,
             },
             adapter,
