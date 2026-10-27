@@ -65,40 +65,73 @@ fn rotate(path: &Path) {
     }
 }
 
-/// The log file for this run, or `None` when this is not the first ClippiBoy.
+/// What a start does with the log file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Open {
+    /// The only ClippiBoy: the previous run's log becomes `.log.1`, this one
+    /// starts empty.
+    Rotate,
+    /// A start that got past single-instance late — the other ClippiBoy quit
+    /// in between. It writes on at the end of the log and never rotates: two
+    /// starts close together rotated twice, and the second rotation pushed the
+    /// previous session's log out of `.log.1` for the few lines of the first.
+    Append,
+    /// A second start that hands over and ends touches neither file.
+    Not,
+}
+
+/// `first`: no other ClippiBoy was running at start. `late`: asked from
+/// `setup`, past single-instance.
+fn opening(first: bool, late: bool) -> Open {
+    match (first, late) {
+        (_, true) => Open::Append,
+        (true, false) => Open::Rotate,
+        (false, false) => Open::Not,
+    }
+}
+
+/// The log file for this run, opened the way `how` says.
 ///
 /// A second start (a shortcut, a `clippiboy://` link, autostart twice) lives
 /// for a moment before single-instance ends it. Rotating there moved the
 /// running session's log over `.log.1` — the running one kept writing into the
 /// renamed file, and the next start threw it away: the log of exactly the
 /// session that had the problem. So a second start touches neither file.
-fn open_for(path: &Path, first: bool) -> Option<File> {
-    if !first {
+fn open_for(path: &Path, how: Open) -> Option<File> {
+    if how == Open::Not {
         return None;
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok()?;
     }
+    if how == Open::Append {
+        return std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+    }
     rotate(path);
     File::create(path).ok()
 }
 
-/// Rotate and open the log file, once. Called again from `setup`: a start that
-/// found another ClippiBoy running and still got past single-instance — the
-/// other one quit in between — is the app now and needs its file. A no-op once
-/// a file is attached.
-pub fn attach_file() {
-    if FILE.lock().is_some() {
+/// Open the log file, once — a no-op once a file is attached.
+fn attach(how: Open) {
+    if how == Open::Not || FILE.lock().is_some() {
         return;
     }
     let path = log_path();
-    match open_for(&path, true) {
+    match open_for(&path, how) {
         Some(file) => {
             *FILE.lock() = Some(file);
             log::info!("log file: {}", path.display());
         }
         None => log::warn!("no log file at {} — stderr only", path.display()),
     }
+}
+
+/// Called from `setup`: a start that found another ClippiBoy running and still
+/// got past single-instance — the other one quit in between — is the app now
+/// and needs its file. It writes on without rotating. A no-op once a file is
+/// attached.
+pub fn attach_file() {
+    attach(opening(false, true));
 }
 
 /// Set the logger up. Called once, before anything else logs. `first` says
@@ -117,7 +150,7 @@ pub fn init(first: bool) {
         .init();
 
     if first {
-        attach_file();
+        attach(opening(true, false));
     } else {
         log::info!("another ClippiBoy is running — this start logs to stderr only");
     }
@@ -151,7 +184,7 @@ mod tests {
         let (dir, path) = temp_log();
         std::fs::write(&path, "live").unwrap();
         std::fs::write(path.with_extension("log.1"), "previous").unwrap();
-        assert!(open_for(&path, false).is_none());
+        assert!(open_for(&path, Open::Not).is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "live");
         assert_eq!(std::fs::read_to_string(path.with_extension("log.1")).unwrap(), "previous");
         let _ = std::fs::remove_dir_all(&dir);
@@ -161,17 +194,43 @@ mod tests {
     fn the_first_start_keeps_one_generation() {
         let (dir, path) = temp_log();
         std::fs::write(&path, "old").unwrap();
-        drop(open_for(&path, true).unwrap());
+        drop(open_for(&path, Open::Rotate).unwrap());
         assert_eq!(std::fs::read_to_string(path.with_extension("log.1")).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two starts close together: the one that got past single-instance late
+    /// must not rotate a second time — that would push the previous session's
+    /// log out of `.log.1` and keep the few lines of the first start instead.
+    #[test]
+    fn a_late_start_writes_on_without_rotating() {
+        let (dir, path) = temp_log();
+        std::fs::write(&path, "first start\n").unwrap();
+        std::fs::write(path.with_extension("log.1"), "previous session").unwrap();
+        let mut file = open_for(&path, Open::Append).unwrap();
+        file.write_all(b"late start\n").unwrap();
+        drop(file);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first start\nlate start\n");
+        assert_eq!(std::fs::read_to_string(path.with_extension("log.1")).unwrap(), "previous session");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_first_start_rotates() {
+        assert_eq!(opening(true, false), Open::Rotate);
+        assert_eq!(opening(false, false), Open::Not);
+        assert_eq!(opening(false, true), Open::Append);
+        // The first start's own file is attached already; should it have
+        // failed, a retry in `setup` must not rotate again either.
+        assert_eq!(opening(true, true), Open::Append);
     }
 
     #[test]
     fn the_first_start_makes_the_folder() {
         let (dir, _) = temp_log();
         let path = dir.join("logs").join("clippiboy.log");
-        drop(open_for(&path, true).unwrap());
+        drop(open_for(&path, Open::Rotate).unwrap());
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -172,11 +172,7 @@ fn provide(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<(), Str
     if !missing.is_empty() {
         let names = missing.join(", ");
         log::warn!("ffmpeg folder was incomplete ({names} missing) - antivirus quarantine is the usual cause; fetching it again");
-        crate::notify(
-            app,
-            "error",
-            format!("{names} was missing - often an antivirus quarantine. Fetching it again."),
-        );
+        crate::notify(app, "error", missing_notice(&missing));
     }
     std::fs::create_dir_all(root).map_err(|err| format!("could not create {}: {err}", root.display()))?;
     if adopt_bundled(app, root, target) {
@@ -185,6 +181,16 @@ fn provide(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<(), Str
     }
     log::info!("downloading ffmpeg {VERSION}");
     tauri::async_runtime::block_on(download(app, root, target))
+}
+
+/// What the user is told about programs gone from the ffmpeg folder.
+fn missing_notice(missing: &[&str]) -> String {
+    let (names, verb) = match missing {
+        [] => ("A program".to_string(), "was"),
+        [one] => (one.to_string(), "was"),
+        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "were"),
+    };
+    format!("{names} {verb} missing - often an antivirus quarantine. Fetching it again.")
 }
 
 /// The programs of `target` that are not there.
@@ -390,6 +396,19 @@ mod tests {
         assert_eq!(clear_incomplete(&target).unwrap(), ["ffmpeg.exe"]);
         assert!(!target.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_notice_counts_what_was_missing() {
+        assert_eq!(
+            missing_notice(&["ffmpeg.exe"]),
+            "ffmpeg.exe was missing - often an antivirus quarantine. Fetching it again."
+        );
+        assert_eq!(
+            missing_notice(&["ffmpeg.exe", "ffprobe.exe"]),
+            "ffmpeg.exe and ffprobe.exe were missing - often an antivirus quarantine. Fetching it again."
+        );
+        assert!(missing_notice(&["a.exe", "b.exe", "c.exe"]).starts_with("a.exe, b.exe and c.exe were missing"));
     }
 
     #[test]

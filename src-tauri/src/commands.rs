@@ -937,7 +937,7 @@ pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) 
             }
             Ok(None) => Ok(clip),
             Err(err) => {
-                log::warn!("Clip '{id}' blieb liegen: {err}");
+                log::warn!("Clip '{id}' stayed where it was: {err}");
                 Ok(clip)
             }
         }
@@ -948,24 +948,28 @@ pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) 
 
 /// Take a game off every clip that has it, in one transaction, and file each
 /// clip the way `file_clip` does (with no game it belongs back in the clip
-/// folder). One announcement for all of it.
+/// folder). One announcement for all of it — also when one clip could not be
+/// moved or its new place not written down: that is logged, the others still
+/// go, and the game is off all of them either way.
 #[tauri::command(async)]
 pub fn clear_game(state: State<'_, AppState>, app: tauri::AppHandle, game: String) -> Result<()> {
     let clip_dir = state.config_snapshot().clip_dir;
-    with_library(&state, |lib| {
+    let cleared = with_library(&state, |lib| {
         for clip in lib.clear_game(&game).map_err(|e| e.to_string())? {
             match crate::filing::place(&clip, &clip_dir) {
-                Ok(Some(target)) => lib
-                    .set_path(&clip.id, &target.to_string_lossy())
-                    .map_err(|e| e.to_string())?,
+                Ok(Some(target)) => {
+                    if let Err(err) = lib.set_path(&clip.id, &target.to_string_lossy()) {
+                        log::warn!("Clip '{}' moved, but its new place was not saved: {err}", clip.id);
+                    }
+                }
                 Ok(None) => {}
-                Err(err) => log::warn!("Clip '{}' blieb liegen: {err}", clip.id),
+                Err(err) => log::warn!("Clip '{}' stayed where it was: {err}", clip.id),
             }
         }
         Ok(())
-    })?;
+    });
     announce_change(&app);
-    Ok(())
+    cleared
 }
 
 #[tauri::command]

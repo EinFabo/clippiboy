@@ -1468,18 +1468,18 @@ impl Default for AppState {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn a_raised_flag_comes_down_with_its_guard() {
         use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
         let flag = AtomicBool::new(false);
         {
-            let _guard = super::FlagGuard::raise(&flag);
+            let _guard = FlagGuard::raise(&flag);
             assert!(flag.load(SeqCst));
         }
         assert!(!flag.load(SeqCst));
     }
-
-    use super::*;
 
     fn secs(n: u64) -> std::time::Duration {
         std::time::Duration::from_secs(n)

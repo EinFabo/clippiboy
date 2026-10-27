@@ -281,9 +281,9 @@ impl Default for OverlayConfig {
 /// presses the same buttons through that hotkey and tray already press.
 ///
 /// It listens on `127.0.0.1` only and every request has to carry the token, so
-/// nothing reaches it from outside this machine. The token is generated once on
-/// first start; `port` is only in here because 47653 might already belong to
-/// something else.
+/// nothing reaches it from outside this machine. The token is made anew at
+/// every start (`control::start`); `port` is only in here because 47653 might
+/// already belong to something else.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlConfig {
