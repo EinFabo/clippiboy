@@ -26,9 +26,11 @@
 //!    already-trimmed file. The quality loss thus stays at exactly one
 //!    generation, however often you trim again.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 
@@ -55,6 +57,38 @@ static WORKING: Mutex<()> = Mutex::new(());
 /// Is an edit being rendered or swapped in right now? Quit waits for it.
 pub fn is_busy() -> bool {
     WORKING.try_lock().is_none()
+}
+
+/// Every clip lock somebody still holds, by clip id. Only weak: a lock nobody
+/// holds any more is dropped and its entry pruned on the next call.
+static CLIP_LOCKS: std::sync::LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The one lock of a clip, taken by everything that rewrites, moves or deletes
+/// its file: an edit, a delete, filing, an export (which reads the file all
+/// through its ffmpeg run). Without it a delete from the console in the middle
+/// of an editor save had the swap bring the file back with no row.
+///
+/// The same lock for the same id for as long as anyone holds it.
+///
+/// **Lock order:** `clip_lock(id)` → [`WORKING`] → `AppState.library`. Never
+/// two clip locks at once, and never one taken while holding [`WORKING`] or
+/// the library. Waiting on it blocks, so never on the main thread.
+pub fn clip_lock(clip_id: &str) -> Arc<Mutex<()>> {
+    let mut locks = CLIP_LOCKS.lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(clip_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(clip_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
+/// The clip ids [`CLIP_LOCKS`] still knows, without pruning.
+#[cfg(test)]
+fn held_locks() -> Vec<String> {
+    CLIP_LOCKS.lock().keys().cloned().collect()
 }
 
 /// Root of all originals. **Permanent**, like the individual tracks.
@@ -410,6 +444,10 @@ fn run(
     quality: u32,
     on_progress: &impl Fn(f32),
 ) -> Result<Applied, String> {
+    // The clip's own lock first: a delete or a move of this clip finishes
+    // before the swap, or waits for it. Then the global one.
+    let own = clip_lock(&clip.id);
+    let _clip = own.lock();
     let _busy = WORKING.lock();
 
     // The plan was made before the lock. "Clear all trims" may have thrown the
@@ -1100,6 +1138,48 @@ mod tests {
             recording: false,
             tags: Vec::new(),
         }
+    }
+
+    #[test]
+    fn one_clip_one_lock() {
+        let a = clip_lock("a");
+        let _held = a.lock();
+        assert!(std::sync::Arc::ptr_eq(&a, &clip_lock("a")));
+        assert!(!std::sync::Arc::ptr_eq(&a, &clip_lock("b")));
+    }
+
+    #[test]
+    fn a_lock_nobody_holds_is_forgotten() {
+        drop(clip_lock("gone"));
+        let _other = clip_lock("other");
+        assert!(!held_locks().iter().any(|id| id == "gone"));
+    }
+
+    /// A delete or a move holding the clip's lock keeps an edit of that clip
+    /// from starting until it is done — and then the edit finds the file gone.
+    #[test]
+    fn an_edit_waits_for_its_clip() {
+        let clip = Clip { id: "edit-waits-test-clip".into(), ..plain_clip(None, None) };
+        let plan = RenderPlan {
+            video: VideoSource::Clip,
+            video_start_ms: 0,
+            stems_start_ms: 0,
+            length_ms: 30_000,
+            reencode: false,
+            original: None,
+        };
+        let lock = clip_lock(&clip.id);
+        let held = lock.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = run(&clip, &plan, &[], EncoderId::X264, 70, &|_| {});
+            let _ = tx.send(result.err());
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "ran past the lock");
+        drop(held);
+        let err = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("never finished");
+        assert_eq!(err.as_deref(), Some("The clip file is no longer there."));
+        worker.join().unwrap();
     }
 
     fn mixed(gain_db: f32, muted: bool) -> Option<ClipEdit> {

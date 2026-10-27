@@ -838,6 +838,11 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
 pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri::Emitter;
     let clip_dir = state.config_snapshot().clip_dir;
+    // Held to the end, before the row is even read: an edit, a move or an
+    // export of this clip finishes first — a save swapping its file back in
+    // after the row went left a clip nobody could see.
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
     // The clip first, and the stores by its stored id. The stores are named
     // after a sanitised id, so an id that is empty or spelled differently
     // named the whole store — every clip's tracks and originals went with it.
@@ -922,6 +927,10 @@ fn announce_change(app: &tauri::AppHandle) {
 #[tauri::command(async)]
 pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
     let clip_dir = state.config_snapshot().clip_dir;
+    // An edit swapping the file in at its old place, or an export reading it,
+    // goes first; the row is read only after.
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
     let clip = with_library(&state, |lib| {
         let clip = lib
             .get(&id)
@@ -951,25 +960,39 @@ pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) 
 /// folder). One announcement for all of it — also when one clip could not be
 /// moved or its new place not written down: that is logged, the others still
 /// go, and the game is off all of them either way.
+///
+/// Each clip moves under its own lock, one at a time, taken outside the
+/// library lock (see `edit::clip_lock`); its row is read again inside, since
+/// an edit or a delete may have finished while this waited.
 #[tauri::command(async)]
 pub fn clear_game(state: State<'_, AppState>, app: tauri::AppHandle, game: String) -> Result<()> {
     let clip_dir = state.config_snapshot().clip_dir;
-    let cleared = with_library(&state, |lib| {
-        for clip in lib.clear_game(&game).map_err(|e| e.to_string())? {
+    let cleared = with_library(&state, |lib| lib.clear_game(&game).map_err(|e| e.to_string()));
+    for id in cleared.iter().flatten().map(|clip| clip.id.clone()) {
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        let filed = with_library(&state, |lib| {
+            // Deleted in the meantime: nothing to move.
+            let Some(clip) = lib.get(&id).map_err(|e| e.to_string())? else {
+                return Ok(());
+            };
             match crate::filing::place(&clip, &clip_dir) {
                 Ok(Some(target)) => {
-                    if let Err(err) = lib.set_path(&clip.id, &target.to_string_lossy()) {
-                        log::warn!("Clip '{}' moved, but its new place was not saved: {err}", clip.id);
+                    if let Err(err) = lib.set_path(&id, &target.to_string_lossy()) {
+                        log::warn!("Clip '{id}' moved, but its new place was not saved: {err}");
                     }
                 }
                 Ok(None) => {}
-                Err(err) => log::warn!("Clip '{}' stayed where it was: {err}", clip.id),
+                Err(err) => log::warn!("Clip '{id}' stayed where it was: {err}"),
             }
+            Ok(())
+        });
+        if let Err(err) = filed {
+            log::warn!("Clip '{id}' stayed where it was: {err}");
         }
-        Ok(())
-    });
+    }
     announce_change(&app);
-    cleared
+    cleared.map(|_| ())
 }
 
 #[tauri::command]
@@ -1083,10 +1106,16 @@ pub fn export_for_discord(
     // Already there from an earlier run, small enough and newer than the clip:
     // copying it again beats encoding the same file twice. An older one still
     // has what a trim or a muted track has since taken out.
-    let ready = std::fs::metadata(&output)
-        .map(|meta| meta.len() > 0 && meta.len() <= target_bytes)
-        .unwrap_or(false)
-        && stems::is_newer(&output, &source);
+    // Under the clip's lock, so a save of the clip in progress finishes first
+    // and its newer file counts — `shrink` takes the lock again for its run.
+    let ready = {
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        std::fs::metadata(&output)
+            .map(|meta| meta.len() > 0 && meta.len() <= target_bytes)
+            .unwrap_or(false)
+            && stems::is_newer(&output, &source)
+    };
     if !ready {
         // Straight to the work: the target is the core's own, in its data
         // folder — `export_target` would rightly refuse it for the dialog.
@@ -1295,6 +1324,10 @@ pub(crate) fn shrink(
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
 ) -> Result<u64> {
+    // Held for the whole ffmpeg run, which reads the clip file throughout: a
+    // save, a move or a delete of this clip waits for it, and it for them.
+    let own = edit::clip_lock(id);
+    let _clip = own.lock();
     let clip = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
