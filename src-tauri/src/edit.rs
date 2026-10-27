@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Weak};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex};
 
 use crate::config;
 use crate::model::{Clip, ClipEdit, ClipOriginal, EncoderId, TrackMix};
@@ -61,7 +61,7 @@ pub fn is_busy() -> bool {
 
 /// Every clip lock somebody still holds, by clip id. Only weak: a lock nobody
 /// holds any more is dropped and its entry pruned on the next call.
-static CLIP_LOCKS: std::sync::LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+static CLIP_LOCKS: std::sync::LazyLock<Mutex<HashMap<String, Weak<ReentrantMutex<()>>>>> =
     std::sync::LazyLock::new(Default::default);
 
 /// The one lock of a clip, taken by everything that rewrites, moves or deletes
@@ -69,18 +69,20 @@ static CLIP_LOCKS: std::sync::LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> 
 /// through its ffmpeg run). Without it a delete from the console in the middle
 /// of an editor save had the swap bring the file back with no row.
 ///
-/// The same lock for the same id for as long as anyone holds it.
+/// The same lock for the same id for as long as anyone holds it. Reentrant:
+/// a command holds it from reading the row to storing the result, and the
+/// run in between ([`run`]) takes it again on the same thread.
 ///
 /// **Lock order:** `clip_lock(id)` → [`WORKING`] → `AppState.library`. Never
 /// two clip locks at once, and never one taken while holding [`WORKING`] or
 /// the library. Waiting on it blocks, so never on the main thread.
-pub fn clip_lock(clip_id: &str) -> Arc<Mutex<()>> {
+pub fn clip_lock(clip_id: &str) -> Arc<ReentrantMutex<()>> {
     let mut locks = CLIP_LOCKS.lock();
     locks.retain(|_, lock| lock.strong_count() > 0);
     if let Some(lock) = locks.get(clip_id).and_then(Weak::upgrade) {
         return lock;
     }
-    let lock = Arc::new(Mutex::new(()));
+    let lock = Arc::new(ReentrantMutex::new(()));
     locks.insert(clip_id.to_string(), Arc::downgrade(&lock));
     lock
 }
@@ -1146,6 +1148,17 @@ mod tests {
         let _held = a.lock();
         assert!(std::sync::Arc::ptr_eq(&a, &clip_lock("a")));
         assert!(!std::sync::Arc::ptr_eq(&a, &clip_lock("b")));
+    }
+
+    /// A command holds the lock from reading the row to storing the result,
+    /// and the run in between takes it again on the same thread.
+    #[test]
+    fn a_clip_lock_taken_again_on_the_same_thread_does_not_wait() {
+        let lock = clip_lock("again");
+        let _held = lock.lock();
+        assert!(clip_lock("again").try_lock().is_some(), "the same thread waited on itself");
+        let other = std::thread::spawn(|| clip_lock("again").try_lock().is_none());
+        assert!(other.join().unwrap(), "another thread got in");
     }
 
     #[test]

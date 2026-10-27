@@ -686,6 +686,11 @@ fn edit_screenshot(
     steps: Vec<Step>,
     marks: String,
 ) -> Result<Clip> {
+    // Held until the picture and its notes are written, before the row is
+    // read: a delete or a move of this screenshot finishes first, or waits —
+    // the swap in `write_picture` would otherwise bring a deleted file back.
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     if !clip.screenshot {
@@ -882,7 +887,15 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // export of this clip finishes first — a save swapping its file back in
     // after the row went left a clip nobody could see.
     let own = edit::clip_lock(&id);
-    let _clip = own.lock();
+    let _clip = match own.try_lock() {
+        Some(held) => held,
+        None => {
+            // A save or an export of this clip is running; it can take a
+            // while, and a delete that seems to do nothing gets clicked again.
+            crate::notify(&app, "ok", "Waiting for this clip to finish saving…");
+            own.lock()
+        }
+    };
     // The clip first, and the stores by its stored id. The stores are named
     // after a sanitised id, so an id that is empty or spelled differently
     // named the whole store — every clip's tracks and originals went with it.
@@ -1008,6 +1021,11 @@ pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) 
 pub fn clear_game(state: State<'_, AppState>, app: tauri::AppHandle, game: String) -> Result<()> {
     let clip_dir = state.config_snapshot().clip_dir;
     let cleared = with_library(&state, |lib| lib.clear_game(&game).map_err(|e| e.to_string()));
+    // The game is off every clip now; the moves below can take a while (each
+    // waits for its clip), and the lists should not show the old game meanwhile.
+    if cleared.is_ok() {
+        announce_change(&app);
+    }
     for id in cleared.iter().flatten().map(|clip| clip.id.clone()) {
         let own = edit::clip_lock(&id);
         let _clip = own.lock();
@@ -1284,6 +1302,11 @@ pub fn apply_clip_edit(
     end_ms: u64,
     tracks: Vec<TrackMix>,
 ) -> Result<Clip> {
+    // From before the row is read until the new state is stored: a delete or
+    // a move in between would leave the row describing a file that is gone or
+    // elsewhere. `edit::run` takes the same lock again (it is reentrant).
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
@@ -1308,6 +1331,9 @@ pub fn restore_clip_original(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Clip> {
+    // As in `apply_clip_edit`: held across the run and `store`.
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
@@ -1334,6 +1360,12 @@ pub fn discard_clip_original(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Clip> {
+    // On the main thread, so never waiting: a save of this clip still needs
+    // the original it would throw away.
+    let own = edit::clip_lock(&id);
+    let Some(_clip) = own.try_lock() else {
+        return Err("This clip is being saved — try again in a moment.".into());
+    };
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     edit::discard_original(&clip.id)?;
