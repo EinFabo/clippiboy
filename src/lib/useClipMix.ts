@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { mockTracks } from "@/lib/mock";
+import { singleTrackVolume } from "@/lib/editRules";
 import type { Clip, ClipTrack, TrackMix } from "@/lib/types";
 
 export interface TrackState {
@@ -280,7 +281,16 @@ export function useClipMix(
 
     // With separated tracks the sound comes exclusively from the audio
     // elements — the video's audio track contains the same thing again.
-    if (video.current) video.current.volume = separate ? 0 : master;
+    // A clip with one track has no elements of its own: the video is the only
+    // sound, so the level and the mute act on it, as they do on save.
+    if (video.current) {
+      const only = !separate && tracks.length === 1 ? tracks[0] : null;
+      video.current.volume = separate
+        ? 0
+        : only
+          ? singleTrackVolume(master, (mix[only.index] ?? NEUTRAL).gainDb, !audible(mix[only.index] ?? NEUTRAL, anySolo))
+          : master;
+    }
 
     const built = graph.current;
     if (built) {

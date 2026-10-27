@@ -24,6 +24,7 @@ import { formatAgo, formatSize } from "@/lib/format";
 import { useClipMix } from "@/lib/useClipMix";
 import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
+import { EDGE_S, snapTrim } from "@/lib/editRules";
 import { leaving as closing, typesText } from "@/lib/viewer";
 import type { Clip, ClipEdit } from "@/lib/types";
 
@@ -494,9 +495,11 @@ export function ClipPlayer({
     if (!element) return;
     const at = element.currentTime;
     setTrim((current) =>
-      which === "start"
-        ? { start: Math.min(at, current.end - 0.5), end: current.end }
-        : { start: current.start, end: Math.max(at, current.start + 0.5) },
+      snapTrim(
+        which === "start" ? Math.min(at, current.end - 0.5) : current.start,
+        which === "start" ? current.end : Math.max(at, current.start + 0.5),
+        element.duration,
+      ),
     );
   }, []);
 
@@ -1146,12 +1149,12 @@ function savedEdit(
 }
 
 /**
- * Same state? Start and end with a few milliseconds of slack: the length the
+ * Same state? Start and end within the core's edge tolerance (250 ms): the length the
  * video element reports varies by fractions between two loads — without slack
  * every freshly opened clip would count as changed.
  */
 function sameEdit(a: ClipEdit, b: ClipEdit): boolean {
-  const near = (x: number, y: number) => Math.abs(x - y) <= 50;
+  const near = (x: number, y: number) => Math.abs(x - y) <= EDGE_S * 1000;
   return (
     near(a.startMs, b.startMs) &&
     near(a.endMs, b.endMs) &&

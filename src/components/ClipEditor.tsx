@@ -6,6 +6,7 @@ import { IconSpeaker } from "@/components/icons";
 import { ClipMeta } from "@/components/ClipMeta";
 import { inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
+import { isTrimmed } from "@/lib/editRules";
 import type { TrackState } from "@/lib/useClipMix";
 import type { Clip, ClipTrack } from "@/lib/types";
 
@@ -85,7 +86,7 @@ export function ClipEditor({
   // Local, like `askingDelete` in the player: the confirmation replaces the
   // button that opened it and nobody else needs to know about it.
   const [discarding, setDiscarding] = useState(false);
-  const trimmed = trim.start > 0.05 || trim.end < duration - 0.05;
+  const trimmed = isTrimmed(trim.start, trim.end, duration);
   const length = Math.max(0, trim.end - trim.start);
   // A cut at the start has to be frame-accurate — when copying it slid to the
   // keyframe before it. So the video gets recomputed, and that takes time.

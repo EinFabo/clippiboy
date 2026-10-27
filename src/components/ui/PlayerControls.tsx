@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { cn } from "@/lib/cn";
+import { snapTrim } from "@/lib/editRules";
 import type { Trim } from "@/components/ClipEditor";
 
 /**
@@ -144,9 +145,11 @@ export function Scrubber({
       );
       const at = ratio * duration;
       onTrim(
-        which === "start"
-          ? { start: Math.min(at, trim.end - 0.5), end: trim.end }
-          : { start: trim.start, end: Math.max(at, trim.start + 0.5) },
+        snapTrim(
+          which === "start" ? Math.min(at, trim.end - 0.5) : trim.start,
+          which === "start" ? trim.end : Math.max(at, trim.start + 0.5),
+          duration,
+        ),
       );
     };
     const up = () => {
