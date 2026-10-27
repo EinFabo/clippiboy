@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { areFriends, friendIds } from "./db";
 import {
   beyondCap,
+  hidesNow,
   HELLO,
   PRESENCE,
   RAW_MAX,
@@ -299,9 +300,10 @@ export class Hub extends DurableObject<Env> {
   /**
    * Publishes at once while the presence budget lasts; after that, the alarm
    * publishes whatever is current when the next token is there, so a burst
-   * always ends on its last change.
+   * always ends on its last change. Going invisible never waits (`hidesNow`).
    */
   private async publishSoon(user: string): Promise<void> {
+    if (hidesNow((await this.card()).presence, this.current())) return this.publish(user);
     const now = Date.now();
     const budget = await this.take("presence", PRESENCE, now);
     if (budget.ok) return this.publish(user);

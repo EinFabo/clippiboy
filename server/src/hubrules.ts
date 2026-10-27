@@ -29,6 +29,16 @@ export function mayReach(contacts: Contacts | undefined, from: string, now: numb
   return expiry !== undefined && expiry > now;
 }
 
+/**
+ * Whether a presence change hides the user — "Appear offline" turned on, or
+ * the last app gone. That one is published at once, past the presence budget:
+ * the throttle must never keep a user visible who asked not to be. It cannot
+ * be used to flood: showing up again still spends from the budget.
+ */
+export function hidesNow(published: object | null, next: object | null): boolean {
+  return published !== null && next === null;
+}
+
 // --- Budgets and limits -----------------------------------------------------
 
 /** A budget in use: tokens left at `at`. */

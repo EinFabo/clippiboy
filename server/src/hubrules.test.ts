@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { beyondCap, CONTACT_MAX, CONTACT_MS, mayReach, remember, spend, type Contacts } from "./hubrules.ts";
+import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, mayReach, remember, spend, type Contacts } from "./hubrules.ts";
 
 const now = 1_000_000;
 
@@ -50,4 +50,15 @@ test("a budget restored from storage keeps throttling", () => {
   const restored = JSON.parse(JSON.stringify(bucket));
   assert.equal(spend(restored, rule, now + 500).ok, false);
   assert.equal(spend(restored, rule, now + 1000).ok, true);
+});
+
+test("turning Appear offline on is published at once, past the throttle", () => {
+  const playing = { game: "Valorant" };
+  assert.equal(hidesNow(playing, null), true);
+});
+
+test("other changes wait for the presence budget", () => {
+  assert.equal(hidesNow(null, { game: "Valorant" }), false);
+  assert.equal(hidesNow({ game: null }, { game: "Valorant" }), false);
+  assert.equal(hidesNow(null, null), false);
 });
