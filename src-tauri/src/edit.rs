@@ -1018,6 +1018,8 @@ pub fn repair(library: &crate::clips::Library) {
         let note = read_note(&clip.id);
         let video = video_path(&clip.id);
         let target = Path::new(&clip.path);
+        // Whether an arm wrote to the clip's row, so that it is read again.
+        let mut wrote = false;
 
         match (target.is_file(), note, video.is_file()) {
             // Died between saving and swapping: the clip file is missing, the
@@ -1028,6 +1030,7 @@ pub fn repair(library: &crate::clips::Library) {
                     log::info!("clip '{}' recovered from the originals store", clip.id);
                     remove(&clip.id);
                     let _ = library.set_original(&clip.id, None);
+                    wrote = true;
                 }
             }
 
@@ -1037,6 +1040,7 @@ pub fn repair(library: &crate::clips::Library) {
             // cleared the store out by hand — then the recording is lost, but the
             // tracks' offset is not.
             (_, Some(note), false) => {
+                wrote = true;
                 remove(&clip.id);
                 if clip.duration_ms == note.duration_ms {
                     log::info!("note without an original at '{}' — cleared away", clip.id);
@@ -1063,6 +1067,7 @@ pub fn repair(library: &crate::clips::Library) {
                 } else {
                     log::info!("original of '{}' recorded after the fact", clip.id);
                     let _ = library.set_original(&clip.id, Some(&note));
+                    wrote = true;
                 }
             }
 
@@ -1092,11 +1097,15 @@ pub fn repair(library: &crate::clips::Library) {
         // answer: does the record still describe the file? A still has no length
         // to compare — asking ffprobe about a PNG would only cost a process.
         //
-        // The row is read again rather than reused: an arm may just have written
-        // to it, and the note along with it.
+        // The row is read again only after an arm wrote to it; otherwise the one
+        // from the list is still the truth. The note is read afresh either way.
         if !clip.screenshot {
-            if let Ok(Some(fresh)) = library.get(&clip.id) {
-                settle(library, &fresh, read_note(&clip.id));
+            if wrote {
+                if let Ok(Some(fresh)) = library.get(&clip.id) {
+                    settle(library, &fresh, read_note(&clip.id));
+                }
+            } else {
+                settle(library, &clip, read_note(&clip.id));
             }
         }
     }
@@ -1643,5 +1652,28 @@ mod tests {
         for quality in [0, 1, 50, 70, 100, 999] {
             assert!((14..=28).contains(&quantiser(quality)), "quality {quality}");
         }
+    }
+
+    /// Timing, not a check: `cargo test --lib -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn a_thousand_clips_repair_quickly() {
+        let dir = std::env::temp_dir().join(format!("clippiboy-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = crate::clips::Library::in_memory().unwrap();
+        for n in 0..1000 {
+            let path = dir.join(format!("{n}.mp4"));
+            std::fs::write(&path, b"0123456789").unwrap();
+            let mut clip = plain_clip(None, None);
+            clip.id = format!("repair-timing-{n}");
+            clip.path = path.to_string_lossy().into_owned();
+            clip.created_at = n;
+            clip.size_bytes = 10;
+            lib.insert(&clip).unwrap();
+        }
+        let started = std::time::Instant::now();
+        repair(&lib);
+        println!("repair of 1000 clips: {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

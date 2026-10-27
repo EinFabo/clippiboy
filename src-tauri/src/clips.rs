@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::config;
 use crate::model::{Clip, ClipEdit, ClipOriginal};
@@ -142,37 +142,9 @@ impl Library {
 
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, created_at, duration_ms, game, width, height, size_bytes,
-                    thumb_path, title, description, edit, original, favorite, screenshot,
-                    recording
-             FROM clips ORDER BY created_at DESC",
+            &format!("{CLIP_COLUMNS} ORDER BY created_at DESC"),
         )?;
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            Ok(Clip {
-                // Not in the database: the file can disappear without the row
-                // hearing about it, so it is asked rather than remembered.
-                original_available: crate::edit::has_original(&id),
-                id,
-                path: row.get(1)?,
-                created_at: row.get(2)?,
-                duration_ms: row.get::<_, i64>(3)? as u64,
-                game: row.get(4)?,
-                width: row.get(5)?,
-                height: row.get(6)?,
-                size_bytes: row.get::<_, i64>(7)? as u64,
-                thumb_path: row.get(8)?,
-                title: row.get(9)?,
-                description: row.get(10)?,
-                edit: decode_edit(row.get::<_, Option<String>>(11)?),
-                original: decode_original(row.get::<_, Option<String>>(12)?),
-                favorite: row.get(13)?,
-                screenshot: row.get(14)?,
-                recording: row.get(15)?,
-                // Filled in below, from the table of their own.
-                tags: Vec::new(),
-            })
-        })?;
+        let rows = stmt.query_map([], row_to_clip)?;
         let mut clips = rows.collect::<rusqlite::Result<Vec<Clip>>>()?;
 
         // One query for all of them rather than one per clip: the gallery asks
@@ -193,8 +165,20 @@ impl Library {
         Ok(clips)
     }
 
+    /// One clip by id: its row and its tags, nothing else. Same result as the
+    /// entry `list` returns for it.
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<Clip>> {
-        Ok(self.list()?.into_iter().find(|c| c.id == id))
+        let mut stmt = self.conn.prepare(&format!("{CLIP_COLUMNS} WHERE id = ?1"))?;
+        let Some(mut clip) = stmt.query_row([id], row_to_clip).optional()? else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare("SELECT tag FROM tags WHERE clip_id = ?1")?;
+        let mut own = stmt
+            .query_map([id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        own.sort_by_key(|tag| tag.to_lowercase());
+        clip.tags = own;
+        Ok(Some(clip))
     }
 
     /// Change name, description and game. Empty fields arrive as `None` and
@@ -452,6 +436,41 @@ pub fn remove_file_patiently(path: &Path, attempts: u32) -> std::io::Result<()> 
     Err(last.expect("at least one attempt ran"))
 }
 
+const CLIP_COLUMNS: &str = "SELECT id, path, created_at, duration_ms, game, width, height,
+    size_bytes, thumb_path, title, description, edit, original, favorite, screenshot, recording
+    FROM clips";
+
+/// One `CLIP_COLUMNS` row as a clip, tags left empty. Shared by `list` and
+/// `get`, so the two cannot drift apart. It costs a file check per row
+/// (`original_available`): a new flag that has to ask the disk must not be
+/// added here for every row of `list` — look it up on demand instead.
+fn row_to_clip(row: &rusqlite::Row) -> rusqlite::Result<Clip> {
+    let id: String = row.get(0)?;
+    Ok(Clip {
+        // Not in the database: the file can disappear without the row
+        // hearing about it, so it is asked rather than remembered.
+        original_available: crate::edit::has_original(&id),
+        id,
+        path: row.get(1)?,
+        created_at: row.get(2)?,
+        duration_ms: row.get::<_, i64>(3)? as u64,
+        game: row.get(4)?,
+        width: row.get(5)?,
+        height: row.get(6)?,
+        size_bytes: row.get::<_, i64>(7)? as u64,
+        thumb_path: row.get(8)?,
+        title: row.get(9)?,
+        description: row.get(10)?,
+        edit: decode_edit(row.get::<_, Option<String>>(11)?),
+        original: decode_original(row.get::<_, Option<String>>(12)?),
+        favorite: row.get(13)?,
+        screenshot: row.get(14)?,
+        recording: row.get(15)?,
+        // Filled in by the caller, from the table of their own.
+        tags: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +666,30 @@ mod tests {
     fn a_broken_entry_is_dropped_not_fatal() {
         assert!(decode_original(Some("{kaputt".into())).is_none());
         assert!(decode_edit(Some("{kaputt".into())).is_none());
+    }
+
+    #[test]
+    fn get_reads_one_clip_with_its_tags() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        lib.insert(&clip("b", 2)).unwrap();
+        lib.set_tags("b", &tags(&["Zed", "alpha"])).unwrap();
+        let got = lib.get("b").unwrap().unwrap();
+        assert_eq!(got.id, "b");
+        assert_eq!(got.tags, tags(&["alpha", "Zed"]));
+        assert!(lib.get("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_and_list_agree_on_every_field() {
+        let lib = Library::in_memory().unwrap();
+        let mut c = clip("x", 5);
+        c.title = Some("T".into());
+        c.recording = true;
+        lib.insert(&c).unwrap();
+        lib.set_tags("x", &tags(&["b", "A"])).unwrap();
+        let from_list = lib.list().unwrap().into_iter().find(|c| c.id == "x").unwrap();
+        assert_eq!(format!("{:?}", lib.get("x").unwrap().unwrap()), format!("{from_list:?}"));
     }
 
     fn tags(list: &[&str]) -> Vec<String> {
