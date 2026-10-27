@@ -165,6 +165,10 @@ pub struct MetaTrack {
 
 /// What the writer thread is told to do.
 enum Job {
+    /// The first job: create the picture's file, a TS if `timestamped`, else
+    /// the raw stream. Not made at [`Recorder::prepare`], which does not know
+    /// which of the two it will be.
+    Begin { timestamped: bool },
     /// One frame. `pts_us` counts from the recording's first frame, its gaps
     /// taken out; only the TS writes it.
     Video {
@@ -193,7 +197,7 @@ impl Job {
         match self {
             Job::Video { data, .. } | Job::Header(data) => data.len() as u64,
             Job::Audio(_, samples) => samples.len() as u64 * 2,
-            Job::Open(_) | Job::Silence(..) | Job::Meta(_) => 0,
+            Job::Begin { .. } | Job::Open(_) | Job::Silence(..) | Job::Meta(_) => 0,
         }
     }
 }
@@ -284,90 +288,147 @@ pub struct Recorder {
     audio: Mutex<AudioSide>,
 }
 
+/// A recording made ready but not begun: its folder, its description and the
+/// writer thread are there, the picture's file is not — whether that is a TS
+/// or a raw stream is only known under the ring lock ([`Recorder::attach`]).
+///
+/// Made before that lock is taken (BUF-3): on a drive that has spun down or a
+/// network folder the file work takes seconds, and under the lock it stalled
+/// the encoder — a hole at the start of the recording and in the buffer.
+///
+/// One that is never attached clears itself away when dropped, writer and
+/// folder, so a refused start leaves nothing for the next start to finish.
+pub struct Prepared {
+    dir: PathBuf,
+    /// Boxed: a refused start hands the whole thing back by value.
+    meta: Box<Meta>,
+    jobs: Option<Sender<Job>>,
+    writer: Option<std::thread::JoinHandle<()>>,
+    failure: Arc<Mutex<Option<String>>>,
+    queued: Arc<AtomicU64>,
+}
+
+impl Prepared {
+    /// Give the preparation up: the writer ends and the folder goes. File
+    /// work — never under a lock.
+    pub fn discard(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        // Taken by `attach`: the recording owns the writer and the folder now.
+        let Some(jobs) = self.jobs.take() else {
+            return;
+        };
+        drop(jobs);
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+        clear_work_folder(&self.dir);
+    }
+}
+
+/// Remove a recording's folder that holds nothing to keep, and `.recording`
+/// itself when nothing else is in it.
+fn clear_work_folder(dir: &Path) {
+    if let Err(err) = std::fs::remove_dir_all(dir) {
+        log::warn!("recording folder '{}' not cleared: {err}", dir.display());
+    }
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+}
+
 impl Recorder {
-    /// Create the folder and the writer, and write the packets the recording
-    /// starts with (see `ReplayBuffer::from_last_keyframe`) behind the
-    /// sequence header.
-    ///
-    /// `timestamped`: the frames come in presentation order and go into
-    /// [`VIDEO_TS`] with their times. Otherwise (B-frames) the raw stream
-    /// goes into [`VIDEO_FILE`], as before.
-    pub fn start(
-        clip_dir: &Path,
-        meta: Meta,
-        sequence_header: &[u8],
-        backlog: Vec<EncodedPacket>,
-        start_100ns: i64,
-        timestamped: bool,
-    ) -> Result<Arc<Self>, String> {
+    /// Create the folder, write the description and start the writer — all
+    /// the file work a recording's start has, done before the ring is locked.
+    pub fn prepare(clip_dir: &Path, meta: Meta) -> Result<Prepared, String> {
         let dir = clip_dir.join(WORK_DIR).join(&meta.id);
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("could not create '{}': {err}", dir.display()))?;
-        let name = if timestamped { VIDEO_TS } else { VIDEO_FILE };
-        let video = File::create(dir.join(name))
-            .map_err(|err| format!("could not create the recording: {err}"))?;
-        write_meta(&dir, &meta)?;
+        if let Err(err) = write_meta(&dir, &meta) {
+            clear_work_folder(&dir);
+            return Err(err);
+        }
 
         let (tx, rx) = channel::<Job>();
         let failure = Arc::new(Mutex::new(None));
         let queued = Arc::new(AtomicU64::new(0));
-        let writer = {
-            let dir = dir.clone();
-            let failure = failure.clone();
-            let queued = queued.clone();
-            std::thread::Builder::new()
-                .name("clippiboy-recorder".into())
-                .spawn(move || {
-                    let video = BufWriter::with_capacity(WRITE_BUFFER, video);
-                    let mut video = VideoSink {
-                        out: if timestamped {
-                            VideoOut::Ts(TsWriter::new(video))
-                        } else {
-                            VideoOut::Raw(video)
-                        },
-                        header: Vec::new(),
-                    };
-                    let mut tracks: Vec<Option<BufWriter<File>>> = Vec::new();
-                    let mut broken = false;
-                    for job in rx {
-                        let bytes = job.bytes();
-                        // After the first failure everything else is dropped:
-                        // the recording is being stopped, and a half-full disk
-                        // only gets fuller.
-                        if broken {
-                            queued.fetch_sub(bytes, Ordering::Relaxed);
-                            continue;
-                        }
-                        if let Err(err) = run_job(&dir, job, &mut video, &mut tracks) {
-                            log::error!("recording: {err}");
-                            failure.lock().get_or_insert(err);
-                            broken = true;
-                        }
-                        queued.fetch_sub(bytes, Ordering::Relaxed);
-                    }
-                    let _ = video.close();
-                    for track in tracks.iter_mut().flatten() {
-                        let _ = track.flush();
-                    }
-                })
-                .map_err(|err| format!("recorder: {err}"))?
+        // From here on a failure clears the folder through `Prepared`'s drop.
+        let mut prepared = Prepared {
+            dir: dir.clone(),
+            meta: Box::new(meta),
+            jobs: Some(tx),
+            writer: None,
+            failure: failure.clone(),
+            queued: queued.clone(),
         };
+        let writer = std::thread::Builder::new()
+            .name("clippiboy-recorder".into())
+            .spawn(move || {
+                // Made on `Job::Begin`, the first job `attach` sends.
+                let mut video: Option<VideoSink> = None;
+                let mut tracks: Vec<Option<BufWriter<File>>> = Vec::new();
+                let mut broken = false;
+                for job in rx {
+                    let bytes = job.bytes();
+                    // After the first failure everything else is dropped:
+                    // the recording is being stopped, and a half-full disk
+                    // only gets fuller.
+                    if broken {
+                        queued.fetch_sub(bytes, Ordering::Relaxed);
+                        continue;
+                    }
+                    if let Err(err) = run_job(&dir, job, &mut video, &mut tracks) {
+                        log::error!("recording: {err}");
+                        failure.lock().get_or_insert(err);
+                        broken = true;
+                    }
+                    queued.fetch_sub(bytes, Ordering::Relaxed);
+                }
+                if let Some(video) = video {
+                    let _ = video.close();
+                }
+                for track in tracks.iter_mut().flatten() {
+                    let _ = track.flush();
+                }
+            })
+            .map_err(|err| format!("recorder: {err}"))?;
+        prepared.writer = Some(writer);
+        Ok(prepared)
+    }
 
+    /// Begin the prepared recording and queue the packets it starts with (see
+    /// `ReplayBuffer::from_last_keyframe`) behind the sequence header. Called
+    /// with the replay buffer locked: no file work, it only queues.
+    ///
+    /// `timestamped`: the frames come in presentation order and go into
+    /// [`VIDEO_TS`] with their times. Otherwise (B-frames) the raw stream
+    /// goes into [`VIDEO_FILE`], as before.
+    pub fn attach(
+        mut prepared: Prepared,
+        sequence_header: &[u8],
+        backlog: Vec<EncodedPacket>,
+        start_100ns: i64,
+        timestamped: bool,
+    ) -> Arc<Self> {
         let recorder = Arc::new(Self {
-            dir,
+            dir: std::mem::take(&mut prepared.dir),
             start_100ns,
             started: std::time::Instant::now(),
-            meta: Mutex::new(meta),
-            jobs: Mutex::new(Some(tx)),
-            writer: Mutex::new(Some(writer)),
+            meta: Mutex::new(*std::mem::take(&mut prepared.meta)),
+            jobs: Mutex::new(prepared.jobs.take()),
+            writer: Mutex::new(prepared.writer.take()),
             frames: AtomicU64::new(0),
             first_pts_us: AtomicI64::new(i64::MAX),
             last_pts_us: AtomicI64::new(i64::MIN),
             largest_step_us: AtomicI64::new(0),
             closed_us: AtomicI64::new(0),
             video_bytes: AtomicU64::new(0),
-            failure,
-            queued,
+            failure: prepared.failure.clone(),
+            queued: prepared.queued.clone(),
             audio: Mutex::new(AudioSide {
                 attached: false,
                 timeline: 0,
@@ -376,13 +437,28 @@ impl Recorder {
             }),
         });
 
+        recorder.send(Job::Begin { timestamped });
         // SPS/PPS first, as a clip does: most encoders repeat them before every
         // IDR, but they must not be missing.
         recorder.send(Job::Header(sequence_header.to_vec().into()));
         for packet in &backlog {
             recorder.video(packet);
         }
-        Ok(recorder)
+        recorder
+    }
+
+    /// [`Self::prepare`] and [`Self::attach`] in one, for the tests.
+    #[cfg(test)]
+    pub fn start(
+        clip_dir: &Path,
+        meta: Meta,
+        sequence_header: &[u8],
+        backlog: Vec<EncodedPacket>,
+        start_100ns: i64,
+        timestamped: bool,
+    ) -> Result<Arc<Self>, String> {
+        let prepared = Self::prepare(clip_dir, meta)?;
+        Ok(Self::attach(prepared, sequence_header, backlog, start_100ns, timestamped))
     }
 
     fn send(&self, job: Job) {
@@ -657,17 +733,36 @@ fn track_file(index: usize) -> String {
 fn run_job(
     dir: &Path,
     job: Job,
-    video: &mut VideoSink,
+    video: &mut Option<VideoSink>,
     tracks: &mut Vec<Option<BufWriter<File>>>,
 ) -> Result<(), String> {
+    let no_file = || "the recording's video file was never made".to_string();
     match job {
+        Job::Begin { timestamped } => {
+            let name = if timestamped { VIDEO_TS } else { VIDEO_FILE };
+            let file = File::create(dir.join(name))
+                .map_err(|err| format!("could not create the recording: {err}"))?;
+            let file = BufWriter::with_capacity(WRITE_BUFFER, file);
+            *video = Some(VideoSink {
+                out: if timestamped {
+                    VideoOut::Ts(TsWriter::new(file))
+                } else {
+                    VideoOut::Raw(file)
+                },
+                header: Vec::new(),
+            });
+        }
         Job::Video { data, pts_us, keyframe } => {
             video
+                .as_mut()
+                .ok_or_else(no_file)?
                 .frame(&data, pts_us, keyframe)
                 .map_err(|err| format!("could not write the video: {err}"))?;
         }
         Job::Header(data) => {
             video
+                .as_mut()
+                .ok_or_else(no_file)?
                 .header(&data)
                 .map_err(|err| format!("could not write the video: {err}"))?;
         }
@@ -1219,6 +1314,13 @@ mod tests {
         assert!(is_empty_leftover(&dir, &Meta { frames: Some(0), ..Meta::default() }));
         std::fs::remove_file(dir.join(VIDEO_FILE)).unwrap();
         assert!(is_empty_leftover(&dir, &Meta::default()), "no video at all");
+        // BUF-3: a crash between preparing a recording and attaching it
+        // leaves its description and no picture.
+        let prepared = Recorder::prepare(&dir, Meta { id: "c".into(), fps: 60, ..Meta::default() }).unwrap();
+        let work = dir.join(WORK_DIR).join("c");
+        assert!(leftovers(&dir).contains(&work));
+        assert!(is_empty_leftover(&work, &read_meta(&work).unwrap()), "a description alone");
+        prepared.discard();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1275,6 +1377,42 @@ mod tests {
         let _ = recorder.finish(Vec::new(), None);
         let written = std::fs::read(dir.join(WORK_DIR).join("t").join(VIDEO_TS)).unwrap();
         assert_eq!(ts::read_pts(&written), vec![63_000, 64_500, 109_500]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BUF-3: the folder and its description are made before the ring is
+    /// locked; the picture's file waits for the attach, which alone knows
+    /// whether it is a TS or a raw stream.
+    #[test]
+    fn a_prepared_recording_writes_nothing_until_it_is_attached() {
+        let dir = scratch("prepare");
+        let meta = Meta { id: "p".into(), fps: 60, ..Meta::default() };
+        let prepared = Recorder::prepare(&dir, meta).unwrap();
+        let work = dir.join(WORK_DIR).join("p");
+        assert!(work.join("meta.json").is_file() || read_meta(&work).is_ok());
+        assert_eq!(read_meta(&work).unwrap().fps, 60);
+        assert!(!work.join(VIDEO_TS).exists() && !work.join(VIDEO_FILE).exists());
+        let recorder = Recorder::attach(prepared, &[0, 0, 0, 1], vec![frame(0, true)], 0, true);
+        recorder.finish(Vec::new(), None);
+        assert!(work.join(VIDEO_TS).is_file());
+        assert!(!work.join(VIDEO_FILE).exists());
+        assert_eq!(ts::read_pts(&std::fs::read(work.join(VIDEO_TS)).unwrap()), vec![63_000]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BUF-3: a start refused under the lock (already recording, no keyframe)
+    /// leaves no folder for the next start to pick up.
+    #[test]
+    fn a_discarded_preparation_leaves_no_folder() {
+        let dir = scratch("discard");
+        let prepared = Recorder::prepare(&dir, Meta { id: "d".into(), ..Meta::default() }).unwrap();
+        prepared.discard();
+        assert!(!dir.join(WORK_DIR).join("d").exists());
+        assert!(!dir.join(WORK_DIR).exists(), "an empty work folder goes too");
+        // One dropped on an error path is cleared all the same.
+        let prepared = Recorder::prepare(&dir, Meta { id: "e".into(), ..Meta::default() }).unwrap();
+        drop(prepared);
+        assert!(!dir.join(WORK_DIR).join("e").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

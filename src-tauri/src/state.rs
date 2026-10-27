@@ -1476,6 +1476,8 @@ impl AppState {
         let meta = recorder::Meta {
             id: uuid::Uuid::new_v4().to_string(),
             created_at: now_ms(),
+            // The running pipeline's, which `lifecycle` keeps the one below.
+            fps: shared.fps,
             width: recording.width,
             height: recording.height,
             game,
@@ -1485,11 +1487,20 @@ impl AppState {
             friends,
             ..recorder::Meta::default()
         };
-        let guard = self.pipeline.lock();
-        let pipeline = guard
-            .as_ref()
-            .ok_or_else(|| "The capture is not running.".to_string())?;
-        pipeline.start_recording(std::path::Path::new(&config.clip_dir), meta)
+        // The folder, its description and the writer before any lock (BUF-3):
+        // on a sleeping drive or a network folder that takes seconds, and
+        // under the ring lock it stalled the encoder. A start refused below
+        // clears it away again.
+        let prepared = recorder::Recorder::prepare(std::path::Path::new(&config.clip_dir), meta)?;
+        let outcome = match self.pipeline.lock().as_ref() {
+            Some(pipeline) => pipeline.start_recording(prepared),
+            None => Err((prepared, "The capture is not running.".to_string())),
+        };
+        // Cleared away with no lock held: it joins the writer and deletes.
+        outcome.map_err(|(prepared, why)| {
+            prepared.discard();
+            why
+        })
     }
 
     /// Stop writing and settle the folder, without muxing it. Fast — what

@@ -1266,19 +1266,25 @@ impl Pipeline {
     }
 
     /// Begin a recording at the buffer's newest keyframe.
+    ///
+    /// `prepared` already has its folder, description and writer
+    /// ([`Recorder::prepare`]): under the ring lock nothing touches the disk.
+    /// A refused start (already recording, no keyframe) hands it back for the
+    /// caller to [`recorder::Prepared::discard`] once its own locks are let go
+    /// — `AppState.pipeline` is held around this call, and clearing the folder
+    /// away is file work too.
     pub fn start_recording(
         &self,
-        clip_dir: &std::path::Path,
-        mut meta: recorder::Meta,
-    ) -> Result<Arc<Recorder>, String> {
-        meta.fps = self.shared.fps;
+        prepared: recorder::Prepared,
+    ) -> Result<Arc<Recorder>, (recorder::Prepared, String)> {
         let ring = self.shared.packets.lock();
         if self.shared.recorder.lock().is_some() {
-            return Err("A recording is already running.".into());
+            return Err((prepared, "A recording is already running.".into()));
         }
         let backlog = ring.from_last_keyframe();
         let Some(first) = backlog.first() else {
-            return Err("The encoder has not delivered a picture yet — try again in a moment.".into());
+            let why = "The encoder has not delivered a picture yet — try again in a moment.";
+            return Err((prepared, why.into()));
         };
         let start_100ns = self.shared.qpc_of(first.pts_us);
         let header = self.shared.sequence_header.lock().clone();
@@ -1286,7 +1292,7 @@ impl Pipeline {
         // stream: the TS carries no DTS. It shows a few frames after the
         // stream's first keyframe, and the ring keeps it until it is cleared.
         let timestamped = !ring.reorders();
-        let recorder = Recorder::start(clip_dir, meta, &header, backlog, start_100ns, timestamped)?;
+        let recorder = Recorder::attach(prepared, &header, backlog, start_100ns, timestamped);
         *self.shared.recorder.lock() = Some(recorder.clone());
         drop(ring);
         Ok(recorder)
