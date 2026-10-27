@@ -258,7 +258,9 @@ struct AudioSide {
 }
 
 struct TrackState {
-    source_id: String,
+    /// Kept for its label: a source renamed during the recording names its
+    /// track as it is called at the stop (REC-11).
+    ring: Arc<TrackRing>,
     frames: u64,
 }
 
@@ -562,7 +564,7 @@ impl Recorder {
             .lock()
             .tracks
             .iter()
-            .filter(|t| !separate.contains(&t.source_id))
+            .filter(|t| !separate.contains(&t.ring.source_id))
             .count()
     }
 
@@ -606,9 +608,9 @@ impl Recorder {
     }
 
     /// One block of one ring, after [`Self::begin_window`] said yes.
-    pub fn audio(&self, ring: &TrackRing, block: &[i16]) {
+    pub fn audio(&self, ring: &Arc<TrackRing>, block: &[i16]) {
         let mut audio = self.audio.lock();
-        let index = match audio.tracks.iter().position(|t| t.source_id == ring.source_id) {
+        let index = match audio.tracks.iter().position(|t| t.ring.source_id == ring.source_id) {
             Some(index) => index,
             None => self.open_track(&mut audio, ring),
         };
@@ -659,10 +661,10 @@ impl Recorder {
     }
 
     /// A new file for a source the recording has not seen yet.
-    fn open_track(&self, audio: &mut AudioSide, ring: &TrackRing) -> usize {
+    fn open_track(&self, audio: &mut AudioSide, ring: &Arc<TrackRing>) -> usize {
         let index = audio.tracks.len();
         audio.tracks.push(TrackState {
-            source_id: ring.source_id.clone(),
+            ring: ring.clone(),
             frames: 0,
         });
         self.send(Job::Open(index));
@@ -693,7 +695,13 @@ impl Recorder {
         if let Some(writer) = self.writer.lock().take() {
             let _ = writer.join();
         }
+        // Labels as they stand now — a source renamed mid-recording. Read
+        // before `meta`, the order `open_track` takes the two in.
+        let labels: Vec<String> = self.audio.lock().tracks.iter().map(|t| t.ring.label()).collect();
         let mut meta = self.meta.lock().clone();
+        for (track, label) in meta.tracks.iter_mut().zip(labels) {
+            track.label = label;
+        }
         meta.separate = separate;
         if let Some(game) = game {
             // The friends were looked up for the game at the start. Another
@@ -715,7 +723,6 @@ impl Recorder {
             .flatten()
             .map(|span| span.saturating_sub(closed));
         meta.largest_step_us = Some(self.largest_step_us.load(Ordering::Relaxed));
-        // Labels as they stand now — a source renamed mid-recording.
         // A description that cannot be written (drive gone, file held) must not
         // keep the recording open: the caller still gets it, and the folder
         // stays for the next start.
@@ -1574,6 +1581,23 @@ mod tests {
 
     fn ring_with(id: &str) -> Arc<TrackRing> {
         Arc::new(TrackRing::new(id.into(), id.into(), 5))
+    }
+
+    /// REC-11: a source renamed during the recording names its track as it is
+    /// called at the stop, not as it was called when the track was opened.
+    #[test]
+    fn a_track_renamed_mid_recording_carries_its_new_label() {
+        let dir = scratch("rename");
+        let recorder = Recorder::start(&dir, Meta { id: "r".into(), fps: 60, ..Meta::default() }, &[], vec![frame(0, true)], 0, true).unwrap();
+        let ring = ring_with("mic");
+        ring.set_label("Old".into());
+        assert!(recorder.begin_window(&[ring.clone()], 0));
+        recorder.audio(&ring, &[0; 960]);
+        ring.set_label("New".into());
+        let meta = recorder.finish(vec!["mic".into()], None);
+        assert_eq!(meta.tracks[0].label, "New");
+        assert_eq!(read_meta(&recorder.dir).unwrap().tracks[0].label, "New", "the folder says so too");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The part before the mixer caught up comes out of the ring, the rest

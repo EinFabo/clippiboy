@@ -215,7 +215,7 @@ impl TrackRing {
         self.label.lock().clone()
     }
 
-    fn set_label(&self, label: String) {
+    pub(crate) fn set_label(&self, label: String) {
         *self.label.lock() = label;
     }
 

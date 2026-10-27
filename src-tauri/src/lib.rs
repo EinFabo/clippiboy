@@ -282,14 +282,33 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
 
 /// Stop the recording and write it out. Encoding an hour of audio takes a
 /// while — call it off the hotkey thread.
+///
+/// Nothing shows before the recording is really closed: a second stop while
+/// the first one writes out — a double press, the failure tick — finds none
+/// and returns quietly, instead of sounding an error and taking away the
+/// first one's progress bar (REC-8).
 pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
+    let mut ticket = match state.begin_stop() {
+        Ok(ticket) => ticket,
+        Err(err) if err == state::NOT_RECORDING => {
+            log::info!("stop ignored: no recording is running");
+            return Err(err);
+        }
+        Err(err) => {
+            overlay::set_recording(app, state.is_recording());
+            notify(app, "error", err.clone());
+            sounds::play(app, SoundKind::Error);
+            overlay::show(app, BannerKind::Error, "Recording failed", Some(err.clone()));
+            return Err(err);
+        }
+    };
     overlay::set_recording(app, false);
     overlay::show(app, BannerKind::Recording, "Saving recording…", None);
-    let outcome = state.stop_recording(
-        &|share| recording_progress(app, share),
-        &|restarted| settings_restarted(app, restarted),
-    );
+    if let Some(restarted) = ticket.restarted.take() {
+        settings_restarted(app, restarted);
+    }
+    let outcome = state.finish_stop(ticket, &|share| recording_progress(app, share));
     // Always the closing 1, success or not — the window takes it as "done"
     // and drops the bar.
     recording_progress(app, 1.0);
@@ -1335,13 +1354,20 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     overlay::show(&handle, BannerKind::Error, "Recording disrupted", Some(err));
                 }
                 // The recording cannot write any more — a full disk, most
-                // likely. Stop it while what is there is still whole.
+                // likely. Stop it while what is there is still whole. Once:
+                // the failure stays set until the stop has closed the
+                // recording, and that can take longer than a second (CORE-13).
+                static STOPPING_FOR_FAILURE: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
                 if let Some(err) = state.recording_failure() {
-                    notify(&handle, "error", format!("Recording stopped: {err}"));
-                    let handle = handle.clone();
-                    std::thread::spawn(move || {
-                        let _ = stop_recording_and_notify(&handle);
-                    });
+                    if !STOPPING_FOR_FAILURE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        notify(&handle, "error", format!("Recording stopped: {err}"));
+                        let handle = handle.clone();
+                        std::thread::spawn(move || {
+                            let _ = stop_recording_and_notify(&handle);
+                            STOPPING_FOR_FAILURE.store(false, std::sync::atomic::Ordering::SeqCst);
+                        });
+                    }
                 }
             }
             // Every 5 s while something is recording: what the pipeline is

@@ -208,9 +208,11 @@ pub struct AppState {
     pub active_recording: Mutex<Option<RecordingConfig>>,
     /// Is a save in progress right now? See `begin_save`.
     saving: std::sync::atomic::AtomicBool,
-    /// Is a stopped recording still being written out? Raised from the close
-    /// until the muxing is done; the control port reports it.
-    finalizing: std::sync::atomic::AtomicBool,
+    /// How many recordings are being written out — a stop's from the close
+    /// until the muxing is done, and the recovery's. Counted, not a flag: the
+    /// two can run at once, and the first to end must not lower it for the
+    /// other. The control port reports it.
+    finalizing: std::sync::atomic::AtomicUsize,
     /// Wraps starting and stopping the recording.
     ///
     /// The "already running?" check and registering the finished pipeline are
@@ -238,8 +240,7 @@ pub struct AppState {
 }
 
 /// Keeps a flag raised for as long as it lives and lowers it when dropped —
-/// even if a `?` strikes in between. Holds the save slot (`begin_save`) and
-/// the "recording is being written" mark.
+/// even if a `?` strikes in between. Holds the save slot (`begin_save`).
 pub struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl<'a> FlagGuard<'a> {
@@ -254,6 +255,70 @@ impl Drop for FlagGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// Counts one more for as long as it lives — the same as [`FlagGuard`] for
+/// something more than one can hold at a time.
+pub struct CountGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> CountGuard<'a> {
+    pub fn raise(count: &'a std::sync::atomic::AtomicUsize) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for CountGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What a stop answers when there is nothing to stop. A second press while
+/// the first stop writes the recording out gets it — and stays quiet.
+pub const NOT_RECORDING: &str = "No recording is running.";
+
+/// The recording folders being written out right now, process-wide (REC-12).
+///
+/// A stop still muxing when the bundled ffmpeg finishes downloading would
+/// otherwise see its folder finished a second time by
+/// [`AppState::recover_recordings`]: two MP4s, both writing the same mix and
+/// stems, both deleting the folder.
+pub struct Finalizing;
+
+static FINALIZING: Mutex<std::collections::BTreeSet<std::path::PathBuf>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+impl Finalizing {
+    /// Take `dir` for writing out. `None` while somebody else has it.
+    pub fn claim(dir: &std::path::Path) -> Option<FinalizingGuard> {
+        FINALIZING
+            .lock()
+            .insert(dir.to_path_buf())
+            .then(|| FinalizingGuard(dir.to_path_buf()))
+    }
+}
+
+/// A folder taken with [`Finalizing::claim`]; handed back when dropped.
+pub struct FinalizingGuard(std::path::PathBuf);
+
+impl Drop for FinalizingGuard {
+    fn drop(&mut self) {
+        FINALIZING.lock().remove(&self.0);
+    }
+}
+
+/// A recording that has been closed and not written out yet — what
+/// [`AppState::begin_stop`] hands to [`AppState::finish_stop`]. It holds its
+/// folder and the "finalizing" count until it is written out or dropped.
+pub struct StopTicket<'a> {
+    recorder: Arc<Recorder>,
+    meta: recorder::Meta,
+    folder: FinalizingGuard,
+    _finalizing: CountGuard<'a>,
+    /// How applying the video settings that waited for the recording went,
+    /// if any waited — for the caller to report, off the lock.
+    pub restarted: Option<Result<bool, String>>,
 }
 
 /// What one turn of the game tick found.
@@ -552,7 +617,7 @@ impl AppState {
             lifecycle: Mutex::new(()),
             active_recording: Mutex::new(None),
             saving: std::sync::atomic::AtomicBool::new(false),
-            finalizing: std::sync::atomic::AtomicBool::new(false),
+            finalizing: std::sync::atomic::AtomicUsize::new(0),
             recorder: Mutex::new(None),
             buffer_wanted: std::sync::atomic::AtomicBool::new(false),
             drift_seen: std::sync::atomic::AtomicU8::new(0),
@@ -716,7 +781,7 @@ impl AppState {
     /// Is a stopped recording still being written out? Then the status says
     /// "not recording" although the file does not exist yet.
     pub fn is_finalizing(&self) -> bool {
-        self.finalizing.load(std::sync::atomic::Ordering::SeqCst)
+        self.finalizing.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
     /// Is a recording into the buffer running right now?
@@ -1543,27 +1608,49 @@ impl AppState {
         on_progress: &dyn Fn(f32),
         on_restart: &dyn Fn(Result<bool, String>),
     ) -> Result<Clip, String> {
-        let (recorder, meta, _finalizing, restarted) = {
-            let _lifecycle = self.lifecycle.lock();
-            if !self.is_recording() {
-                return Err("No recording is running.".into());
-            }
-            let (recorder, meta) = self.close_recording().ok_or_else(|| {
-                "The recording could not be closed — it is finished on the next start.".to_string()
-            })?;
-            // Raised before the lifecycle lock is let go, so the status never
-            // shows "not recording" without "finalizing" in between.
-            let finalizing = FlagGuard::raise(&self.finalizing);
-            let restarted = self
-                .settings_waiting
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-                .then(|| self.restart_for_settings());
-            (recorder, meta, finalizing, restarted)
-        };
-        if let Some(outcome) = restarted {
+        let mut ticket = self.begin_stop()?;
+        if let Some(outcome) = ticket.restarted.take() {
             on_restart(outcome);
         }
-        self.finish_recording(&recorder.dir, &meta, on_progress)
+        self.finish_stop(ticket, on_progress)
+    }
+
+    /// The fast half of a stop: close the recording, take its folder and
+    /// apply the video settings that waited for it. Fails with
+    /// [`NOT_RECORDING`] when there is nothing to stop — a second press while
+    /// the first stop writes out, which its caller keeps quiet (REC-8).
+    pub fn begin_stop(&self) -> Result<StopTicket<'_>, String> {
+        let _lifecycle = self.lifecycle.lock();
+        if !self.is_recording() {
+            return Err(NOT_RECORDING.into());
+        }
+        let (recorder, meta) = self.close_recording().ok_or_else(|| {
+            "The recording could not be closed — it is finished on the next start.".to_string()
+        })?;
+        // Raised before the lifecycle lock is let go, so the status never
+        // shows "not recording" without "finalizing" in between.
+        let finalizing = CountGuard::raise(&self.finalizing);
+        // Taken under `lifecycle` too, where the recovery picks its folders:
+        // from the close on, this one is never on its list.
+        let folder = Finalizing::claim(&recorder.dir).ok_or_else(|| {
+            "The recording is already being written out.".to_string()
+        })?;
+        let restarted = self
+            .settings_waiting
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            .then(|| self.restart_for_settings());
+        Ok(StopTicket {
+            recorder,
+            meta,
+            folder,
+            _finalizing: finalizing,
+            restarted,
+        })
+    }
+
+    /// The slow half of a stop: write the closed recording out.
+    pub fn finish_stop(&self, ticket: StopTicket<'_>, on_progress: &dyn Fn(f32)) -> Result<Clip, String> {
+        self.finish_recording(&ticket.folder, &ticket.recorder.dir, &ticket.meta, on_progress)
     }
 
     /// Quitting or updating: close the files, leave the muxing to the next
@@ -1585,8 +1672,11 @@ impl AppState {
         self.shared.lock().as_ref().and_then(|shared| shared.encoder_failure())
     }
 
+    /// Write a recording folder out. Only with the folder claimed: `_claim`
+    /// is the proof that nobody else is finishing it at the same time.
     fn finish_recording(
         &self,
+        _claim: &FinalizingGuard,
         dir: &std::path::Path,
         meta: &recorder::Meta,
         on_progress: &dyn Fn(f32),
@@ -1621,31 +1711,52 @@ impl AppState {
     /// ffmpeg, so it runs once that is in place.
     pub fn recover_recordings(&self, on_progress: &dyn Fn(f32)) -> Vec<Clip> {
         let clip_dir = self.config_snapshot().clip_dir;
-        let live = self.recorder.lock().as_ref().map(|r| r.dir.clone());
-        let mut done = Vec::new();
         let clip_path = std::path::Path::new(&clip_dir);
-        for dir in recorder::leftovers(clip_path) {
-            if live.as_ref() == Some(&dir) {
-                continue;
-            }
-            let meta = match recorder::read_meta(&dir) {
-                Ok(meta) => meta,
-                Err(err) => {
-                    log::warn!("recording in '{}' left alone: {err}", dir.display());
+        // The list is made under `lifecycle`, the muxing is not. A recording
+        // being made ready at this start is then either running — its folder
+        // skipped — or not there yet; one being stopped holds its folder
+        // (REC-12). Each folder taken here stays taken until it is written
+        // out. Emptied folders go here too: a start after the lock is let go
+        // may be making `.recording` anew.
+        let work = {
+            let _lifecycle = self.lifecycle.lock();
+            let live = self.recorder.lock().as_ref().map(|r| r.dir.clone());
+            let mut work = Vec::new();
+            for dir in recorder::leftovers(clip_path) {
+                if live.as_ref() == Some(&dir) {
                     continue;
                 }
-            };
-            if recorder::is_empty_leftover(&dir, &meta) {
-                // Nothing to finish; retrying it at every start would never end.
-                if std::fs::remove_dir_all(&dir).is_ok() {
-                    let _ = std::fs::remove_dir(clip_path.join(recorder::WORK_DIR));
-                    log::info!("empty recording folder '{}' cleared", dir.display());
-                } else {
-                    log::warn!("empty recording folder '{}' not cleared", dir.display());
+                let Some(claim) = Finalizing::claim(&dir) else {
+                    log::info!("recording in '{}' is being written out already", dir.display());
+                    continue;
+                };
+                let meta = match recorder::read_meta(&dir) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        log::warn!("recording in '{}' left alone: {err}", dir.display());
+                        continue;
+                    }
+                };
+                if recorder::is_empty_leftover(&dir, &meta) {
+                    // Nothing to finish; retrying it at every start would never end.
+                    if std::fs::remove_dir_all(&dir).is_ok() {
+                        let _ = std::fs::remove_dir(clip_path.join(recorder::WORK_DIR));
+                        log::info!("empty recording folder '{}' cleared", dir.display());
+                    } else {
+                        log::warn!("empty recording folder '{}' not cleared", dir.display());
+                    }
+                    continue;
                 }
-                continue;
+                work.push((claim, dir, meta));
             }
-            match self.finish_recording(&dir, &meta, on_progress) {
+            work
+        };
+        let mut done = Vec::new();
+        for (claim, dir, meta) in work {
+            // Counted like a stop's: the status says a recording is being
+            // written while this one is.
+            let _finalizing = CountGuard::raise(&self.finalizing);
+            match self.finish_recording(&claim, &dir, &meta, on_progress) {
                 Ok(clip) => {
                     log::info!("recording '{}' finished after the fact", meta.id);
                     done.push(clip);
@@ -1772,6 +1883,30 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REC-12: a stop still writing its folder out and the recovery that runs
+    /// once ffmpeg has arrived must not both finish it.
+    #[test]
+    fn a_folder_being_finalized_is_not_taken_twice() {
+        let dir = std::path::PathBuf::from("C:/clips/.recording/abc");
+        let first = Finalizing::claim(&dir).expect("free");
+        assert!(Finalizing::claim(&dir).is_none(), "a second finalize of the same folder waits its turn");
+        drop(first);
+        assert!(Finalizing::claim(&dir).is_some(), "free again once the first is done");
+    }
+
+    /// A stop and the recovery can write out at the same time: the first to
+    /// end must not report "finalizing" over for the other.
+    #[test]
+    fn finalizing_stays_raised_while_any_writer_runs() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let stop = CountGuard::raise(&count);
+        let recovery = CountGuard::raise(&count);
+        drop(stop);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(recovery);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn a_start_that_found_the_buffer_running_is_not_announced() {
