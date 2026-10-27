@@ -34,6 +34,8 @@ pub struct AudioEngine {
     /// Is an off-thread `apply` running right now? On failure `capture::start`
     /// waits up to five seconds — that must not stack up.
     applying: std::sync::atomic::AtomicBool,
+    /// The last non-empty (output, input) default ids, for [`crate::audio::keep_good`].
+    last_defaults: Mutex<(String, String)>,
 }
 
 fn fingerprint(kind: &SourceKind) -> String {
@@ -193,8 +195,16 @@ impl AudioEngine {
         }
         let engine = self.clone();
         std::thread::spawn(move || {
+            // A "Windows default" source is pinned to the device that is the
+            // default right now, so its stream key changes with the default and
+            // the two-second tick restarts it on the new device.
+            let (output, input) = {
+                let now = crate::audio::devices::default_ids();
+                crate::audio::keep_good(&mut engine.last_defaults.lock(), now)
+            };
+            let sources = crate::audio::pin_defaults(&sources, &output, &input);
             let ledger = crate::audio::Leftovers {
-                default_device: crate::audio::devices::default_output_id(),
+                default_device: output,
                 previous: engine.assignments(),
             };
             let streams = crate::audio::resolve(

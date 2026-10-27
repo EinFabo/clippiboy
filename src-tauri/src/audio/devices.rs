@@ -298,14 +298,25 @@ pub fn session_pids(device_id: &str) -> Vec<u32> {
     Vec::new()
 }
 
+/// The ids of the default devices as (output, input), from one enumeration —
+/// two calls could straddle a change and name a pair that never existed. A half
+/// is empty when Windows reports no default of that kind.
+pub fn default_ids() -> (String, String) {
+    let devices = list_devices();
+    let pick = |wanted: DeviceKind| {
+        devices
+            .iter()
+            .find(|device| device.kind == wanted && device.is_default)
+            .map(|device| device.id.clone())
+            .unwrap_or_default()
+    };
+    (pick(DeviceKind::Output), pick(DeviceKind::Input))
+}
+
 /// The id of the default output device — the catch-all everything lands on
 /// unless it was routed somewhere on purpose.
 pub fn default_output_id() -> String {
-    list_devices()
-        .into_iter()
-        .find(|device| matches!(device.kind, DeviceKind::Output) && device.is_default)
-        .map(|device| device.id)
-        .unwrap_or_default()
+    default_ids().0
 }
 
 /// The sessions on this output device as (pid, is it rendering right now).

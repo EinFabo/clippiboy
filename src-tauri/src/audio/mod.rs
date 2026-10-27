@@ -83,6 +83,43 @@ pub fn records_single_applications(sources: &[AudioSource]) -> bool {
     })
 }
 
+/// The sources with every "Windows default" device (an empty id) replaced by
+/// the real default device, so the engine sees which device a stream is on and
+/// restarts it when the default changes. Only for the engine: the result is
+/// never written to the configuration, where `""` must stay "follow Windows".
+/// An empty `output` or `input` leaves that kind alone.
+pub fn pin_defaults(sources: &[AudioSource], output: &str, input: &str) -> Vec<AudioSource> {
+    sources
+        .iter()
+        .map(|source| {
+            let mut source = source.clone();
+            match &mut source.kind {
+                SourceKind::OutputDevice { device_id } if device_id.is_empty() && !output.is_empty() => {
+                    *device_id = output.to_string();
+                }
+                SourceKind::InputDevice { device_id } if device_id.is_empty() && !input.is_empty() => {
+                    *device_id = input.to_string();
+                }
+                _ => {}
+            }
+            source
+        })
+        .collect()
+}
+
+/// Remembers the last non-empty default per half: a device list that fails for
+/// a moment (or a default that is briefly gone) must not read as "no default"
+/// and drop every stream that follows it.
+fn keep_good(last: &mut (String, String), now: (String, String)) -> (String, String) {
+    if !now.0.is_empty() {
+        last.0 = now.0;
+    }
+    if !now.1.is_empty() {
+        last.1 = now.1;
+    }
+    last.clone()
+}
+
 /// What plays on each output device, as (pid, is it rendering right now).
 ///
 /// Empty while nothing is recorded application by application — the enumeration
@@ -891,6 +928,57 @@ mod tests {
         );
         assert_eq!(pids_of(&streams, "chat"), vec![5556]);
         assert_eq!(pids_of(&streams, "system"), vec![900]);
+    }
+
+    fn output_source(id: &str, device_id: &str) -> AudioSource {
+        of_kind(id, output(device_id))
+    }
+
+    fn input_source(id: &str, device_id: &str) -> AudioSource {
+        of_kind(id, SourceKind::InputDevice { device_id: device_id.into() })
+    }
+
+    #[test]
+    fn a_windows_default_source_names_the_real_device() {
+        let sources = vec![output_source("sys", ""), input_source("mic", ""), output_source("chat", "chat-dev")];
+        let pinned = pin_defaults(&sources, "spk-2", "mic-1");
+        assert!(matches!(&pinned[0].kind, SourceKind::OutputDevice { device_id } if device_id == "spk-2"));
+        assert!(matches!(&pinned[1].kind, SourceKind::InputDevice { device_id } if device_id == "mic-1"));
+        assert!(matches!(&pinned[2].kind, SourceKind::OutputDevice { device_id } if device_id == "chat-dev"));
+        // No known default: the source stays "follow Windows".
+        let unpinned = pin_defaults(&sources, "", "");
+        assert_eq!(unpinned[0].kind, sources[0].kind);
+    }
+
+    #[test]
+    fn an_empty_default_keeps_the_last_good_one() {
+        let mut last = ("spk-1".to_string(), "mic-1".to_string());
+        assert_eq!(
+            keep_good(&mut last, ("".into(), "mic-2".into())),
+            ("spk-1".to_string(), "mic-2".to_string())
+        );
+    }
+
+    #[test]
+    fn something_playing_nowhere_lands_on_a_windows_default_bucket() {
+        // System = Windows default, plus a "Chat" device; Steam idles on both.
+        let sources = pin_defaults(
+            &[
+                recording_by_app(),
+                output_source("system", ""),
+                output_source("chat", "chat-dev"),
+            ],
+            "spk",
+            "",
+        );
+        let streams = resolve(
+            &sources,
+            None,
+            &playing(&[("spk", &idle(&[42])), ("chat-dev", &idle(&[42]))]),
+            &tree(&[(42, 1, "steam.exe")]),
+            &ledger("spk"),
+        );
+        assert_eq!(pids_of(&streams, "system"), vec![42]);
     }
 
     /// Steam sits open on every device without playing anywhere. It belongs on
