@@ -1315,17 +1315,23 @@ pub fn apply_clip_edit(
 ) -> Result<Clip> {
     // From before the row is read until the new state is stored: a delete or
     // a move in between would leave the row describing a file that is gone or
-    // elsewhere. `edit::run` takes the same lock again (it is reentrant).
+    // elsewhere. `edit::run` takes the same lock again (it is reentrant) and
+    // reads the row itself, once it holds `WORKING` as well.
     let own = edit::clip_lock(&id);
     let _clip = own.lock();
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    refuse_still(&clip)?;
     let (encoder, quality) = encoder_for(&state);
     let trim = edit::Trim { start_ms, end_ms };
 
-    let applied = edit::apply(&clip, trim, &tracks, encoder, quality, progress(&app, &id));
-    let stored = store(&state, &app, &clip, applied, tracks);
+    let applied = edit::apply(
+        &id,
+        load_editable(&state, &id),
+        trim,
+        &tracks,
+        encoder,
+        quality,
+        progress(&app, &id),
+    );
+    let stored = store(&state, &app, applied, tracks);
     if stored.is_ok() {
         crate::telemetry::used(crate::telemetry::Feature::Editor);
     }
@@ -1345,17 +1351,39 @@ pub fn restore_clip_original(
     // As in `apply_clip_edit`: held across the run and `store`.
     let own = edit::clip_lock(&id);
     let _clip = own.lock();
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    refuse_still(&clip)?;
     let (encoder, quality) = encoder_for(&state);
-    let tracks = clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default();
 
     // If it fails, the record stays on the clip: it carries the offset the
     // individual tracks sit at. Throwing it away because the recording cannot
     // be found would leave the preview out of sync forever.
-    let applied = edit::restore(&clip, &tracks, encoder, quality, progress(&app, &id));
-    store(&state, &app, &clip, applied, tracks)
+    //
+    // The mix kept is the one stored on the clip as the run finds it.
+    let applied = edit::restore(
+        &id,
+        load_editable(&state, &id),
+        None,
+        encoder,
+        quality,
+        progress(&app, &id),
+    );
+    let tracks = match &applied {
+        Ok((clip, _)) => clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    store(&state, &app, applied, tracks)
+}
+
+/// The row an edit plans on, read by the run once it has the clip to itself.
+fn load_editable<'a>(
+    state: &'a State<'_, AppState>,
+    id: &'a str,
+) -> impl FnOnce() -> Result<Clip> + 'a {
+    move || {
+        let clip = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        refuse_still(&clip)?;
+        Ok(clip)
+    }
 }
 
 /// Throw a clip's untouched recording away and keep the trimmed file.
@@ -1703,17 +1731,17 @@ fn progress<'a>(app: &'a tauri::AppHandle, id: &'a str) -> impl Fn(f32) + 'a {
 fn store(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
-    clip: &Clip,
-    applied: Result<edit::Applied>,
+    applied: Result<(Clip, edit::Applied)>,
     tracks: Vec<TrackMix>,
 ) -> Result<Clip> {
-    let applied = match applied {
+    let (clip, applied) = match applied {
         Ok(applied) => applied,
         Err(err) => {
             crate::notify(app, "error", err.clone());
             return Err(err);
         }
     };
+    let clip = &clip;
 
     // Baked into the file, the levels start over from there.
     let tracks = if applied.mix_baked {
@@ -1747,11 +1775,30 @@ fn store(
         lib.get(&clip.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
-    })?;
+    });
     // The clip's Discord copies show what it was before. An undo puts back a
     // file with the original's old time, so the age check in
-    // `export_for_discord` alone would let them through.
+    // `export_for_discord` alone would let them through. The file is swapped
+    // either way, so they go even if the record could not follow.
     remove_discord_copies(&discord_root(), &clip.id);
+    let stored = match stored {
+        Ok(stored) => stored,
+        Err(err) => {
+            // The file is the new one, the row may still describe the old:
+            // left alone, the preview's tracks run off by the cut and the next
+            // save cuts at the old offsets until a restart repairs it. So the
+            // record is brought in line with the file now, as far as the
+            // database lets it.
+            crate::notify(
+                app,
+                "error",
+                format!("The clip was written, but its record could not be updated: {err}"),
+            );
+            edit::heal(&state.library, &clip.id);
+            announce_change(app);
+            return Err(err);
+        }
+    };
     announce_change(app);
     Ok(stored)
 }

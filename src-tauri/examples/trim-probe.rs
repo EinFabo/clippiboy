@@ -103,8 +103,9 @@ fn main() {
 
     // 3. Undo. Has to bring the full length back, losslessly.
     println!("\n3. Undo trim");
-    match edit::restore(&clip, &mix, EncoderId::X264, 40_000, |_| {}) {
-        Ok(applied) => {
+    let snapshot = clip.clone();
+    match edit::restore(id, move || Ok(snapshot), Some(&mix), EncoderId::X264, 40_000, |_| {}) {
+        Ok((_, applied)) => {
             report(applied.duration_ms, full);
             if (applied.duration_ms as i64 - full as i64).abs() > TOLERANCE_MS {
                 failures += 1;
@@ -149,12 +150,14 @@ fn mix_for(clip: &Clip) -> Vec<TrackMix> {
 
 /// Carry out one cut, measure afterwards and bring the clip to the new state.
 fn step(clip: &mut Clip, trim: edit::Trim, mix: &[TrackMix], want_ms: u64) -> u32 {
-    match edit::apply(clip, trim, mix, EncoderId::X264, 40_000, |value| {
+    let id = clip.id.clone();
+    let snapshot = clip.clone();
+    match edit::apply(&id, move || Ok(snapshot), trim, mix, EncoderId::X264, 40_000, |value| {
         if value >= 1.0 {
             println!("  done");
         }
     }) {
-        Ok(applied) => {
+        Ok((_, applied)) => {
             report(applied.duration_ms, want_ms);
             let off = (applied.duration_ms as i64 - want_ms as i64).abs() > TOLERANCE_MS;
             clip.duration_ms = applied.duration_ms;

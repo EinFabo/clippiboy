@@ -403,63 +403,108 @@ pub struct Applied {
 }
 
 /// Rewrite the clip: apply the mix, carry out the trim, save the original.
-/// Returns what has to stand in the database afterwards.
+/// Returns the clip as the run found it and what has to stand in the database
+/// afterwards.
+///
+/// `load` reads the clip's row; it runs only once this edit has the clip to
+/// itself (see [`run`]), and the cut is planned on what it returns. Read any
+/// earlier, an edit queued behind another planned on the row from before that
+/// one — and cut the already trimmed file at the old offsets.
 pub fn apply(
-    clip: &Clip,
+    clip_id: &str,
+    load: impl FnOnce() -> Result<Clip, String>,
     trim: Trim,
     mix: &[TrackMix],
     encoder: EncoderId,
     quality: u32,
     on_progress: impl Fn(f32),
-) -> Result<Applied, String> {
-    // The record on the clip is the truth about the coordinates; the store only
-    // says whether there is still a file to go with it.
-    let plan = plan(
-        clip.original.as_ref(),
-        has_original(&clip.id),
-        clip.duration_ms,
-        trim,
-    );
-    run(clip, &plan, mix, encoder, quality, &on_progress)
+) -> Result<(Clip, Applied), String> {
+    run(
+        clip_id,
+        load,
+        |clip| {
+            // The record on the clip is the truth about the coordinates; the
+            // store only says whether there is still a file to go with it.
+            Ok(plan(
+                clip.original.as_ref(),
+                has_original(&clip.id),
+                clip.duration_ms,
+                trim,
+            ))
+        },
+        Some(mix),
+        encoder,
+        quality,
+        &on_progress,
+    )
 }
 
-/// Undo the trim: pull the whole recording back, keep the mix.
+/// Undo the trim: pull the whole recording back, keep the mix — `mix`, or
+/// with `None` the levels stored on the clip as `load` finds it. As with
+/// [`apply`], the clip is loaded only once the run has it to itself.
 pub fn restore(
-    clip: &Clip,
-    mix: &[TrackMix],
+    clip_id: &str,
+    load: impl FnOnce() -> Result<Clip, String>,
+    mix: Option<&[TrackMix]>,
     encoder: EncoderId,
     quality: u32,
     on_progress: impl Fn(f32),
-) -> Result<Applied, String> {
-    let base = clip
-        .original
-        .filter(|_| has_original(&clip.id))
-        .ok_or_else(|| "The original can no longer be found.".to_string())?;
-    let plan = restore_plan(&base);
-    run(clip, &plan, mix, encoder, quality, &on_progress)
+) -> Result<(Clip, Applied), String> {
+    run(
+        clip_id,
+        load,
+        |clip| {
+            let base = clip
+                .original
+                .filter(|_| has_original(&clip.id))
+                .ok_or_else(|| "The original can no longer be found.".to_string())?;
+            Ok(restore_plan(&base))
+        },
+        mix,
+        encoder,
+        quality,
+        &on_progress,
+    )
 }
 
 fn run(
-    clip: &Clip,
-    plan: &RenderPlan,
-    mix: &[TrackMix],
+    clip_id: &str,
+    load: impl FnOnce() -> Result<Clip, String>,
+    make_plan: impl FnOnce(&Clip) -> Result<RenderPlan, String>,
+    mix: Option<&[TrackMix]>,
     encoder: EncoderId,
     quality: u32,
     on_progress: &impl Fn(f32),
-) -> Result<Applied, String> {
+) -> Result<(Clip, Applied), String> {
     // The clip's own lock first: a delete or a move of this clip finishes
     // before the swap, or waits for it. Then the global one.
-    let own = clip_lock(&clip.id);
+    let own = clip_lock(clip_id);
     let _clip = own.lock();
     let _busy = WORKING.lock();
 
-    // The plan was made before the lock. "Clear all trims" may have thrown the
-    // original away while this run waited for it — and `source_path` would then
-    // quietly hand over the trimmed file, to be cut again with the original's
-    // times. Asked again, the plan fits what is there.
-    if plan.video == VideoSource::Original && !has_original(&clip.id) {
-        return Err("The original was cleared in the meantime — please try again.".into());
+    // Only now the row, and the plan from it. An edit queued behind another
+    // sees what that one left: its record, its length, its file. And with
+    // `WORKING` held, "Clear all trims" cannot throw the original away
+    // between asking `has_original` and reading from it.
+    let clip = load()?;
+    if clip.id != clip_id {
+        return Err("clip not found".into());
     }
+    let plan = make_plan(&clip)?;
+    let plan = &plan;
+    let stored_mix: Vec<TrackMix>;
+    let mix = match mix {
+        Some(mix) => mix,
+        None => {
+            stored_mix = clip
+                .edit
+                .as_ref()
+                .map(|edit| edit.tracks.clone())
+                .unwrap_or_default();
+            &stored_mix
+        }
+    };
+    let clip = &clip;
 
     let target = PathBuf::from(&clip.path);
     if !target.is_file() {
@@ -546,9 +591,17 @@ fn run(
     // together with the video. So it may only stand where a recording really
     // lies: after a cut on a clip whose original was thrown away there is none,
     // and a note left over from back then is stale.
+    //
+    // From the swap on the file *is* the edit, so nothing after it may fail
+    // the run: an error here would leave the database describing the file
+    // from before, and the next save would cut at the wrong place. A note
+    // that cannot be written only loses `end_ms` precision until the next
+    // start, where `repair` and `settle` measure the file again.
     if let Some(original) = original.as_ref() {
         if video_path(&clip.id).is_file() {
-            write_note(&clip.id, original)?;
+            if let Err(err) = write_note(&clip.id, original) {
+                log::warn!("clip '{}': the trim's note could not be updated: {err}", clip.id);
+            }
         } else {
             let _ = std::fs::remove_file(note_path(&clip.id));
         }
@@ -560,12 +613,15 @@ fn run(
         log::warn!("could not refresh the thumbnail: {err}");
     }
 
-    Ok(Applied {
-        duration_ms,
-        size_bytes: std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0),
-        original,
-        mix_baked: in_file,
-    })
+    Ok((
+        clip.clone(),
+        Applied {
+            duration_ms,
+            size_bytes: std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0),
+            original,
+            mix_baked: in_file,
+        },
+    ))
 }
 
 /// Move a file, even onto another drive.
@@ -1002,6 +1058,19 @@ fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Opt
     true
 }
 
+/// [`settle`] for one clip right away, on its row as it is now: when an edit
+/// swapped the file in but its record could not be written, the next save
+/// would otherwise cut at the old offsets until a restart repaired it.
+///
+/// Takes the library itself, not a guard: `settle` locks it per write and
+/// probes the file in between. Call it under the clip's lock.
+pub(crate) fn heal(library: &Mutex<Option<crate::clips::Library>>, clip_id: &str) -> bool {
+    match fresh(library, clip_id) {
+        Some(clip) if !clip.screenshot => settle(library, &clip, read_note(clip_id)),
+        _ => false,
+    }
+}
+
 /// Clean up at startup whatever a crash in the middle of the swap left behind.
 ///
 /// The note tells the cases apart. The rule underneath is always the same:
@@ -1261,19 +1330,13 @@ mod tests {
     #[test]
     fn an_edit_waits_for_its_clip() {
         let clip = Clip { id: "edit-waits-test-clip".into(), ..plain_clip(None, None) };
-        let plan = RenderPlan {
-            video: VideoSource::Clip,
-            video_start_ms: 0,
-            stems_start_ms: 0,
-            length_ms: 30_000,
-            reencode: false,
-            original: None,
-        };
         let lock = clip_lock(&clip.id);
         let held = lock.lock();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let result = run(&clip, &plan, &[], EncoderId::X264, 70, &|_| {});
+            let id = clip.id.clone();
+            let load = move || Ok(clip);
+            let result = apply(&id, load, Trim::whole(30_000), &[], EncoderId::X264, 70, |_| {});
             let _ = tx.send(result.err());
         });
         assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "ran past the lock");
@@ -1281,6 +1344,76 @@ mod tests {
         let err = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("never finished");
         assert_eq!(err.as_deref(), Some("The clip file is no longer there."));
         worker.join().unwrap();
+    }
+
+    /// Is the run's clip being read while it has the clip to itself? Both
+    /// locks held: `WORKING` (not free on this thread) and the clip's own
+    /// (not free on any other).
+    fn loaded_under_both_locks(id: &'static str) -> bool {
+        let working = is_busy();
+        let clip = std::thread::spawn(move || clip_lock(id).try_lock().is_none()).join().unwrap();
+        working && clip
+    }
+
+    /// An edit queued behind another reads the row only once it is its turn:
+    /// what it plans on is what the one before it left.
+    #[test]
+    fn an_edit_loads_its_clip_only_once_it_has_the_clip_to_itself() {
+        let id = "edit-loads-late-test-clip";
+        let seen = std::cell::Cell::new(None);
+        let result = apply(
+            id,
+            || {
+                seen.set(Some(loaded_under_both_locks(id)));
+                Err("stop here".into())
+            },
+            Trim::whole(30_000),
+            &[],
+            EncoderId::X264,
+            70,
+            |_| {},
+        );
+        assert_eq!(result.err().as_deref(), Some("stop here"));
+        assert_eq!(seen.get(), Some(true), "the clip was read before the locks were held");
+    }
+
+    #[test]
+    fn an_undo_loads_its_clip_only_once_it_has_the_clip_to_itself() {
+        let id = "undo-loads-late-test-clip";
+        let seen = std::cell::Cell::new(None);
+        let result = restore(
+            id,
+            || {
+                seen.set(Some(loaded_under_both_locks(id)));
+                // As it stands now: no longer trimmed, so nothing to undo.
+                Ok(Clip { id: id.into(), ..plain_clip(None, None) })
+            },
+            None,
+            EncoderId::X264,
+            70,
+            |_| {},
+        );
+        assert_eq!(result.err().as_deref(), Some("The original can no longer be found."));
+        assert_eq!(seen.get(), Some(true), "the clip was read before the locks were held");
+    }
+
+    #[test]
+    fn a_second_trim_plans_on_the_clip_the_first_one_left() {
+        // Two saves each cutting 10 s off the front of a 60 s clip. What run 2
+        // sees once it loads under the lock: the first trim's record and the
+        // 50 s file it left.
+        let front = Trim { start_ms: 10_000, end_ms: 50_000 };
+        let first = plan(None, true, 60_000, Trim { start_ms: 10_000, end_ms: 60_000 });
+        let after_first = first.original.unwrap();
+        let second = plan(Some(&after_first), true, 50_000, front);
+        assert_eq!(second.original.unwrap().start_ms, 20_000);
+        assert_eq!(second.stems_start_ms, 20_000);
+        assert_eq!(second.video_start_ms, 20_000);
+        // On the snapshot from before the first save, the second cut lands at
+        // 10 s again and the end is cut short as well.
+        let stale = plan(None, true, 60_000, front);
+        assert_ne!(stale, second, "planning on the stale snapshot gives another cut");
+        assert_eq!(stale.original.unwrap().start_ms, 10_000);
     }
 
     fn mixed(gain_db: f32, muted: bool) -> Option<ClipEdit> {

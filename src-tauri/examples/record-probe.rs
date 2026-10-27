@@ -1093,15 +1093,17 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
     // argument is a quality, not a bitrate — it used to be handed 40_000, which
     // the encoder clamped to its top end and nobody noticed.
     let whole = edit::Trim::whole(clip.duration_ms);
+    let snapshot = clip.clone();
     match edit::apply(
-        &clip,
+        &clip.id,
+        move || Ok(snapshot),
         whole,
         &mix,
         EncoderId::X264,
         clippiboy_lib::model::default_quality(),
         |_| {},
     ) {
-        Ok(applied) => {
+        Ok((_, applied)) => {
             let after = video_frames(path);
             println!(
                 "  rewritten: {:.1} MB",
