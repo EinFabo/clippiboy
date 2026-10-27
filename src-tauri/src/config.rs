@@ -10,7 +10,8 @@ use serde_json::{Map, Value};
 
 use crate::encode;
 use crate::model::{
-    AppConfig, BufferConfig, ControlConfig, OverlayConfig, RecordingConfig, SourceKind, TargetKind,
+    AppConfig, AudioSource, BufferConfig, ControlConfig, OverlayConfig, RecordingConfig, SourceKind,
+    TargetKind,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -438,6 +439,36 @@ pub fn accept(current: &AppConfig, history: &VecDeque<AppConfig>, incoming: AppC
     next
 }
 
+/// A source command's write, as a whole config for [`accept`]: `change` (one
+/// row put in or taken out) done to the copy the window built that row on.
+///
+/// The console sends whole rows from its own copy. Put onto the config as it
+/// stands, a row read before the main window turned that source down would
+/// undo the level with the mute; put onto its own revision, `accept` merges it
+/// field by field. Without a revision, or with one the history no longer
+/// holds, the row goes onto the current config as before.
+pub fn with_sources(
+    current: &AppConfig,
+    history: &VecDeque<AppConfig>,
+    base: Option<u64>,
+    change: impl FnOnce(&mut Vec<AudioSource>),
+) -> AppConfig {
+    let mut incoming = base
+        .and_then(|revision| history.iter().rev().find(|old| old.revision == revision))
+        .unwrap_or(current)
+        .clone();
+    change(&mut incoming.sources);
+    incoming
+}
+
+/// Replace the row with this source's id, or add it at the end.
+pub fn put_source(sources: &mut Vec<AudioSource>, source: AudioSource) {
+    match sources.iter_mut().find(|s| s.id == source.id) {
+        Some(existing) => *existing = source,
+        None => sources.push(source),
+    }
+}
+
 /// Three-way merge of a window's write: `base` is the copy the window was
 /// given, `incoming` what it sent back, `current` what the core holds now.
 ///
@@ -553,7 +584,6 @@ fn merge_by_id(base: &[Value], incoming: &[Value], current: &[Value]) -> Vec<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::AudioSource;
 
     #[test]
     fn a_settings_page_cannot_move_the_clip_folder_or_change_the_token() {
@@ -999,6 +1029,93 @@ mod tests {
         let mut expected = incoming;
         expected.revision = 10;
         assert_eq!(json(&accepted), json(&expected));
+    }
+
+    /// A window writes one change at a time, each on the revision of the
+    /// answer to the one before: a switch flipped on and straight back off
+    /// ends off — B is built on A's answer, so its "off" is a change.
+    #[test]
+    fn a_switch_flipped_back_on_the_answers_revision_stays_back() {
+        let mut history = VecDeque::new();
+        let mut core = revision(with(vec![mic()]), 4);
+        core.watermark = false;
+        remember(&mut history, &core);
+
+        let mut a = core.clone();
+        a.watermark = true;
+        core = accept(&core, &history, a);
+        remember(&mut history, &core);
+        assert_eq!(core.revision, 5);
+
+        let mut b = core.clone();
+        b.watermark = false;
+        core = accept(&core, &history, b);
+        assert!(!core.watermark, "the switch came back on");
+        assert_eq!(core.revision, 6);
+    }
+
+    /// CFG-1 for the console's own rows: the main window turns the mic down,
+    /// the console — which built its row before that — mutes it. The console
+    /// sends its row with the revision it was built on, and the core puts it
+    /// onto that copy before merging: the level stays, the mute lands.
+    #[test]
+    fn the_main_windows_level_survives_the_consoles_stale_mute() {
+        let mut history = VecDeque::new();
+        let mut core = revision(with(vec![mic(), game()]), 4);
+        remember(&mut history, &core);
+        // The console's copy of the mic row, read when it opened.
+        let console_row = core.sources[0].clone();
+
+        // The main window turns the mic down.
+        let mut main = core.clone();
+        main.sources[0].gain_db = -6.0;
+        core = accept(&core, &history, main);
+        remember(&mut history, &core);
+
+        // The console mutes the mic on its row from revision 4.
+        let incoming = with_sources(&core, &history, Some(4), |sources| {
+            put_source(sources, muted(console_row))
+        });
+        core = accept(&core, &history, incoming);
+
+        assert!(core.sources[0].muted, "the console's mute was lost");
+        assert_eq!(core.sources[0].gain_db, -6.0, "the main window's level came undone");
+        assert_eq!(ids(&core), ["mic", "game"]);
+        assert_eq!(core.revision, 6);
+    }
+
+    /// No revision, or one the history no longer holds: the row goes onto the
+    /// config as it stands now, the way the source commands always worked.
+    #[test]
+    fn a_source_row_without_a_known_revision_goes_onto_the_current_config() {
+        let mut history = VecDeque::new();
+        let mut core = revision(with(vec![mic(), game()]), 9);
+        core.sources[1].gain_db = 3.0;
+        remember(&mut history, &core);
+        for base in [None, Some(2)] {
+            let incoming = with_sources(&core, &history, base, |sources| put_source(sources, muted(mic())));
+            let accepted = accept(&core, &history, incoming);
+            assert!(accepted.sources[0].muted);
+            assert_eq!(accepted.sources[1].gain_db, 3.0);
+        }
+    }
+
+    /// A source removed in the console on an old copy goes, and what changed
+    /// elsewhere on the others stays.
+    #[test]
+    fn a_source_removed_on_an_old_revision_keeps_the_others_changes() {
+        let mut history = VecDeque::new();
+        let mut core = revision(with(vec![mic(), game()]), 4);
+        remember(&mut history, &core);
+        let mut main = core.clone();
+        main.sources[1] = muted(game());
+        core = accept(&core, &history, main);
+        remember(&mut history, &core);
+
+        let incoming = with_sources(&core, &history, Some(4), |sources| sources.retain(|s| s.id != "mic"));
+        core = accept(&core, &history, incoming);
+        assert_eq!(ids(&core), ["game"]);
+        assert!(core.sources[0].muted);
     }
 
     #[test]

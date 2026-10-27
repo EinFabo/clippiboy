@@ -605,19 +605,24 @@ impl AppState {
         config::remember(&mut self.config_history.lock(), config);
     }
 
-    pub fn upsert_source(&self, source: AudioSource) -> AppConfig {
-        let mut config = self.config_snapshot();
-        match config.sources.iter_mut().find(|s| s.id == source.id) {
-            Some(existing) => *existing = source,
-            None => config.sources.push(source),
-        }
-        self.replace_config(config)
+    /// Put one source row in. `base` is the revision the window built the row
+    /// on: the row goes onto that copy and is merged from there
+    /// (`config::with_sources`), so a row from the console's older copy does
+    /// not undo what the main window changed on it since.
+    pub fn upsert_source(&self, source: AudioSource, base: Option<u64>) -> AppConfig {
+        let incoming = self.source_write(base, |sources| config::put_source(sources, source));
+        self.replace_config(incoming)
     }
 
-    pub fn remove_source(&self, id: &str) -> AppConfig {
-        let mut config = self.config_snapshot();
-        config.sources.retain(|s| s.id != id);
-        self.replace_config(config)
+    pub fn remove_source(&self, id: &str, base: Option<u64>) -> AppConfig {
+        let incoming = self.source_write(base, |sources| sources.retain(|s| s.id != id));
+        self.replace_config(incoming)
+    }
+
+    fn source_write(&self, base: Option<u64>, change: impl FnOnce(&mut Vec<AudioSource>)) -> AppConfig {
+        let current = self.config.lock();
+        let history = self.config_history.lock();
+        config::with_sources(&current, &history, base, change)
     }
 }
 

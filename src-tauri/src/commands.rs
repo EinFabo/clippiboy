@@ -174,8 +174,10 @@ pub fn set_config(
         || previous.control.port != next.control.port
     {
         crate::control::restart(&app);
-        // The restart made a new token: hand that one back, not the dead one.
-        next.control.token = state.config_snapshot().control.token;
+        // The restart made a new token: hand that one back, not the dead one —
+        // and the revision it was written under, or the window's next write
+        // would be merged against a copy the core never held.
+        next = state.config_snapshot();
     }
     next
 }
@@ -457,13 +459,17 @@ fn source_written(webview: &tauri::WebviewWindow, config: AppConfig) -> AppConfi
     config
 }
 
+/// The source commands take the revision of the copy the window built its
+/// row on (`AppState::upsert_source`); without one the row goes onto the
+/// config as it stands.
 #[tauri::command]
 pub fn add_audio_source(
     state: State<'_, AppState>,
     webview: tauri::WebviewWindow,
     source: AudioSource,
+    revision: Option<u64>,
 ) -> AppConfig {
-    source_written(&webview, state.upsert_source(source))
+    source_written(&webview, state.upsert_source(source, revision))
 }
 
 #[tauri::command]
@@ -471,8 +477,9 @@ pub fn update_audio_source(
     state: State<'_, AppState>,
     webview: tauri::WebviewWindow,
     source: AudioSource,
+    revision: Option<u64>,
 ) -> AppConfig {
-    source_written(&webview, state.upsert_source(source))
+    source_written(&webview, state.upsert_source(source, revision))
 }
 
 #[tauri::command]
@@ -480,8 +487,9 @@ pub fn remove_audio_source(
     state: State<'_, AppState>,
     webview: tauri::WebviewWindow,
     id: String,
+    revision: Option<u64>,
 ) -> AppConfig {
-    source_written(&webview, state.remove_source(&id))
+    source_written(&webview, state.remove_source(&id, revision))
 }
 
 #[tauri::command(async)]

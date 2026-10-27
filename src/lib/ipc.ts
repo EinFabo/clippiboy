@@ -76,12 +76,14 @@ export const api = {
   suspendHotkeys: () => invoke<void>("suspend_hotkeys"),
   resumeHotkeys: () => invoke<void>("resume_hotkeys"),
 
-  addAudioSource: (source: AudioSource) =>
-    invoke<AppConfig>("add_audio_source", { source }),
-  updateAudioSource: (source: AudioSource) =>
-    invoke<AppConfig>("update_audio_source", { source }),
-  removeAudioSource: (id: string) =>
-    invoke<AppConfig>("remove_audio_source", { id }),
+  /** `revision`: of the settings the row was built on — the core merges the
+   *  row against that copy, so what changed elsewhere since stays. */
+  addAudioSource: (source: AudioSource, revision?: number) =>
+    invoke<AppConfig>("add_audio_source", { source, revision }),
+  updateAudioSource: (source: AudioSource, revision?: number) =>
+    invoke<AppConfig>("update_audio_source", { source, revision }),
+  removeAudioSource: (id: string, revision?: number) =>
+    invoke<AppConfig>("remove_audio_source", { id, revision }),
 
   startBuffer: () => invoke<void>("start_buffer"),
   stopBuffer: () => invoke<void>("stop_buffer"),

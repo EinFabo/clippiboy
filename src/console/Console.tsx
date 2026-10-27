@@ -2,7 +2,9 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, events, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
-import type { AudioSource, Clip, ConsoleStyle, EngineStatus, FriendUser } from "@/lib/types";
+import type { AppConfig, AudioSource, Clip, ConsoleStyle, EngineStatus, FriendUser } from "@/lib/types";
+import { Outbox } from "@/lib/outbox";
+import { changedFields, sourceWrite } from "@/lib/sourceWrite";
 import { cn } from "@/lib/cn";
 import { mockClips, mockConfig } from "@/lib/mock";
 import {
@@ -157,6 +159,25 @@ export function Console() {
    *  meldet Fehler und Auffälligkeiten je Quellen-Id, und einen Namen dazu hat
    *  nur die Konfiguration. */
   const [sources, setSources] = useState<AudioSource[]>(inTauri ? [] : mockConfig.sources);
+  /** The settings as the core last handed them here — read on opening, then
+   *  each answer to a source write — with this console's writes still on
+   *  their way on top. A row goes out with this copy's revision. */
+  const configRef = useRef<AppConfig | null>(null);
+  /** Changes made on a source's slider that wait out its brake, by id: shown
+   *  over `configRef`, not yet sent. */
+  const drafts = useRef(new Map<string, Partial<AudioSource>>());
+  /** Source writes, one at a time, each on the answer to the one before. */
+  const [outbox] = useState(
+    () =>
+      new Outbox<AppConfig>({
+        shown: () => configRef.current,
+        show: (config) => {
+          configRef.current = config;
+          setSources(config.sources.map((s) => ({ ...s, ...drafts.current.get(s.id) })));
+        },
+        read: () => api.getConfig(),
+      }),
+  );
   /** Clips von heute — die Zahl im Statusblock. */
   const [today, setToday] = useState(inTauri ? 0 : clipsToday(mockClips));
   const [panel, setPanel] = useState<Panel>(null);
@@ -342,7 +363,7 @@ export function Console() {
         setTargetFps(config.recording.fps);
         setScale(config.consoleScale);
         setInCapture(config.consoleInCapture);
-        setSources(config.sources);
+        outbox.read(config);
       })
       .catch(() => {});
     const offs = [
@@ -437,14 +458,14 @@ export function Console() {
           setBufferLength(Math.max(1, config.buffer.seconds));
           setTargetFps(config.recording.fps);
           setInCapture(config.consoleInCapture);
-          setSources(config.sources);
+          outbox.read(config);
         })
         .catch(() => {});
     }
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));
     };
-  }, [loadClips, refreshClips, trendPush, close]);
+  }, [loadClips, refreshClips, trendPush, close, outbox]);
 
   /** Open something above the dock — a panel, or the player. The window is the
    *  screen and never changes size, so this is nothing but state. */
@@ -543,27 +564,49 @@ export function Console() {
    *  Je Quelle eine eigene Bremse, nicht eine gemeinsame: sonst verschluckte
    *  ein Griff an der zweiten Quelle den noch ausstehenden Stand der ersten.
    *
-   *  Was der Kern zurückgibt, wird bewusst **nicht** übernommen. Solange die
-   *  Konsole offen ist, kommt jede Änderung von hier, und beim nächsten Öffnen
-   *  liest sie die Konfiguration ohnehin frisch. Das Zurückschreiben hätte nur
-   *  die Chance eröffnet, dass ein verspätetes Ergebnis einen neueren Reglerweg
-   *  wieder einkassiert. */
+   *  The core's answers are taken (`outbox`): one write at a time, so no late
+   *  answer lands on a newer slider path, and what waits — a draft under the
+   *  brake, a queued write — stays on top. That way the console also learns
+   *  of a change made to a row in the main window, and sends only the fields
+   *  changed here, with the revision of the copy it built them on: a click on
+   *  mute no longer takes back the level the main window just set. */
   const sourceTimers = useRef(new Map<string, number>());
   const changeSource = useCallback(
     (next: AudioSource, now = false) => {
+      if (!inTauri) {
+        setSources((prev) => prev.map((s) => (s.id === next.id ? next : s)));
+        return;
+      }
+      const row = configRef.current?.sources.find((s) => s.id === next.id);
+      if (!row) return;
+      const draft = drafts.current.get(next.id);
+      drafts.current.set(next.id, { ...draft, ...changedFields({ ...row, ...draft }, next) });
       setSources((prev) => prev.map((s) => (s.id === next.id ? next : s)));
-      if (!inTauri) return;
       const timers = sourceTimers.current;
       const running = timers.get(next.id);
       if (running) window.clearTimeout(running);
       const send = () => {
         timers.delete(next.id);
-        void api.updateAudioSource(next).catch((err) => say(String(err)));
+        const fields = drafts.current.get(next.id);
+        drafts.current.delete(next.id);
+        const shown = configRef.current?.sources.find((s) => s.id === next.id);
+        if (!fields || !shown) return;
+        void outbox.push(
+          sourceWrite(
+            { ...shown, ...fields },
+            shown,
+            (row, revision) => api.updateAudioSource(row, revision),
+            (err) => {
+              say(String(err));
+              return true;
+            },
+          ),
+        );
       };
       if (now) send();
       else timers.set(next.id, window.setTimeout(send, 150));
     },
-    [say],
+    [say, outbox],
   );
 
   const buffered = status.bufferActive ? status.bufferedSeconds : 0;

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { coalesce } from "./lib/coalesce";
-import { later, takes } from "./lib/revision";
+import { Outbox } from "./lib/outbox";
+import { removeSourceWrite, sourceWrite } from "./lib/sourceWrite";
 import { api, events, inTauri } from "./lib/ipc";
 import * as mock from "./lib/mock";
 import type {
@@ -161,80 +162,29 @@ export interface ClipMeta {
   game: string | null;
 }
 
-/** Settings writes so far — see `patchConfig`. */
-let configWrites = 0;
-/** Writes of the settings still waiting for the core's answer. */
-let configPending = 0;
-/**
- * The newest settings the core handed over unasked (or for a write without a
- * ticket) while a write was on its way. Taken then, they would show the
- * setting just changed rolled back until its answer came; once every answer
- * is in, they count if their revision is the later one.
- */
-let configHeld: AppConfig | null = null;
 /**
  * The real settings were read from the core. Until then `config` is the mock;
  * writing it would put its values (a made-up token, say) over the real ones.
  */
 let configLoaded = false;
 
-type ConfigSet = (state: { config: AppConfig }) => void;
-
 /**
- * Settings from the core, put in place unless the copy held is from later —
- * see `takes`. Every write carries the revision it was built on, so the core
- * merges one from an older copy instead of undoing what changed since.
+ * This window's settings writes, one at a time (see `Outbox`): each goes out
+ * on the core's answer to the one before, so a switch flipped and flipped
+ * back, or a slider dragged back to where it started, is not merged away as
+ * "unchanged". What is done meanwhile shows at once and waits; settings the
+ * core hands over meanwhile wait until the last answer is in.
  */
-function adopt(set: ConfigSet, config: AppConfig, orSame = false) {
-  if (takes(useEngine.getState().config, config, orSame)) set({ config });
-}
+const outbox = new Outbox<AppConfig>({
+  shown: () => useEngine.getState().config,
+  show: (config) => useEngine.setState({ config }),
+  read: () => api.getConfig(),
+});
 
-/** Settings from the core that no ticket orders: held while a write is on its way. */
-function offer(set: ConfigSet, config: AppConfig) {
-  if (configPending > 0) configHeld = later(configHeld, config);
-  else adopt(set, config);
-}
-
-/** A ticketed write is answered (or failed): the last one lets the held copy in. */
-function writeSettled(set: ConfigSet) {
-  configPending--;
-  if (configPending > 0 || !configHeld) return;
-  const held = configHeld;
-  configHeld = null;
-  adopt(set, held);
-}
-
-/** The settings as the core now holds them, unless a newer write came since. */
-async function rereadConfig(set: ConfigSet) {
-  const ticket = ++configWrites;
-  try {
-    const config = await api.getConfig();
-    // Its own revision too: it replaces the optimistic copy built on it.
-    if (ticket === configWrites) adopt(set, config, true);
-  } catch {
-    // The copy held stands; the next write answers with the right one.
-  }
-}
-
-/**
- * A source write takes a ticket like `patchConfig`: only the newest answer
- * counts, and a refusal puts the core's copy back over the optimistic one.
- */
-async function writeSources(
-  set: (state: { config?: AppConfig; lastError?: string }) => void,
-  write: () => Promise<AppConfig>,
-) {
-  const ticket = ++configWrites;
-  configPending++;
-  try {
-    const config = await write();
-    if (ticket === configWrites) adopt(set, config);
-  } catch (err) {
-    set({ lastError: `Apply source: ${String(err)}` });
-    void rereadConfig(set);
-  } finally {
-    writeSettled(set);
-  }
+/** A refused source write: said, and the core's copy read back over the optimistic one. */
+function sourceFailed(err: unknown): boolean {
+  useEngine.setState({ lastError: `Apply source: ${String(err)}` });
+  return true;
 }
 
 /**
@@ -403,9 +353,8 @@ export const useEngine = create<EngineState>((set, get) => ({
       );
       // The core changed the settings without this window asking: the
       // console muted a source, a screen went away. Never an echo of a write
-      // from here, so it takes no ticket and an answer in flight still counts;
-      // whichever has the later revision wins (`offer`).
-      await events.onConfigChanged((config) => offer(set, config));
+      // from here; held while a write is out, then the later revision wins.
+      await events.onConfigChanged((config) => outbox.offer(config));
       // One read at a time, one more after a burst: a run of changes would
       // otherwise stack up full-list reads.
       await events.onClipsChanged(
@@ -475,25 +424,22 @@ export const useEngine = create<EngineState>((set, get) => ({
       });
       return;
     }
-    const config = { ...get().config, ...patch };
-    set({ config });
-    const ticket = ++configWrites;
-    configPending++;
-    try {
-      // The core's answer, not what was sent: it puts back a source changed
-      // mid-recording, swaps an encoder that is not there, cleans colours.
-      // Kept as sent, the uncorrected copy went back with the next change.
-      // Only the newest answer counts — an older one landing late would undo it.
-      // An answer from before a change made elsewhere is older news (`adopt`).
-      const kept = await api.setConfig(config);
-      if (ticket === configWrites) adopt(set, kept);
-    } catch (err) {
-      // The selection already stands in the UI — if the core does not accept it,
-      // somebody has to see that rather than have it fail silently.
-      set({ lastError: `Apply setting: ${String(err)}` });
-    } finally {
-      writeSettled(set);
-    }
+    await outbox.push({
+      // Patches waiting together go out as one write.
+      key: "settings",
+      change: (config) => ({ ...config, ...patch }),
+      // The core's answer is what is shown and built on, not what was sent:
+      // it puts back a source changed mid-recording, swaps an encoder that is
+      // not there, cleans colours. Kept as sent, the uncorrected copy went
+      // back with the next change.
+      send: (next) => api.setConfig(next),
+      failed: (err) => {
+        // Somebody has to see a setting that did not take, rather than have
+        // it fail silently; the display goes back to the core's copy.
+        set({ lastError: `Apply setting: ${String(err)}` });
+        return false;
+      },
+    });
   },
 
   async setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey) {
@@ -515,14 +461,14 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
     // Deliberately without an optimistic update: if registering fails, the old
     // assignment should stand, and the error belongs on that row.
-    offer(set, await api.setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey));
+    outbox.offer(await api.setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey));
   },
 
   async regenerateControlToken() {
     if (!inTauri) return;
     // Without an optimistic update: the token is generated by the core, so
     // there is nothing here to guess at.
-    offer(set, await api.regenerateControlToken());
+    outbox.offer(await api.regenerateControlToken());
   },
 
   async setClipDir(dir) {
@@ -530,7 +476,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       set((st) => ({ config: { ...st.config, clipDir: dir } }));
       return;
     }
-    offer(set, await api.setClipDir(dir));
+    outbox.offer(await api.setClipDir(dir));
   },
 
   async upsertSource(source) {
@@ -538,16 +484,19 @@ export const useEngine = create<EngineState>((set, get) => ({
       set({ lastError: "Apply source: the settings could not be read, so nothing was saved" });
       return;
     }
-    const sources = get().config.sources;
-    const exists = sources.some((s) => s.id === source.id);
-    const next = exists
-      ? sources.map((s) => (s.id === source.id ? source : s))
-      : [...sources, source];
-    set({ config: { ...get().config, sources: next } });
-    if (!inTauri) return;
-    await writeSources(set, () =>
-      exists ? api.updateAudioSource(source) : api.addAudioSource(source),
+    const shown = get().config.sources.find((s) => s.id === source.id);
+    const write = sourceWrite(
+      source,
+      shown,
+      (row, revision) =>
+        shown ? api.updateAudioSource(row, revision) : api.addAudioSource(row, revision),
+      sourceFailed,
     );
+    if (!inTauri) {
+      set({ config: write.change(get().config) });
+      return;
+    }
+    await outbox.push(write);
   },
 
   async removeSource(id) {
@@ -555,9 +504,12 @@ export const useEngine = create<EngineState>((set, get) => ({
       set({ lastError: "Remove source: the settings could not be read, so nothing was saved" });
       return;
     }
-    const next = get().config.sources.filter((s) => s.id !== id);
-    set({ config: { ...get().config, sources: next } });
-    if (inTauri) await writeSources(set, () => api.removeAudioSource(id));
+    const write = removeSourceWrite(id, (id, revision) => api.removeAudioSource(id, revision), sourceFailed);
+    if (!inTauri) {
+      set({ config: write.change(get().config) });
+      return;
+    }
+    await outbox.push(write);
   },
 
   async toggleBuffer() {
