@@ -1538,6 +1538,12 @@ impl AppState {
     /// game the recording is filed under, so the two cannot disagree.
     pub fn start_recording(&self, friends_in: &dyn Fn(&str) -> Vec<String>) -> Result<(), String> {
         let _lifecycle = self.lifecycle.lock();
+        // Quit (or the update restart) waits up to half a minute for saves,
+        // then closes the recording: one started meanwhile would be a few
+        // seconds the next start "finishes from last time".
+        if self.quitting.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("ClippiBoy is quitting.".into());
+        }
         if self.is_recording() {
             return Err("A recording is already running.".into());
         }
@@ -2042,6 +2048,17 @@ mod tests {
         assert!(state.recording_or_closing(), "a press during the close is a stop");
         drop(closing);
         assert!(!state.recording_or_closing());
+    }
+
+    /// Final review (core M2): Quit's wait for saves is no time to begin a
+    /// recording it closes again a moment later.
+    #[test]
+    fn no_recording_starts_while_quitting() {
+        let state = AppState::new(false);
+        state.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(state.start_recording(&|_| Vec::new()).err().as_deref(), Some("ClippiBoy is quitting."));
+        assert!(!state.is_recording());
+        assert!(state.pipeline.lock().is_none(), "nothing was brought up for it");
     }
 
     /// REC-12: the recovery leaves a folder alone while a stop holds it. An

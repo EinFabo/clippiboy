@@ -157,6 +157,10 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
                 app.state::<AppState>()
                     .quitting
                     .store(false, std::sync::atomic::Ordering::SeqCst);
+                // The wait for saves told the start-up passes over the
+                // library to stop. ClippiBoy goes on, so one still under way
+                // goes on too instead of ending at its next clip.
+                crate::clips::STOP_PASSES.store(false, std::sync::atomic::Ordering::SeqCst);
                 // The hook took the control port down with the handshake file.
                 crate::control::start(&app);
             }
