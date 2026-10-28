@@ -45,7 +45,7 @@ export async function userByCode(db: D1Database, code: string): Promise<UserRow 
 }
 
 export async function userByName(db: D1Database, name: string): Promise<UserRow | null> {
-  return db.prepare("SELECT * FROM users WHERE username = ?").bind(name).first<UserRow>();
+  return db.prepare("SELECT * FROM users WHERE username = ? AND username != ''").bind(name).first<UserRow>();
 }
 
 /** Everyone the user has a row with, whatever its status. */
@@ -103,7 +103,7 @@ export async function upsertDiscordUser(db: D1Database, discord: DiscordUser, de
   // Discord hands a released name to someone else: the stale row gives it up first,
   // since a name belongs to one account.
   const releaseName = db
-    .prepare("UPDATE users SET username = '' WHERE username = ? AND discord_id != ?")
+    .prepare("UPDATE users SET username = '' WHERE username = ? AND username != '' AND discord_id != ?")
     .bind(discord.username, discord.id);
   const existing = await db
     .prepare("SELECT id FROM users WHERE discord_id = ?")

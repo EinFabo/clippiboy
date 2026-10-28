@@ -14,14 +14,12 @@
     // Public — it is in every authorize URL anyway. The secret is set with
     // `wrangler secret put DISCORD_CLIENT_SECRET`.
     "DISCORD_CLIENT_ID": "1553530949491236894",
-    // Daily ceilings for the routes anyone may call, counted in anon_budget
-    // across all addresses: past them /t/ping answers 429 and /auth/start a
-    // "busy" page until midnight UTC. A new install's ping writes about 7 rows
-    // (two tables, their indexes and the counter), a sign-in start about 3;
-    // together that stays under half of D1's free 100k row writes a day. Keep
-    // both above the real daily numbers.
-    "ANON_PINGS_PER_DAY": "6000",
-    "ANON_SIGNINS_PER_DAY": "1500"
+    // Daily ceiling for pings, counted in anon_budget across all addresses:
+    // past it /t/ping answers 429 until midnight UTC. A new install's ping
+    // writes about 7 rows (two tables, their indexes and the counter), which
+    // stays well under D1's free 100k row writes a day. Keep it above the real
+    // daily number. Sign-in has no shared ceiling; the per-address limit holds it.
+    "ANON_PINGS_PER_DAY": "6000"
   },
   "d1_databases": [
     {

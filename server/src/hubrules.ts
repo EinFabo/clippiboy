@@ -23,6 +23,12 @@ export function remember(contacts: Contacts, to: string, now: number): Contacts 
   return Object.fromEntries(live);
 }
 
+/** The list without what expired; undefined when nothing is left, so the caller can delete the key. */
+export function pruned(contacts: Contacts | undefined, now: number): Contacts | undefined {
+  const live = Object.fromEntries(Object.entries(contacts ?? {}).filter(([, expiry]) => expiry > now));
+  return Object.keys(live).length > 0 ? live : undefined;
+}
+
 /** May a relay from `from` reach the invisible user? */
 export function mayReach(contacts: Contacts | undefined, from: string, now: number): boolean {
   const expiry = contacts?.[from];

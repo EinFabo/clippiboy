@@ -53,7 +53,8 @@ interface ShareRow {
 const video = (id: string) => `${id}.mp4`;
 const poster = (id: string) => `${id}.jpg`;
 
-// What counts against the week and the bucket: finished shares, and uploads
+// What counts against the week and the bucket (keep `departStatement` in db.ts,
+// which carries the newest of these over a deleted account, in step with it): finished shares, and uploads
 // still in time to finish. The `?` is when a pending one is given up.
 const COUNTS = "(pending = 0 OR created_at > ?)";
 const RECENT = `SELECT COUNT(*) FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`;

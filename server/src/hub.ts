@@ -9,6 +9,7 @@ import {
   RELAY,
   SOCKET_CAP,
   mayReach,
+  pruned,
   remember,
   spend,
   type Bucket,
@@ -130,6 +131,8 @@ export class Hub extends DurableObject<Env> {
     attachment.at = Date.now();
     ws.serializeAttachment(attachment);
     if (data.t === "hello") await this.sendSnapshot(ws, attachment.user);
+    // Visible again: who the user wrote to while hidden is no longer kept.
+    if (this.current() !== null) await this.ctx.storage.delete(CONTACTS);
     await this.publishSoon(attachment.user);
   }
 
@@ -141,11 +144,18 @@ export class Hub extends DurableObject<Env> {
       // Already closed.
     }
     await this.publish(user, ws);
+    await this.forgetContactsIfGone(ws);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     const { user } = ws.deserializeAttachment() as Attachment;
     await this.publish(user, ws);
+    await this.forgetContactsIfGone(ws);
+  }
+
+  /** The session is over when no other connection is left: the contacts list goes with it. */
+  private async forgetContactsIfGone(closing: WebSocket): Promise<void> {
+    if (this.open(closing).length === 0) await this.ctx.storage.delete(CONTACTS);
   }
 
   /** Closes connections that stopped pinging — a crash or a dead network never says goodbye. */
@@ -165,6 +175,13 @@ export class Hub extends DurableObject<Env> {
       }
     }
     if (user) await this.publish(user);
+    // Entries run out after ten minutes; the list itself must not outlive them.
+    const contacts = await this.ctx.storage.get<Contacts>(CONTACTS);
+    if (contacts) {
+      const live = this.open().length > 0 ? pruned(contacts, now) : undefined;
+      if (live) await this.ctx.storage.put(CONTACTS, live);
+      else await this.ctx.storage.delete(CONTACTS);
+    }
     if (this.open().length > 0) await this.ctx.storage.setAlarm(now + SWEEP_MS);
   }
 

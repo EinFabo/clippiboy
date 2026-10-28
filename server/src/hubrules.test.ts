@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, mayReach, remember, spend, type Contacts } from "./hubrules.ts";
+import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, mayReach, pruned, remember, spend, type Contacts } from "./hubrules.ts";
 
 const now = 1_000_000;
 
@@ -18,6 +18,13 @@ test("the list drops what expired and keeps the newest fifty", () => {
   assert.equal(Object.keys(contacts).length, CONTACT_MAX);
   assert.equal("old" in contacts || "f0" in contacts, false);
   assert.equal("f59" in contacts, true);
+});
+
+test("pruning drops expired contacts and reports an empty list as nothing", () => {
+  const contacts = { old: now - 1, fresh: now + 5 };
+  assert.deepEqual(pruned(contacts, now), { fresh: now + 5 });
+  assert.equal(pruned({ old: now }, now), undefined);
+  assert.equal(pruned(undefined, now), undefined);
 });
 
 const rule = { capacity: 3, refillMs: 1000 };

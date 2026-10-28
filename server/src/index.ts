@@ -184,14 +184,15 @@ async function underLimit(request: Request, env: Env, route: "auth" | "ping" | "
 }
 
 /**
- * Within today's ceiling for a route that writes without a sign-in? Counted
- * across all addresses, one per call, after the per-address limit: many
- * addresses together still cannot spend the database's daily writes. The
- * counter stops at the ceiling, so a refused call writes nothing.
+ * Within today's ceiling for pings? Counted across all addresses, one per call,
+ * after the per-address limit: many addresses together still cannot spend the
+ * database's daily writes. The counter stops at the ceiling, so a refused call
+ * writes nothing. Sign-in has no such ceiling: one address could use it up and
+ * lock everybody else out, so it is held only by the per-address limit.
  */
-async function withinCeiling(env: Env, route: "auth" | "ping"): Promise<boolean> {
-  const configured = Number(route === "ping" ? env.ANON_PINGS_PER_DAY : env.ANON_SIGNINS_PER_DAY);
-  const ceiling = Number.isInteger(configured) && configured > 0 ? configured : route === "ping" ? 6000 : 1500;
+async function withinCeiling(env: Env, route: "ping"): Promise<boolean> {
+  const configured = Number(env.ANON_PINGS_PER_DAY);
+  const ceiling = Number.isInteger(configured) && configured > 0 ? configured : 6000;
   const result = await env.DB.prepare(
     `INSERT INTO anon_budget (day, route, count) VALUES (?1, ?2, 1)
      ON CONFLICT(day, route) DO UPDATE SET count = count + 1 WHERE count < ?3`,
@@ -214,7 +215,6 @@ async function authStart(request: Request, url: URL, env: Env): Promise<Response
   const challenge = url.searchParams.get("challenge") ?? "";
   if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new HttpError(400, "Missing challenge.");
   if (!env.DISCORD_CLIENT_ID) throw new HttpError(503, "Discord login is not configured yet.");
-  if (!(await withinCeiling(env, "auth"))) return page("Sign-in is busy", "Too many sign-ins today. Try again later.");
   const now = Date.now();
   const state = randomToken(24);
   await env.DB.prepare("INSERT INTO logins (state, challenge, created_at) VALUES (?, ?, ?)")

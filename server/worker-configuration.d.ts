@@ -9,7 +9,6 @@ interface __BaseEnv_Env {
 	USER_LIMIT: RateLimit;
 	DISCORD_CLIENT_ID: "1553530949491236894";
 	ANON_PINGS_PER_DAY: "6000";
-	ANON_SIGNINS_PER_DAY: "1500";
 	HUB: DurableObjectNamespace<import("./src/index").Hub>;
 }
 declare namespace Cloudflare {
