@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { BusyRing } from "@/components/ui/BusyVeil";
 import { api, events, inTauri } from "@/lib/ipc";
 import { clipName } from "@/lib/format";
-import { planExport } from "@/lib/exportPlan";
+import { planExport, roundMb } from "@/lib/exportPlan";
 import { cn } from "@/lib/cn";
 import type { Clip } from "@/lib/types";
 
@@ -74,7 +74,7 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
   async function run() {
     // Not "<name> (<n> MB).mp4": that is the console's Discord copy, which goes
     // when the clip is edited or deleted (`manual_export_name` in the core).
-    const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} - ${targetMb} MB.mp4`;
+    const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} - ${roundMb(targetMb)} MB.mp4`;
     setStage("choosing");
     setProgress(0);
     setError(null);
@@ -171,6 +171,13 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
           {plan.width}×{plan.height} · ~{(plan.videoKbps / 1000).toFixed(1)} Mbit/s ·{" "}
           {plan.seconds} s
         </p>
+        {plan.tooLong && (
+          <p className="mt-1 text-xs text-warn">
+            This clip is too long to fit {roundMb(targetMb)} MB — the copy
+            will be about {plan.expectedMb} MB. Trim it first, or pick a
+            larger size.
+          </p>
+        )}
         {plan.height < clip.height && (
           <p className="mt-1 text-xs text-ink-faint">
             Scaled down from {clip.height}p — at this size a sharp smaller

@@ -463,7 +463,7 @@ async fn upload(
                 crate::commands::shrink(&state, &report.clip_id, TARGET_BYTES, &temp, &progress)
             })
         };
-        let written = shrinking.await.map_err(|err| err.to_string())??;
+        let written = shrinking.await.map_err(|err| err.to_string())??.bytes;
         if written > MAX_BYTES {
             let _ = std::fs::remove_file(&temp);
             return Err("This clip is too long to fit in 50 MB. Trim it first.".into());

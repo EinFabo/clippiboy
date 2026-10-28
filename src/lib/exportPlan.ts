@@ -5,6 +5,8 @@
 
 const HEIGHTS = [1080, 720, 480];
 const AUDIO_KBPS = 128;
+const THIN_AUDIO_KBPS = 64;
+const VIDEO_FLOOR_KBPS = 200;
 const CONTAINER_OVERHEAD = 3;
 const STARVED = 2;
 const BITS_PER_PIXEL = Math.fround(0.15);
@@ -23,14 +25,35 @@ function widthFor(clip: { width: number; height: number }, height: number): numb
   return Math.max(2, width) & ~1;
 }
 
-/** Mirrors `export::video_budget` and `export::recipe`. `seconds` is for display. */
+function videoBudget(targetBytes: number, durationMs: number, audioKbps: number): number {
+  const usableBits = Math.floor((Math.floor(targetBytes) * 8 * (100 - CONTAINER_OVERHEAD)) / 100);
+  const videoBits = Math.max(0, usableBits - audioKbps * durationMs);
+  return Math.floor(videoBits / Math.max(1000, durationMs));
+}
+
+/**
+ * Mirrors `export::video_budget` and `export::recipe`. `seconds` is for
+ * display; `tooLong` says the target cannot be met, and `expectedMb` is then
+ * about what the copy will come to instead.
+ */
 export function planExport(
   clip: { durationMs: number; width: number; height: number },
   targetBytes: number,
-): { videoKbps: number; width: number; height: number; seconds: number } {
-  const usableBits = Math.floor((Math.floor(targetBytes) * 8 * (100 - CONTAINER_OVERHEAD)) / 100);
-  const videoBits = Math.max(0, usableBits - AUDIO_KBPS * clip.durationMs);
-  const budget = Math.floor(videoBits / Math.max(1000, clip.durationMs));
+): {
+  videoKbps: number;
+  audioKbps: number;
+  width: number;
+  height: number;
+  seconds: number;
+  tooLong: boolean;
+  expectedMb: number;
+} {
+  let audioKbps = AUDIO_KBPS;
+  let budget = videoBudget(targetBytes, clip.durationMs, audioKbps);
+  if (budget < VIDEO_FLOOR_KBPS) {
+    audioKbps = THIN_AUDIO_KBPS;
+    budget = videoBudget(targetBytes, clip.durationMs, audioKbps);
+  }
 
   let height = clip.height;
   for (const step of [clip.height, ...HEIGHTS.filter((h) => h < clip.height)]) {
@@ -38,10 +61,20 @@ export function planExport(
     const wants = bitrateFor(widthFor(clip, step), step, 30);
     if (budget >= Math.floor(wants / STARVED)) break;
   }
+  const videoKbps = Math.max(VIDEO_FLOOR_KBPS, budget);
+  const expectedBytes = (((videoKbps + audioKbps) * clip.durationMs) / 8) * (100 / (100 - CONTAINER_OVERHEAD));
   return {
-    videoKbps: Math.max(200, budget),
+    videoKbps,
+    audioKbps,
     width: widthFor(clip, height),
     height,
     seconds: Math.round(clip.durationMs / 100) / 10,
+    tooLong: budget < VIDEO_FLOOR_KBPS,
+    expectedMb: roundMb(expectedBytes / (1024 * 1024)),
   };
+}
+
+/** A size in MB to one decimal, as the core's `export::megabytes` shows it. */
+export function roundMb(mb: number): number {
+  return Math.round(mb * 10) / 10;
 }

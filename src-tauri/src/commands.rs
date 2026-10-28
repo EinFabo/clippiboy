@@ -1430,9 +1430,17 @@ pub fn discard_clip_original(
     Ok(clip)
 }
 
+/// What [`shrink`] wrote.
+pub(crate) struct Shrunk {
+    pub bytes: u64,
+    /// The clip was too long for the target: written at the least bitrate a
+    /// picture gets, and larger than asked (`export::Recipe::too_long`).
+    pub too_long: bool,
+}
+
 /// The work of an export, without its notices: shrink a clip into `output`,
-/// reporting 0 to 1 along the way. Returns the bytes written. A share link
-/// shrinks through here too, and says what happened in its own words.
+/// reporting 0 to 1 along the way. A share link shrinks through here too, and
+/// says what happened in its own words.
 ///
 /// ffmpeg writes beside `output` under a name of its own ([`export_part`]) and
 /// the result is renamed in only when whole: a run cut short leaves no file
@@ -1444,7 +1452,7 @@ pub(crate) fn shrink(
     target_bytes: u64,
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
-) -> Result<u64> {
+) -> Result<Shrunk> {
     // Held for the whole ffmpeg run, which reads the clip file throughout: a
     // save, a move or a delete of this clip waits for it, and it for them.
     let own = edit::clip_lock(id);
@@ -1514,7 +1522,7 @@ pub(crate) fn shrink(
         let name = output.file_name().unwrap_or_default().to_string_lossy();
         return Err(format!("Could not put the export in place — is \"{name}\" open somewhere right now?"));
     }
-    Ok(written)
+    Ok(Shrunk { bytes: written, too_long: recipe.too_long })
 }
 
 /// Write a copy of a clip that comes in under a size.
@@ -1596,26 +1604,32 @@ fn export_to(
 ) -> Result<()> {
     // The target is settled: the window can show the copy being written.
     progress(app, id)(0.0);
-    let written = shrink(state, id, target_bytes, output, &progress(app, id))
+    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id))
         .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
+    let written = shrunk.bytes;
     progress(app, id)(1.0);
-    if written > target_bytes {
+    let (size, asked) = (crate::export::megabytes(written), crate::export::megabytes(target_bytes));
+    if written > target_bytes && shrunk.too_long {
+        // Said by the core: the console's "Export for Discord" and the Stream
+        // Deck have no dialog that could have warned before.
+        crate::notify(
+            app,
+            "error",
+            format!("This clip is too long to fit in {asked} MB — the copy came out at {size} MB. Trim it, or pick a larger size."),
+        );
+    } else if written > target_bytes {
         // Not an error: the file is there and usually only just over. Saying so
         // beats letting it be refused somewhere else without explanation.
         crate::notify(
             app,
             "ok",
-            format!(
-                "Exported at {} MB — a little over the {} MB asked for.",
-                written / 1024 / 1024,
-                target_bytes / 1024 / 1024
-            ),
+            format!("Exported at {size} MB — a little over the {asked} MB asked for."),
         );
     } else {
         crate::notify(
             app,
             "ok",
-            format!("Exported · {} MB", written.div_ceil(1024 * 1024)),
+            format!("Exported · {size} MB"),
         );
     }
     Ok(())

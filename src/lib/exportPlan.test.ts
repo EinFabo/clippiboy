@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bitrateFor, planExport } from "./exportPlan.ts";
+import { bitrateFor, planExport, roundMb } from "./exportPlan.ts";
 
 const MB = 1024 * 1024;
 test("the bitrate mirror clamps like the core", () => {
@@ -16,4 +16,19 @@ test("a 1440p clip with room keeps its height", () =>
 test("a 5.9 s clip is budgeted for 5.9 s", () => {
   const plan = planExport({ durationMs: 5_900, width: 1920, height: 1080 }, 10 * MB);
   assert.ok(((plan.videoKbps + 128) * 5_900) / 8 <= 10 * MB);
+});
+test("a clip too long for its target says so, after the sound gave way", () => {
+  const tenMinutes = planExport({ durationMs: 600_000, width: 1920, height: 1080 }, 10 * MB);
+  assert.equal(tenMinutes.tooLong, true);
+  assert.deepEqual([tenMinutes.videoKbps, tenMinutes.audioKbps], [200, 64]);
+  assert.ok(tenMinutes.expectedMb > 19 && tenMinutes.expectedMb < 20, `expected ${tenMinutes.expectedMb} MB`);
+  const rescued = planExport({ durationMs: 280_000, width: 1920, height: 1080 }, 10 * MB);
+  assert.equal(rescued.tooLong, false);
+  assert.equal(rescued.audioKbps, 64);
+  const short = planExport({ durationMs: 60_000, width: 1920, height: 1080 }, 10 * MB);
+  assert.equal(short.audioKbps, 128);
+});
+test("sizes round to one decimal", () => {
+  assert.equal(roundMb(9.333333), 9.3);
+  assert.equal(roundMb(25), 25);
 });

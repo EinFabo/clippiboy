@@ -26,6 +26,15 @@ const HEIGHTS: [u32; 3] = [1080, 720, 480];
 /// picture working and not.
 const AUDIO_KBPS: u32 = 128;
 
+/// What the sound drops to when, at [`AUDIO_KBPS`], the picture would be
+/// left less than [`VIDEO_FLOOR_KBPS`]: still clear speech and game sound,
+/// and on a long clip the room that keeps it under its target.
+const THIN_AUDIO_KBPS: u32 = 64;
+
+/// The least the picture is given. ffmpeg cannot encode at nothing, so a
+/// target that leaves less than this cannot be met.
+const VIDEO_FLOOR_KBPS: u32 = 200;
+
 /// The container's own overhead — headers, the index, per-packet framing.
 /// Three percent is generous for MP4 and a good deal cheaper than landing a
 /// kilobyte over the limit.
@@ -53,6 +62,9 @@ pub struct Recipe {
     /// What to scale to. Equal to the source when nothing is scaled.
     pub width: u32,
     pub height: u32,
+    /// The clip is too long for the target: even with the thinner sound the
+    /// picture got its floor, and the file comes out larger than asked.
+    pub too_long: bool,
 }
 
 impl Recipe {
@@ -65,9 +77,9 @@ impl Recipe {
 /// Video bitrate left over for a target, in kbit/s. The clip's real length in
 /// milliseconds: kbit/s times ms is bits, so a 5.9 s clip is budgeted for 5.9 s
 /// and not rounded down to 5.
-fn video_budget(bytes: u64, duration_ms: u64) -> u32 {
+fn video_budget(bytes: u64, duration_ms: u64, audio_kbps: u32) -> u32 {
     let usable_bits = bytes.saturating_mul(8) * (100 - CONTAINER_OVERHEAD) / 100;
-    let audio_bits = AUDIO_KBPS as u64 * duration_ms;
+    let audio_bits = audio_kbps as u64 * duration_ms;
     let video_bits = usable_bits.saturating_sub(audio_bits);
     (video_bits / duration_ms.max(1000)).min(u32::MAX as u64) as u32
 }
@@ -78,8 +90,17 @@ fn video_budget(bytes: u64, duration_ms: u64) -> u32 {
 /// stops at the smallest step rather than looping — a target small enough to
 /// starve 480p is going to look poor whatever happens, and saying so with a
 /// picture is better than not producing one.
+///
+/// When the picture would get less than its floor, the sound gives up half
+/// its bitrate first. Should that still not be enough, the recipe says so
+/// (`too_long`): the export goes ahead at the floor, larger than asked.
 pub fn recipe(target: &Target) -> Recipe {
-    let budget = video_budget(target.bytes, target.duration_ms);
+    let mut audio_kbps = AUDIO_KBPS;
+    let mut budget = video_budget(target.bytes, target.duration_ms, audio_kbps);
+    if budget < VIDEO_FLOOR_KBPS {
+        audio_kbps = THIN_AUDIO_KBPS;
+        budget = video_budget(target.bytes, target.duration_ms, audio_kbps);
+    }
 
     // Never upscale: the source height is the ceiling and the first try.
     let mut height = target.height;
@@ -93,10 +114,22 @@ pub fn recipe(target: &Target) -> Recipe {
 
     Recipe {
         // A floor, or ffmpeg is handed a bitrate it cannot encode at all.
-        video_kbps: budget.max(200),
-        audio_kbps: AUDIO_KBPS,
+        video_kbps: budget.max(VIDEO_FLOOR_KBPS),
+        audio_kbps,
         width: width_for(target, height),
         height,
+        too_long: budget < VIDEO_FLOOR_KBPS,
+    }
+}
+
+/// A size in MB as a notice or a file name shows it: one decimal, none when
+/// it is whole.
+pub fn megabytes(bytes: u64) -> String {
+    let tenths = (bytes * 10 + 512 * 1024) / (1024 * 1024);
+    if tenths % 10 == 0 {
+        format!("{}", tenths / 10)
+    } else {
+        format!("{}.{}", tenths / 10, tenths % 10)
     }
 }
 
@@ -241,6 +274,37 @@ mod tests {
         let plan = recipe(&target(MB / 100, 600_000, 1920, 1080));
         assert_eq!(plan.height, 480);
         assert!(plan.video_kbps >= 200, "ffmpeg needs something to work with");
+    }
+
+    /// Final review I-2: a long clip at a small target used to be floored at
+    /// 200 kbit/s with full sound and come out at 2.4 times the size asked
+    /// for, without a word. The sound gives way first; when that is not
+    /// enough the recipe says so.
+    #[test]
+    fn a_clip_too_long_for_its_target_says_so() {
+        let ten_minutes = recipe(&target(10 * MB, 600_000, 1920, 1080));
+        assert!(ten_minutes.too_long, "{ten_minutes:?}");
+        assert_eq!((ten_minutes.video_kbps, ten_minutes.audio_kbps), (200, 64));
+
+        // 280 s fits 10 MB only with the thinner sound.
+        let rescued = recipe(&target(10 * MB, 280_000, 1920, 1080));
+        assert!(!rescued.too_long, "{rescued:?}");
+        assert_eq!(rescued.audio_kbps, 64);
+        assert!(rescued.video_kbps >= 200);
+        let predicted = (rescued.video_kbps + rescued.audio_kbps) as u64 * 280_000 / 8;
+        assert!(predicted <= 10 * MB, "predicted {predicted} bytes");
+
+        let short = recipe(&target(10 * MB, 60_000, 1920, 1080));
+        assert_eq!(short.audio_kbps, 128, "a clip that fits keeps its full sound");
+        assert!(!short.too_long);
+    }
+
+    #[test]
+    fn sizes_are_shown_to_one_decimal() {
+        assert_eq!(megabytes(10 * MB), "10");
+        assert_eq!(megabytes(10 * MB + MB / 4), "10.3");
+        assert_eq!(megabytes(24 * MB + 6 * MB / 10), "24.6");
+        assert_eq!(megabytes(0), "0");
     }
 
     /// Never upscale — a 720p clip exported "at 25 MB" stays 720p.
