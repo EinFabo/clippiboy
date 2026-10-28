@@ -1320,10 +1320,11 @@ pub fn apply_clip_edit(
     // From before the row is read until the new state is stored: a delete or
     // a move in between would leave the row describing a file that is gone or
     // elsewhere. `edit::run` takes the same lock again (it is reentrant) and
-    // reads the row itself, once it holds `WORKING` as well.
+    // reads the row itself, once it holds `WORKING` as well. The settings are
+    // read first: nothing takes a lock before `AppState.config`.
+    let (encoder, quality) = encoder_for(&state);
     let own = edit::clip_lock(&id);
     let _clip = own.lock();
-    let (encoder, quality) = encoder_for(&state);
     let trim = edit::Trim { start_ms, end_ms };
 
     let loaded = std::cell::Cell::new(false);
@@ -1353,10 +1354,11 @@ pub fn restore_clip_original(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Clip> {
-    // As in `apply_clip_edit`: held across the run and `store`.
+    // As in `apply_clip_edit`: held across the run and `store`, the settings
+    // read before it.
+    let (encoder, quality) = encoder_for(&state);
     let own = edit::clip_lock(&id);
     let _clip = own.lock();
-    let (encoder, quality) = encoder_for(&state);
 
     // If it fails, the record stays on the clip: it carries the offset the
     // individual tracks sit at. Throwing it away because the recording cannot
@@ -1453,6 +1455,8 @@ pub(crate) fn shrink(
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
 ) -> Result<Shrunk> {
+    // The settings before any lock: nothing takes one before `AppState.config`.
+    let (encoder, _) = encoder_for(state);
     // Held for the whole ffmpeg run, which reads the clip file throughout: a
     // save, a move or a delete of this clip waits for it, and it for them.
     let own = edit::clip_lock(id);
@@ -1483,7 +1487,6 @@ pub(crate) fn shrink(
         width: clip.width,
         height: clip.height,
     });
-    let (encoder, _) = encoder_for(state);
     let args = crate::export::arguments(&source, &part, &recipe, clip.height, encoder);
 
     match edit::run_with_progress(&args, duration_ms, on_progress) {
