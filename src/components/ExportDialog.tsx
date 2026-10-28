@@ -37,7 +37,6 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
   const [stage, setStage] = useState<"idle" | "choosing" | "writing">("idle");
   const busy = stage !== "idle";
   const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
   const plan = planExport(clip, Math.floor(targetMb * MB));
 
   // Escape closes — but not mid-run, where it would leave a half-written file
@@ -77,7 +76,6 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
     const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} - ${roundMb(targetMb)} MB.mp4`;
     setStage("choosing");
     setProgress(0);
-    setError(null);
     try {
       // The core opens the save dialog itself and only takes the name as a
       // suggestion; `null` means it was cancelled, which leaves this open.
@@ -85,9 +83,13 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
       if (written === null) setStage("idle");
       else onClose();
     } catch (failure) {
-      // The core raises its own notice for a failure after it started, so this
-      // is only a rejection that came before (serde, IPC).
-      setError(`The export did not start: ${String(failure)}`);
+      // Said once, by the core: `export_clip` raises a notice for every
+      // failure it answers with — a check before the save dialog, a name that
+      // is taken, an encode that broke off minutes in. A line here as well
+      // doubled it, and claimed the export never started when it had. A
+      // rejection from the bridge itself (a command this window may not call)
+      // is a build error the grant tests catch, not something to show.
+      console.error("export failed", failure);
       setStage("idle");
     }
   }
@@ -194,12 +196,6 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
             progress={progress > 0 ? progress : null}
             label="The copy is being written."
           />
-        )}
-
-        {error && (
-          <p role="alert" className="mt-4 text-xs text-red-400">
-            {error}
-          </p>
         )}
 
         <div className="mt-6 flex justify-end gap-2">
