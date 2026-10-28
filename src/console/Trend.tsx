@@ -42,7 +42,9 @@ export interface Trend {
  * Sammelt den Verlauf. `push` gehört in den `engine-status`-Zuhörer, direkt
  * neben `setStatus` — beide Änderungen liegen dann im selben Rendern.
  */
-export function useTrend(targetFps: number): Trend & { push: (s: EngineStatus) => void } {
+export function useTrend(
+  targetFps: number,
+): Trend & { push: (s: EngineStatus) => void; record: (s: EngineStatus) => void; commit: () => void } {
   const [samples, setSamples] = useState<Sample[]>([]);
   /** Der Zählerstand aus dem vorigen Status, um den Zuwachs zu bilden.
    *
@@ -52,7 +54,11 @@ export function useTrend(targetFps: number): Trend & { push: (s: EngineStatus) =
    *  verrechnet. Der Zuhörer läuft einmal, also steht der Zuwachs hier. */
   const seen = useRef<number | null>(null);
 
-  const push = useCallback((status: EngineStatus) => {
+  /** Samples taken while the console is hidden: written to a ref only, so a
+   *  hidden console does not re-render every second. `commit` moves them in. */
+  const parked = useRef<Sample[]>([]);
+
+  const sample = useCallback((status: EngineStatus): Sample => {
     const before = seen.current;
     seen.current = status.droppedFrames;
     // Ein Neustart der Pipeline setzt den Zähler zurück; der Unterschied wäre
@@ -61,11 +67,29 @@ export function useTrend(targetFps: number): Trend & { push: (s: EngineStatus) =
       before === null || status.droppedFrames < before
         ? 0
         : status.droppedFrames - before;
-    setSamples((prev) =>
-      prev
-        .concat({ fps: status.fps, dropped: grew, active: status.bufferActive })
-        .slice(-TREND_SECONDS),
-    );
+    return { fps: status.fps, dropped: grew, active: status.bufferActive };
+  }, []);
+
+  const push = useCallback(
+    (status: EngineStatus) => {
+      const next = sample(status);
+      setSamples((prev) => prev.concat(next).slice(-TREND_SECONDS));
+    },
+    [sample],
+  );
+
+  const record = useCallback(
+    (status: EngineStatus) => {
+      parked.current = parked.current.concat(sample(status)).slice(-TREND_SECONDS);
+    },
+    [sample],
+  );
+
+  const commit = useCallback(() => {
+    const taken = parked.current;
+    parked.current = [];
+    if (taken.length === 0) return;
+    setSamples((prev) => prev.concat(taken).slice(-TREND_SECONDS));
   }, []);
 
   const dropped = samples.reduce((sum, s) => sum + s.dropped, 0);
@@ -84,7 +108,7 @@ export function useTrend(targetFps: number): Trend & { push: (s: EngineStatus) =
     }
   }
 
-  return { samples, dropped, dipAgo, push };
+  return { samples, dropped, dipAgo, push, record, commit };
 }
 
 /** Die Kurve selbst. Ohne Achsen und ohne Zahlen — die stehen in den Kacheln

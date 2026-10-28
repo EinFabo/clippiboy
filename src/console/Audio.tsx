@@ -37,7 +37,7 @@ export function useLevelBars(): LevelBars {
   const bars = useRef(new Map<string, HTMLElement>());
   useEffect(() => {
     if (!inTauri) return;
-    const off = listen<LevelMap>("audio-levels", (e) => {
+    const off = listen<LevelMap>("audio-levels:console", (e) => {
       for (const [id, bar] of bars.current) {
         // Stumm heißt stumm — der Kern misst weiter, was hereinkommt, aber im
         // Clip landet nichts davon. Ein zappelnder Balken an einer
@@ -45,7 +45,7 @@ export function useLevelBars(): LevelBars {
         const level = bar.dataset.muted === "true" ? 0 : (e.payload[id] ?? 0);
         bar.style.width = `${Math.min(1, Math.max(0, level)) * 100}%`;
       }
-    });
+    }, { target: "console" });
     return () => {
       void off.then((fn) => fn());
     };

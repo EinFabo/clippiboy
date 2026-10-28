@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "@/lib/ipc";
+import { sameRecord } from "@/lib/same";
 import type { AudioSource, EngineStatus } from "@/lib/types";
 
 /**
@@ -38,8 +39,12 @@ export function useAudioTrouble() {
   useEffect(() => {
     if (!inTauri) return;
     const offs = [
-      listen<Record<string, string>>("audio-errors", (e) => setErrors(e.payload)),
-      listen<Record<string, string>>("audio-warnings", (e) => setWarnings(e.payload)),
+      listen<Record<string, string>>("audio-errors", (e) =>
+        // Keep the old object when nothing changed: the same warnings arrive
+        // every second and a new object would re-render the whole console.
+        setErrors((prev) => (sameRecord(prev, e.payload) ? prev : e.payload)),
+      ),
+      listen<Record<string, string>>("audio-warnings", (e) => setWarnings((prev) => (sameRecord(prev, e.payload) ? prev : e.payload))),
     ];
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));

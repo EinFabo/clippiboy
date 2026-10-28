@@ -1297,10 +1297,10 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             if watched || console_watched || logging {
                 let levels = state.audio.levels(&sources);
                 if watched {
-                    let _ = handle.emit_to("main", "audio-levels", &levels);
+                    let _ = handle.emit_to("main", &levels_event("main"), &levels);
                 }
                 if console_watched {
-                    let _ = handle.emit_to(console::LABEL, "audio-levels", &levels);
+                    let _ = handle.emit_to(console::LABEL, &levels_event(console::LABEL), &levels);
                 }
                 // Diagnostics: with CLIPPIBOY_LOG_LEVELS=1 the levels get logged.
                 if tick % 20 == 0 && logging {
@@ -1890,9 +1890,24 @@ pub fn run() {
     });
 }
 
+/// The level stream's event name for one window. Each window listens to its
+/// own name, so a hidden window never handles a packet meant for the other.
+pub fn levels_event(label: &str) -> String {
+    format!("audio-levels:{label}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_window_has_its_own_level_event() {
+        assert_eq!(levels_event("main"), "audio-levels:main");
+        assert_ne!(levels_event("main"), levels_event(crate::console::LABEL));
+        assert!(levels_event("console")
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-/:_".contains(c)));
+    }
 
     #[test]
     fn a_way_up_to_the_drive_is_not_granted_even_when_it_exists() {

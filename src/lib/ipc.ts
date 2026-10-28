@@ -215,7 +215,8 @@ export const api = {
 
 export const events = {
   onLevels: (cb: (levels: LevelMap) => void): Promise<UnlistenFn> =>
-    listen<LevelMap>("audio-levels", (e) => cb(e.payload)),
+    // Window-scoped: only the main window's own stream, under its own name.
+    listen<LevelMap>("audio-levels:main", (e) => cb(e.payload), { target: "main" }),
   onStatus: (cb: (s: EngineStatus) => void): Promise<UnlistenFn> =>
     listen<EngineStatus>("engine-status", (e) => cb(e.payload)),
   onClipSaved: (cb: (c: Clip) => void): Promise<UnlistenFn> =>

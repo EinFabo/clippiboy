@@ -255,6 +255,10 @@ export function Console() {
    *  findet den Einbruch dann noch vor. */
   const trend = useTrend(targetFps);
   const trendPush = trend.push;
+  const trendRecord = trend.record;
+  const trendCommit = trend.commit;
+  /** The newest status that arrived while hidden; `begin()` shows it. */
+  const latestStatus = useRef<EngineStatus | null>(null);
   const { errors: sourceErrors, warnings: sourceWarnings } = useAudioTrouble();
   /** Die Pegelbalken des Ton-Panels. Sie werden an React vorbei gezeichnet —
    *  warum, steht in `Audio.tsx`. */
@@ -368,6 +372,12 @@ export function Console() {
       .catch(() => {});
     const offs = [
       listen<EngineStatus>("engine-status", (e) => {
+        if (hidden.current) {
+          // Nobody sees it: park it instead of re-rendering the whole tree.
+          latestStatus.current = e.payload;
+          trendRecord(e.payload);
+          return;
+        }
         setStatus(e.payload);
         // Im selben Zuhörer, damit beide Änderungen in einem Rendern landen.
         trendPush(e.payload);
@@ -432,6 +442,9 @@ export function Console() {
     function begin(payload: OpenedPayload) {
       closingRef.current = false;
       hidden.current = false;
+      if (latestStatus.current) setStatus(latestStatus.current);
+      latestStatus.current = null;
+      trendCommit();
       setClosing(false);
       setOpened((n) => n + 1);
       setPanel(null);
@@ -465,7 +478,7 @@ export function Console() {
     return () => {
       offs.forEach((off) => void off.then((fn) => fn()));
     };
-  }, [loadClips, refreshClips, trendPush, close, outbox]);
+  }, [loadClips, refreshClips, trendPush, trendRecord, trendCommit, close, outbox]);
 
   /** Open something above the dock — a panel, or the player. The window is the
    *  screen and never changes size, so this is nothing but state. */
