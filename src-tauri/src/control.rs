@@ -557,21 +557,25 @@ mod tests {
     }
 
     /// Over a real socket, as the attack came: the server side reads with the
-    /// port's timeout and has to let go on its own.
+    /// port's timeout and has to let go on its own. The client keeps the
+    /// connection open, sending nothing more, until the server is done or
+    /// `hold` is up — not for a fixed time: under a loaded test run a client
+    /// that hung up first turned the timeout into an "incomplete request".
     fn served(send: &'static [u8], hold: Duration) -> (Result<Request, (u16, &'static str)>, Duration) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
+        let (done, released) = std::sync::mpsc::channel::<()>();
         let client = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(address).unwrap();
             stream.write_all(send).unwrap();
-            // Keeps the connection open without sending more.
-            std::thread::sleep(hold);
+            let _ = released.recv_timeout(hold);
         });
         let (mut stream, _) = listener.accept().unwrap();
         stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
         let started = std::time::Instant::now();
         let outcome = read_request(&mut stream, started + REQUEST_DEADLINE);
         let took = started.elapsed();
+        let _ = done.send(());
         client.join().unwrap();
         (outcome, took)
     }
@@ -586,11 +590,15 @@ mod tests {
         assert!(took < Duration::from_millis(500), "waited {took:?} for a body that never comes");
     }
 
+    /// Let go by the read timeout: not before it (less a timer tick's slack —
+    /// Windows may wake a socket wait a few milliseconds early), and well
+    /// before the client would have given up by itself.
     #[test]
     fn a_client_that_stalls_is_let_go_after_the_timeout() {
-        let (outcome, took) = served(b"GET /v1/status HTTP/1.1\r\nX-Cl", Duration::from_secs(4));
+        let (outcome, took) = served(b"GET /v1/status HTTP/1.1\r\nX-Cl", Duration::from_secs(30));
         assert_eq!(outcome.unwrap_err().0, 408);
-        assert!(took >= READ_TIMEOUT && took < READ_TIMEOUT * 2, "took {took:?}");
+        let early = Duration::from_millis(100);
+        assert!(took >= READ_TIMEOUT - early && took < READ_TIMEOUT * 2, "took {took:?}");
     }
 
     /// One byte per read, each well inside the read timeout.
