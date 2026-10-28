@@ -25,7 +25,7 @@ import { useClipMix } from "@/lib/useClipMix";
 import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
-import { leaving as closing, typesText } from "@/lib/viewer";
+import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
 import { useGrants } from "@/lib/useGrants";
 import type { Clip, ClipEdit } from "@/lib/types";
 
@@ -544,6 +544,8 @@ export function ClipPlayer({
       // Sliders are not text: the volume keeps the focus after a drag, and
       // would otherwise swallow every shortcut.
       if (typesText(event.target as HTMLElement | null)) return;
+      // Only the arrows and their kin stay with a focused slider.
+      if (sliderOwns(event.target as HTMLInputElement | null, event.key)) return;
       const handlers: Record<string, () => void> = {
         " ": toggle,
         k: toggle,

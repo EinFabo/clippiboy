@@ -13,6 +13,18 @@ export function typesText(target: { tagName?: string; type?: string } | null): b
   return target.tagName === "INPUT" && target.type !== "range";
 }
 
+/** The keys a focused slider moves itself with. */
+const SLIDER_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+
+/**
+ * Whether a focused slider keeps this key. Sliders are not text, so the
+ * shortcuts reach them — but the arrows move a gain or the volume, and taken
+ * for seeking they left a slider nobody could move by keyboard.
+ */
+export function sliderOwns(target: { tagName?: string; type?: string } | null, key: string): boolean {
+  return target?.tagName === "INPUT" && target.type === "range" && SLIDER_KEYS.has(key);
+}
+
 /** What closing the player does: wait for a running write, ask about unapplied edits, or go. */
 export function leaving(writing: boolean, dirty: boolean): "wait" | "ask" | "go" {
   if (writing) return "wait";
