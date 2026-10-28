@@ -240,8 +240,8 @@ fn specifiers(source: &str) -> Vec<String> {
     out
 }
 
-/// `allow-a-b` → `a_b`; every other permission is ignored.
-fn granted(capability: &str) -> BTreeSet<String> {
+/// Every permission a capability file lists, as it is written there.
+fn permissions(capability: &str) -> Vec<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(capability);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -249,7 +249,15 @@ fn granted(capability: &str) -> BTreeSet<String> {
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|p| p.as_str()?.strip_prefix("allow-"))
+        .map(|p| p.as_str().unwrap_or_else(|| panic!("{capability}: {p} is no plain permission")).to_string())
+        .collect()
+}
+
+/// `allow-a-b` → `a_b`; every other permission is ignored.
+fn granted(capability: &str) -> BTreeSet<String> {
+    permissions(capability)
+        .iter()
+        .filter_map(|p| p.strip_prefix("allow-"))
         .map(|name| name.replace('-', "_"))
         .collect()
 }
@@ -297,5 +305,16 @@ fn every_command_a_window_calls_is_granted_to_it() {
             .cloned()
             .collect();
         assert!(missing.is_empty(), "{window} calls commands it is not granted: {missing:?}");
+    }
+}
+
+/// CON-3 / CFG-6: neither window moves, hides or shows itself, and neither
+/// reads pictures or makes tray icons — `core:default` let them. They listen
+/// to the core's events and call the commands above, nothing more.
+#[test]
+fn the_console_and_the_banner_may_only_listen() {
+    for capability in ["capabilities/console.json", "capabilities/overlay.json"] {
+        let core: Vec<String> = permissions(capability).into_iter().filter(|p| p.starts_with("core:")).collect();
+        assert_eq!(core, ["core:event:allow-listen", "core:event:allow-unlisten"], "{capability}");
     }
 }

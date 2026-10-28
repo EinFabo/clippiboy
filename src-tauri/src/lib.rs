@@ -1437,8 +1437,9 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
 
 /// Grant the configured clip folder to the `asset:` protocol.
 ///
-/// Without it the player plays nothing as soon as `clipDir` lies outside the
-/// `$VIDEO` scope from `tauri.conf.json`.
+/// Without it the player plays nothing from there: the asset scope in
+/// `tauri.conf.json` is empty, every folder a window loads from is granted
+/// here while running.
 ///
 /// Checked as the folder really is: Tauri grants the resolved form as well, so
 /// `D:\clips\..` or a junction onto `D:\` would open the whole drive.
@@ -1468,6 +1469,20 @@ pub fn grantable_dir(path: &std::path::Path) -> bool {
         && path
             .components()
             .all(|part| !matches!(part, Component::ParentDir | Component::CurDir))
+}
+
+/// The folders in the data directory the windows load files from, granted
+/// at setup: they are local, so resolving them never waits on a disk.
+///
+/// The preview folder holds the throwaway files (waveforms, track previews of
+/// clips without stored tracks). The individual tracks, by contrast, are the
+/// master copy of the mix and stay put — the player plays them straight from
+/// there. The thumbnails live here rather than in the user's folder. And the
+/// originals store: a trimmed clip's untouched recording is never played back
+/// from it — but a screenshot's is: while it is being annotated, that is the
+/// very picture on the stage.
+fn asset_data_dirs() -> [std::path::PathBuf; 4] {
+    [preview::dir(), stems::root(), thumbs::dir(), edit::root()]
 }
 
 /// Grant the folders older clips live in as well.
@@ -1524,6 +1539,9 @@ fn maintain_library(app: &tauri::AppHandle) {
                 allow_existing_clip_dirs(&app, rows);
             }
             drop(listed);
+            // The asset scope holds nothing else (`tauri.conf.json`): a window
+            // that read the list before these grants reads it again now.
+            let _ = app.emit("clips-changed", ());
             // After a pass that changed something, the gallery learns of it
             // at once rather than at the very end.
             let announce = |changed: usize| {
@@ -1676,21 +1694,10 @@ pub fn run() {
             discard_leftovers();
             // Throwaway files from an old session: clear first, then grant.
             preview::clear();
-            allow_clip_dir(handle, &preview::dir().to_string_lossy());
-            // The individual tracks, by contrast, are the master copy of the mix
-            // and stay put — the player plays them straight from there.
-            let _ = std::fs::create_dir_all(stems::root());
-            allow_clip_dir(handle, &stems::root().to_string_lossy());
-            // The thumbnails live in the data directory rather than the user's
-            // folder — the gallery loads them from there.
-            let _ = std::fs::create_dir_all(thumbs::dir());
-            allow_clip_dir(handle, &thumbs::dir().to_string_lossy());
-            // The originals store. A trimmed clip's untouched recording is
-            // never played back from here — but a screenshot's is: while it is
-            // being annotated, that is the very picture on the stage, and
-            // without this the WebView refuses to load it.
-            let _ = std::fs::create_dir_all(edit::root());
-            allow_clip_dir(handle, &edit::root().to_string_lossy());
+            for dir in asset_data_dirs() {
+                let _ = std::fs::create_dir_all(&dir);
+                allow_clip_dir(handle, &dir.to_string_lossy());
+            }
             // The passes over the library touch every clip's file — on a thread
             // of its own, so a clip folder on a sleeping disk holds no window.
             maintain_library(handle);
@@ -1901,6 +1908,38 @@ mod tests {
         assert!(grant_target(&to_root.to_string_lossy()).is_none(), "{}", to_root.display());
         assert!(grant_target(&root.to_string_lossy()).is_none());
         let _ = std::fs::remove_dir_all(&inside);
+    }
+
+    /// CORE-7: the asset protocol reads only folders granted while running —
+    /// nothing from `tauri.conf.json`, which handed out all of Videos and a
+    /// data folder ClippiBoy never used.
+    #[test]
+    fn the_asset_scope_holds_nothing_until_a_folder_is_granted() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let conf: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let protocol = &conf["app"]["security"]["assetProtocol"];
+        assert_eq!(protocol["enable"], true);
+        assert_eq!(protocol["scope"], serde_json::json!([]));
+    }
+
+    /// What the windows load from the data folder lies in a folder setup
+    /// grants: thumbnails, waveforms, track previews, a screenshot's grounds.
+    /// The clips themselves lie in the clip folders `maintain_library` grants.
+    #[test]
+    fn every_picture_and_track_from_the_data_folder_lies_in_a_granted_folder() {
+        let granted = asset_data_dirs();
+        let files = [
+            thumbs::path("clip"),
+            preview::dir().join("clip_wave.png"),
+            stems::track_path("clip", 1),
+            edit::video_path("clip"),
+            shot::base_path("clip"),
+            shot::original_path("clip"),
+            shot::under_path("clip"),
+        ];
+        for file in files {
+            assert!(granted.iter().any(|dir| file.starts_with(dir)), "{} is not granted", file.display());
+        }
     }
 
     #[cfg(windows)]

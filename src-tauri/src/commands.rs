@@ -479,14 +479,17 @@ pub fn add_audio_source(
     source_written(&webview, state.upsert_source(source, revision))
 }
 
+/// Refused for a source the config does not hold: an update never adds one
+/// (`AppState::update_source`), that is `add_audio_source`'s, which the
+/// console is not granted.
 #[tauri::command]
 pub fn update_audio_source(
     state: State<'_, AppState>,
     webview: tauri::WebviewWindow,
     source: AudioSource,
     revision: Option<u64>,
-) -> AppConfig {
-    source_written(&webview, state.upsert_source(source, revision))
+) -> Result<AppConfig> {
+    Ok(source_written(&webview, state.update_source(source, revision)?))
 }
 
 #[tauri::command]

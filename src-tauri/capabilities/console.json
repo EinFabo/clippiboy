@@ -6,10 +6,8 @@
     "console"
   ],
   "permissions": [
-    "core:default",
-    "core:window:allow-hide",
-    "core:window:allow-show",
-    "core:window:allow-set-focus",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "allow-get-config",
     "allow-ui-error",
     "allow-engine-status",

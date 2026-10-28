@@ -828,6 +828,32 @@ impl AppState {
         self.replace_config(incoming)
     }
 
+    /// Change a source row that is there. Unlike [`Self::upsert_source`] it
+    /// never adds one: the console may turn a source up or mute it, but an
+    /// id the config does not hold — a row the main window removed meanwhile,
+    /// or one made up — is refused.
+    pub fn update_source(&self, source: AudioSource, base: Option<u64>) -> Result<AppConfig, String> {
+        let incoming = {
+            let current = self.config.lock();
+            if !current.sources.iter().any(|s| s.id == source.id) {
+                return Err(SOURCE_GONE.into());
+            }
+            let history = self.config_history.lock();
+            let mut known = false;
+            let onto_base =
+                config::with_sources(&current, &history, base, |sources| known = replace_known(sources, source.clone()));
+            if known {
+                onto_base
+            } else {
+                // Added after the copy the window names: onto the config as it stands.
+                config::with_sources(&current, &history, None, |sources| {
+                    replace_known(sources, source);
+                })
+            }
+        };
+        Ok(self.replace_config(incoming))
+    }
+
     pub fn remove_source(&self, id: &str, base: Option<u64>) -> AppConfig {
         let incoming = self.source_write(base, |sources| sources.retain(|s| s.id != id));
         self.replace_config(incoming)
@@ -837,6 +863,21 @@ impl AppState {
         let current = self.config.lock();
         let history = self.config_history.lock();
         config::with_sources(&current, &history, base, change)
+    }
+}
+
+/// The answer to an update of a source the config no longer holds.
+pub const SOURCE_GONE: &str = "That source no longer exists.";
+
+/// Replace the row with this source's id; false, and nothing changed, when
+/// there is none.
+pub fn replace_known(sources: &mut [AudioSource], source: AudioSource) -> bool {
+    match sources.iter_mut().find(|s| s.id == source.id) {
+        Some(existing) => {
+            *existing = source;
+            true
+        }
+        None => false,
     }
 }
 
@@ -1924,6 +1965,46 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mic(id: &str) -> AudioSource {
+        AudioSource {
+            id: id.into(),
+            label: "Mic".into(),
+            kind: crate::model::SourceKind::InputDevice { device_id: "dev-1".into() },
+            enabled: true,
+            gain_db: 0.0,
+            muted: false,
+            solo: false,
+            separate_track: false,
+        }
+    }
+
+    /// CON-3: the console sends whole rows; an id the config does not hold
+    /// is no update, and is not added either.
+    #[test]
+    fn an_update_never_adds_a_source() {
+        let mut sources = vec![];
+        assert!(!replace_known(&mut sources, mic("mic")));
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn an_update_replaces_the_row_with_its_id() {
+        let mut sources = vec![mic("mic"), mic("other")];
+        let mut row = mic("mic");
+        row.gain_db = -6.0;
+        assert!(replace_known(&mut sources, row.clone()));
+        assert_eq!(sources, vec![row, mic("other")]);
+    }
+
+    #[test]
+    fn an_update_of_a_source_that_is_gone_is_refused_and_changes_nothing() {
+        let state = AppState::new(false);
+        let before = state.config_snapshot();
+        assert_eq!(state.update_source(mic("not-a-source"), None).err().as_deref(), Some(SOURCE_GONE));
+        let after = state.config_snapshot();
+        assert_eq!((after.revision, after.sources), (before.revision, before.sources));
+    }
 
     /// REC-9: two pictures in one millisecond get two files.
     #[test]

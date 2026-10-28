@@ -6,7 +6,8 @@
     "overlay"
   ],
   "permissions": [
-    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "allow-get-config",
     "allow-ui-error"
   ]
