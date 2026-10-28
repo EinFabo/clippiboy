@@ -1215,23 +1215,37 @@ pub fn finalize(
 /// even one whole packet, or its tables without a frame after them (a crash in
 /// the first frames). Decided by the files alone, never by ffprobe, which may
 /// simply be absent.
+///
+/// The folder is deleted on a yes, so only a file seen to hold nothing counts:
+/// one that cannot be looked at or read — held open by a scanner, a network
+/// drive failing for a moment — may be a whole recording, and is kept.
 pub fn is_empty_leftover(dir: &Path, meta: &Meta) -> bool {
-    let size = |name: &str| std::fs::metadata(dir.join(name)).ok().map(|m| m.len());
-    let empty = match size(VIDEO_TS) {
-        Some(len) => len < ts::PACKET as u64 || has_no_frame(&dir.join(VIDEO_TS), meta.fps),
-        None => size(VIDEO_FILE).is_none_or(|len| len == 0),
-    };
-    meta.frames == Some(0) || empty
+    if meta.frames == Some(0) {
+        return true;
+    }
+    let gone = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
+    match std::fs::metadata(dir.join(VIDEO_TS)) {
+        Ok(ts) => ts.len() < ts::PACKET as u64 || has_no_frame(&dir.join(VIDEO_TS)),
+        Err(err) if gone(&err) => match std::fs::metadata(dir.join(VIDEO_FILE)) {
+            Ok(raw) => raw.len() == 0,
+            Err(err) => gone(&err),
+        },
+        Err(_) => false,
+    }
 }
 
-/// A TS in which [`ts::span_us`] finds no frame. Only a file that can be read:
-/// one that cannot — held open by a scanner, say — may be a whole recording,
-/// and an empty leftover is deleted.
-fn has_no_frame(path: &Path, fps: u32) -> bool {
-    let readable = File::open(path)
-        .and_then(|mut file| file.read(&mut [0u8; ts::PACKET]))
-        .is_ok();
-    readable && ts::span_us(path, fps).is_none()
+/// The largest TS that can count as frameless. A crash in the first frames
+/// leaves the tables and little else; a file past this has had at least one
+/// buffer of frames written, and one whose head reads as nothing (zeros left
+/// by a power loss) still holds the rest of a recording.
+const FRAMELESS_MAX_BYTES: u64 = 64 << 10;
+
+/// A small TS read whole, in one go, with no frame in it. Anything larger, or
+/// any read that fails, is not "no frame".
+fn has_no_frame(path: &Path) -> bool {
+    let mut bytes = Vec::new();
+    let read = File::open(path).and_then(|file| file.take(FRAMELESS_MAX_BYTES + 1).read_to_end(&mut bytes));
+    read.is_ok() && bytes.len() as u64 <= FRAMELESS_MAX_BYTES && ts::read_pts(&bytes).is_empty()
 }
 
 /// Folders left behind by a recording that never stopped — the app crashed, or
@@ -1371,6 +1385,42 @@ mod tests {
         assert!(is_empty_leftover(&dir, &Meta::default()), "tables alone are nothing to finish");
         std::fs::write(dir.join(VIDEO_TS), &whole).unwrap();
         assert!(!is_empty_leftover(&dir, &Meta::default()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Final review I-1: a recording is deleted when it counts as empty, so
+    /// a file that only looks frameless at its head — zeros a power loss left
+    /// there, a read that fails — must not count.
+    #[test]
+    fn a_leftover_that_reads_as_nothing_at_its_head_is_kept() {
+        let dir = scratch("zero-head");
+        let mut ts = ts::TsWriter::new(Vec::new());
+        ts.write_frame(0, true, &[0, 0, 0, 1, 0x65]).unwrap();
+        let frames = ts.finish().unwrap();
+        let mut file = vec![0u8; 2 << 20];
+        file.extend_from_slice(&frames);
+        std::fs::write(dir.join(VIDEO_TS), &file).unwrap();
+        assert!(!is_empty_leftover(&dir, &Meta::default()), "a zero-filled head with frames after it");
+        std::fs::write(dir.join(VIDEO_TS), vec![0u8; 2 << 20]).unwrap();
+        assert!(!is_empty_leftover(&dir, &Meta::default()), "too large to be a crash in the first frames");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_leftover_that_cannot_be_read_is_kept() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = scratch("locked");
+        let tables = {
+            let mut ts = ts::TsWriter::new(Vec::new());
+            ts.write_frame(0, true, &[0, 0, 0, 1, 0x65]).unwrap();
+            ts.finish().unwrap()[..2 * ts::PACKET].to_vec()
+        };
+        std::fs::write(dir.join(VIDEO_TS), &tables).unwrap();
+        assert!(is_empty_leftover(&dir, &Meta::default()), "tables alone, readable");
+        let held = OpenOptions::new().read(true).share_mode(0).open(dir.join(VIDEO_TS)).unwrap();
+        assert!(!is_empty_leftover(&dir, &Meta::default()), "held by another program");
+        drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
