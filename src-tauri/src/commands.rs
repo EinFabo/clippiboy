@@ -1336,7 +1336,7 @@ pub fn apply_clip_edit(
         quality,
         progress(&app, &id),
     );
-    let stored = store(&state, &app, applied, tracks, loaded.get());
+    let stored = store(&state, &app, applied, tracks, loaded.get(), false);
     if stored.is_ok() {
         crate::telemetry::used(crate::telemetry::Feature::Editor);
     }
@@ -1377,7 +1377,7 @@ pub fn restore_clip_original(
         Ok((clip, _)) => clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    store(&state, &app, applied, tracks, loaded.get())
+    store(&state, &app, applied, tracks, loaded.get(), true)
 }
 
 /// The row an edit plans on, read by the run once it has the clip to itself.
@@ -1753,13 +1753,15 @@ fn progress<'a>(app: &'a tauri::AppHandle, id: &'a str) -> impl Fn(f32) + 'a {
     }
 }
 
-/// Write a run's result into the database and read the clip back.
+/// Write a run's result into the database and read the clip back. `undo`:
+/// the run was "Undo trim", which put the untouched recording back.
 fn store(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
     applied: Result<(Clip, edit::Applied)>,
     tracks: Vec<TrackMix>,
     loaded: bool,
+    undo: bool,
 ) -> Result<Clip> {
     let (clip, applied) = match applied {
         Ok(applied) => applied,
@@ -1794,9 +1796,7 @@ fn store(
         start_ms: 0,
         end_ms: applied.duration_ms,
         tracks,
-        // Once in the file, it stays there: zero levels must not read as
-        // "as recorded" afterwards (`edit::audio_untouched`).
-        baked: applied.mix_baked || clip.edit.as_ref().is_some_and(|edit| edit.baked),
+        baked: baked_after(applied.mix_baked, clip, undo),
     };
     let stored = with_library(state, |lib| {
         lib.set_edit(&clip.id, Some(&edit)).map_err(|e| e.to_string())?;
@@ -1846,6 +1846,14 @@ fn store(
     }
     announce_change(app);
     Ok(stored)
+}
+
+/// Is the mix baked into the file after a run? Once in the file, it stays
+/// there: zero levels must not read as "as recorded" afterwards
+/// (`edit::audio_untouched`). Only an undo takes it out — it renders the file
+/// again from the untouched recording, so only what that run baked counts.
+fn baked_after(mix_baked: bool, clip: &Clip, undo: bool) -> bool {
+    mix_baked || (!undo && clip.edit.as_ref().is_some_and(|edit| edit.baked))
 }
 
 /// What a save answers once its file is swapped: always the clip, never an
@@ -1955,6 +1963,21 @@ pub fn retry_ffmpeg() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Undo trim" renders the file again from the untouched recording, so a
+    /// mix baked into the trimmed file is no longer in it. Left set, the clip
+    /// counted as changed for good and a friend send kept its tracks home.
+    #[test]
+    fn undoing_the_trim_takes_the_baked_mix_out_again() {
+        let baked = Clip {
+            edit: Some(ClipEdit { start_ms: 0, end_ms: 1_000, tracks: Vec::new(), baked: true }),
+            ..saved_clip("baked-undo", 1_000)
+        };
+        assert!(!baked_after(false, &baked, true), "an undo kept the old bake");
+        assert!(baked_after(true, &baked, true), "a mix baked by the undo itself was lost");
+        assert!(baked_after(false, &baked, false), "a cut forgot the bake");
+        assert!(!baked_after(false, &saved_clip("plain", 1_000), false));
+    }
 
     fn saved_clip(id: &str, duration_ms: u64) -> Clip {
         Clip {
