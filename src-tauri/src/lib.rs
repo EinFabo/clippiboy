@@ -460,7 +460,8 @@ pub fn restart_buffer_for_settings(app: &tauri::AppHandle) {
 /// How a restart for changed settings went — quietly: the change was the
 /// user's own, and was answered when it was made; a banner here would
 /// replace a "Recording saved" just shown. Only a buffer that did not come
-/// back is worth a word.
+/// back is worth a word, and it gets the whole of a failed start — banner and
+/// sound too: over a game a toast goes unseen, and the buffer is gone.
 fn settings_restarted(app: &tauri::AppHandle, outcome: Result<bool, String>) {
     match &outcome {
         Ok(false) => return,
@@ -473,7 +474,7 @@ fn settings_restarted(app: &tauri::AppHandle, outcome: Result<bool, String>) {
     tray::refresh(app, &status);
     let _ = app.emit("engine-status", status);
     if let Err(err) = outcome {
-        notify(app, "error", format!("The replay buffer stopped: {err}"));
+        buffer_failed(app, format!("The replay buffer stopped: {err}"));
     }
 }
 
