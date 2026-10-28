@@ -178,8 +178,15 @@ let configLoaded = false;
  * core hands over meanwhile wait until the last answer is in.
  */
 const outbox = new Outbox<AppConfig>({
-  shown: () => useEngine.getState().config,
-  show: (config) => useEngine.setState({ config }),
+  // Null until the real settings are in: the mock shown before that is
+  // nothing to build a write on (revision 0, made-up sources and hotkeys).
+  shown: () => (configLoaded ? useEngine.getState().config : null),
+  // Whatever it shows is the core's (an answer, or settings handed over),
+  // or built on them.
+  show: (config) => {
+    configLoaded = true;
+    useEngine.setState({ config });
+  },
   read: () => api.getConfig(),
 });
 
@@ -316,6 +323,10 @@ export const useEngine = create<EngineState>((set, get) => ({
       }
     };
 
+    // Set only together with the settings it vouches for: flagged as soon
+    // as they were read, a switch flipped while the other reads still ran
+    // sent the mock still on screen, and the core took it whole.
+    let configRead = false;
     try {
       const [config, devices, processes, targets, encoders, clips] =
         await Promise.all([
@@ -323,7 +334,7 @@ export const useEngine = create<EngineState>((set, get) => ({
             "Reading the settings",
             async () => {
               const config = await api.getConfig();
-              configLoaded = true;
+              configRead = true;
               return config;
             },
             get().config,
@@ -334,7 +345,19 @@ export const useEngine = create<EngineState>((set, get) => ({
           load("Reading encoders", api.listEncoders, []),
           load("Reading clips", api.listClips, []),
         ]);
-      set({ ready: true, config, devices, processes, targets, encoders, clips });
+      // A write in the meantime read the settings itself (`settingsReadable`)
+      // and may already be built on: that copy stands.
+      const readMeanwhile = configLoaded;
+      set({
+        ready: true,
+        config: readMeanwhile ? get().config : config,
+        devices,
+        processes,
+        targets,
+        encoders,
+        clips,
+      });
+      if (configRead) configLoaded = true;
 
       await events.onLevels((levels) => set({ levels }));
       await events.onStatus((s) =>
