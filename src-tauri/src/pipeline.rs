@@ -68,8 +68,11 @@ pub(crate) fn ring_seconds(buffer_seconds: u32, keyframe_seconds: u32) -> u32 {
 /// The longest hole a clip's MPEG-TS may carry. ffmpeg's CLI takes a break in
 /// a TS's timestamps above its `-dts_delta_threshold` (10 s by default) for a
 /// discontinuity and closes it up: the freeze comes out shorter than its sound
-/// and the picture after it runs ahead. 8 s stays clear of that; a longer hole
-/// takes the raw path, whose ends still meet.
+/// and the picture after it runs ahead. 8 s stays clear of that. A longer hole
+/// cannot reach a clip at all: the game ring cuts it like a sleep
+/// ([`game_ring`]). The raw path spreads frames evenly and stretches only
+/// across short stalls (`muxer::timing`), so across a hole that long its
+/// picture would run ahead of its sound by the whole hole.
 const TS_HOLE_LIMIT_US: i64 = 8_000_000;
 
 /// The longest step between frames a clip still keeps its own timestamps
@@ -77,6 +80,16 @@ const TS_HOLE_LIMIT_US: i64 = 8_000_000;
 /// more than ffmpeg leaves alone in a TS ([`TS_HOLE_LIMIT_US`]).
 fn ts_jump_limit_us(keyframe_seconds: u32) -> i64 {
     crate::buffer::jump_limit_us(keyframe_seconds).min(TS_HOLE_LIMIT_US)
+}
+
+/// The game's packet ring. A step longer than a clip keeps as a held frame is
+/// a break in time: the ring drops what lies before it (BUF-5). That limit is
+/// the clip's own ([`ts_jump_limit_us`]), so every hole the ring keeps goes
+/// out with its timestamps and the sound stays with the picture across it.
+fn game_ring(buffer_seconds: u32, buffer_bytes: u64, keyframe_seconds: u32) -> ReplayBuffer {
+    let mut packets = ReplayBuffer::new(buffer_seconds, buffer_bytes);
+    packets.set_jump_limit_us(ts_jump_limit_us(keyframe_seconds));
+    packets
 }
 
 /// How much audio a clip gets, in 48 kHz frames: as long as its picture lasts.
@@ -1195,10 +1208,7 @@ impl Pipeline {
         // nobody collected.
         audio.reset_rings();
 
-        // A step longer than a clip keeps as a held frame is a break in time:
-        // the ring drops what lies before it (BUF-5).
-        let mut packets = ReplayBuffer::new(buffer_seconds, buffer_bytes);
-        packets.set_jump_limit_us(crate::buffer::jump_limit_us(recording.keyframe_seconds));
+        let packets = game_ring(buffer_seconds, buffer_bytes, recording.keyframe_seconds);
 
         let shared = Arc::new(Shared {
             buffer_seconds: AtomicU32::new(buffer_seconds),
@@ -1578,6 +1588,35 @@ mod tests {
         let pts = [0, 16_666, 11_016_666, 11_033_333];
         let step = crate::muxer::largest_step_us(&pts);
         assert!(!crate::muxer::keeps_timestamps(&pts, step, ts_jump_limit_us(4)), "an 11 s freeze takes the raw path");
+    }
+
+    /// Final review I-1: with 4 s keyframes the ring kept holes up to 12 s,
+    /// but a clip keeps its timestamps only up to 8 s. A 9 s freeze went out
+    /// spread evenly with sound as long as the frames, and everything after
+    /// it played 9 s ahead of its sound. The ring cuts such a hole instead.
+    #[test]
+    fn a_hole_too_long_for_a_clips_timestamps_is_cut_from_the_ring() {
+        use crate::buffer::{EncodedPacket, VIDEO_TRACK};
+        let mut ring = game_ring(30, u64::MAX, 4);
+        let mut push = |from_ms: i64, frames: i64| {
+            for frame in 0..frames {
+                ring.push(EncodedPacket {
+                    track: VIDEO_TRACK,
+                    pts_us: (from_ms + frame * 1000 / 60) * 1000,
+                    duration_us: 16_666,
+                    keyframe: frame % 240 == 0,
+                    data: vec![0u8; 100].into(),
+                });
+            }
+        };
+        push(0, 10 * 60);
+        push(10_000 + 9_000, 10 * 60);
+
+        let clip = ring.snapshot(30);
+        let pts: Vec<i64> = clip.iter().map(|p| p.pts_us).collect();
+        assert!(pts[0] >= 19_000_000, "the clip still reaches back over the hole to {} us", pts[0]);
+        let step = crate::muxer::largest_step_us(&pts);
+        assert!(crate::muxer::keeps_timestamps(&pts, step, ts_jump_limit_us(4)), "what is left keeps its timestamps");
     }
 
     /// Final review: with its own timestamps the audio is as long as the span
