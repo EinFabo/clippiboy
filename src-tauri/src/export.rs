@@ -126,7 +126,7 @@ pub fn recipe(target: &Target) -> Recipe {
 /// it is whole.
 pub fn megabytes(bytes: u64) -> String {
     let tenths = (bytes * 10 + 512 * 1024) / (1024 * 1024);
-    if tenths % 10 == 0 {
+    if tenths.is_multiple_of(10) {
         format!("{}", tenths / 10)
     } else {
         format!("{}.{}", tenths / 10, tenths % 10)
