@@ -17,8 +17,19 @@ import { useMenu, type MenuEntry, type MenuTrigger } from "@/components/ui/Menu"
 import { useEngine } from "@/store";
 import { api, inTauri } from "@/lib/ipc";
 import { useShare } from "@/lib/share";
+import { toast } from "@/lib/toastBus";
 import { freeOn, timeLeft, useLinks } from "@/lib/links";
 import type { Clip } from "@/lib/types";
+
+/** Awaits a menu action: its failure is toasted, its success says `done` if given. */
+async function run(call: Promise<unknown>, done?: string) {
+  try {
+    await call;
+    if (done) toast("ok", done);
+  } catch (err) {
+    toast("error", String(err));
+  }
+}
 
 /** What the calling site contributes on top. */
 interface Options {
@@ -133,7 +144,7 @@ export function useClipMenu() {
       label: clip.screenshot ? "Open in default viewer" : "Open in default player",
       icon: <IconArrowUpRight className={icon} />,
       disabled: !inTauri,
-      onSelect: () => void api.openClip(clip.id),
+      onSelect: () => void run(api.openClip(clip.id)),
     });
     if (options.onRename) {
       entries.push({
@@ -167,7 +178,7 @@ export function useClipMenu() {
         label: "Copy picture",
         icon: <IconCamera className={icon} />,
         disabled: !inTauri,
-        onSelect: () => void api.copyClipImage(clip.id),
+        onSelect: () => void run(api.copyClipImage(clip.id), "Picture copied"),
       });
     }
     entries.push({
@@ -177,7 +188,7 @@ export function useClipMenu() {
       // ready for Ctrl+V in Discord.
       icon: <IconCopy className={icon} />,
       disabled: !inTauri,
-      onSelect: () => void api.copyClipFile(clip.id),
+      onSelect: () => void run(api.copyClipFile(clip.id), "Clip copied"),
     });
     entries.push({
       kind: "item",
@@ -206,14 +217,14 @@ export function useClipMenu() {
       label: "Copy path",
       icon: <IconPaste className={icon} />,
       disabled: !inTauri,
-      onSelect: () => void api.clipboardWriteText(clip.path),
+      onSelect: () => void run(api.clipboardWriteText(clip.path), "Path copied"),
     });
     entries.push({
       kind: "item",
       label: "Show in folder",
       icon: <IconFolder className={icon} />,
       disabled: !inTauri,
-      onSelect: () => void api.revealClip(clip.id),
+      onSelect: () => void run(api.revealClip(clip.id)),
     });
 
     // Only worth offering while there is something to release, and only where

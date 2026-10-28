@@ -3,6 +3,7 @@ import { coalesce } from "./lib/coalesce";
 import { Outbox } from "./lib/outbox";
 import { removeSourceWrite, sourceWrite } from "./lib/sourceWrite";
 import { api, events, inTauri } from "./lib/ipc";
+import { toast } from "./lib/toastBus";
 import * as mock from "./lib/mock";
 import type {
   AppConfig,
@@ -88,6 +89,7 @@ interface EngineState {
   setUpdate: (update: UpdateInfo | null) => void;
   setSettingsTab: (tab: SettingsTab) => void;
   setSetupOpen: (open: boolean) => void;
+  dismissError: () => void;
   /**
    * Download and install `update`. Only comes back if that failed — on
    * success Windows quits the app and starts the installer.
@@ -203,6 +205,17 @@ async function settingsReadable(
   } catch {
     return false;
   }
+}
+
+/**
+ * A failed action: the Settings card keeps the text, and a toast says it where
+ * the user acted. Only for commands that raise no notice of their own.
+ */
+function fail(what: string, err: unknown): string {
+  console.error(`${what} failed`, err);
+  const message = `${what}: ${String(err)}`;
+  toast("error", message);
+  return message;
 }
 
 export const useEngine = create<EngineState>((set, get) => ({
@@ -512,6 +525,10 @@ export const useEngine = create<EngineState>((set, get) => ({
     await outbox.push(write);
   },
 
+  dismissError() {
+    set({ lastError: null });
+  },
+
   async toggleBuffer() {
     const active = get().bufferActive;
     set({ bufferActive: !active });
@@ -591,7 +608,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       const clip = await api.updateClip(id, meta);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
-      set({ lastError: String(err) });
+      set({ lastError: fail("Could not save the change", err) });
     }
   },
 
@@ -609,7 +626,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     } catch (err) {
       set((st) => ({
         clips: st.clips.map((c) => (c.id === id ? { ...c, tags: before } : c)),
-        lastError: String(err),
+        lastError: fail("Could not save the tags", err),
       }));
     }
   },
@@ -629,7 +646,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         clips: st.clips.map((c) =>
           c.id === id ? { ...c, favorite: !favorite } : c,
         ),
-        lastError: String(err),
+        lastError: fail("Could not change the favorite", err),
       }));
     }
   },
@@ -641,7 +658,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       // The folder is cosmetic; the clip itself is right either way.
-      console.error("Clip einsortieren fehlgeschlagen", err);
+      fail("Could not move the clip into its game folder", err);
     }
   },
 
@@ -661,7 +678,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       await api.clearGame(game);
     } catch (err) {
-      set({ lastError: String(err) });
+      set({ lastError: fail("Could not clear the game", err) });
       // The optimistic change may not have happened; show what is stored.
       try {
         set({ clips: await api.listClips() });
@@ -694,7 +711,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       const clip = await api.writeScreenshot(id, crop, steps, marks);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
-      set({ lastError: String(err) });
+      set({ lastError: fail("Could not save the picture", err) });
       throw err;
     }
   },
@@ -705,7 +722,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       const clip = await api.discardClipOriginal(id);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
-      set({ lastError: String(err) });
+      set({ lastError: fail("Could not free up the space", err) });
       throw err;
     }
   },
@@ -716,7 +733,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     try {
       freed = await api.discardAllOriginals();
     } catch (err) {
-      set({ lastError: String(err) });
+      set({ lastError: fail("Could not free up the space", err) });
       throw err;
     }
     // Every clip's `originalAvailable` may have changed — read them all again

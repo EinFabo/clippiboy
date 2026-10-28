@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { useFlip } from "@/lib/useFlip";
+import { onToast } from "@/lib/toastBus";
 
 interface Notice {
   kind: "ok" | "error";
@@ -33,16 +34,9 @@ export function Toasts() {
   );
 
   useEffect(() => {
-    if (!inTauri) return;
-    // StrictMode mounts the effect twice, but `listen` only resolves after the
-    // cleanup. Without the cancelled flag the first listener stays around and
-    // every message appears twice.
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
     const timers: number[] = [];
-
-    listen<Notice>("notice", (event) => {
-      const entry: Entry = { ...event.payload, id: nextId++ };
+    const push = (notice: Notice) => {
+      const entry: Entry = { ...notice, id: nextId++ };
       setEntries((current) => [...current, entry]);
       // Two steps: first the entry is marked as going and plays its exit, then
       // it actually falls out of the list.
@@ -62,13 +56,26 @@ export function Toasts() {
           entry.kind === "error" ? 6000 : 3000,
         ),
       );
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
+    };
+
+    // Toasts raised by this window itself, beside the core's `notice` events.
+    const offBus = onToast(push);
+
+    // StrictMode mounts the effect twice, but `listen` only resolves after the
+    // cleanup. Without the cancelled flag the first listener stays around and
+    // every message appears twice.
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    if (inTauri) {
+      listen<Notice>("notice", (event) => push(event.payload)).then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      });
+    }
 
     return () => {
       cancelled = true;
+      offBus();
       unlisten?.();
       for (const timer of timers) clearTimeout(timer);
     };

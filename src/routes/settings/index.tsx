@@ -38,6 +38,7 @@ export function Settings() {
   const tab = useEngine((s) => s.settingsTab);
   const setTab = useEngine((s) => s.setSettingsTab);
   const lastError = useEngine((s) => s.lastError);
+  const dismissError = useEngine((s) => s.dismissError);
   const unlocked = useEngine((s) => s.config.colorsUnlocked);
   const patchConfig = useEngine((s) => s.patchConfig);
   const shown = unlocked ? [...tabs, extra] : tabs;
@@ -78,8 +79,16 @@ export function Settings() {
       {/* Under every tab: a setting that failed to apply may have been made on
           another one. */}
       {lastError && (
-        <Card className="border-live/40 bg-live/8 p-4 text-sm text-live">
-          {lastError}
+        <Card className="flex items-start justify-between gap-4 border-live/40 bg-live/8 p-4 text-sm text-live">
+          <span>{lastError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            className="shrink-0 px-1 leading-none hover:text-white"
+            onClick={dismissError}
+          >
+            ✕
+          </button>
         </Card>
       )}
     </div>
