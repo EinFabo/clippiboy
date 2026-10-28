@@ -1511,8 +1511,10 @@ fn allow_existing_clip_dirs(app: &tauri::AppHandle, clips: &[model::Clip]) {
 /// rewrites a file another one is moving; each takes a clip's lock and the
 /// library only for that clip. The sweep, the recovery and the originals store
 /// they sit beside work on scratch names and new ids, not on these clips.
-/// Ends with one `clips-changed`, so a gallery that read the list half way
-/// reads it again.
+/// Emits `clips-changed` right after the clip folders are granted (a player
+/// opened before that retries its file then), after every pass that changed
+/// something, and once more at the end, so a gallery that read the list half
+/// way reads it again.
 fn maintain_library(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
 
