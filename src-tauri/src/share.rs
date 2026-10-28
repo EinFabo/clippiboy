@@ -754,8 +754,7 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     let mut meta = meta;
     let tracks_size: u64 = meta.tracks.iter().map(|track| track.size).sum();
     let data_dir = crate::config::data_dir();
-    let same_drive = tracks_size > 0
-        && crate::disk::volume_of(&dir).is_some_and(|volume| Some(volume) == crate::disk::volume_of(&data_dir));
+    let same_drive = tracks_size > 0 && crate::disk::same_volume(&dir, &data_dir);
     let data_free = if tracks_size > 0 { crate::disk::free_bytes(&data_dir) } else { None };
     match room(size, tracks_size, crate::disk::free_bytes(&dir), data_free, same_drive) {
         Room::Fits => {}

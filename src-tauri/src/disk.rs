@@ -74,6 +74,23 @@ pub fn volume_of(_dir: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Do `a` and `b` lie on one volume, and so share its free space? `false`
+/// when either cannot say.
+pub fn same_volume(a: &Path, b: &Path) -> bool {
+    match (volume_of(a), volume_of(b)) {
+        (Some(a), Some(b)) => same_root(&a, &b),
+        _ => false,
+    }
+}
+
+/// Two volume roots, compared without regard to case: Windows hands a share's
+/// root back spelled as the caller spelled the path, and `\\NAS\Clips\`
+/// against `\\nas\clips\` is the same share. A `Path` compares those
+/// parts case by case.
+fn same_root(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
 /// Do `a` and `b` name the same file — under any spelling, through a hard link
 /// or a junction? Asks the file system for the file's identity: the volume's
 /// serial number and the file's index on Windows, device and inode elsewhere.
@@ -133,6 +150,21 @@ mod tests {
         assert_eq!(volume_of(&root.join("not-there-yet").join("deeper")), Some(volume.clone()));
         let drive = &root.to_string_lossy()[..2];
         assert!(volume.to_string_lossy().eq_ignore_ascii_case(&format!("{drive}\\")), "{}", volume.display());
+    }
+
+    /// Final review: a clip folder on a share spelled in another case than
+    /// the data folder's counted as another drive, and a receive counted the
+    /// free space twice.
+    #[test]
+    fn a_volume_spelled_in_another_case_is_the_same_one() {
+        let (upper, lower) = (Path::new(r"\\NAS\Clips\"), Path::new(r"\\nas\clips\"));
+        assert!(same_root(upper, lower));
+        assert!(same_root(Path::new(r"c:\"), Path::new(r"C:\")));
+        assert!(!same_root(Path::new(r"C:\"), Path::new(r"D:\")));
+        assert!(!same_root(upper, Path::new(r"\\nas\other\")));
+        if cfg!(windows) {
+            assert_ne!(upper, lower, "what the comparison was: by `Path`, case by case");
+        }
     }
 
     #[test]
