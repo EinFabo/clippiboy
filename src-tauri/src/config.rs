@@ -309,7 +309,7 @@ pub fn load() -> (AppConfig, Loaded) {
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0);
     let (read, loaded) = read_config(&dir, stamp_ms);
-    let config = match read {
+    let mut config = match read {
         Some(mut config) => {
             // Check the encoder against the hardware actually present.
             config.recording.encoder = encode::resolve(config.recording.encoder);
@@ -323,6 +323,10 @@ pub fn load() -> (AppConfig, Loaded) {
         }
         None => default_config(),
     };
+    // Revision 0 stays the mark of a window that has not read the settings
+    // yet ([`unread`]) — a config from 0.8.3, before revisions, or a first
+    // start included.
+    config.revision = config.revision.max(FIRST_REVISION);
     if let Loaded::Recovered {
         aside,
         from_backup,
@@ -421,14 +425,40 @@ pub fn remember(history: &mut VecDeque<AppConfig>, config: &AppConfig) {
     }
 }
 
+/// The revision a loaded config starts at, at least. The core never gives out
+/// 0 once it holds one, so 0 means a window still on its stand-in values.
+pub const FIRST_REVISION: u64 = 1;
+
+/// Is `revision` that of a window that never read the settings? The main
+/// window shows stand-in values at revision 0 until the real ones arrive
+/// (`src/lib/mock.ts`); a write built on them carries made-up sources,
+/// hotkeys and settings and must not replace the user's.
+pub fn unread(revision: u64, current: &AppConfig) -> bool {
+    revision == 0 && current.revision >= FIRST_REVISION
+}
+
 /// A write from a window, put onto the config the core holds.
+///
+/// The contract with the windows: every write carries the revision of the
+/// copy it was built on — the last one the core answered with or announced.
 ///
 /// A window that holds the current revision replaces the config, as it always
 /// did. One that holds an older copy — the main window while the console muted
 /// a source — would undo every change made since with values it never touched:
 /// it is merged against the copy it was given (`merge_stale`). A revision no
-/// longer in the history is taken as it stands. The result always counts up.
+/// longer in the history is taken as it stands. One built on no read at all
+/// (revision 0, [`unread`]) is not taken: the config stays as it is. The
+/// result always counts up, so the window hears the real config back.
 pub fn accept(current: &AppConfig, history: &VecDeque<AppConfig>, incoming: AppConfig) -> AppConfig {
+    if unread(incoming.revision, current) {
+        log::warn!(
+            "a settings write built on no settings read (revision 0, now {}) — refused",
+            current.revision
+        );
+        let mut next = current.clone();
+        next.revision = current.revision + 1;
+        return next;
+    }
     let mut next = if incoming.revision >= current.revision {
         incoming
     } else {
@@ -455,13 +485,18 @@ pub fn accept(current: &AppConfig, history: &VecDeque<AppConfig>, incoming: AppC
 /// stands, a row read before the main window turned that source down would
 /// undo the level with the mute; put onto its own revision, `accept` merges it
 /// field by field. Without a revision, or with one the history no longer
-/// holds, the row goes onto the current config as before.
+/// holds, the row goes onto the current config as before. A row from a window
+/// that never read the settings ([`unread`]) changes nothing.
 pub fn with_sources(
     current: &AppConfig,
     history: &VecDeque<AppConfig>,
     base: Option<u64>,
     change: impl FnOnce(&mut Vec<AudioSource>),
 ) -> AppConfig {
+    if base.is_some_and(|revision| unread(revision, current)) {
+        log::warn!("a source write built on no settings read (revision 0) — refused");
+        return current.clone();
+    }
     let mut incoming = base
         .and_then(|revision| history.iter().rev().find(|old| old.revision == revision))
         .unwrap_or(current)
@@ -1136,6 +1171,27 @@ mod tests {
         assert_eq!(history.len(), 16);
         assert_eq!(history.front().unwrap().revision, 4);
         assert_eq!(history.back().unwrap().revision, 19);
+    }
+
+    /// Final review (state M4, frontend I1): the main window's stand-in
+    /// config is revision 0. Written before the real one arrived, it replaced
+    /// the user's sources, hotkeys and settings whole.
+    #[test]
+    fn a_write_built_on_no_settings_read_changes_nothing() {
+        let current = revision(with(vec![muted(mic())]), FIRST_REVISION);
+        let history = VecDeque::from([current.clone()]);
+        let mut stand_in = revision(with(vec![mic(), game()]), 0);
+        stand_in.watermark = !current.watermark;
+
+        let accepted = accept(&current, &history, stand_in);
+        assert_eq!(accepted.revision, FIRST_REVISION + 1, "still counts up, so the window hears back");
+        let mut expected = current.clone();
+        expected.revision = FIRST_REVISION + 1;
+        assert_eq!(json(&accepted), json(&expected));
+
+        let row = with_sources(&current, &history, Some(0), |sources| sources.push(game()));
+        assert_eq!(json(&row), json(&current), "a source row from it is no change either");
+        assert!(!unread(0, &revision(with(vec![]), 0)), "a core that never loaded is at 0 itself");
     }
 
     /// A config written before the revision existed loads at revision 0.

@@ -842,7 +842,8 @@ impl AppState {
             let mut known = false;
             let onto_base =
                 config::with_sources(&current, &history, base, |sources| known = replace_known(sources, source.clone()));
-            if known {
+            // A window that never read the settings changes nothing.
+            if known || base.is_some_and(|revision| config::unread(revision, &current)) {
                 onto_base
             } else {
                 // Added after the copy the window names: onto the config as it stands.
