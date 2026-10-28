@@ -130,6 +130,8 @@ export function ClipPlayer({
   /** What follows once the discard question is confirmed: which way to page,
    *  0 to close, or "mixer" to go set up tracks in the mixer. */
   const [pendingStep, setPendingStep] = useState<number | "mixer">(0);
+  /** A step "Discard changes" asked for while a write ran; see `leaveTo`. */
+  const leaveAfterWrite = useRef<number | "mixer" | null>(null);
   writing.current = saving || restoring;
   const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
@@ -628,6 +630,24 @@ export function ClipPlayer({
       ? !sameEdit(current, saved, duration)
       : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration));
   dirtyRef.current = dirty;
+  /** Where "Discard changes" leads: the mixer, a clip to either side, or out (0). */
+  const leaveTo = (where: number | "mixer") => {
+    if (where === "mixer") onOpenMixer();
+    else if (where) step(where, true);
+    else close();
+  };
+  // "Discard changes" confirmed while a save ran: closing, paging and the
+  // mixer all wait for a write, and the click used to be dropped. It is
+  // carried out once the write is done.
+  const writingNow = saving || restoring;
+  useEffect(() => {
+    if (writingNow || leaveAfterWrite.current === null) return;
+    const where = leaveAfterWrite.current;
+    leaveAfterWrite.current = null;
+    leaveTo(where);
+    // Only the end of a write starts it; `leaveTo` is this render's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [writingNow]);
   // Edits that were applied meanwhile need no question any more.
   useEffect(() => {
     if (!dirty) {
@@ -803,9 +823,9 @@ export function ClipPlayer({
             cancelTitle="Back to the player — Escape does the same"
             onConfirm={() => {
               setAskingDiscard(false);
-              if (pendingStep === "mixer") onOpenMixer();
-              else if (pendingStep) step(pendingStep, true);
-              else close();
+              // A save still running would swallow the step: it waits for it.
+              if (writing.current) leaveAfterWrite.current = pendingStep;
+              else leaveTo(pendingStep);
             }}
             onCancel={() => setAskingDiscard(false)}
           />
