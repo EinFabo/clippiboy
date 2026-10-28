@@ -9,15 +9,19 @@
 //!   as deep as `filing` ever puts a clip): a save's `<clip id>.part.*` (and
 //!   the `<stem>_<clip id>.part.*` of versions before), an edit's
 //!   `<clip>.<pid>.neu.mp4` and an export's `<name>.<pid>.clippiboy-export.mp4`;
-//! - in the originals store: a cam the save did not finish (`cam.part.*`);
+//!   and the empty file a screenshot claims its name with
+//!   (`<game or shot>_<stamp>.png`, see `state::claim_file`) when the picture
+//!   never got into it — 0 bytes is never a picture;
+//! - in the originals store: a cam the save did not finish (`cam.part.*`) and
+//!   a picture an edit did not finish (`<clip id>.part.png`);
 //! - in the folder of Discord copies: an export's part file, as above, and
 //!   copies more than a week old ([`COPY_AGE`]);
 //! - in the same folders: a received clip's `.clippiboy-<offer>.part`
 //!   (see `share::sweep_parts`);
 //! - in the stem store: a clip's folder with neither an index nor a clip.
 //!
-//! Only names given out here, and only files from before the start — a save
-//! begun meanwhile keeps its own.
+//! Only names given out here, and only files from well before the start
+//! ([`CLOCK_MARGIN`]) — a save begun meanwhile keeps its own.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -36,22 +40,34 @@ const STORE_GRACE: Duration = Duration::from_secs(10 * 60);
 /// sight in the data folder nobody would ever clear it.
 const COPY_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// How much earlier than the start a file must have been written to count as
+/// left over. A clip folder on a network drive is stamped by the server's
+/// clock, and a NAS a little behind made a save begun during the sweep look
+/// older than the start. A crash's leftovers are far older than this.
+const CLOCK_MARGIN: Duration = Duration::from_secs(2 * 60);
+
+/// What counts as "before the start" for a file written at `started`.
+fn cutoff(started: SystemTime) -> SystemTime {
+    started.checked_sub(CLOCK_MARGIN).unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
 /// Clear away the leftovers, on a thread of its own: a clip folder on a share
 /// that is offline must not hold up the start until the network gives up.
 pub fn run(app: &tauri::AppHandle) {
     let started = SystemTime::now();
+    let before_start = cutoff(started);
     let clip_dir = PathBuf::from(app.state::<AppState>().config_snapshot().clip_dir);
     let app = app.clone();
     std::thread::spawn(move || {
         // The data folder first: it is local, the clip folder may not be —
         // though the stores do ask it which recordings wait to be finished.
-        for path in cam_partials(&crate::edit::root(), started) {
-            remove_file(&path);
+        for path in cam_partials(&crate::edit::root(), before_start) {
+            remove_file(&path, before_start);
         }
         // A Discord copy is written beside where it goes, like any export.
         let discord = crate::commands::discord_root();
-        for path in leftovers_in(&discord, started) {
-            remove_file(&path);
+        for path in leftovers_in(&discord, before_start) {
+            remove_file(&path, before_start);
         }
         let before = started.checked_sub(COPY_AGE).unwrap_or(SystemTime::UNIX_EPOCH);
         for path in aged_copies(&discord, before) {
@@ -77,8 +93,8 @@ pub fn run(app: &tauri::AppHandle) {
                 }
             }
         }
-        for path in leftovers_in(&clip_dir, started) {
-            remove_file(&path);
+        for path in leftovers_in(&clip_dir, before_start) {
+            remove_file(&path, before_start);
         }
         // A receive cut short leaves `.clippiboy-<offer>.part` behind.
         let parts = crate::share::sweep_parts(&clip_dir, STORE_GRACE);
@@ -88,7 +104,14 @@ pub fn run(app: &tauri::AppHandle) {
     });
 }
 
-fn remove_file(path: &Path) {
+/// Removes a leftover found a moment ago — asked once more first: a save,
+/// a recovery or a screenshot may have written to that name since it was
+/// listed, and a newer or no longer empty file is theirs.
+fn remove_file(path: &Path, before: SystemTime) {
+    if !still_left_over(path, before) {
+        log::info!("'{}' was written to since the start; left alone", path.display());
+        return;
+    }
     match std::fs::remove_file(path) {
         Ok(()) => log::info!("removed '{}' from a save cut short", path.display()),
         Err(err) => log::warn!("could not remove '{}': {err}", path.display()),
@@ -118,6 +141,41 @@ fn recording_ids(clip_dir: &Path) -> Vec<String> {
         .flatten()
         .map(|entry| crate::muxer::sanitize(&entry.file_name().to_string_lossy()))
         .collect()
+}
+
+fn still_left_over(path: &Path, before: SystemTime) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    modified_before(path, before) && (is_scratch_name(&name) || is_empty_file(path))
+}
+
+fn is_empty_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == 0)
+}
+
+/// The name a screenshot claims (`state::destination`, `state::claim_file`):
+/// `<anything>_<YYYY-MM-DD_HH-MM-SS-mmm>.png`, with ` (<n>)` before the
+/// extension when that was taken. Only ever swept when the file is empty.
+pub fn is_screenshot_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".png") else {
+        return false;
+    };
+    let stem = match stem.strip_suffix(')').and_then(|rest| rest.rsplit_once(" (")) {
+        Some((rest, n)) if is_pid(n) => rest,
+        Some(_) => return false,
+        None => stem,
+    };
+    let Some(at) = stem.len().checked_sub(23) else {
+        return false;
+    };
+    let Some(stamp) = stem.get(at..) else {
+        return false;
+    };
+    let stamp_like = stamp.char_indices().all(|(at, c)| match at {
+        4 | 7 | 13 | 16 | 19 => c == '-',
+        10 => c == '_',
+        _ => c.is_ascii_digit(),
+    });
+    stamp_like && at > 0 && stem.as_bytes()[at - 1] == b'_'
 }
 
 fn modified_before(path: &Path, before: SystemTime) -> bool {
@@ -187,7 +245,10 @@ pub fn leftovers_in(clip_dir: &Path, before: SystemTime) -> Vec<PathBuf> {
                 if depth < 2 && !name.starts_with('.') {
                     dirs.push((path, depth + 1));
                 }
-            } else if kind.is_file() && is_scratch_name(&name) && modified_before(&path, before) {
+            } else if kind.is_file()
+                && (is_scratch_name(&name) || (is_screenshot_name(&name) && is_empty_file(&path)))
+                && modified_before(&path, before)
+            {
                 found.push(path);
             }
         }
@@ -197,7 +258,9 @@ pub fn leftovers_in(clip_dir: &Path, before: SystemTime) -> Vec<PathBuf> {
 
 /// `cam.part.h264` and `cam.part.mp4` in a clip's folder of the originals
 /// store, written before `before`. `facecam.json` is written only after
-/// `cam.mp4`, so a part file there is never a finished cam.
+/// `cam.mp4`, so a part file there is never a finished cam. Also a picture
+/// staged beside `base.png` or `under.png` (`<clip id>.part.png`,
+/// `shot::write_png`) and never renamed into place.
 pub fn cam_partials(originals: &Path, before: SystemTime) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(originals) else {
         return Vec::new();
@@ -210,6 +273,20 @@ pub fn cam_partials(originals: &Path, before: SystemTime) -> Vec<PathBuf> {
         for name in ["cam.part.h264", "cam.part.mp4"] {
             let path = entry.path().join(name);
             if path.is_file() && modified_before(&path, before) {
+                found.push(path);
+            }
+        }
+        let Ok(files) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let name = file.file_name().to_string_lossy().to_string();
+            let path = file.path();
+            if name.ends_with(".part.png")
+                && is_scratch_name(&name)
+                && file.file_type().is_ok_and(|kind| kind.is_file())
+                && modified_before(&path, before)
+            {
                 found.push(path);
             }
         }
@@ -363,6 +440,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ledger rest T10: a crash between claiming a screenshot's name and
+    /// writing the picture left a 0-byte "picture" in the user's folder.
+    #[test]
+    fn an_empty_screenshot_claim_is_swept_and_a_picture_is_not() {
+        let dir = scratch_dir();
+        let game = dir.join("Valorant").join("Screenshots");
+        std::fs::create_dir_all(&game).unwrap();
+        let claim = dir.join("shot_2026-10-24_12-00-00-123.png");
+        let second = game.join("Valorant_2026-10-24_12-00-00-123 (2).png");
+        let picture = dir.join("shot_2026-10-24_12-00-00-456.png");
+        let users = dir.join("empty.png");
+        std::fs::write(&claim, b"").unwrap();
+        std::fs::write(&second, b"").unwrap();
+        std::fs::write(&picture, b"\x89PNG").unwrap();
+        std::fs::write(&users, b"").unwrap();
+        let mut found = leftovers_in(&dir, SystemTime::now() + Duration::from_secs(60));
+        found.sort();
+        let mut expected = vec![claim, second];
+        expected.sort();
+        assert_eq!(found, expected);
+        assert!(leftovers_in(&dir, SystemTime::UNIX_EPOCH).is_empty(), "a screenshot being taken right now");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn screenshot_names_are_told_apart() {
+        for name in [
+            "shot_2026-10-24_12-00-00-123.png",
+            "Valorant_2026-10-24_12-00-00-123.png",
+            "shot_2026-10-24_12-00-00-123 (2).png",
+            "My_Game_2026-10-24_12-00-00-123 (1000).png",
+        ] {
+            assert!(is_screenshot_name(name), "{name}");
+        }
+        for name in [
+            "2026-10-24_12-00-00-123.png",
+            "shot_2026-10-24_12-00-00-123.mp4",
+            "shot_2026-10-24_12-00-00-12.png",
+            "shot_2026-10-24 12-00-00-123.png",
+            "shot_2026-10-24_12-00-00-123 (x).png",
+            "shot_2026-10-24_12-00-00-123 (02).png",
+            "holiday.png",
+        ] {
+            assert!(!is_screenshot_name(name), "{name}");
+        }
+    }
+
+    /// Final review: a NAS whose clock runs behind stamps a save begun
+    /// during the sweep as older than the start.
+    #[test]
+    fn a_file_from_just_before_the_start_is_left_alone() {
+        let dir = scratch_dir();
+        let part = dir.join(format!("{ID}.part.mp4"));
+        std::fs::write(&part, b"x").unwrap();
+        age(&part, Duration::from_secs(60));
+        assert!(leftovers_in(&dir, cutoff(SystemTime::now())).is_empty());
+        age(&part, Duration::from_secs(10 * 60));
+        assert_eq!(leftovers_in(&dir, cutoff(SystemTime::now())), vec![part.clone()]);
+
+        // Written to again between the listing and the removal.
+        std::fs::write(&part, b"y").unwrap();
+        remove_file(&part, cutoff(SystemTime::now()));
+        assert!(part.is_file(), "a file written since it was listed is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_recording_in_progress_is_never_entered() {
         let dir = scratch_dir();
@@ -384,12 +527,15 @@ mod tests {
         let root = scratch_dir();
         let store = root.join(ID);
         std::fs::create_dir_all(&store).unwrap();
-        for name in ["cam.part.h264", "cam.part.mp4", "cam.mp4", "video.mp4", "facecam.json"] {
+        let picture = format!("{ID}.part.png");
+        for name in ["cam.part.h264", "cam.part.mp4", "cam.mp4", "video.mp4", "facecam.json", "base.png", &picture] {
             std::fs::write(store.join(name), b"x").unwrap();
         }
         let mut found = cam_partials(&root, SystemTime::now() + Duration::from_secs(60));
         found.sort();
-        assert_eq!(found, vec![store.join("cam.part.h264"), store.join("cam.part.mp4")]);
+        let mut expected = vec![store.join("cam.part.h264"), store.join("cam.part.mp4"), store.join(&picture)];
+        expected.sort();
+        assert_eq!(found, expected);
         assert!(cam_partials(&root, SystemTime::UNIX_EPOCH).is_empty(), "a save writing its cam right now");
         let _ = std::fs::remove_dir_all(&root);
     }
