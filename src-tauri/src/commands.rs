@@ -1808,6 +1808,12 @@ fn store(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
     });
+    // The row describes the file now: an in-place cut's marker has done its
+    // job. On a failed write it stays — `heal` below, or `repair` on the next
+    // start, still needs it.
+    if stored.is_ok() {
+        edit::forget_in_place(&clip.id);
+    }
     // The clip's Discord copies show what it was before. An undo puts back a
     // file with the original's old time, so the age check in
     // `export_for_discord` alone would let them through. The file is swapped

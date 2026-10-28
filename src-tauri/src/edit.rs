@@ -16,6 +16,12 @@
 //! it the signal "this original is alive", and [`repair`] can clean up any state
 //! a crash in the middle of the swap leaves behind.
 //!
+//! A cut in place has no note — there is no original for it to describe — yet
+//! its record is just as precious: it is the only place the tracks' offset
+//! lives. So it leaves a marker of its own beside it, `in-place.json`, written
+//! before the file is replaced and deleted only once the database has the new
+//! record ([`forget_in_place`], or [`repair`] on the next start).
+//!
 //! # Three invariants
 //!
 //! 1. **The individual tracks stay untrimmed** and are always in coordinates of
@@ -169,6 +175,51 @@ fn write_note(clip_id: &str, original: &ClipOriginal) -> Result<(), String> {
     std::fs::create_dir_all(dir(clip_id)).map_err(|err| err.to_string())?;
     let text = serde_json::to_string_pretty(original).map_err(|err| err.to_string())?;
     std::fs::write(note_path(clip_id), text).map_err(|err| err.to_string())
+}
+
+/// What a cut in place leaves beside the clip until the database has its
+/// record. A recording, or a clip whose original was thrown away, is cut with
+/// no untouched copy and so with no note; a crash between the swap and the
+/// database write lost where the cut starts, the tracks fell back to offset 0,
+/// and the next mix save baked them out of sync into a file whose trim is final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InPlace {
+    /// The record the cut stands for. Its end follows the planned length;
+    /// what really came out is measured when the marker is applied.
+    original: ClipOriginal,
+    /// The size of the render being swapped in: the clip file at exactly this
+    /// size is the cut, at any other the swap never happened.
+    bytes: u64,
+    /// The planned length, for when the file cannot be measured.
+    length_ms: u64,
+}
+
+fn in_place_path(clip_id: &str) -> PathBuf {
+    dir(clip_id).join("in-place.json")
+}
+
+fn read_in_place(clip_id: &str) -> Option<InPlace> {
+    let text = std::fs::read_to_string(in_place_path(clip_id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_in_place(clip_id: &str, marker: &InPlace) -> Result<(), String> {
+    std::fs::create_dir_all(dir(clip_id)).map_err(|err| err.to_string())?;
+    let text = serde_json::to_string_pretty(marker).map_err(|err| err.to_string())?;
+    std::fs::write(in_place_path(clip_id), text).map_err(|err| err.to_string())
+}
+
+/// The database describes the clip's file again: an in-place cut's marker
+/// goes, and the folder with it if nothing else lives there (screenshot
+/// originals share it). Call it under the clip's lock, only after the row
+/// was written.
+pub(crate) fn forget_in_place(clip_id: &str) {
+    if sanitize(clip_id).is_empty() {
+        return;
+    }
+    let _ = std::fs::remove_file(in_place_path(clip_id));
+    let _ = std::fs::remove_dir(dir(clip_id));
 }
 
 /// Clear away everything belonging to a clip. The note first, then the video —
@@ -697,8 +748,14 @@ fn archives_the_clip(clip: &Clip, plan: &RenderPlan, archive_exists: bool) -> bo
 /// one rolls back. That way the clip can never disappear entirely at any point.
 fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result<(), String> {
     let archive = video_path(&clip.id);
+    let archive_exists = archive.is_file();
     let keep_original = plan.original.is_some();
-    let first_cut = archives_the_clip(clip, plan, archive.is_file());
+    let first_cut = archives_the_clip(clip, plan, archive_exists);
+    // Trimmed with no untouched copy beside it: the record about to be written
+    // is the only place the tracks' offset will live, so it goes on disk
+    // first, as the note does for a first cut.
+    let in_place = keep_original && !first_cut && !archive_exists;
+    let marked_before = if in_place { read_in_place(&clip.id) } else { None };
 
     if first_cut {
         // Note first: if the process dies right away, `repair` finds the file
@@ -714,7 +771,35 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
         }
     }
 
+    if let Some(original) = plan.original.filter(|_| in_place) {
+        let marked = std::fs::metadata(temp)
+            .map_err(|err| err.to_string())
+            .and_then(|meta| {
+                write_in_place(
+                    &clip.id,
+                    &InPlace {
+                        original,
+                        bytes: meta.len(),
+                        length_ms: plan.length_ms,
+                    },
+                )
+            });
+        if let Err(err) = marked {
+            let _ = std::fs::remove_file(temp);
+            return Err(format!("Could not save where the cut starts ({err})."));
+        }
+    }
+
     if let Err(err) = replace_file(temp, target) {
+        if in_place {
+            // Nothing was swapped: the marker says again what it said before.
+            match marked_before {
+                Some(before) => {
+                    let _ = write_in_place(&clip.id, &before);
+                }
+                None => forget_in_place(&clip.id),
+            }
+        }
         if first_cut {
             // Back to the start: better an untrimmed clip than none at all.
             if let Err(back) = move_across(&archive, target) {
@@ -1013,7 +1098,14 @@ fn is_the_whole_recording(original: Option<&ClipOriginal>, actual_ms: u64) -> bo
 /// So this asks the file. The size is the cheap tell — [`crate::clips::Library::set_file_state`]
 /// writes it with every rewrite, so one `stat` per clip settles the usual case,
 /// and only a mismatch is worth an ffprobe.
-fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Option<ClipOriginal>) -> bool {
+///
+/// `probe` measures the file — [`probe_duration_ms`], or a stand-in in tests.
+fn settle(
+    library: &Mutex<Option<crate::clips::Library>>,
+    clip: &Clip,
+    note: Option<ClipOriginal>,
+    probe: &impl Fn(&Path) -> Option<u64>,
+) -> bool {
     let target = Path::new(&clip.path);
     let Ok(actual_bytes) = std::fs::metadata(target).map(|meta| meta.len()) else {
         return false;
@@ -1021,7 +1113,7 @@ fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Opt
     if actual_bytes == clip.size_bytes {
         return false;
     }
-    let Some(actual_ms) = probe_duration_ms(target) else {
+    let Some(actual_ms) = probe(target) else {
         return false;
     };
 
@@ -1077,6 +1169,10 @@ fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Opt
 /// away, is cut with no note at all, and without it the tracks' offset would
 /// be lost along with the database write.
 ///
+/// An in-place cut's marker is applied after that if the file could not be
+/// measured, and goes once the row describes the file; while the database
+/// stays out of reach it stays for [`repair`].
+///
 /// Takes the library itself, not a guard: `settle` locks it per write and
 /// probes the file in between. Call it under the clip's lock.
 pub(crate) fn heal(
@@ -1084,12 +1180,79 @@ pub(crate) fn heal(
     clip_id: &str,
     written: Option<ClipOriginal>,
 ) -> bool {
-    match fresh(library, clip_id) {
-        Some(clip) if !clip.screenshot => {
-            settle(library, &clip, written.or_else(|| read_note(clip_id)))
-        }
-        _ => false,
+    heal_by(library, clip_id, written, &probe_duration_ms)
+}
+
+fn heal_by(
+    library: &Mutex<Option<crate::clips::Library>>,
+    clip_id: &str,
+    written: Option<ClipOriginal>,
+    probe: &impl Fn(&Path) -> Option<u64>,
+) -> bool {
+    let Some(clip) = fresh(library, clip_id).filter(|clip| !clip.screenshot) else {
+        return false;
+    };
+    let settled = settle(library, &clip, written.or_else(|| read_note(clip_id)), probe);
+    let marked = fresh(library, clip_id).is_some_and(|clip| honour_in_place(library, &clip, probe));
+    settled || marked
+}
+
+/// Bring the row in line with an in-place cut whose record did not land.
+///
+/// The clip file at the marker's size is the cut: the record comes from the
+/// marker, its end and the length from the file where it can be measured, from
+/// the plan where it cannot. At any other size the swap never happened and the
+/// row stands. The marker goes once the row describes the file; a clip file
+/// that cannot be reached (a drive asleep or unplugged) keeps it for later.
+/// Returns whether it wrote to the row.
+fn honour_in_place(
+    library: &Mutex<Option<crate::clips::Library>>,
+    clip: &Clip,
+    probe: &impl Fn(&Path) -> Option<u64>,
+) -> bool {
+    let Some(marker) = read_in_place(&clip.id) else {
+        return false;
+    };
+    let target = Path::new(&clip.path);
+    let Ok(bytes) = std::fs::metadata(target).map(|meta| meta.len()) else {
+        return false;
+    };
+    let swapped = bytes == marker.bytes;
+    let on_record = clip.size_bytes == bytes
+        && clip
+            .original
+            .is_some_and(|original| original.start_ms == marker.original.start_ms);
+    if !swapped || on_record {
+        forget_in_place(&clip.id);
+        return false;
     }
+
+    let length_ms = probe(target).unwrap_or(marker.length_ms);
+    let original = ClipOriginal {
+        end_ms: marker.original.start_ms + length_ms,
+        ..marker.original
+    };
+    log::info!("in-place cut of '{}' recorded after the fact", clip.id);
+    let written = with_library(library, |lib| -> rusqlite::Result<()> {
+        lib.set_original(&clip.id, Some(&original))?;
+        // As in `settle`: the handles belong on the new file's full range.
+        if let Some(edit) = clip.edit.as_ref() {
+            lib.set_edit(
+                &clip.id,
+                Some(&ClipEdit {
+                    start_ms: 0,
+                    end_ms: length_ms,
+                    tracks: edit.tracks.clone(),
+                    baked: edit.baked,
+                }),
+            )?;
+        }
+        lib.set_file_state(&clip.id, length_ms, bytes)
+    });
+    if matches!(written, Some(Ok(()))) {
+        forget_in_place(&clip.id);
+    }
+    true
 }
 
 /// Clean up at startup whatever a crash in the middle of the swap left behind.
@@ -1125,6 +1288,7 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
         let note = read_note(&clip.id);
         let video = video_path(&clip.id);
         let target = Path::new(&clip.path);
+        let marked = in_place_path(&clip.id).is_file();
         // Whether an arm wrote to the clip's row, so that it is read again.
         let mut wrote = false;
 
@@ -1139,6 +1303,14 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
                     let _ = with_library(library, |lib| lib.set_original(&clip.id, None));
                     wrote = true;
                 }
+            }
+
+            // A note beside a cut in place is older than the cut (one left
+            // standing when the original was thrown away): the marker has the
+            // newer word, and clearing the folder would take it along.
+            (_, Some(_), false) if marked => {
+                log::info!("stale note beside the in-place cut of '{}' — cleared away", clip.id);
+                let _ = std::fs::remove_file(note_path(&clip.id));
             }
 
             // Note without a recording. Two possibilities, and the clip's length
@@ -1204,15 +1376,23 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
         // answer: does the record still describe the file? A still has no length
         // to compare — asking ffprobe about a PNG would only cost a process.
         //
-        // The row is read again only after an arm wrote to it; otherwise the one
-        // from the list is still the truth. The note is read afresh either way.
+        // An in-place cut's marker goes first: it knows where the cut starts,
+        // which the file cannot say.
+        //
+        // The row is read again only after something wrote to it; otherwise the
+        // one from the list is still the truth. The note is read afresh either way.
         if !clip.screenshot {
-            if wrote {
-                if let Some(again) = fresh(library, &clip.id) {
-                    wrote |= settle(library, &again, read_note(&clip.id));
+            let mut row = if wrote { fresh(library, &clip.id) } else { Some(clip.clone()) };
+            if marked {
+                if let Some(now) = row.as_ref() {
+                    if honour_in_place(library, now, &probe_duration_ms) {
+                        wrote = true;
+                        row = fresh(library, &clip.id);
+                    }
                 }
-            } else {
-                wrote |= settle(library, &clip, read_note(&clip.id));
+            }
+            if let Some(row) = row {
+                wrote |= settle(library, &row, read_note(&clip.id), &probe_duration_ms);
             }
         }
         if wrote {
@@ -1262,12 +1442,36 @@ mod tests {
         }
     }
 
+    /// While the pass waits on one clip, the clip before it is already done
+    /// and written, and the library is free: it goes one clip at a time, not
+    /// as one batch under the library.
     #[test]
     fn repair_takes_the_library_one_clip_at_a_time() {
-        let lib = Mutex::new(Some(crate::clips::Library::in_memory().unwrap()));
-        lib.lock().as_ref().unwrap().insert(&plain_clip(None, None)).unwrap();
-        repair(&lib);
-        assert!(lib.try_lock().is_some(), "nothing holds it afterwards");
+        let lib = std::sync::Arc::new(Mutex::new(Some(crate::clips::Library::in_memory().unwrap())));
+        // Listed first (newest): a note with no recording, at full length — a
+        // trim that never happened, whose record the pass clears.
+        let note = ClipOriginal { duration_ms: 30_000, start_ms: 5_000, end_ms: 20_000 };
+        let first = Clip {
+            id: "pass-order-first-test-clip".into(),
+            created_at: 2,
+            ..plain_clip(None, Some(note))
+        };
+        let second = Clip {
+            id: "pass-order-second-test-clip".into(),
+            path: "C:/clips/y.mp4".into(),
+            created_at: 1,
+            ..plain_clip(None, None)
+        };
+        lib.lock().as_ref().unwrap().insert(&first).unwrap();
+        lib.lock().as_ref().unwrap().insert(&second).unwrap();
+        write_note(&first.id, &ClipOriginal { duration_ms: 30_000, ..note }).unwrap();
+        let mut done_meanwhile = None;
+        pass_waiting_on_a_held_clip(&lib, &second.id, repair, || {
+            let guard = lib.try_lock().expect("the pass holds the library across its wait");
+            done_meanwhile = Some(guard.as_ref().unwrap().get(&first.id).unwrap().unwrap().original);
+        });
+        remove(&first.id);
+        assert_eq!(done_meanwhile, Some(None), "the first clip was not done before the pass reached the second");
     }
 
     /// A pass on its own thread, waiting on `id`'s lock held here: the closure
@@ -1957,6 +2161,167 @@ mod tests {
         let (kept, archived) = first_cut_of(clip);
         assert_eq!(kept, b"the excerpt");
         assert!(archived, "the clip's original was not kept");
+    }
+
+    /// An in-place cut (no untouched copy) swapped in for `clip` under `plan`,
+    /// and then the crash: the database never heard of it. `stale_note` is a
+    /// note left over in the store beside it. Returns the row after `repair`
+    /// and whether the cut's marker is still there, and clears everything away.
+    fn crashed_after_an_in_place_cut(
+        clip: Clip,
+        plan: &RenderPlan,
+        stale_note: Option<ClipOriginal>,
+    ) -> (Clip, bool) {
+        let scratch = std::env::temp_dir().join(format!("clippiboy-{}-{}", clip.id, std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let target = scratch.join("clip.mp4");
+        let temp = scratch.join("clip.neu.mp4");
+        std::fs::write(&target, b"the whole recording").unwrap();
+        std::fs::write(&temp, b"the excerpt").unwrap();
+        let clip = Clip {
+            path: target.to_string_lossy().into_owned(),
+            size_bytes: b"the whole recording".len() as u64,
+            ..clip
+        };
+        remove(&clip.id);
+        let lib = Mutex::new(Some(crate::clips::Library::in_memory().unwrap()));
+        lib.lock().as_ref().unwrap().insert(&clip).unwrap();
+
+        let swapped = swap_in(&clip, plan, &temp, &target);
+        if let Some(note) = stale_note {
+            write_note(&clip.id, &note).unwrap();
+        }
+        repair(&lib);
+
+        let row = lib.lock().as_ref().unwrap().get(&clip.id).unwrap().unwrap();
+        let marked = in_place_path(&clip.id).is_file();
+        let kept = std::fs::read(&target).unwrap();
+        remove(&clip.id);
+        let _ = std::fs::remove_dir_all(&scratch);
+        swapped.unwrap();
+        assert_eq!(kept, b"the excerpt", "the cut was not swapped in");
+        (row, marked)
+    }
+
+    /// A recording's first cut replaces the file in place; a crash before the
+    /// database write used to leave the row with no record at all, so the
+    /// tracks fell back to offset 0 and the next mix save baked them out of
+    /// sync into a file whose trim is final.
+    #[test]
+    fn a_recordings_first_cut_keeps_its_offset_through_a_crash() {
+        let recording = Clip {
+            id: "recording-crash-test".into(),
+            recording: true,
+            ..plain_clip(None, None)
+        };
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        let (row, marked) = crashed_after_an_in_place_cut(recording, &first, None);
+        assert_eq!(row.original.map(|original| original.start_ms), Some(5_000));
+        assert_eq!(row.size_bytes, b"the excerpt".len() as u64);
+        assert!(!marked, "the marker outlived the record it carried");
+    }
+
+    /// The same for a clip whose original was thrown away: a further front cut
+    /// is in place too, and the record must move to the new start.
+    #[test]
+    fn a_cut_after_the_original_was_discarded_keeps_its_offset_through_a_crash() {
+        let before = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 35_000 };
+        let clip = Clip {
+            id: "discarded-crash-test".into(),
+            ..plain_clip(None, Some(before))
+        };
+        let further = plan(Some(&before), false, 30_000, Trim { start_ms: 3_000, end_ms: 30_000 });
+        assert!(!archives_the_clip(&clip, &further, false));
+        let (row, marked) = crashed_after_an_in_place_cut(clip, &further, None);
+        assert_eq!(row.original.map(|original| original.start_ms), Some(8_000));
+        assert_eq!(row.original.map(|original| original.duration_ms), Some(60_000));
+        assert!(!marked);
+    }
+
+    /// A note left over beside an in-place cut is older than the cut: repair's
+    /// "note without a recording" arm must neither take its word nor clear
+    /// the marker away with it.
+    #[test]
+    fn a_stale_note_does_not_outvote_an_in_place_cut() {
+        let recording = Clip {
+            id: "recording-stale-note-test".into(),
+            recording: true,
+            ..plain_clip(None, None)
+        };
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        let stale = ClipOriginal { duration_ms: 30_000, start_ms: 2_000, end_ms: 30_000 };
+        let (row, marked) = crashed_after_an_in_place_cut(recording, &first, Some(stale));
+        assert_eq!(row.original.map(|original| original.start_ms), Some(5_000));
+        assert!(!marked);
+    }
+
+    /// A crash after the marker but before the swap: the file is still the
+    /// one the row describes, so the row stands and the marker goes.
+    #[test]
+    fn a_marker_for_a_swap_that_never_happened_changes_nothing() {
+        let scratch = std::env::temp_dir().join(format!("clippiboy-unswapped-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let target = scratch.join("clip.mp4");
+        std::fs::write(&target, b"the whole recording").unwrap();
+        let clip = Clip {
+            id: "recording-unswapped-test".into(),
+            recording: true,
+            path: target.to_string_lossy().into_owned(),
+            size_bytes: b"the whole recording".len() as u64,
+            ..plain_clip(None, None)
+        };
+        remove(&clip.id);
+        let lib = Mutex::new(Some(crate::clips::Library::in_memory().unwrap()));
+        lib.lock().as_ref().unwrap().insert(&clip).unwrap();
+        let cut = ClipOriginal { duration_ms: 30_000, start_ms: 5_000, end_ms: 20_000 };
+        write_in_place(&clip.id, &InPlace { original: cut, bytes: 11, length_ms: 15_000 }).unwrap();
+
+        let changed = repair(&lib);
+        let row = lib.lock().as_ref().unwrap().get(&clip.id).unwrap().unwrap();
+        let marked = in_place_path(&clip.id).is_file();
+        remove(&clip.id);
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert_eq!(changed, 0);
+        assert_eq!(row.original, None, "a cut that never happened was recorded");
+        assert!(!marked, "the marker stayed behind");
+    }
+
+    /// `heal` after a failed database write takes the run's own record — the
+    /// measured one — over a note left in the store, and drops the marker
+    /// once the row describes the file.
+    #[test]
+    fn heal_records_the_runs_own_cut() {
+        let scratch = std::env::temp_dir().join(format!("clippiboy-heal-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let target = scratch.join("clip.mp4");
+        std::fs::write(&target, b"the excerpt").unwrap();
+        let clip = Clip {
+            id: "recording-heal-test".into(),
+            recording: true,
+            path: target.to_string_lossy().into_owned(),
+            size_bytes: b"the whole recording".len() as u64,
+            ..plain_clip(None, None)
+        };
+        remove(&clip.id);
+        let lib = Mutex::new(Some(crate::clips::Library::in_memory().unwrap()));
+        lib.lock().as_ref().unwrap().insert(&clip).unwrap();
+        let planned = ClipOriginal { duration_ms: 30_000, start_ms: 5_000, end_ms: 20_000 };
+        write_in_place(&clip.id, &InPlace { original: planned, bytes: 11, length_ms: 15_000 }).unwrap();
+        write_note(&clip.id, &ClipOriginal { duration_ms: 30_000, start_ms: 2_000, end_ms: 30_000 }).unwrap();
+        let written = ClipOriginal { end_ms: 19_900, ..planned };
+
+        let healed = heal_by(&lib, &clip.id, Some(written), &|_: &Path| Some(14_900));
+        let row = lib.lock().as_ref().unwrap().get(&clip.id).unwrap().unwrap();
+        let marked = in_place_path(&clip.id).is_file();
+        remove(&clip.id);
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert!(healed);
+        assert_eq!(
+            row.original,
+            Some(ClipOriginal { duration_ms: 30_000, start_ms: 5_000, end_ms: 19_900 })
+        );
+        assert_eq!((row.duration_ms, row.size_bytes), (14_900, 11));
+        assert!(!marked, "the marker outlived the record");
     }
 
     /// Timing, not a check: `cargo test --lib -- --ignored --nocapture`.
