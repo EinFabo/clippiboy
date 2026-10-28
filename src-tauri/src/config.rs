@@ -412,6 +412,27 @@ pub fn keep_core_owned(next: &mut AppConfig, previous: &AppConfig) {
     next.control.token = previous.control.token.clone();
 }
 
+/// A recording is one stream from one source: switching the source would
+/// restart the capture and cut it in two, so while one runs the source stays
+/// as `previous` has it. `true` when `next` tried to change it.
+///
+/// Asked of the merged result (`accept`), not of what the window sent: a
+/// write built on a copy from before the screen watcher corrected the source
+/// carries the old one without the user touching it, and the merge has kept
+/// the correction already.
+pub fn keep_recording_source(next: &mut AppConfig, previous: &AppConfig) -> bool {
+    let (now, before) = (&mut next.recording, &previous.recording);
+    let changed = now.target_kind != before.target_kind
+        || now.target_id != before.target_id
+        || now.target_stable_id != before.target_stable_id;
+    if changed {
+        now.target_kind = before.target_kind;
+        now.target_id = before.target_id.clone();
+        now.target_stable_id = before.target_stable_id.clone();
+    }
+    changed
+}
+
 /// How many earlier configs the core keeps to merge a stale write against.
 /// A window more than this many changes behind is taken as it stands.
 pub const HISTORY_LEN: usize = 16;
@@ -1192,6 +1213,33 @@ mod tests {
         let row = with_sources(&current, &history, Some(0), |sources| sources.push(game()));
         assert_eq!(json(&row), json(&current), "a source row from it is no change either");
         assert!(!unread(0, &revision(with(vec![]), 0)), "a core that never loaded is at 0 itself");
+    }
+
+    /// Final review (state M1): the screen watcher corrected the source of a
+    /// running recording; a write the main window built before it heard of
+    /// that still carries the old source. That is no attempt to switch it.
+    #[test]
+    fn a_stale_write_does_not_count_as_switching_the_recordings_source() {
+        let on = |id: &str| {
+            let mut config = with(vec![mic()]);
+            config.recording.target_id = Some(id.into());
+            config
+        };
+        let base = revision(on(r"\\.\DISPLAY1"), 4);
+        let current = revision(on(r"\\.\DISPLAY2"), 5);
+        let history = VecDeque::from([base.clone(), current.clone()]);
+
+        let mut stale = base.clone();
+        stale.watermark = !base.watermark;
+        let mut next = accept(&current, &history, stale);
+        assert!(!keep_recording_source(&mut next, &current));
+        assert_eq!(next.recording.target_id.as_deref(), Some(r"\\.\DISPLAY2"));
+
+        let mut switched = current.clone();
+        switched.recording.target_id = Some(r"\\.\DISPLAY3".into());
+        let mut next = accept(&current, &history, switched);
+        assert!(keep_recording_source(&mut next, &current), "a real switch is refused");
+        assert_eq!(next.recording.target_id.as_deref(), Some(r"\\.\DISPLAY2"));
     }
 
     /// A config written before the revision existed loads at revision 0.

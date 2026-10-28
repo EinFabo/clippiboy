@@ -76,19 +76,12 @@ pub fn set_config(
 ) -> AppConfig {
     let previous = state.config_snapshot();
     let mut config = config;
-    // A recording is one stream from one source. Switching the source would
-    // restart the capture and cut it in two — so the source stays until it
-    // stops.
-    if state.is_recording()
-        && (config.recording.target_kind != previous.recording.target_kind
-            || config.recording.target_id != previous.recording.target_id
-            || config.recording.target_stable_id != previous.recording.target_stable_id)
-    {
-        config.recording.target_kind = previous.recording.target_kind;
-        config.recording.target_id = previous.recording.target_id.clone();
-        config.recording.target_stable_id = previous.recording.target_stable_id.clone();
-        crate::notify(&app, "error", "Stop the recording before changing the source.");
-    }
+    // A recording is one stream from one source, so the source stays until it
+    // stops — judged on the merged result under the lock
+    // (`config::keep_recording_source`). Whether one runs is asked before
+    // the config's lock is taken.
+    let recording = state.is_recording();
+    let source_kept = std::cell::Cell::new(false);
     // The clip folder and the token have their own commands: the folder is
     // granted to the player recursively and the token is what every Stream
     // Deck key holds, so a settings write (a stale page, the mock config) must
@@ -100,7 +93,13 @@ pub fn set_config(
     let mut next = state.replace_config_with(config, |next, current| {
         crate::config::keep_core_owned(next, current);
         crate::config::keep_once_flags(next, current);
+        if recording && crate::config::keep_recording_source(next, current) {
+            source_kept.set(true);
+        }
     });
+    if source_kept.get() {
+        crate::notify(&app, "error", "Stop the recording before changing the source.");
+    }
     if previous.friends != next.friends {
         crate::friends::config_changed(&app);
     }
