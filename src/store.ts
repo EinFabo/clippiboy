@@ -190,9 +190,9 @@ const outbox = new Outbox<AppConfig>({
   read: () => api.getConfig(),
 });
 
-/** A refused source write: said, and the core's copy read back over the optimistic one. */
+/** A refused source write: said where it happened, and the core's copy read back over the optimistic one. */
 function sourceFailed(err: unknown): boolean {
-  useEngine.setState({ lastError: `Apply source: ${String(err)}` });
+  useEngine.setState({ lastError: fail("Apply source", err) });
   return true;
 }
 
@@ -306,7 +306,7 @@ export const useEngine = create<EngineState>((set, get) => ({
     // Windows does not always grant rights — that must not take the rest down
     // with it. Previously the target list stayed empty in that case too and no
     // source could be picked on the recording page.
-    const fail = (what: string, err: unknown) => {
+    const loadFailed = (what: string, err: unknown) => {
       console.error(`${what} failed`, err);
       set({ lastError: `${what}: ${String(err)}` });
     };
@@ -318,7 +318,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       try {
         return await call();
       } catch (err) {
-        fail(what, err);
+        loadFailed(what, err);
         return fallback;
       }
     };
