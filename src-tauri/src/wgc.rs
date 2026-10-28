@@ -132,7 +132,7 @@ fn capture_item(
         GraphicsCaptureItem,
         IGraphicsCaptureItemInterop,
     >()
-    .map_err(|err| format!("Capture-Interop: {err}"))?;
+    .map_err(|err| format!("capture interop: {err}"))?;
 
     match kind {
         TargetKind::Monitor => {
@@ -143,7 +143,7 @@ fn capture_item(
                 .ok_or_else(|| "no screen found".to_string())?;
             let monitor = find_monitor(&choice.target.id)?;
             let item = unsafe { interop.CreateForMonitor(monitor) }
-                .map_err(|err| format!("Bildschirm aufnehmen: {err}"))?;
+                .map_err(|err| format!("capture the screen: {err}"))?;
             Ok((item, Some(choice)))
         }
         TargetKind::Window => {

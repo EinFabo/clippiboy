@@ -954,7 +954,7 @@ mod win {
             std::thread::Builder::new()
                 .name("clippiboy-pacer".into())
                 .spawn(move || pace(latest, fps, sink))
-                .map_err(|err| format!("Taktgeber: {err}"))?
+                .map_err(|err| format!("frame pacer: {err}"))?
         };
 
         let mixer_stop = Arc::new(AtomicBool::new(false));

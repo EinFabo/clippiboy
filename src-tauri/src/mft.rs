@@ -376,7 +376,7 @@ fn enumerate(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
                 &mut array,
                 &mut count,
             )
-            .map_err(|err| format!("Encoder suchen: {err}"))?;
+            .map_err(|err| format!("find encoders: {err}"))?;
         }
     }
 
@@ -668,13 +668,13 @@ fn media_type_video(
     settings: &EncoderSettings,
 ) -> Result<IMFMediaType, String> {
     unsafe {
-        let media = MFCreateMediaType().map_err(|err| format!("Medientyp: {err}"))?;
+        let media = MFCreateMediaType().map_err(|err| format!("media type: {err}"))?;
         media
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-            .map_err(|err| format!("Medientyp (Major): {err}"))?;
+            .map_err(|err| format!("media type (major): {err}"))?;
         media
             .SetGUID(&MF_MT_SUBTYPE, &subtype)
-            .map_err(|err| format!("Medientyp (Subtype): {err}"))?;
+            .map_err(|err| format!("media type (subtype): {err}"))?;
         media
             .SetUINT64(
                 &MF_MT_FRAME_SIZE,
@@ -683,13 +683,13 @@ fn media_type_video(
             .map_err(|err| format!("frame size: {err}"))?;
         media
             .SetUINT64(&MF_MT_FRAME_RATE, ((settings.fps.max(1) as u64) << 32) | 1)
-            .map_err(|err| format!("Bildrate: {err}"))?;
+            .map_err(|err| format!("frame rate: {err}"))?;
         media
             .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)
             .map_err(|err| format!("pixel aspect ratio: {err}"))?;
         media
             .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-            .map_err(|err| format!("Interlace: {err}"))?;
+            .map_err(|err| format!("interlace mode: {err}"))?;
 
         // Write the colour metadata along, matching what `convert.rs` actually
         // produces. Without them the player guesses, and the same clip looks
@@ -887,7 +887,7 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
 
     let activate = candidates[pick].activate.clone();
     let transform: IMFTransform = unsafe { activate.ActivateObject() }
-        .map_err(|err| format!("Encoder starten: {err}"))?;
+        .map_err(|err| format!("start the encoder: {err}"))?;
 
     // From here on every way out has to give the hardware session back: a
     // half-built transform is shut down like a finished one.
@@ -919,7 +919,7 @@ fn set_up(
         is_async = unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) == 1;
         if is_async {
             unsafe { attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) }
-                .map_err(|err| format!("Encoder freischalten: {err}"))?;
+                .map_err(|err| format!("unlock the encoder: {err}"))?;
         }
     }
 
@@ -972,7 +972,7 @@ fn set_up(
     unsafe {
         output
             .SetUINT32(&MF_MT_AVG_BITRATE, settings.bitrate_kbps.saturating_mul(1000))
-            .map_err(|err| format!("Bitrate: {err}"))?;
+            .map_err(|err| format!("bitrate: {err}"))?;
         let _ = output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32);
         // The keyframe distance belongs here, not only on ICodecAPI: the NVIDIA
         // MFT accepts `CODECAPI_AVEncMPVGOPSize` without complaint but goes by
@@ -984,14 +984,14 @@ fn set_up(
         );
         transform
             .SetOutputType(0, &output, 0)
-            .map_err(|err| format!("Ausgabetyp: {err}"))?;
+            .map_err(|err| format!("output type: {err}"))?;
     }
 
     let input = media_type_video(MFVideoFormat_NV12, settings)?;
     unsafe {
         transform
             .SetInputType(0, &input, 0)
-            .map_err(|err| format!("Eingabetyp: {err}"))?;
+            .map_err(|err| format!("input type: {err}"))?;
     }
 
     let report = codec
@@ -1032,7 +1032,7 @@ fn set_up(
         let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
         transform
             .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-            .map_err(|err| format!("Encoder starten: {err}"))?;
+            .map_err(|err| format!("start the encoder: {err}"))?;
         let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
     }
 
@@ -1280,9 +1280,9 @@ impl Transform {
                 let info = self
                     .transform
                     .GetOutputStreamInfo(0)
-                    .map_err(|err| format!("Ausgabeinfo: {err}"))?;
+                    .map_err(|err| format!("output info: {err}"))?;
                 let buffer = MFCreateMemoryBuffer(info.cbSize.max(1))
-                    .map_err(|err| format!("Ausgabepuffer: {err}"))?;
+                    .map_err(|err| format!("output buffer: {err}"))?;
                 let sample = MFCreateSample().map_err(|err| format!("output sample: {err}"))?;
                 sample
                     .AddBuffer(&buffer)
@@ -1332,7 +1332,7 @@ impl Transform {
                     }
                     return Ok(Taken::StreamChanged);
                 }
-                Err(err) => return Err(format!("Paket abholen: {err}")),
+                Err(err) => return Err(format!("collect a packet: {err}")),
             }
 
             let Some(sample) = sample else {
@@ -1344,12 +1344,12 @@ impl Transform {
 
             let buffer = sample
                 .ConvertToContiguousBuffer()
-                .map_err(|err| format!("Paketpuffer: {err}"))?;
+                .map_err(|err| format!("packet buffer: {err}"))?;
             let mut ptr: *mut u8 = std::ptr::null_mut();
             let mut len = 0u32;
             buffer
                 .Lock(&mut ptr, None, Some(&mut len))
-                .map_err(|err| format!("Paket lesen: {err}"))?;
+                .map_err(|err| format!("read a packet: {err}"))?;
             let bytes: Arc<[u8]> = std::slice::from_raw_parts(ptr, len as usize).into();
             let _ = buffer.Unlock();
 
@@ -1455,7 +1455,7 @@ impl VideoEncoder {
                         unsafe { CoUninitialize() };
                     }
                 })
-                .map_err(|err| format!("Encoder-Faden: {err}"))?
+                .map_err(|err| format!("encoder thread: {err}"))?
         };
 
         match ready_rx.recv_timeout(Duration::from_secs(10)) {
@@ -1670,7 +1670,7 @@ fn run<F, H>(
                             Err(err) => {
                                 log::warn!("{err}");
                                 if output_streak.failed() {
-                                    stats.fail(format!("the encoder keeps failing: {err}"));
+                                    stats.fail(err.to_string());
                                 }
                             }
                         }
@@ -1708,7 +1708,7 @@ fn run<F, H>(
                                 Err(err) => {
                                     log::warn!("{err}");
                                     if feed_streak.failed() {
-                                        stats.fail(format!("the encoder keeps failing: {err}"));
+                                        stats.fail(err.to_string());
                                     }
                                     None
                                 }
@@ -1729,7 +1729,7 @@ fn run<F, H>(
                                 Some(Err(err)) => {
                                     log::warn!("{err}");
                                     if feed_streak.failed() {
-                                        stats.fail(format!("the encoder keeps failing: {err}"));
+                                        stats.fail(err.to_string());
                                     }
                                 }
                                 None => {}
@@ -1761,7 +1761,7 @@ fn run<F, H>(
                 if let Err(err) = fed {
                     log::warn!("{err}");
                     if feed_streak.failed() {
-                        stats.fail(format!("the encoder keeps failing: {err}"));
+                        stats.fail(err.to_string());
                     }
                     continue;
                 }
@@ -1791,7 +1791,7 @@ fn run<F, H>(
                         Err(err) => {
                             log::warn!("{err}");
                             if output_streak.failed() {
-                                stats.fail(format!("the encoder keeps failing: {err}"));
+                                stats.fail(err.to_string());
                             }
                             break;
                         }

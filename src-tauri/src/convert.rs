@@ -162,9 +162,9 @@ impl Converter {
         };
 
         let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc) }
-            .map_err(|err| format!("VideoProcessor-Enumerator: {err}"))?;
+            .map_err(|err| format!("video processor enumerator: {err}"))?;
         let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0) }
-            .map_err(|err| format!("VideoProcessor: {err}"))?;
+            .map_err(|err| format!("video processor: {err}"))?;
 
         // Set the colour space explicitly. Without it the driver guesses, and
         // depending on the GPU washed-out or crushed colours come out — a good
@@ -245,7 +245,7 @@ impl Converter {
         };
         let mut texture = None;
         unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
-            .map_err(|err| format!("NV12-Textur: {err}"))?;
+            .map_err(|err| format!("NV12 texture: {err}"))?;
         let texture = texture.ok_or_else(|| "NV12-Textur fehlt".to_string())?;
 
         let view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
@@ -263,7 +263,7 @@ impl Converter {
                 Some(&mut output_view),
             )
         }
-        .map_err(|err| format!("VideoProcessor-Ausgabeansicht: {err}"))?;
+        .map_err(|err| format!("video processor output view: {err}"))?;
         let output_view = output_view.ok_or_else(|| "Ausgabeansicht fehlt".to_string())?;
 
         Ok(Slot {
@@ -300,7 +300,7 @@ impl Converter {
                 Some(&mut view),
             )
         }
-        .map_err(|err| format!("VideoProcessor-Eingabeansicht: {err}"))?;
+        .map_err(|err| format!("video processor input view: {err}"))?;
         let view = view.ok_or_else(|| "Eingabeansicht fehlt".to_string())?;
 
         // If the frame pool grows again after a `Recreate`, views onto long-freed
