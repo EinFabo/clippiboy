@@ -41,6 +41,7 @@ import { formatAgo, formatSize } from "@/lib/format";
 import { EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
 import { typesText } from "@/lib/viewer";
+import { useGrants } from "@/lib/useGrants";
 import {
   PictureViewContext,
   WHOLE,
@@ -162,6 +163,17 @@ export function ShotViewer({
   const [shrinking, setShrinking] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
   const [broken, setBroken] = useState(false);
+  // A picture refused before its folder was granted is asked for again once
+  // the grant is in (`useGrants`), under a fresh address.
+  const grants = useGrants();
+  const [retry, setRetry] = useState(0);
+  const brokenRef = useRef(broken);
+  brokenRef.current = broken;
+  useEffect(() => {
+    if (grants === 0 || !brokenRef.current) return;
+    setBroken(false);
+    setRetry((n) => n + 1);
+  }, [grants]);
   /** Looking, cropping or drawing — never two of them at once. */
   const [mode, setMode] = useState<"view" | "crop" | "draw">("view");
   const [ratio, setRatio] = useState<string>("Free");
@@ -461,7 +473,9 @@ export function ShotViewer({
             height: edit?.crop?.height ?? full.height,
           }
         : { src: clip.path, width: clip.width, height: clip.height };
-  const source = inTauri ? `${fileUrl(ground.src)}?v=${clip.sizeBytes}` : null;
+  const source = inTauri
+    ? `${fileUrl(ground.src)}?v=${clip.sizeBytes}${retry > 0 ? `&r=${retry}` : ""}`
+    : null;
 
   // The window changed size: a view panned to a corner of the big stage would
   // leave the smaller one mostly black.

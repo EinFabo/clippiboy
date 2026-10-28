@@ -7,6 +7,7 @@ import { Outbox } from "@/lib/outbox";
 import { changedFields, sourceWrite } from "@/lib/sourceWrite";
 import { cn } from "@/lib/cn";
 import { mockClips, mockConfig } from "@/lib/mock";
+import { useGrants } from "@/lib/useGrants";
 import {
   IconArrowUpRight,
   IconAudio,
@@ -1280,6 +1281,18 @@ function ClipStage({
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
+  // A file refused before its folder was granted is asked for again once the
+  // grant is in (`useGrants`), under a fresh address — without reopening.
+  const grants = useGrants();
+  const failed = useRef(false);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    if (grants === 0 || !failed.current) return;
+    failed.current = false;
+    setRetry((n) => n + 1);
+  }, [grants]);
+  const source = fileUrl(clip.path);
+  const src = source && retry > 0 ? `${source}?r=${retry}` : source;
 
   // Während des Abspielens wird die Stelle an React vorbei gezeichnet: die
   // Bildschleife schreibt Balken, Griff und Uhr direkt in den DOM. Ein
@@ -1377,14 +1390,16 @@ function ClipStage({
         <div className="grid min-h-0 flex-1 place-items-center bg-black/70 p-2">
           {clip.screenshot ? (
             <img
-              src={fileUrl(clip.path)}
+              src={src}
+              onError={() => (failed.current = true)}
               alt={clipName(clip)}
               className="h-full w-full rounded-inner object-contain"
             />
           ) : (
             <video
               ref={video}
-              src={fileUrl(clip.path)}
+              src={src}
+              onError={() => (failed.current = true)}
               autoPlay
               onClick={toggle}
               onPlay={() => setPlaying(true)}

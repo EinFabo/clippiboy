@@ -26,6 +26,7 @@ import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, typesText } from "@/lib/viewer";
+import { useGrants } from "@/lib/useGrants";
 import type { Clip, ClipEdit } from "@/lib/types";
 
 interface Props {
@@ -172,6 +173,20 @@ export function ClipPlayer({
   }, [startAt]);
   /** Failed attempts at loading the current file. */
   const loadFailures = useRef(0);
+  // A file refused before its folder was granted loads once the grant is in:
+  // every attempt gets its chance again, and a player that already gave up
+  // tries once more — without being reopened.
+  const grants = useGrants();
+  const brokenRef = useRef(broken);
+  brokenRef.current = broken;
+  useEffect(() => {
+    if (grants === 0) return;
+    loadFailures.current = 0;
+    if (brokenRef.current) {
+      setBroken(false);
+      setReload((n) => n + 1);
+    }
+  }, [grants]);
   /** Holds the last frame while the file underneath is being replaced. */
   const veil = useRef<SaveVeilHandle>(null);
 
