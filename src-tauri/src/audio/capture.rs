@@ -227,6 +227,37 @@ pub(crate) fn rest(wait: std::time::Duration, stop: &AtomicBool) -> bool {
     }
 }
 
+/// How a wait in slices ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Waited {
+    Signalled,
+    TimedOut,
+    Stopped,
+}
+
+/// Waits up to `total_ms` for `signalled`, asked with a slice of
+/// [`REST_SLICE`] at a time, and looks at `stop` between the slices. A
+/// process tap's activation is waited on like this: one long wait kept a
+/// source that was switched away from busy until it ran out.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn wait_in_slices(total_ms: u32, stop: &AtomicBool, mut signalled: impl FnMut(u32) -> bool) -> Waited {
+    let slice = REST_SLICE.as_millis() as u32;
+    let mut left = total_ms;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Waited::Stopped;
+        }
+        if left == 0 {
+            return Waited::TimedOut;
+        }
+        let now = left.min(slice);
+        if signalled(now) {
+            return Waited::Signalled;
+        }
+        left -= now;
+    }
+}
+
 /// Starts capturing one source. An error means the device is gone, the process
 /// has ended or there is no permission — the caller reports that to the UI.
 pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, String> {
@@ -337,7 +368,9 @@ mod win {
     use crate::audio::resample::Resampler;
     use std::sync::mpsc::Sender;
     use windows::core::{implement, IUnknown, Interface, PCWSTR};
-    use windows::Win32::Foundation::{CloseHandle, E_INVALIDARG, HANDLE, S_OK, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{
+        CloseHandle, E_ABORT, E_INVALIDARG, ERROR_TIMEOUT, HANDLE, S_OK, WAIT_OBJECT_0,
+    };
     use windows::Win32::Media::Audio::{
         eCapture, eMultimedia, eRender, ActivateAudioInterfaceAsync,
         IActivateAudioInterfaceAsyncOperation,
@@ -392,7 +425,10 @@ mod win {
     ///
     /// It shares the event rather than borrowing its value: after a timed-out
     /// wait the operation may still call back, and the handle must not be
-    /// closed (and its value handed out again) under it.
+    /// closed (and its value handed out again) under it. The cost: an
+    /// activation that never completes keeps its handler, and so one event
+    /// handle, for the rest of the run — one per activation Windows never
+    /// answers, at most one per retry of such a source.
     #[implement(IActivateAudioInterfaceCompletionHandler)]
     struct ActivationHandler {
         event: Arc<OwnedEvent>,
@@ -559,7 +595,11 @@ mod win {
         }
     }
 
-    fn process_client(pid: u32, include: bool) -> windows::core::Result<(IAudioClient, Format)> {
+    fn process_client(
+        pid: u32,
+        include: bool,
+        stop: &AtomicBool,
+    ) -> windows::core::Result<(IAudioClient, Format)> {
         unsafe {
             let event = Arc::new(OwnedEvent::new()?);
             let handler: IActivateAudioInterfaceCompletionHandler =
@@ -595,8 +635,21 @@ mod win {
                 &handler,
             )?;
 
-            if WaitForSingleObject(event.0, ACTIVATION_WAIT_MS) != WAIT_OBJECT_0 {
-                return Err(windows::core::Error::from_win32());
+            // `GetLastError` says nothing after a wait that timed out: it read
+            // "The operation completed successfully" in the source's error.
+            match super::wait_in_slices(ACTIVATION_WAIT_MS, stop, |ms| {
+                WaitForSingleObject(event.0, ms) == WAIT_OBJECT_0
+            }) {
+                super::Waited::Signalled => {}
+                super::Waited::TimedOut => {
+                    return Err(windows::core::Error::new(
+                        ERROR_TIMEOUT.to_hresult(),
+                        "timed out starting the audio source",
+                    ));
+                }
+                super::Waited::Stopped => {
+                    return Err(windows::core::Error::new(E_ABORT, "the audio source was stopped"));
+                }
             }
 
             let mut activate_result = S_OK;
@@ -723,6 +776,7 @@ mod win {
             SourceKind::Process { pid, mode, .. } => process_client(
                 *pid,
                 matches!(mode, crate::model::ProcessMode::Include),
+                stop,
             ),
             // `resolve` turns these into `Process` sources long before the engine
             // sees them, and drops them while there is nothing to bind to.
@@ -955,6 +1009,29 @@ mod tests {
         assert!(rest(std::time::Duration::from_secs(5), &stop));
         assert!(started.elapsed() < std::time::Duration::from_millis(400));
         setter.join().unwrap();
+    }
+
+    /// Final review (audio M1, ledger rest T21): the activation wait asks in
+    /// slices, so a stop ends it, and a timeout is a timeout.
+    #[test]
+    fn a_sliced_wait_ends_on_a_signal_a_stop_or_its_length() {
+        let stop = AtomicBool::new(false);
+        let mut asked = Vec::new();
+        assert_eq!(wait_in_slices(120, &stop, |ms| { asked.push(ms); false }), Waited::TimedOut);
+        assert_eq!(asked, vec![50, 50, 20], "the whole length, slice by slice");
+
+        let mut calls = 0;
+        assert_eq!(wait_in_slices(4_000, &stop, |_| { calls += 1; calls == 3 }), Waited::Signalled);
+
+        let mut calls = 0;
+        let stopped = wait_in_slices(4_000, &stop, |_| {
+            calls += 1;
+            if calls == 2 {
+                stop.store(true, Ordering::Relaxed);
+            }
+            false
+        });
+        assert_eq!((stopped, calls), (Waited::Stopped, 2));
     }
 
     #[test]
