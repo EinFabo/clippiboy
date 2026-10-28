@@ -11,9 +11,19 @@
 
 use crate::model::{EncoderId, EncoderInfo};
 
+/// Empty when Media Foundation could not be asked. The caller may be any
+/// thread — `list_encoders` runs on a pool thread, `config::load` on the main
+/// thread before the window sets COM up — so it brings its own apartment for
+/// the call and gives it back; a thread that already has one keeps it.
 #[cfg(windows)]
 fn enumerate_hardware() -> Vec<EncoderId> {
-    crate::mft::available_encoders()
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let found = crate::mft::available_encoders();
+    if com {
+        unsafe { CoUninitialize() };
+    }
+    found
 }
 
 #[cfg(not(windows))]
@@ -34,14 +44,30 @@ fn hardware_encoders() -> Vec<EncoderId> {
     // Enumerated outside the lock: it is slow, and a second caller doing the
     // same work is harmless.
     let found = enumerate_hardware();
-    HARDWARE.lock().get_or_insert(found).clone()
+    let mut cache = HARDWARE.lock();
+    *cache = cached_after(cache.take(), found.clone());
+    cache.clone().unwrap_or(found)
 }
 
 /// Looks again. The Video page asks through `list_encoders`, so a driver
 /// installed while the app runs still shows up.
 pub fn refresh_encoders() {
     let found = enumerate_hardware();
-    *HARDWARE.lock() = Some(found);
+    let mut cache = HARDWARE.lock();
+    *cache = cached_after(cache.take(), found);
+}
+
+/// What the cache holds after an enumeration found `found`. An empty answer
+/// is far more often Media Foundation failing for a moment than a graphics
+/// driver gone mid-session, so it never replaces a list and is never kept as
+/// the first one: the next look asks again. Taken for the truth, it rewrote
+/// the user's encoder to software on the next settings write.
+fn cached_after(known: Option<Vec<EncoderId>>, found: Vec<EncoderId>) -> Option<Vec<EncoderId>> {
+    if found.is_empty() {
+        known
+    } else {
+        Some(found)
+    }
 }
 
 pub fn list_encoders() -> Vec<EncoderInfo> {
@@ -156,7 +182,7 @@ pub fn effective(requested: EncoderId) -> EncoderId {
             log::info!("encoder forced to {forced:?} by CLIPPIBOY_ENCODER");
             forced
         }
-        None => resolve(requested),
+        None => resolve_among(requested, &hardware_encoders()),
     }
 }
 
@@ -185,10 +211,23 @@ pub fn for_recording(requested: EncoderId) -> EncoderId {
     }
 }
 
-/// Falls back to an available encoder if the requested one is missing (a
-/// config carried over from another machine, for instance).
+/// The encoder to **store**: falls back to an available one if the requested
+/// one is missing (a config carried over from another machine, for instance).
+/// Encoding goes through [`effective`].
 pub fn resolve(requested: EncoderId) -> EncoderId {
-    resolve_among(requested, &hardware_encoders())
+    stored_among(requested, &hardware_encoders())
+}
+
+/// [`resolve_among`], except that an empty hardware list changes nothing: it
+/// says Media Foundation told us nothing, not that the user's encoder is gone,
+/// and a setting is not rewritten on that. Encoding still falls back
+/// ([`effective`]), so nothing asks for an encoder that is not there.
+fn stored_among(requested: EncoderId, hardware: &[EncoderId]) -> EncoderId {
+    if hardware.is_empty() {
+        requested
+    } else {
+        resolve_among(requested, hardware)
+    }
 }
 
 /// [`resolve`] against a given hardware list: the request if it is there
@@ -240,6 +279,26 @@ mod tests {
         assert_eq!(resolve_among(X264, &[]), X264);
         assert_eq!(resolve_among(Qsv, &[Qsv, Amf]), Qsv);
         assert_eq!(preferred_among(&[Qsv, Amf]), Amf, "list order decides");
+    }
+
+    /// Final review M-2 / ledger rest T7: an empty enumeration is no reason
+    /// to store software over the user's encoder, neither as the first look
+    /// nor after a good one.
+    #[test]
+    fn an_empty_enumeration_never_replaces_the_encoder_list() {
+        use EncoderId::*;
+        assert_eq!(cached_after(None, vec![]), None, "an empty first look is not kept");
+        assert_eq!(cached_after(Some(vec![Nvenc]), vec![]), Some(vec![Nvenc]));
+        assert_eq!(cached_after(Some(vec![Nvenc]), vec![Amf]), Some(vec![Amf]), "a real answer replaces");
+        assert_eq!(cached_after(None, vec![Qsv]), Some(vec![Qsv]));
+    }
+
+    #[test]
+    fn an_empty_hardware_list_keeps_the_stored_encoder() {
+        use EncoderId::*;
+        assert_eq!(stored_among(Nvenc, &[]), Nvenc);
+        assert_eq!(stored_among(Nvenc, &[Amf]), Amf, "a list that lacks it still falls back");
+        assert_eq!(stored_among(X264, &[]), X264);
     }
 
     #[test]
