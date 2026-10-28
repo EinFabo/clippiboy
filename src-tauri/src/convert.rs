@@ -246,7 +246,7 @@ impl Converter {
         let mut texture = None;
         unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
             .map_err(|err| format!("NV12 texture: {err}"))?;
-        let texture = texture.ok_or_else(|| "NV12-Textur fehlt".to_string())?;
+        let texture = texture.ok_or_else(|| "NV12 texture: none was created".to_string())?;
 
         let view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
             ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
@@ -264,7 +264,7 @@ impl Converter {
             )
         }
         .map_err(|err| format!("video processor output view: {err}"))?;
-        let output_view = output_view.ok_or_else(|| "Ausgabeansicht fehlt".to_string())?;
+        let output_view = output_view.ok_or_else(|| "video processor output view: none was created".to_string())?;
 
         Ok(Slot {
             texture,
@@ -301,7 +301,7 @@ impl Converter {
             )
         }
         .map_err(|err| format!("video processor input view: {err}"))?;
-        let view = view.ok_or_else(|| "Eingabeansicht fehlt".to_string())?;
+        let view = view.ok_or_else(|| "video processor input view: none was created".to_string())?;
 
         // If the frame pool grows again after a `Recreate`, views onto long-freed
         // textures would otherwise pile up.
