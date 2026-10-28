@@ -241,7 +241,9 @@ pub fn hide(app: &tauri::AppHandle) {
 }
 
 /// Take on changed settings while the console is open — size, screen, and
-/// whether it lets itself be recorded.
+/// whether it lets itself be recorded. Sends `console-relayout`, not
+/// `console-opened`: the page re-lays out without starting over, so a clip
+/// playing in it keeps playing and a console in its closing fade stays closed.
 pub fn relayout(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
@@ -252,7 +254,7 @@ pub fn relayout(app: &tauri::AppHandle) {
     protect(app, &window);
     match place(&window) {
         Ok(layout) => {
-            let _ = window.emit("console-opened", layout);
+            let _ = window.emit("console-relayout", layout);
         }
         Err(err) => log::warn!("could not lay the console out: {err}"),
     }

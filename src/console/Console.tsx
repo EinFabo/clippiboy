@@ -437,6 +437,21 @@ export function Console() {
           begin(e.payload);
         });
       }),
+      listen<OpenedPayload>("console-relayout", (e) => {
+        // A settings or screen change while the console is up: take on the
+        // new layout and nothing else. No `begin()` — the panel, the player
+        // and the clip stay as they are. During the closing fade, or while
+        // hidden, the next opening brings the layout anyway.
+        if (closingRef.current || hidden.current) return;
+        setScale(e.payload.scale || 1);
+        setBottomInset(e.payload.bottomInset);
+        setGlow(e.payload.glow);
+        setStyle(e.payload.style);
+        void api
+          .getConfig()
+          .then((config) => setInCapture(config.consoleInCapture))
+          .catch(() => {});
+      }),
     ];
     /** Everything an opening resets and takes on — once the page has its size. */
     function begin(payload: OpenedPayload) {

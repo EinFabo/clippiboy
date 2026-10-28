@@ -162,7 +162,7 @@ pub fn set_config(
 
     // Size, screen, visibility or the glow of the console changed in the settings
     // while it happens to be open: it should not wait for the next opening.
-    // `relayout` re-emits `console-opened`, and the console re-reads the config
+    // `relayout` emits `console-relayout`, and the console re-reads the config
     // on that — which is how the glow gets switched without a restart.
     if previous.console_scale != next.console_scale
         || previous.console_monitor != next.console_monitor
