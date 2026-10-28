@@ -145,7 +145,15 @@ fn recording_ids(clip_dir: &Path) -> Vec<String> {
 
 fn still_left_over(path: &Path, before: SystemTime) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    modified_before(path, before) && (is_scratch_name(&name) || is_empty_file(path))
+    modified_before(path, before) && (is_scratch_name(&name) || is_cam_part(&name) || is_empty_file(path))
+}
+
+/// The names a facecam is written under in the originals store until it is
+/// complete (`cam_partials`).
+const CAM_PARTS: [&str; 2] = ["cam.part.h264", "cam.part.mp4"];
+
+fn is_cam_part(name: &str) -> bool {
+    CAM_PARTS.contains(&name)
 }
 
 fn is_empty_file(path: &Path) -> bool {
@@ -270,7 +278,7 @@ pub fn cam_partials(originals: &Path, before: SystemTime) -> Vec<PathBuf> {
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
-        for name in ["cam.part.h264", "cam.part.mp4"] {
+        for name in CAM_PARTS {
             let path = entry.path().join(name);
             if path.is_file() && modified_before(&path, before) {
                 found.push(path);
@@ -538,6 +546,28 @@ mod tests {
         assert_eq!(found, expected);
         assert!(cam_partials(&root, SystemTime::UNIX_EPOCH).is_empty(), "a save writing its cam right now");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Found is not enough: the re-check before removal must take the cam
+    /// part's name too, or it stays for good, start after start.
+    #[test]
+    fn a_half_written_cam_is_removed_from_the_originals_store() {
+        let root = scratch_dir();
+        let store = root.join(ID);
+        std::fs::create_dir_all(&store).unwrap();
+        let after = SystemTime::now() + Duration::from_secs(60);
+        for name in ["cam.part.h264", "cam.part.mp4"] {
+            std::fs::write(store.join(name), b"half a picture").unwrap();
+        }
+        for path in cam_partials(&root, after) {
+            remove_file(&path, after);
+        }
+        let left: Vec<_> = ["cam.part.h264", "cam.part.mp4"]
+            .into_iter()
+            .filter(|name| store.join(name).exists())
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(left.is_empty(), "left behind: {left:?}");
     }
 
     fn age(path: &Path, by: Duration) {
