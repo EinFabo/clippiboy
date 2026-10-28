@@ -3,7 +3,9 @@
 //! The trim used to be nothing but a marker in the database: whoever sent the
 //! clip sent the untrimmed one. Now it sits in the file. So nothing is lost
 //! regardless, the untouched recording moves into a store beside the individual
-//! tracks on the first real cut:
+//! tracks on the first real cut — for a clip. A recording started by hand keeps
+//! no such copy: it can run for an hour, and its trim is final (the editor asks
+//! first). It is cut in place, like a clip whose original was thrown away:
 //!
 //! ```text
 //! <data>/originals/<clip-id>/video.mp4  the untouched recording
@@ -36,7 +38,7 @@ use parking_lot::{Mutex, ReentrantMutex};
 
 use crate::clips::{fresh, passes_stopped, with_library};
 use crate::config;
-use crate::model::{Clip, ClipEdit, ClipOriginal, EncoderId, TrackMix};
+use crate::model::{Clip, ClipEdit, ClipKind, ClipOriginal, EncoderId, TrackMix};
 use crate::muxer::{ffmpeg, probe_duration_ms, replace_file, sanitize};
 use crate::stems;
 
@@ -676,8 +678,16 @@ fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
 ///
 /// So the record decides, not the disk: whoever is already trimmed never files
 /// anything away again.
-fn archives_the_clip(already_trimmed: bool, keeps_original: bool, archive_exists: bool) -> bool {
-    keeps_original && !archive_exists && !already_trimmed
+///
+/// And only for a clip. A recording keeps no untouched copy: it can run for an
+/// hour, and filing it away left gigabytes in the app data folder for a trim
+/// that was meant as final — the editor says so before it cuts. Its record
+/// still stands afterwards, for the tracks' offset, exactly as after
+/// [`discard_original`].
+fn archives_the_clip(clip: &Clip, plan: &RenderPlan, archive_exists: bool) -> bool {
+    let already_trimmed = clip.original.is_some();
+    let keeps_original = plan.original.is_some();
+    clip.kind() == ClipKind::Clip && keeps_original && !archive_exists && !already_trimmed
 }
 
 /// Move the finished file into its place — and, if this is the first real cut,
@@ -688,11 +698,7 @@ fn archives_the_clip(already_trimmed: bool, keeps_original: bool, archive_exists
 fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result<(), String> {
     let archive = video_path(&clip.id);
     let keep_original = plan.original.is_some();
-    let first_cut = archives_the_clip(
-        clip.original.is_some(),
-        keep_original,
-        archive.is_file(),
-    );
+    let first_cut = archives_the_clip(clip, plan, archive.is_file());
 
     if first_cut {
         // Note first: if the process dies right away, `repair` finds the file
@@ -1066,11 +1072,22 @@ fn settle(library: &Mutex<Option<crate::clips::Library>>, clip: &Clip, note: Opt
 /// swapped the file in but its record could not be written, the next save
 /// would otherwise cut at the old offsets until a restart repaired it.
 ///
+/// `written` is the record the run itself produced ([`Applied::original`]). It
+/// goes before the note: a recording, or a clip whose original was thrown
+/// away, is cut with no note at all, and without it the tracks' offset would
+/// be lost along with the database write.
+///
 /// Takes the library itself, not a guard: `settle` locks it per write and
 /// probes the file in between. Call it under the clip's lock.
-pub(crate) fn heal(library: &Mutex<Option<crate::clips::Library>>, clip_id: &str) -> bool {
+pub(crate) fn heal(
+    library: &Mutex<Option<crate::clips::Library>>,
+    clip_id: &str,
+    written: Option<ClipOriginal>,
+) -> bool {
     match fresh(library, clip_id) {
-        Some(clip) if !clip.screenshot => settle(library, &clip, read_note(clip_id)),
+        Some(clip) if !clip.screenshot => {
+            settle(library, &clip, written.or_else(|| read_note(clip_id)))
+        }
         _ => false,
     }
 }
@@ -1685,18 +1702,34 @@ mod tests {
         assert!(!root().starts_with(config::data_dir().join("buffer")));
     }
 
+    /// [`archives_the_clip`] for a clip that is `already_trimmed` or not, a
+    /// save that `keeps_original` or not, and a store that holds one or not.
+    fn archives(already_trimmed: bool, keeps_original: bool, archive_exists: bool) -> bool {
+        let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 35_000 };
+        let clip = plain_clip(None, already_trimmed.then_some(base));
+        let saved = plan(
+            clip.original.as_ref(),
+            archive_exists,
+            30_000,
+            if keeps_original { Trim { start_ms: 1_000, end_ms: 20_000 } } else { Trim::whole(30_000) },
+        );
+        // Without a trim before it and none now, the plan keeps no record.
+        assert_eq!(saved.original.is_some(), keeps_original || already_trimmed);
+        archives_the_clip(&clip, &saved, archive_exists)
+    }
+
     /// The first cut files the clip away — that is where the original comes
     /// from at all.
     #[test]
     fn the_first_cut_files_the_recording_away() {
-        assert!(archives_the_clip(false, true, false));
+        assert!(archives(false, true, false));
     }
 
     /// A further cut on an already filed clip must leave the store alone,
     /// otherwise the trimmed file would overwrite the recording.
     #[test]
     fn a_further_cut_leaves_the_store_alone() {
-        assert!(!archives_the_clip(true, true, true));
+        assert!(!archives(true, true, true));
     }
 
     /// The one that cost footage: after "throw the original away" the record
@@ -1708,7 +1741,7 @@ mod tests {
     #[test]
     fn a_discarded_original_is_never_filed_again() {
         assert!(
-            !archives_the_clip(true, true, false),
+            !archives(true, true, false),
             "the trimmed file must not become the original"
         );
     }
@@ -1716,8 +1749,7 @@ mod tests {
     /// Nothing trimmed, nothing to keep — then there is nothing to file either.
     #[test]
     fn without_a_trim_nothing_is_filed() {
-        assert!(!archives_the_clip(false, false, false));
-        assert!(!archives_the_clip(true, false, true));
+        assert!(!archives(false, false, false));
     }
 
     /// The whole recording lying there again is what tells a completed undo
@@ -1868,6 +1900,63 @@ mod tests {
         for quality in [0, 1, 50, 70, 100, 999] {
             assert!((14..=28).contains(&quantiser(quality)), "quality {quality}");
         }
+    }
+
+    /// A first cut swapped in for `clip`: the clip file and the finished
+    /// render as two files in a scratch folder, the store under the clip's own
+    /// id. Returns what the clip file holds afterwards and whether the store
+    /// got a copy, and clears both away again.
+    fn first_cut_of(clip: Clip) -> (Vec<u8>, bool) {
+        let scratch = std::env::temp_dir().join(format!("clippiboy-{}-{}", clip.id, std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let target = scratch.join("clip.mp4");
+        let temp = scratch.join("clip.neu.mp4");
+        std::fs::write(&target, b"the whole recording").unwrap();
+        std::fs::write(&temp, b"the excerpt").unwrap();
+        let clip = Clip { path: target.to_string_lossy().into_owned(), ..clip };
+        remove(&clip.id);
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+
+        let swapped = swap_in(&clip, &first, &temp, &target);
+        let archived = video_path(&clip.id).is_file();
+        let kept = std::fs::read(&target).unwrap();
+        remove(&clip.id);
+        let _ = std::fs::remove_dir_all(dir(&clip.id));
+        let _ = std::fs::remove_dir_all(&scratch);
+        swapped.unwrap();
+        (kept, archived)
+    }
+
+    /// A recording runs for an hour and keeps no untouched copy: its first cut
+    /// replaces the file in place, and nothing lands in the originals store.
+    /// Filed away, a ten-minute recording on a second drive left gigabytes
+    /// behind in `AppData` for a trim the user meant as final.
+    #[test]
+    fn a_recording_is_trimmed_without_an_untouched_copy() {
+        let recording = Clip {
+            id: "recording-first-cut-test".into(),
+            recording: true,
+            ..plain_clip(None, None)
+        };
+        // The record still stands: the tracks sit in the recording's
+        // coordinates, and a later remix needs the offset.
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        assert!(!archives_the_clip(&recording, &first, false));
+        assert_eq!(first.original.map(|original| original.start_ms), Some(5_000));
+
+        let (kept, archived) = first_cut_of(recording);
+        assert_eq!(kept, b"the excerpt");
+        assert!(!archived, "a recording was filed away as an original");
+    }
+
+    /// The same first cut on a clip still files the recording away, so the
+    /// trim can be undone as before.
+    #[test]
+    fn a_clip_still_keeps_its_untouched_copy() {
+        let clip = Clip { id: "clip-first-cut-test".into(), ..plain_clip(None, None) };
+        let (kept, archived) = first_cut_of(clip);
+        assert_eq!(kept, b"the excerpt");
+        assert!(archived, "the clip's original was not kept");
     }
 
     /// Timing, not a check: `cargo test --lib -- --ignored --nocapture`.

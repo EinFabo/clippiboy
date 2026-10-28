@@ -1301,8 +1301,9 @@ pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTra
 /// carried out.
 ///
 /// The trim really does land in the file — whoever sends the clip sends the
-/// trimmed one. The untouched recording moves into the originals store on the
-/// way and comes back at any time via [`restore_clip_original`].
+/// trimmed one. A clip's untouched recording moves into the originals store on
+/// the way and comes back at any time via [`restore_clip_original`]; a
+/// recording keeps no such copy, its trim is final.
 ///
 /// `async` because a cut at the start re-encodes the picture and that takes a
 /// while depending on length; the main thread would not paint the window in the
@@ -1804,7 +1805,7 @@ fn store(
             // save cuts at the old offsets until a restart repairs it. So the
             // record is brought in line with the file now, as far as the
             // database lets it, and read again.
-            edit::heal(&state.library, &clip.id);
+            edit::heal(&state.library, &clip.id, applied.original);
             with_library(state, |lib| lib.get(&clip.id).map_err(|e| e.to_string()))
                 .ok()
                 .flatten()

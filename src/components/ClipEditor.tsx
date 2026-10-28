@@ -41,6 +41,10 @@ interface Props {
   progress: number | null;
   justSaved: boolean;
   onSave: () => void;
+  /** Save asked whether to cut a recording for good; the button turns into that question. */
+  askingTrim: boolean;
+  onConfirmTrim: () => void;
+  onCancelTrim: () => void;
   /** Undo the trim and pull the whole recording back. */
   onRestore: () => void;
   restoring: boolean;
@@ -78,6 +82,9 @@ export function ClipEditor({
   progress,
   justSaved,
   onSave,
+  askingTrim,
+  onConfirmTrim,
+  onCancelTrim,
   onRestore,
   restoring,
   onDiscard,
@@ -229,23 +236,40 @@ export function ClipEditor({
               so beats an "Undo trim" button that fails when pressed. */}
           {clip.original && !clip.originalAvailable && (
             <p className="rounded-inner bg-elevated p-3 text-xs leading-relaxed text-ink-muted">
-              Trimmed from {clock(clip.original.durationMs / 1000)}. The whole
-              recording is no longer there, so the trim cannot be undone — the
-              mix can still be changed at any time.
+              Trimmed from {clock(clip.original.durationMs / 1000)}.{" "}
+              {clip.recording
+                ? "A recording keeps no untouched copy, so the trim is final"
+                : "The whole recording is no longer there, so the trim cannot be undone"}{" "}
+              — the mix can still be changed at any time.
             </p>
           )}
         </section>
       </div>
 
       <section className="space-y-3 border-t border-line p-5">
-        <Button
-          variant="primary"
-          className="w-full"
-          disabled={busy || !dirty || !inTauri}
-          onClick={onSave}
-        >
-          {saving ? "Saving…" : "Save"}
-        </Button>
+        {askingTrim ? (
+          // As tall as the button it stands in for, so nothing below jumps.
+          <div className="flex h-10 items-center justify-center">
+            <ConfirmDelete
+              question="Trimming a recording cannot be undone."
+              confirmLabel="Trim"
+              confirmTitle="Cut it — what is cut away is gone for good"
+              cancelLabel="Keep editing"
+              cancelTitle="Back to the editor — Escape does the same"
+              onConfirm={onConfirmTrim}
+              onCancel={onCancelTrim}
+            />
+          </div>
+        ) : (
+          <Button
+            variant="primary"
+            className="w-full"
+            disabled={busy || !dirty || !inTauri}
+            onClick={onSave}
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        )}
         {busy && progress !== null && <Progress value={progress} />}
         <p className="flex items-start gap-1.5 text-xs leading-relaxed text-ink-faint">
           {/* Mounts only while the message stands, so the stroke draws itself

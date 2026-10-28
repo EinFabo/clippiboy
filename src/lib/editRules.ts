@@ -27,6 +27,20 @@ export function isTrimmed(start: number, end: number, duration: number): boolean
 }
 
 /**
+ * Does saving this selection need a yes first? Only a cut on a recording: it
+ * keeps no untouched copy (`edit::archives_the_clip`), so its trim is final. An
+ * older recording whose copy is still beside it can be undone like a clip.
+ */
+export function asksBeforeTrim(
+  clip: { recording: boolean; originalAvailable: boolean },
+  start: number,
+  end: number,
+  duration: number,
+): boolean {
+  return clip.recording && !clip.originalAvailable && isTrimmed(start, end, duration);
+}
+
+/**
  * The video element's volume for a clip with one audio track: muted is silent,
  * the level applies, and the element cannot boost above 1.
  */

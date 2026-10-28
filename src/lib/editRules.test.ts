@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isTrimmed, sameCut, singleTrackVolume, snapTrim } from "./editRules.ts";
+import { asksBeforeTrim, isTrimmed, sameCut, singleTrackVolume, snapTrim } from "./editRules.ts";
 
 test("a cut of a quarter second or less snaps to the edge, as the core drops it", () => {
   assert.deepEqual(snapTrim(0.2, 29.9, 30), { start: 0, end: 30 });
@@ -27,4 +27,17 @@ test("a real move of the cut is a change, an edge cut under a quarter second is 
 test("a track at or below the core's silence threshold is silent", () => {
   assert.equal(singleTrackVolume(1, -59, false), 0);
   assert.ok(singleTrackVolume(1, -58, false) > 0);
+});
+
+test("a recording asks before a trim, a clip does not", () => {
+  const recording = { recording: true, originalAvailable: false };
+  const clip = { recording: false, originalAvailable: false };
+  assert.equal(asksBeforeTrim(recording, 5, 20, 30), true);
+  assert.equal(asksBeforeTrim(clip, 5, 20, 30), false);
+  assert.equal(asksBeforeTrim(recording, 0.1, 29.9, 30), false, "no cut, only the mix");
+  assert.equal(
+    asksBeforeTrim({ recording: true, originalAvailable: true }, 5, 20, 30),
+    false,
+    "an older recording whose copy is still there can still be undone",
+  );
 });

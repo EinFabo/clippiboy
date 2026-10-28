@@ -407,6 +407,10 @@ whole clip is back. Trimming further inwards works without undoing first; the
 handles run over the trimmed file's timeline while the arithmetic happens in the
 original.
 
+A **recording** is the exception: it can run for an hour, so it keeps no
+untouched copy. Its trim is final — the editor asks once before it cuts, and
+there is no undo afterwards. The mix can still be changed.
+
 **A trimmed clip needs twice the space** for as long as that original sits beside
 it. It disappears as soon as the trim is undone or the clip is deleted — or on
 **Free up space**, in the clip menu and beside the undo button, which throws the

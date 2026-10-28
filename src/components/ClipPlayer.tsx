@@ -24,7 +24,7 @@ import { formatAgo, formatSize } from "@/lib/format";
 import { useClipMix } from "@/lib/useClipMix";
 import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
-import { sameCut, snapTrim } from "@/lib/editRules";
+import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, typesText } from "@/lib/viewer";
 import type { Clip, ClipEdit } from "@/lib/types";
 
@@ -138,6 +138,12 @@ export function ClipPlayer({
    * everything else that asks in this app.
    */
   const [askingDelete, setAskingDelete] = useState(false);
+  /**
+   * Whether the question before cutting a recording stands. A recording keeps
+   * no untouched copy, so its trim cannot be undone — Save asks once, in its
+   * own place.
+   */
+  const [askingTrim, setAskingTrim] = useState(false);
   const links = useLinks((s) => s.links);
   const [exporting, setExporting] = useState(false);
   // Counts the video element's restarts. Serves as a `key`: after saving, the
@@ -274,6 +280,7 @@ export function ClipPlayer({
     setJustSaved(false);
     setAskingDelete(false);
     setAskingDiscard(false);
+    setAskingTrim(false);
   }, [clip?.id]);
 
   /** Delete and move on within the player — if the last clip is gone, there is
@@ -549,6 +556,7 @@ export function ClipPlayer({
           if (askingDelete) return; // the question takes it — see ConfirmDelete
           if (exporting) return; // likewise the export dialog
           if (askingDiscard) return; // and the one about discarding trim and mix
+          if (askingTrim) return; // and the one before cutting a recording
           requestClose();
         },
       };
@@ -570,6 +578,7 @@ export function ClipPlayer({
     requestClose,
     askingDelete,
     askingDiscard,
+    askingTrim,
     exporting,
     trim.start,
     trim.end,
@@ -604,7 +613,10 @@ export function ClipPlayer({
   dirtyRef.current = dirty;
   // Edits that were applied meanwhile need no question any more.
   useEffect(() => {
-    if (!dirty) setAskingDiscard(false);
+    if (!dirty) {
+      setAskingDiscard(false);
+      setAskingTrim(false);
+    }
   }, [dirty]);
 
   /**
@@ -659,6 +671,12 @@ export function ClipPlayer({
       setBroken(false);
       setReload((n) => n + 1);
     }
+  }
+
+  /** Save — but a cut on a recording is final, so that asks first. */
+  function requestSave() {
+    if (clip && asksBeforeTrim(clip, trim.start, trim.end, duration)) setAskingTrim(true);
+    else void save();
   }
 
   /**
@@ -988,7 +1006,13 @@ export function ClipPlayer({
           restoring={restoring}
           saving={saving}
           justSaved={showSaved}
-          onSave={save}
+          onSave={requestSave}
+          askingTrim={askingTrim}
+          onConfirmTrim={() => {
+            setAskingTrim(false);
+            void save();
+          }}
+          onCancelTrim={() => setAskingTrim(false)}
           onOpenMixer={requestMixer}
         />
       </div>
