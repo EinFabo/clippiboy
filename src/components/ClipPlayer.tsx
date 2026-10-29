@@ -5,6 +5,8 @@ import { Pill } from "@/components/ui/Card";
 import { ClipEditor, type Trim } from "@/components/ClipEditor";
 import { SaveVeil, type SaveVeilHandle } from "@/components/ui/BusyVeil";
 import { ExportDialog } from "@/components/ExportDialog";
+import { CamStage } from "@/components/CamStage";
+import { usePictureBox } from "@/lib/pictureBox";
 import { useClipMenu } from "@/components/clipMenu";
 import { useLinks } from "@/lib/links";
 import { IconTrash } from "@/components/icons";
@@ -27,7 +29,7 @@ import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
 import { useGrants } from "@/lib/useGrants";
-import type { Clip, ClipEdit } from "@/lib/types";
+import type { Clip, ClipEdit, FacecamView } from "@/lib/types";
 
 interface Props {
   clips: Clip[];
@@ -153,6 +155,24 @@ export function ClipPlayer({
   // player gets a fresh element rather than one whose source we pulled out from
   // under it. The audio tracks re-attach to it as well.
   const [reload, setReload] = useState(0);
+  // The movable camera's sources, asked for when a clip opens and after every
+  // write; `null` shows the clip file as it is.
+  const [camView, setCamView] = useState<FacecamView | null>(null);
+  const camId = clip?.facecam ? clip.id : null;
+  const camState = clip?.facecam?.state;
+  useEffect(() => {
+    setCamView(null);
+    if (!inTauri || !camId) return;
+    let gone = false;
+    void api
+      .clipFacecamView(camId)
+      .then((view) => !gone && setCamView(view))
+      .catch(() => undefined);
+    return () => {
+      gone = true;
+    };
+  }, [camId, camState, reload]);
+  const picture = usePictureBox(frame, clip?.width ?? 1, clip?.height ?? 1);
   /**
    * The write is through, but the fresh element has not reported a picture yet.
    * The veil stays up for that stretch — letting it go the moment the core is
@@ -886,7 +906,9 @@ export function ClipPlayer({
               ref={video}
               src={source}
               autoPlay
-              className="h-full w-full bg-black object-contain"
+              // With a movable camera the stage below shows the picture; this
+              // element stays the clock and the sound.
+              className={cn("h-full w-full bg-black object-contain", camView && "opacity-0")}
               // With the bar gone, a click is someone reaching for it — the mouse
               // rested on a button, or the bar was still fading out. It brings
               // the bar back instead of pausing behind it.
@@ -962,6 +984,17 @@ export function ClipPlayer({
                 setBroken(true);
                 setSettling(false);
               }}
+            />
+          )}
+          {camView && clip?.facecam && source && !broken && (
+            <CamStage
+              view={camView}
+              layout={clip.facecam.layout}
+              master={video}
+              bindKey={reload}
+              box={picture}
+              frame={{ width: clip.width, height: clip.height }}
+              released={saving || restoring}
             />
           )}
 
