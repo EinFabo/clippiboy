@@ -363,6 +363,18 @@
           "markdownDescription": "Enables the apply_clip_edit command without any pre-configured scope."
         },
         {
+          "description": "Enables the bake_all_cams command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bake-all-cams",
+          "markdownDescription": "Enables the bake_all_cams command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bake_clip_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bake-clip-cam",
+          "markdownDescription": "Enables the bake_clip_cam command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_update command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-update",
@@ -865,6 +877,18 @@
           "type": "string",
           "const": "deny-apply-clip-edit",
           "markdownDescription": "Denies the apply_clip_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bake_all_cams command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bake-all-cams",
+          "markdownDescription": "Denies the bake_all_cams command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bake_clip_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bake-clip-cam",
+          "markdownDescription": "Denies the bake_clip_cam command without any pre-configured scope."
         },
         {
           "description": "Denies the check_update command without any pre-configured scope.",

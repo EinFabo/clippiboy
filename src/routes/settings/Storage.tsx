@@ -56,6 +56,9 @@ function Storage() {
     <>
       {usage && <UsageCard usage={usage} />}
       <ClearTrims onCleared={() => setReads((n) => n + 1)} />
+      {usage && usage.facecamBytes > 0 && (
+        <BakeCams bytes={usage.facecamBytes} onBaked={() => setReads((n) => n + 1)} />
+      )}
     </>
   );
 }
@@ -71,6 +74,11 @@ function UsageCard({ usage }: { usage: StorageUsage }) {
       "Untouched recordings",
       usage.originalsBytes,
       "One per trimmed clip, so the trim can be undone. \u201cFree up space\u201d in the clip menu releases one, \u201cClear all trims\u201d below all of them.",
+    ],
+    [
+      "Clean pictures for moving the cam",
+      usage.facecamBytes,
+      "The clean picture and the cam of every clip with a facecam, so the cam can still be moved.",
     ],
     [
       "Screenshot edits",
@@ -373,5 +381,66 @@ function ClipDir() {
       </p>
       {error && <p className="mt-2 text-xs text-live">{error}</p>}
     </>
+  );
+}
+
+/**
+ * "Bake all": every facecam clip keeps its clean picture and cam so the cam
+ * can still be moved. This bakes the cam in where each file shows it and frees
+ * that space; the cams can no longer be moved afterwards.
+ */
+function BakeCams({ bytes, onBaked }: { bytes: number; onBaked: () => void }) {
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const bake = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.bakeAllCams();
+      setAsking(false);
+      onBaked();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="mt-3 p-5">
+      <div className="flex items-center justify-between gap-6">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Bake all cams</p>
+          <p className="mt-0.5 text-xs text-ink-faint">
+            Frees the clean pictures. The cams stay where they are in each clip.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
+          <span className="font-mono text-sm tabular-nums text-ink-muted">{formatSize(bytes)}</span>
+          {!asking && (
+            <Button size="sm" variant="danger" disabled={busy} onClick={() => setAsking(true)}>
+              Bake all
+            </Button>
+          )}
+        </div>
+      </div>
+      {asking && (
+        <div className="cb-freed-in mt-4 rounded-inner border border-warn/40 bg-warn/10 p-4">
+          <p className="text-sm font-medium text-warn">Bake the cam into every clip?</p>
+          <p className="mt-1 text-xs text-ink-muted">The cams can no longer be moved.</p>
+          <div className="mt-3 flex justify-end gap-2">
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setAsking(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" variant="danger" disabled={busy} onClick={() => void bake()}>
+              Bake all
+            </Button>
+          </div>
+        </div>
+      )}
+      {error && <p className="mt-3 text-xs text-live">{error}</p>}
+    </Card>
   );
 }

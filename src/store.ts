@@ -143,6 +143,7 @@ interface EngineState {
   restoreClipOriginal: (id: string) => Promise<void>;
   /** Throw the untouched recording away, keep the trimmed clip. */
   discardClipOriginal: (id: string) => Promise<void>;
+  bakeClipCam: (id: string) => Promise<void>;
   /** The same for every trimmed clip at once. Returns what was freed. */
   discardAllOriginals: () => Promise<TrimOriginals>;
   /**
@@ -743,6 +744,17 @@ export const useEngine = create<EngineState>((set, get) => ({
     if (!inTauri) return;
     try {
       const clip = await api.discardClipOriginal(id);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: fail("Could not free up the space", err) });
+      throw err;
+    }
+  },
+
+  async bakeClipCam(id) {
+    if (!inTauri) return;
+    try {
+      const clip = await api.bakeClipCam(id);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
     } catch (err) {
       set({ lastError: fail("Could not free up the space", err) });

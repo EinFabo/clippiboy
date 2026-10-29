@@ -554,6 +554,8 @@ export interface StorageUsage {
   /** The clips, screenshots and recordings themselves. */
   clipsBytes: number;
   originalsBytes: number;
+  /** Clean pictures and cams of facecam clips — what "Bake all" frees. */
+  facecamBytes: number;
   shotEditsBytes: number;
   tracksBytes: number;
   thumbsBytes: number;

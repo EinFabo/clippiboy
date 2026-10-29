@@ -230,8 +230,48 @@ pub fn remove(clip_id: &str) {
         return;
     }
     let _ = std::fs::remove_file(note_path(clip_id));
+    // A facecam store keeps its clean picture and its cam: without them the
+    // cam could no longer be moved or re-composited after a cut.
+    if crate::facecam::has_store(clip_id) {
+        return;
+    }
     let _ = std::fs::remove_file(video_path(clip_id));
     let _ = std::fs::remove_dir_all(dir(clip_id));
+}
+
+/// Everything of a clip in the store, its cam included. Only a deleted clip.
+pub fn remove_everything(clip_id: &str) {
+    if sanitize(clip_id).is_empty() {
+        return;
+    }
+    let _ = std::fs::remove_file(note_path(clip_id));
+    let _ = std::fs::remove_dir_all(dir(clip_id));
+}
+
+/// What "Free up space" did to a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Discarded {
+    Original,
+    /// The clip had a facecam store: its clean picture and cam are gone, the
+    /// cam stays where the file shows it.
+    Baked,
+}
+
+/// Bakes the cam in for good: the clean picture, the cam and the trim note go,
+/// undo with them — the same trade as "Free up space". Returns the bytes freed.
+pub fn bake(clip_id: &str) -> Result<u64, String> {
+    if sanitize(clip_id).is_empty() {
+        return Err("no clip".into());
+    }
+    let files = [video_path(clip_id), crate::facecam::cam_path(clip_id), crate::facecam::facts_path(clip_id), note_path(clip_id)];
+    let bytes = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    if let Err(err) = std::fs::remove_file(video_path(clip_id)) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("Could not free the space ({err}). Is the clip open somewhere right now?"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir(clip_id));
+    Ok(bytes)
 }
 
 /// Throw the untouched recording away but keep the clip as it stands.
@@ -253,7 +293,10 @@ pub fn remove(clip_id: &str) {
 ///    take a screenshot's untouched copy with it. So: the two files that belong
 ///    to the video, then an attempt at the folder, which fails by itself if
 ///    anything else still lives there.
-pub fn discard_original(clip_id: &str) -> Result<(), String> {
+pub fn discard_original(clip_id: &str) -> Result<Discarded, String> {
+    if crate::facecam::has_store(clip_id) {
+        return bake(clip_id).map(|_| Discarded::Baked);
+    }
     let video = video_path(clip_id);
     if !video.is_file() {
         return Err("There is no original to throw away.".into());
@@ -263,7 +306,7 @@ pub fn discard_original(clip_id: &str) -> Result<(), String> {
     })?;
     let _ = std::fs::remove_file(note_path(clip_id));
     let _ = std::fs::remove_dir(dir(clip_id));
-    Ok(())
+    Ok(Discarded::Original)
 }
 
 /// The untouched recordings of trimmed clips, found on disk — clip id and size.
@@ -283,6 +326,11 @@ fn trim_originals_on_disk(needed: &std::collections::HashSet<String>) -> Vec<(St
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
             if needed.contains(&name) {
+                return None;
+            }
+            // A facecam clip's clean picture is no trim original: "Clear all
+            // trims" would take the cam's movability with it.
+            if entry.path().join("facecam.json").exists() {
                 return None;
             }
             let video = entry.path().join("video.mp4");
@@ -316,7 +364,7 @@ pub fn discard_all_originals(needed: &std::collections::HashSet<String>) -> crat
     let mut freed = crate::model::TrimOriginals::default();
     for (clip_id, size) in trim_originals_on_disk(needed) {
         match discard_original(&clip_id) {
-            Ok(()) => {
+            Ok(_) => {
                 freed.count += 1;
                 freed.bytes += size;
             }
@@ -736,6 +784,14 @@ pub(crate) fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
 /// still stands afterwards, for the tracks' offset, exactly as after
 /// [`discard_original`].
 fn archives_the_clip(clip: &Clip, plan: &RenderPlan, archive_exists: bool) -> bool {
+    // A file with the cam in it is no untouched recording; the clean one is
+    // already in the store.
+    let composited = clip.facecam.as_ref().is_some_and(|cam| {
+        cam.state == crate::model::FacecamState::Ready && cam.layout.visible
+    });
+    if composited {
+        return false;
+    }
     let already_trimmed = clip.original.is_some();
     let keeps_original = plan.original.is_some();
     clip.kind() == ClipKind::Clip && keeps_original && !archive_exists && !already_trimmed
@@ -1430,6 +1486,99 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn store_with(id: &str, files: &[&str]) {
+        let _ = std::fs::remove_dir_all(dir(id));
+        std::fs::create_dir_all(dir(id)).unwrap();
+        for file in files {
+            std::fs::write(dir(id).join(file), b"0123456789").unwrap();
+        }
+    }
+
+    #[test]
+    fn trim_bookkeeping_never_clears_a_facecam_store() {
+        let id = "clippiboy-test-facecam-keep";
+        store_with(id, &["video.mp4", "cam.mp4", "facecam.json", "trim.json"]);
+        remove(id);
+        for kept in ["video.mp4", "cam.mp4", "facecam.json"] {
+            assert!(dir(id).join(kept).exists(), "{kept}");
+        }
+        assert!(!dir(id).join("trim.json").exists());
+        remove_everything(id);
+        assert!(!dir(id).exists());
+    }
+
+    #[test]
+    fn clear_all_trims_leaves_facecam_clips_alone() {
+        let (cam, trim) = ("clippiboy-test-facecam-alone", "clippiboy-test-trim-cleared");
+        store_with(cam, &["video.mp4", "facecam.json", "cam.mp4"]);
+        store_with(trim, &["video.mp4", "trim.json"]);
+        let found: Vec<String> = trim_originals_on_disk(&Default::default()).into_iter().map(|(id, _)| id).collect();
+        assert!(!found.contains(&sanitize(cam)));
+        assert!(found.contains(&sanitize(trim)));
+        remove_everything(cam);
+        remove_everything(trim);
+    }
+
+    #[test]
+    fn freeing_a_facecam_clips_space_bakes_the_cam() {
+        let id = "clippiboy-test-facecam-bake";
+        store_with(id, &["video.mp4", "cam.mp4", "facecam.json", "trim.json"]);
+        assert_eq!(discard_original(id), Ok(Discarded::Baked));
+        assert!(!dir(id).exists());
+    }
+
+    #[test]
+    fn an_untrimmed_clip_can_be_baked_too() {
+        let id = "clippiboy-test-facecam-untrimmed";
+        store_with(id, &["video.mp4", "cam.mp4", "facecam.json"]);
+        assert_eq!(bake(id), Ok(30));
+        assert!(!dir(id).exists());
+    }
+
+    #[test]
+    fn startup_repair_leaves_a_facecam_store_alone() {
+        let id = "clippiboy-test-facecam-repair";
+        store_with(id, &["video.mp4", "cam.mp4", "facecam.json"]);
+        let file = std::env::temp_dir().join(format!("{id}.mp4"));
+        std::fs::write(&file, b"clip").unwrap();
+        let library = crate::clips::Library::in_memory().unwrap();
+        let clip = Clip {
+            id: id.into(),
+            path: file.to_string_lossy().into_owned(),
+            facecam: Some(crate::model::ClipFacecam {
+                layout: Default::default(),
+                portrait: Default::default(),
+                delay_ms: -40,
+                state: crate::model::FacecamState::Ready,
+            }),
+            ..plain_clip(None, None)
+        };
+        library.insert(&clip).unwrap();
+        let library = parking_lot::Mutex::new(Some(library));
+        repair(&library);
+        for kept in ["video.mp4", "cam.mp4", "facecam.json"] {
+            assert!(dir(id).join(kept).exists(), "{kept}");
+        }
+        remove_everything(id);
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn a_composited_clip_is_never_filed_as_the_original() {
+        let clip = Clip {
+            id: "clippiboy-test-composited".into(),
+            facecam: Some(crate::model::ClipFacecam {
+                layout: Default::default(),
+                portrait: Default::default(),
+                delay_ms: -40,
+                state: crate::model::FacecamState::Ready,
+            }),
+            ..plain_clip(None, None)
+        };
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        assert!(!archives_the_clip(&clip, &first, false));
+    }
     use crate::model::ClipTrack;
 
     fn track(index: u32, stem: bool) -> ClipTrack {

@@ -8,6 +8,8 @@ fn main() {
     let commands = &[
         "list_audio_devices",
         "list_cameras",
+        "bake_clip_cam",
+        "bake_all_cams",
         "list_audio_processes",
         "list_capture_targets",
         "list_encoders",

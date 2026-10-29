@@ -916,6 +916,9 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
             own.lock()
         }
     };
+    // A cam still waiting to be added goes with the clip; one being added
+    // has finished by now, the lock above waited for it.
+    crate::composite::cancel(&id);
     // The clip first, and the stores by its stored id. The stores are named
     // after a sanitised id, so an id that is empty or spelled differently
     // named the whole store — every clip's tracks and originals went with it.
@@ -941,7 +944,7 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // The individual tracks and the original belong to the clip and serve no
     // purpose without it.
     stems::remove(&clip.id);
-    edit::remove(&clip.id);
+    edit::remove_everything(&clip.id);
     // The thumbnail too, even when none is recorded in the database.
     crate::thumbs::remove(&clip.id);
 
@@ -1410,22 +1413,26 @@ fn load_editable<'a>(
 /// original sat in the app data directory for good, so a trimmed clip occupied
 /// *more* than an untrimmed one. Undo is gone afterwards — the trim is not.
 ///
-/// Not `async`: this deletes two files, it does not run ffmpeg.
-#[tauri::command]
+/// Async: a cam still being added to the clip is waited for first.
+#[tauri::command(async)]
 pub fn discard_clip_original(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Clip> {
-    // On the main thread, so never waiting: a save of this clip still needs
-    // the original it would throw away.
+    // Before the clip's lock: the composite it waits for takes that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err("The cam is still being added to this clip — try again in a moment.".into());
+    }
     let own = edit::clip_lock(&id);
     let Some(_clip) = own.try_lock() else {
         return Err("This clip is being saved — try again in a moment.".into());
     };
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
-    edit::discard_original(&clip.id)?;
+    if edit::discard_original(&clip.id)? == edit::Discarded::Baked {
+        note_baked(&state, &clip)?;
+    }
     // The record on the clip stays: it carries the offset the individual tracks
     // sit at, and a remix without it would run against the picture. What changed
     // is `original_available`, which the library reads off the disk.
@@ -1436,6 +1443,64 @@ pub fn discard_clip_original(
     })?;
     announce_change(&app);
     Ok(clip)
+}
+
+/// A clip whose store was baked: `baked` when its file shows the cam, no
+/// facecam at all when it never did.
+fn note_baked(state: &State<'_, AppState>, clip: &Clip) -> Result<()> {
+    let composited = clip.facecam.as_ref().is_some_and(|cam| {
+        cam.state == crate::model::FacecamState::Ready && cam.layout.visible
+    });
+    let next = clip
+        .facecam
+        .clone()
+        .filter(|_| composited)
+        .map(|cam| crate::model::ClipFacecam { state: crate::model::FacecamState::Baked, ..cam });
+    with_library(state, |lib| lib.set_facecam(&clip.id, next.as_ref()).map_err(|e| e.to_string()))
+}
+
+/// Bakes one clip's cam in for good: its clean picture and cam are freed, the
+/// cam can no longer be moved.
+#[tauri::command(async)]
+pub fn bake_clip_cam(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err("The cam is still being added to this clip — try again in a moment.".into());
+    }
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    edit::bake(&clip.id)?;
+    note_baked(&state, &clip)?;
+    let clip = with_library(&state, |lib| {
+        lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+    })?;
+    announce_change(&app);
+    Ok(clip)
+}
+
+/// Bakes every clip's cam, one clip lock at a time. Returns what was freed.
+#[tauri::command(async)]
+pub fn bake_all_cams(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<TrimOriginals> {
+    let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))?;
+    let mut freed = TrimOriginals::default();
+    for clip in clips.into_iter().filter(|c| crate::facecam::has_store(&c.id)) {
+        if !crate::composite::wait_settled(&clip.id, std::time::Duration::from_secs(60)) {
+            continue;
+        }
+        let own = edit::clip_lock(&clip.id);
+        let _held = own.lock();
+        match edit::bake(&clip.id) {
+            Ok(bytes) => {
+                freed.count += 1;
+                freed.bytes += bytes;
+                let _ = note_baked(&state, &clip);
+            }
+            Err(err) => log::info!("cam of {} kept: {err}", clip.id),
+        }
+    }
+    announce_change(&app);
+    Ok(freed)
 }
 
 /// What [`shrink`] wrote.
@@ -1673,10 +1738,12 @@ pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     // trims" speak of.
     let store_bytes = dir_bytes(&edit::root());
     let originals_bytes = edit::trim_originals(&Default::default()).bytes;
+    let facecam_bytes = facecam_store_bytes();
     Ok(StorageUsage {
         clips_bytes,
         originals_bytes,
-        shot_edits_bytes: store_bytes.saturating_sub(originals_bytes),
+        facecam_bytes,
+        shot_edits_bytes: store_bytes.saturating_sub(originals_bytes).saturating_sub(facecam_bytes),
         tracks_bytes: dir_bytes(&crate::stems::root()),
         thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
         cache_bytes,
@@ -1721,6 +1788,20 @@ fn originals_still_needed(state: &State<'_, AppState>) -> Result<std::collection
 /// dependency. Recursive to any depth — the web views' cache runs to thousands
 /// of files, which is why the storage page does not wait on this to show the
 /// rest.
+/// The clean pictures and cams of facecam clips.
+fn facecam_store_bytes() -> u64 {
+    std::fs::read_dir(edit::root())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|dir| dir.join("facecam.json").exists())
+                .map(|dir| dir_bytes(&dir))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 fn dir_bytes(root: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;

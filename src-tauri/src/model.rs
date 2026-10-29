@@ -1023,6 +1023,9 @@ pub struct StorageUsage {
     pub clips_bytes: u64,
     /// The untouched recordings of trimmed clips — what "Clear all trims" frees.
     pub originals_bytes: u64,
+    /// The clean pictures and cams of facecam clips — what "Bake all" frees.
+    #[serde(default)]
+    pub facecam_bytes: u64,
     /// Everything else in the same store: an edited screenshot's untouched
     /// picture and marks, and what lies under every screenshot's watermark.
     pub shot_edits_bytes: u64,

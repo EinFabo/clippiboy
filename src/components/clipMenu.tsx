@@ -231,7 +231,10 @@ export function useClipMenu() {
     // the calling site can ask first — throwing the recording away cannot be
     // undone. The record on the clip outlives the file, so `originalAvailable`
     // is the question, not `original`; see the note on the type.
-    if (clip.originalAvailable && options.onDiscardOriginal) {
+    // A facecam clip's clean picture and cam are space to free as well: the
+    // cam is baked in where the file shows it.
+    const freeable = clip.originalAvailable || clip.facecam?.state === "ready";
+    if (freeable && options.onDiscardOriginal) {
       const onDiscardOriginal = options.onDiscardOriginal;
       entries.push({ kind: "separator" });
       entries.push({

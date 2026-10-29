@@ -195,6 +195,10 @@ export const api = {
    */
   discardClipOriginal: (id: string) =>
     invoke<Clip>("discard_clip_original", { id }),
+  /** Bakes a clip's cam in for good; the cam can no longer be moved. */
+  bakeClipCam: (id: string) => invoke<Clip>("bake_clip_cam", { id }),
+  /** Bakes every clip's cam; returns what was freed. */
+  bakeAllCams: () => invoke<TrimOriginals>("bake_all_cams"),
   /** What the originals, tracks and thumbnails occupy in the app data folder. */
   storageUsage: () => invoke<StorageUsage>("storage_usage"),
   /** How many trimmed clips keep their untouched recording, and their size. */

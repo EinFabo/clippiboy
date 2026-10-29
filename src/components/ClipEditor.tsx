@@ -211,7 +211,11 @@ export function ClipEditor({
                   <ConfirmDelete
                     question="Throw the recording away?"
                     confirmLabel="Throw away"
-                    confirmTitle="The trim stays, undo goes"
+                    confirmTitle={
+                      clip.facecam?.state === "ready"
+                        ? "The trim stays, undo goes. The cam can no longer be moved in this clip."
+                        : "The trim stays, undo goes"
+                    }
                     onConfirm={() => {
                       setDiscarding(false);
                       onDiscard();
