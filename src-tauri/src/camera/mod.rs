@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::model::CameraDevice;
 
+pub mod grid;
 #[cfg(windows)]
 pub mod windows;
 
