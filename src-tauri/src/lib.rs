@@ -1427,7 +1427,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 state.reconcile_cam();
                 if let Some(err) = state.camera.take_unseen_error() {
                     notify(&handle, "error", err.clone());
-                    overlay::show(&handle, BannerKind::Error, "Facecam stopped", Some(err));
+                    overlay::show(&handle, BannerKind::Error, "Camera stopped", Some(err));
                 }
                 // The recording cannot write any more — a full disk, most
                 // likely. Stop it while what is there is still whole. Once:

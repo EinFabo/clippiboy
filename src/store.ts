@@ -41,7 +41,7 @@ export type SettingsTab =
 interface EngineState {
   ready: boolean;
   config: AppConfig;
-  /** The cameras Windows lists; loaded when the Facecam tab opens. */
+  /** The cameras Windows lists; loaded when the Camera tab opens. */
   cameras: CameraDevice[];
   refreshCameras: () => Promise<void>;
   /** What the webcam is doing; `null` while it is off. */

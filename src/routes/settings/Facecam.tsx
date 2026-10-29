@@ -46,41 +46,27 @@ export function FacecamTab() {
 
   return (
     <section>
-      <SectionTitle title="Facecam" />
+      <SectionTitle title="Camera" />
       <Card className="divide-y divide-line">
-        <Row label="Facecam" hint="Your webcam in your clips. Off, the camera is not opened at all.">
+        <Row label="Camera">
           <Toggle checked={cam.enabled} onChange={(enabled) => patch({ enabled })} />
         </Row>
         {cam.enabled && (
           <div className="p-4">
             <Preview layout={cam.layout} />
-            <p className="mt-3 text-xs text-ink-muted">{state ? camStateLine(state) : "Starting…"}</p>
-            {state?.kind === "blocked" && (
-              <div className="mt-2 flex items-center justify-between gap-4">
-                <p className="text-xs text-ink-faint">Windows blocks the camera for desktop apps</p>
+            <div className="mt-3 flex items-center justify-between gap-4">
+              <p className="text-xs text-ink-muted">{state ? camStateLine(state) : "Starting…"}</p>
+              {state?.kind === "blocked" && (
                 <Button size="sm" onClick={() => inTauri && void api.openCameraPrivacy()}>
                   Open camera privacy
                 </Button>
-              </div>
-            )}
-            {state?.kind === "taken" && (
-              <p className="mt-2 text-xs text-ink-faint">
-                Windows 11: Settings › Bluetooth &amp; devices › Cameras › your camera › Allow multiple apps
-                to use camera at the same time
-              </p>
-            )}
-            <p className="mt-2 text-xs text-ink-faint">
-              While the facecam is on, Discord and other apps can't use this camera.
-            </p>
+              )}
+            </div>
           </div>
         )}
-      </Card>
-
-      <SectionTitle title="Camera" />
-      <Card className="divide-y divide-line">
-        <Row label="Camera" hint="OBS Virtual Camera and other cameras only older programs can see are not supported yet.">
+        <Row label="Device">
           <Select
-            label="Camera"
+            label="Device"
             value={chosen}
             options={cameraOptions}
             disabled={off}
@@ -94,7 +80,7 @@ export function FacecamTab() {
             }}
           />
         </Row>
-        <Row label="Resolution" hint="Applies the next time the camera starts.">
+        <Row label="Resolution">
           <Segmented
             value={cam.resolution}
             disabled={off}
@@ -105,14 +91,10 @@ export function FacecamTab() {
             onChange={(resolution) => patch({ resolution })}
           />
         </Row>
-      </Card>
-
-      <SectionTitle title="Where it appears" />
-      <Card className="divide-y divide-line">
-        <Row label="Clips" hint="Saved clips get the cam a few seconds after saving.">
+        <Row label="In clips">
           <Toggle checked={cam.inClips} disabled={off} onChange={(inClips) => patch({ inClips })} />
         </Row>
-        <Row label="Console preview" hint="Shows where the cam will sit while the console is open.">
+        <Row label="In the console">
           <Toggle
             checked={cam.consolePreview}
             disabled={off}
@@ -121,7 +103,7 @@ export function FacecamTab() {
         </Row>
       </Card>
 
-      <SectionTitle title="Default position" />
+      <SectionTitle title="Position" />
       <Card className="divide-y divide-line">
         <Row label="Corner">
           <CornerPad
@@ -131,8 +113,8 @@ export function FacecamTab() {
             onChange={(corner) => patch({ layout: { ...cam.layout, ...layoutAt(corner) } })}
           />
         </Row>
-        <Row label="Size" hint={`${Math.round((sizeDraft ?? cam.layout.size) * 100)} % of the picture's height`}>
-          <div className={off ? "pointer-events-none w-48 opacity-40" : "w-48"}>
+        <Row label="Size">
+          <div className={off ? "pointer-events-none flex w-56 items-center gap-3 opacity-40" : "flex w-56 items-center gap-3"}>
             <Slider
               label="Size"
               value={Math.round((sizeDraft ?? cam.layout.size) * 100)}
@@ -145,6 +127,9 @@ export function FacecamTab() {
                 patch({ layout: { ...cam.layout, size: v / 100 } });
               }}
             />
+            <span className="w-12 shrink-0 text-right font-mono text-xs text-ink-muted">
+              {Math.round((sizeDraft ?? cam.layout.size) * 100)} %
+            </span>
           </div>
         </Row>
         <Row label="Shape">
@@ -159,24 +144,17 @@ export function FacecamTab() {
             onChange={(shape) => patch({ layout: { ...cam.layout, shape } })}
           />
         </Row>
-        <Row label="Mirror" hint="Off, others see what the camera sees.">
+        <Row label="Mirror">
           <Toggle
             checked={cam.layout.mirror}
             disabled={off}
             onChange={(mirror) => patch({ layout: { ...cam.layout, mirror } })}
           />
         </Row>
-      </Card>
-
-      <SectionTitle title="Sync" />
-      <Card className="divide-y divide-line">
-        <Row
-          label="Cam delay"
-          hint="Clap once in view and save a clip. If you hear the clap before you see it, move this to the left."
-        >
+        <Row label="Delay">
           <div className={off ? "pointer-events-none flex w-56 items-center gap-3 opacity-40" : "flex w-56 items-center gap-3"}>
             <Slider
-              label="Cam delay"
+              label="Delay"
               value={delayDraft ?? cam.delayMs}
               min={-300}
               max={300}

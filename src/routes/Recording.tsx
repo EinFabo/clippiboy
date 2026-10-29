@@ -463,7 +463,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
             </p>
             {config.facecam.enabled && config.facecam.inClips && (
               <p className="mt-2 text-xs text-ink-muted">
-                Facecam: {camMemoryMb(config)} MB on top
+                Camera: {camMemoryMb(config)} MB on top
               </p>
             )}
           </div>

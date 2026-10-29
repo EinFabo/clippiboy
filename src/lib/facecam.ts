@@ -42,7 +42,7 @@ export function layoutAt(corner: OverlayCorner): { x: number; y: number } {
 export function camStateLine(state: CamState): string {
   switch (state.kind) {
     case "live":
-      return "On — other apps can't use this camera meanwhile";
+      return "On";
     case "taken":
       return state.by ? `Taken by ${state.by}` : "Taken by another app";
     case "blocked":

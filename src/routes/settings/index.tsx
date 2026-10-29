@@ -21,7 +21,7 @@ const tabs: Array<{ key: SettingsTab; label: string; page: () => React.ReactNode
   { key: "banner", label: "Banner", page: BannerTab },
   { key: "sounds", label: "Sounds", page: SoundsTab },
   { key: "console", label: "Console", page: ConsoleTab },
-  { key: "facecam", label: "Facecam", page: FacecamTab },
+  { key: "facecam", label: "Camera", page: FacecamTab },
   { key: "storage", label: "Storage", page: StorageTab },
   { key: "friends", label: "Friends", page: FriendsTab },
   { key: "about", label: "About", page: AboutTab },
