@@ -20,7 +20,7 @@ pub const CLSID: &str = "{23b5c234-8158-430a-b8f3-681b7e370ec6}";
 pub const FRIENDLY_NAME: &str = "ClippiBoy Camera";
 /// Where the installer notes what it installed.
 /// The DLL version the setup carries; the app compares it with the installed one.
-pub const DLL_VERSION: &str = "1.0.0";
+pub const DLL_VERSION: &str = "1.0.1";
 pub const REGISTRY_KEY: &str = r"SOFTWARE\ClippiBoy\VirtualCamera";
 pub const MAGIC: u32 = u32::from_le_bytes(*b"CBVC");
 pub const MAJOR: u32 = 1;
@@ -223,6 +223,22 @@ impl Reader {
         (!base.is_null() && len >= TOTAL_BYTES && base as usize % 8 == 0).then(|| Self(Region(base as *mut u8)))
     }
 
+    /// The newest frame's stamp, without copying it — to tell whether a new
+    /// one came. `None` before the writer published anything.
+    pub fn latest_stamp(&self) -> Option<i64> {
+        let h = self.0.header();
+        if h.magic.load(Ordering::Acquire) != MAGIC || h.major.load(Ordering::Acquire) != MAJOR {
+            return None;
+        }
+        let latest = h.latest.load(Ordering::Acquire) as usize;
+        if latest >= SLOT_COUNT {
+            return None;
+        }
+        let slot = unsafe { self.0.slot(latest) };
+        let seq = slot.seq.load(Ordering::Acquire);
+        (seq != 0 && seq % 2 == 0).then(|| slot.qpc.load(Ordering::Relaxed))
+    }
+
     /// The newest whole frame into `out`, or why there is none.
     pub fn read_latest(&self, out: &mut Vec<u8>, now_100ns: i64) -> ReadResult {
         let h = self.0.header();
@@ -311,6 +327,23 @@ mod tests {
         assert!(SLOT_STRIDE >= SLOT_HEADER_BYTES + SLOT_CAPACITY);
         assert_eq!(TOTAL_BYTES, HEADER_BYTES + SLOT_COUNT * SLOT_STRIDE);
         assert_eq!(SLOT_CAPACITY, 1920 * 1080 * 3 / 2);
+    }
+
+    /// The source asks this on every poll; copying 3 MB to learn whether a
+    /// frame is new would cost a gigabyte a second.
+    #[test]
+    fn the_newest_stamp_is_known_without_copying_the_frame() {
+        let mut mem = region();
+        let base = mem.as_mut_ptr() as *mut u8;
+        let writer = unsafe { Writer::new(base, TOTAL_BYTES) }.unwrap();
+        let reader = unsafe { Reader::new(base, TOTAL_BYTES) }.unwrap();
+        assert_eq!(reader.latest_stamp(), None, "before init");
+        writer.init(7, 1);
+        assert_eq!(reader.latest_stamp(), None, "nothing published yet");
+        writer.publish(&frame(64, 36, 9), 64, 36, 1_000, 1_000);
+        assert_eq!(reader.latest_stamp(), Some(1_000));
+        writer.publish(&frame(64, 36, 3), 64, 36, 1_333, 1_333);
+        assert_eq!(reader.latest_stamp(), Some(1_333));
     }
 
     #[test]

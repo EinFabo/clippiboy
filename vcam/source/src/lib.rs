@@ -341,9 +341,72 @@ struct Feed {
     out: Vec<u8>,
     was_live: Option<bool>,
     sent: u64,
+    /// The stamp of the last live frame sent.
+    last_stamp: Option<i64>,
+    stats: Stats,
+}
+
+/// How fresh the frames went out, logged every `Stats::EVERY` of them.
+#[derive(Default)]
+struct Stats {
+    samples: u32,
+    age_sum_ms: f64,
+    age_max_ms: f64,
+    wait_sum_ms: f64,
+    wait_max_ms: f64,
+    in_flight_max: u32,
+    since: Option<Instant>,
+}
+
+impl Stats {
+    const EVERY: u32 = 300;
+
+    fn note(&mut self, age_ms: Option<f64>, waited_ms: f64, in_flight: u32) {
+        self.since.get_or_insert_with(Instant::now);
+        self.samples += 1;
+        if let Some(age) = age_ms {
+            self.age_sum_ms += age;
+            self.age_max_ms = self.age_max_ms.max(age);
+        }
+        self.wait_sum_ms += waited_ms;
+        self.wait_max_ms = self.wait_max_ms.max(waited_ms);
+        self.in_flight_max = self.in_flight_max.max(in_flight);
+        if self.samples >= Self::EVERY {
+            let seconds = self.since.map_or(1.0, |t| t.elapsed().as_secs_f64().max(0.001));
+            let n = self.samples as f64;
+            log(format!(
+                "latency: age avg {:.0} ms max {:.0} ms, waited avg {:.1} ms max {:.0} ms, in flight max {}, {:.1} samples/s",
+                self.age_sum_ms / n,
+                self.age_max_ms,
+                self.wait_sum_ms / n,
+                self.wait_max_ms,
+                self.in_flight_max,
+                n / seconds
+            ));
+            *self = Stats::default();
+        }
+    }
 }
 
 impl Feed {
+    /// Is a live frame waiting that was not sent yet? `None` when ClippiBoy
+    /// sends none (not running, camera off): then the placeholder runs on
+    /// the clock. A stamp half a second old counts as none.
+    unsafe fn fresh(&mut self) -> Option<bool> {
+        if self.map.is_none() {
+            if self.last_try.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+                return None;
+            }
+            self.last_try = Some(Instant::now());
+            self.map = open_mapping();
+        }
+        let stamp = self.map.as_ref()?.reader.latest_stamp()?;
+        if MFGetSystemTime() - stamp > 5_000_000 {
+            return None;
+        }
+        Some(self.last_stamp != Some(stamp))
+    }
+
     /// ClippiBoy's newest frame, or its previous one when a read met a write
     /// half-way. `None` while there is none to show.
     unsafe fn read_live(&mut self) -> Option<(usize, usize)> {
@@ -356,9 +419,10 @@ impl Feed {
         }
         let read = self.map.as_ref()?.reader.read_latest(&mut self.scratch, MFGetSystemTime());
         match (picture_for(&read), read) {
-            (Picture::Live, vcam_protocol::ReadResult::Frame { width, height, .. }) => {
+            (Picture::Live, vcam_protocol::ReadResult::Frame { width, height, qpc_100ns }) => {
                 std::mem::swap(&mut self.live, &mut self.scratch);
                 self.dims = Some((width as usize, height as usize));
+                self.last_stamp = Some(qpc_100ns);
             }
             (_, vcam_protocol::ReadResult::Torn) => {}
             _ => self.dims = None,
@@ -493,6 +557,8 @@ struct StreamInner {
 struct MediaStream {
     attrs: IMFAttributes,
     inner: Mutex<StreamInner>,
+    /// RequestSample calls running at once, for the latency log.
+    in_flight: std::sync::atomic::AtomicU32,
 }
 
 impl MediaStream {
@@ -512,6 +578,7 @@ impl MediaStream {
         }
         Ok(ComObject::new(MediaStream {
             attrs,
+            in_flight: std::sync::atomic::AtomicU32::new(0),
             inner: Mutex::new(StreamInner {
                 queue: Some(MFCreateEventQueue()?),
                 descriptor: Some(descriptor),
@@ -587,18 +654,38 @@ impl IMFMediaStream_Impl for MediaStream_Impl {
     }
 
     fn RequestSample(&self, token: Option<&IUnknown>) -> Result<()> {
-        guard("RequestSample", || unsafe {
-            // Pacing is the source's job: Frame Server asks again as soon as it gets a frame.
-            let wait = lock(&self.inner).next_due.map(|d| d.saturating_duration_since(Instant::now()));
-            if let Some(w) = wait.filter(|w| !w.is_zero()) {
-                std::thread::sleep(w.min(Duration::from_millis(100)));
+        let in_flight = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let result = guard("RequestSample", || unsafe {
+            // Live: the next frame goes out as soon as ClippiBoy has it — a
+            // clock of our own between them only held frames back. Without
+            // ClippiBoy the placeholder runs at 30 fps.
+            let started = Instant::now();
+            loop {
+                let fresh = lock(&self.inner).feed.fresh();
+                match fresh {
+                    Some(true) => break,
+                    Some(false) if started.elapsed() < Duration::from_millis(100) => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Some(false) => break,
+                    None => {
+                        let wait = lock(&self.inner).next_due.map(|d| d.saturating_duration_since(Instant::now()));
+                        if let Some(w) = wait.filter(|w| !w.is_zero()) {
+                            std::thread::sleep(w.min(Duration::from_millis(100)));
+                        }
+                        break;
+                    }
+                }
             }
+            let waited_ms = started.elapsed().as_secs_f64() * 1000.0;
             let mut g = lock(&self.inner);
             let q = g.queue.clone().ok_or_else(shut)?;
             let now = Instant::now();
             g.next_due = Some(g.next_due.unwrap_or(now).max(now) + FRAME);
             let (sub, w, h) = (g.subtype, g.width, g.height);
             let sample = make_sample(g.feed.frame(sub, w, h))?;
+            let age_ms = g.feed.dims.and(g.feed.last_stamp).map(|stamp| (MFGetSystemTime() - stamp) as f64 / 10_000.0);
+            g.feed.stats.note(age_ms, waited_ms, in_flight);
             drop(g);
             sample.SetSampleTime(MFGetSystemTime())?;
             sample.SetSampleDuration(333_333)?;
@@ -606,7 +693,9 @@ impl IMFMediaStream_Impl for MediaStream_Impl {
                 sample.SetUnknown(&MFSampleExtension_Token, t)?;
             }
             q.QueueEventParamUnk(MEMediaSample.0 as u32, &GUID::zeroed(), S_OK, &sample)
-        })
+        });
+        self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
     }
 }
 
