@@ -8,6 +8,8 @@ import * as mock from "./lib/mock";
 import type {
   AppConfig,
   AudioDevice,
+  CameraDevice,
+  CamStatus,
   AudioProcess,
   AudioSource,
   CaptureTarget,
@@ -30,6 +32,7 @@ export type SettingsTab =
   | "banner"
   | "sounds"
   | "console"
+  | "facecam"
   | "storage"
   | "friends"
   | "about"
@@ -38,6 +41,11 @@ export type SettingsTab =
 interface EngineState {
   ready: boolean;
   config: AppConfig;
+  /** The cameras Windows lists; loaded when the Facecam tab opens. */
+  cameras: CameraDevice[];
+  refreshCameras: () => Promise<void>;
+  /** What the webcam is doing; `null` while it is off. */
+  camStatus: CamStatus | null;
   devices: AudioDevice[];
   processes: AudioProcess[];
   targets: CaptureTarget[];
@@ -246,6 +254,19 @@ export const useEngine = create<EngineState>((set, get) => ({
   recordingProgress: null,
   bufferedSeconds: 0,
   screenFallback: null,
+  cameras: [],
+  camStatus: null,
+  async refreshCameras() {
+    if (!inTauri) {
+      set({ cameras: mock.mockCameras });
+      return;
+    }
+    try {
+      set({ cameras: await api.listCameras() });
+    } catch (err) {
+      set({ lastError: `Cameras: ${String(err)}` });
+    }
+  },
   bufferBytes: 0,
   rateControl: null,
   detectedGame: null,
@@ -369,6 +390,7 @@ export const useEngine = create<EngineState>((set, get) => ({
           recordingBytes: s.recordingBytes,
           bufferedSeconds: s.bufferedSeconds,
           screenFallback: s.screenFallback,
+          camStatus: s.cam ?? null,
           bufferBytes: s.bufferBytes,
           rateControl: s.rateControl,
           detectedGame: s.game,
