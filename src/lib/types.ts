@@ -236,11 +236,49 @@ export interface AppConfig {
   rgbSpeed: RgbSpeed;
   friends: FriendsConfig;
   sounds: SoundConfig;
+  facecam: FacecamConfig;
   /**
    * Counts up with every change the core takes in. Sent back as it came: a
    * write from an older copy is merged onto what changed since, not over it.
    */
   revision: number;
+}
+
+/** The webcam laid over clips (`model::FacecamConfig`). Off by default. */
+export interface FacecamConfig {
+  enabled: boolean;
+  /** The camera's symbolic link; `null` for the first camera. */
+  deviceId: string | null;
+  deviceName: string | null;
+  resolution: CamResolution;
+  fps: number;
+  layout: CamLayout;
+  portrait: PortraitLayout;
+  /** −300…300 in steps of 10. */
+  delayMs: number;
+  inClips: boolean;
+  inRecordings: boolean;
+  inScreenshots: boolean;
+  consolePreview: boolean;
+  virtualCamera: boolean;
+}
+
+export type CamResolution = "p720" | "p1080";
+export type CamShape = "rect" | "rounded" | "circle";
+
+/** Where the cam sits: `x`/`y` 0–1 across the free room, `size` its height over the frame's. */
+export interface CamLayout {
+  visible: boolean;
+  x: number;
+  y: number;
+  size: number;
+  shape: CamShape;
+  mirror: boolean;
+}
+
+export interface PortraitLayout {
+  split: number;
+  gameX: number;
 }
 
 /** One notification's sound. `volume` is 0–1, on top of `SoundConfig.volume`. */

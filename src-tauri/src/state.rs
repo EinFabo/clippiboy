@@ -706,6 +706,9 @@ impl AppState {
         settle: impl FnOnce(&mut AppConfig, &AppConfig),
     ) -> AppConfig {
         incoming.recording.encoder = crate::encode::resolve(incoming.recording.encoder);
+        // Every write path — the settings, the console, the Stream Deck —
+        // reaches ffmpeg's numbers only through here.
+        crate::model::clean_facecam(&mut incoming.facecam);
         let (previous, next) = {
             let mut guard = self.config.lock();
             let mut history = self.config_history.lock();

@@ -80,6 +80,7 @@ pub fn default_config() -> AppConfig {
         rgb_speed: crate::model::RgbSpeed::default(),
         friends: crate::model::FriendsConfig::default(),
         sounds: crate::model::SoundConfig::default(),
+        facecam: crate::model::FacecamConfig::default(),
         revision: 0,
     }
 }
@@ -729,6 +730,82 @@ mod tests {
         assert_eq!(parsed.control.port, crate::model::DEFAULT_CONTROL_PORT);
         // Nothing saved yet — `control::start` replaces it at every start.
         assert!(parsed.control.token.is_empty());
+    }
+
+    /// The facecam block came with 0.9. A config from before it has none, and a
+    /// missing block must cost nothing: the cam is simply off.
+    #[test]
+    fn a_configuration_written_before_the_facecam_still_loads() {
+        let mut written =
+            serde_json::to_value(with(vec![source("mic", endpoint("dev-1"), true)])).unwrap();
+        written.as_object_mut().unwrap().remove("facecam").expect("called 'facecam' in JSON");
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert!(!parsed.facecam.enabled);
+        assert_eq!(parsed.facecam.layout.size, 0.25);
+    }
+
+    /// `load` throws everything away when a config does not parse, so a cam block
+    /// it cannot read is replaced by the cam's defaults instead.
+    #[test]
+    fn a_broken_facecam_block_costs_only_the_facecam() {
+        let mut written =
+            serde_json::to_value(with(vec![source("mic", endpoint("dev-1"), true)])).unwrap();
+        written["facecam"] = serde_json::json!({ "enabled": "yes", "layout": 5 });
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(parsed.sources.len(), 1);
+        assert_eq!(parsed.facecam, crate::model::FacecamConfig::default());
+    }
+
+    #[test]
+    fn a_facecam_block_missing_a_field_keeps_the_rest() {
+        let mut written = serde_json::to_value(with(vec![])).unwrap();
+        written["facecam"] = serde_json::json!({ "enabled": true });
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert!(parsed.facecam.enabled);
+        assert_eq!(parsed.facecam.delay_ms, -40);
+        assert!(parsed.facecam.in_clips);
+    }
+
+    #[test]
+    fn an_unknown_shape_loads_as_a_rectangle() {
+        use crate::model::CamShape;
+        for (raw, shape) in [
+            ("hexagon", CamShape::Rect),
+            ("rect", CamShape::Rect),
+            ("rounded", CamShape::Rounded),
+            ("circle", CamShape::Circle),
+        ] {
+            let mut written = serde_json::to_value(with(vec![])).unwrap();
+            written["facecam"] = serde_json::json!({ "layout": { "shape": raw } });
+            let parsed: AppConfig = serde_json::from_value(written).unwrap();
+            assert_eq!(parsed.facecam.layout.shape, shape, "{raw}");
+        }
+    }
+
+    /// A hand-edited file never reaches the filter graph with a cam three times
+    /// the frame or left of it.
+    #[test]
+    fn a_facecam_block_out_of_range_is_clamped_on_load() {
+        let mut written = serde_json::to_value(with(vec![])).unwrap();
+        written["facecam"] = serde_json::json!({ "layout": { "size": 3, "x": -2 } });
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(parsed.facecam.layout.size, 0.5);
+        assert_eq!(parsed.facecam.layout.x, 0.0);
+    }
+
+    /// "Cam off" in the console, then a slider let go in the main window that
+    /// still holds the copy from before: the camera stays off.
+    #[test]
+    fn cam_off_from_the_console_survives_a_stale_write() {
+        let mut base = with(vec![]);
+        base.facecam.enabled = true;
+        let mut current = base.clone();
+        current.facecam.enabled = false;
+        let mut incoming = base.clone();
+        incoming.facecam.layout.size = 0.3;
+        let merged = merge_stale(&base, &incoming, &current);
+        assert!(!merged.facecam.enabled);
+        assert_eq!(merged.facecam.layout.size, 0.3);
     }
 
     /// What the intermediate version left behind: one source turned into a kind

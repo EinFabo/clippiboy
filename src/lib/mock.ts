@@ -151,6 +151,21 @@ export const mockConfig: AppConfig = {
     clipReceived: { on: true, volume: 1 },
     error: { on: true, volume: 1 },
   },
+  facecam: {
+    enabled: true,
+    deviceId: null,
+    deviceName: null,
+    resolution: "p720",
+    fps: 30,
+    layout: { visible: true, x: 1, y: 1, size: 0.25, shape: "rounded", mirror: false },
+    portrait: { split: 0.35, gameX: 0.5 },
+    delayMs: -40,
+    inClips: true,
+    inRecordings: true,
+    inScreenshots: true,
+    consolePreview: true,
+    virtualCamera: false,
+  },
   revision: 0,
 };
 
