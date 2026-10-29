@@ -460,8 +460,8 @@ impl Worker {
                 self.frames_in += 1;
                 let frame = Arc::new(frame);
                 *self.shared.latest.lock() = Some(frame.clone());
-                // ClippiBoy Camera gets the picture as it came, while an app watches.
-                if self.shared.vcam_watching.load(std::sync::atomic::Ordering::Relaxed) {
+                // ClippiBoy Camera gets the picture as it came while it is listed.
+                if self.shared.vcam_on.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Some(writer) = self.shared.vcam.lock().as_ref() {
                         writer.publish(&frame.nv12, frame.probe.width, frame.probe.height, frame.probe.qpc_100ns, now_100ns());
                     }

@@ -142,8 +142,9 @@ pub struct CamShared {
     pub track: Mutex<(u32, u32)>,
     /// ClippiBoy Camera's shared memory, once it exists.
     pub vcam: Mutex<Option<Arc<vcam_protocol::Writer>>>,
-    /// An app streams ClippiBoy Camera: raw frames go into `vcam` meanwhile.
-    pub vcam_watching: Arc<std::sync::atomic::AtomicBool>,
+    /// ClippiBoy Camera is listed: every raw frame goes into `vcam`, whether or
+    /// not Windows has told us yet that an app watches.
+    pub vcam_on: Arc<std::sync::atomic::AtomicBool>,
 }
 
 type PlanSender = Arc<Mutex<Option<crossbeam_channel::Sender<CamPlan>>>>;
@@ -173,7 +174,7 @@ impl CamTrack {
                 errors: crate::pipeline::ErrorSlot::new(),
                 track: Mutex::new((1280, 720)),
                 vcam: Mutex::new(None),
-                vcam_watching: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                vcam_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
         }
     }

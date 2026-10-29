@@ -158,16 +158,17 @@ impl Vcam {
                         return;
                     }
                     let watching = self.watching.clone();
-                    let shared_flag = shared.vcam_watching.clone();
                     let notify = self.on_change.lock().clone();
                     match win::Running::start(move |active| {
                         watching.store(active, Ordering::SeqCst);
-                        shared_flag.store(active, Ordering::SeqCst);
                         if let Some(f) = &notify {
                             f();
                         }
                     }) {
-                        Ok(camera) => *running = Some(camera),
+                        Ok(camera) => {
+                            *running = Some(camera);
+                            shared.vcam_on.store(true, Ordering::SeqCst);
+                        }
                         Err(err) => log::warn!("ClippiBoy Camera could not start: {err}"),
                     }
                 }
@@ -175,8 +176,8 @@ impl Vcam {
                     if let Some(camera) = running.take() {
                         camera.shutdown();
                     }
+                    shared.vcam_on.store(false, Ordering::SeqCst);
                     self.watching.store(false, Ordering::SeqCst);
-                    shared.vcam_watching.store(false, Ordering::SeqCst);
                 }
                 _ => {}
             }
@@ -347,14 +348,30 @@ mod win {
         }
 
         fn Invoke(&self, result: Option<&IMFAsyncResult>) -> WinResult<()> {
-            let event = result.and_then(|r| unsafe { r.GetObject() }.ok()).and_then(|o| o.cast::<IMFMediaEvent>().ok());
-            if let Some(kind) = event.and_then(|e| unsafe { e.GetExtendedType() }.ok()) {
-                if kind == MF_FRAMESERVER_VCAMEVENT_EXTENDED_SOURCE_START {
+            // The documentation says only that the callback "may be invoked
+            // with an IMFMediaEvent"; it is looked for in both places.
+            let event = result.and_then(|r| {
+                let state = unsafe { r.GetState() }.ok().and_then(|s| s.cast::<IMFMediaEvent>().ok());
+                state.or_else(|| unsafe { r.GetObject() }.ok().and_then(|o| o.cast::<IMFMediaEvent>().ok()))
+            });
+            let Some(event) = event else {
+                log::info!("ClippiBoy Camera: a notice without an event");
+                return Ok(());
+            };
+            match unsafe { event.GetExtendedType() } {
+                Ok(kind) if kind == MF_FRAMESERVER_VCAMEVENT_EXTENDED_SOURCE_START => {
                     log::info!("ClippiBoy Camera: an app started watching");
                     (self.on_active)(true);
-                } else if kind == MF_FRAMESERVER_VCAMEVENT_EXTENDED_SOURCE_STOP {
+                }
+                Ok(kind) if kind == MF_FRAMESERVER_VCAMEVENT_EXTENDED_SOURCE_STOP => {
                     log::info!("ClippiBoy Camera: no app watching");
                     (self.on_active)(false);
+                }
+                Ok(kind) => log::info!("ClippiBoy Camera: event {kind:?}"),
+                Err(_) => {
+                    let kind = unsafe { event.GetType() }.unwrap_or(0);
+                    let status = unsafe { event.GetStatus() }.map(|s| s.0).unwrap_or(0);
+                    log::info!("ClippiBoy Camera: event type {kind}, status {status:#010x}");
                 }
             }
             Ok(())
