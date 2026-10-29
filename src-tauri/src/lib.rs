@@ -44,6 +44,7 @@ pub mod tools;
 pub mod tray;
 pub mod ts;
 pub mod updater;
+pub mod vcam;
 pub mod watermark;
 pub mod wgc;
 
@@ -1468,6 +1469,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 if let Some(line) = state.camera.health_line() {
                     log::info!("{line}");
                 }
+                state.vcam.heartbeat(state.camera.shared());
             }
             if tick % 20 == 0 {
                 // Erst messen, dann lesen: die Bildrate ist eine Rate, und das
@@ -1769,6 +1771,17 @@ pub fn run() {
             // The background composites: idle until a save or the recovery
             // in `maintain_library` hands it a clip.
             composite::start(handle);
+            // ClippiBoy Camera: an app starting or stopping to watch it opens
+            // or closes the real camera at once, not on the next tick.
+            {
+                let app = handle.clone();
+                handle.state::<AppState>().vcam.set_on_change(move || {
+                    let app = app.clone();
+                    std::thread::spawn(move || app.state::<AppState>().reconcile_cam());
+                });
+                let app = handle.clone();
+                std::thread::spawn(move || app.state::<AppState>().reconcile_vcam());
+            }
             // What saves, edits and exports cut short left in the clip folder
             // and the data folder — on a thread of its own.
             sweep::run(handle);
@@ -1949,6 +1962,8 @@ pub fn run() {
             // After the saves were waited for (`quit`); the plugin must not find
             // a token for a port nobody serves any more.
             control::stop();
+            // Off Windows' camera list before the process is gone.
+            handle.state::<AppState>().vcam.shutdown();
         }
         // A hidden window must not take the process with it — quitting only
         // happens via "Quit" in the tray.

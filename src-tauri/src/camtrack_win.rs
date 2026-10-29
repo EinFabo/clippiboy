@@ -356,6 +356,9 @@ impl Worker {
     /// Camera first (the LED goes off), then the encoder, then the ring.
     fn stop_all(&mut self) {
         self.close_camera();
+        if let Some(writer) = self.shared.vcam.lock().as_ref() {
+            writer.set_state(vcam_protocol::State::Idle, vcam_protocol::IdleReason::CamOff, now_100ns());
+        }
         if let Some((_, encoder)) = self.encoder.take() {
             let _ = self.ask.send(Ask::StopEncoder(encoder));
         }
@@ -455,6 +458,12 @@ impl Worker {
                 self.frames_in += 1;
                 let frame = Arc::new(frame);
                 *self.shared.latest.lock() = Some(frame.clone());
+                // ClippiBoy Camera gets the picture as it came, while an app watches.
+                if self.shared.vcam_watching.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(writer) = self.shared.vcam.lock().as_ref() {
+                        writer.publish(&frame.nv12, frame.probe.width, frame.probe.height, frame.probe.qpc_100ns, now_100ns());
+                    }
+                }
                 let size = (frame.probe.width, frame.probe.height);
                 self.shared.preview.offer(&frame, cover_crop(size, self.track), Instant::now());
                 let mut outs = Vec::new();

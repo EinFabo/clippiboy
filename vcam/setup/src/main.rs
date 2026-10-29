@@ -218,6 +218,11 @@ mod tests {
     }
 
     #[test]
+    fn the_setup_carries_the_version_the_app_expects() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), vcam_protocol::DLL_VERSION);
+    }
+
+    #[test]
     fn install_refuses_a_path_outside_program_files() {
         assert!(install_plan(Path::new(r"C:\Users\fabia\AppData\Local"), "1.0.0").is_err());
         assert!(install_plan(pf(), "../evil").is_err());

@@ -143,6 +143,8 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
     /// The webcam's own track, next to the pipeline — see [`crate::camtrack`].
     pub camera: crate::camtrack::CamTrack,
+    /// ClippiBoy Camera, the virtual camera other apps can pick.
+    pub vcam: crate::vcam::Vcam,
     /// Until when (QPC, 100 ns) the settings' preview counts as open; each
     /// frame the page asks for renews it.
     pub cam_preview_until: std::sync::atomic::AtomicI64,
@@ -650,6 +652,7 @@ impl AppState {
             restarts: RestartQueue::default(),
             settings_waiting: std::sync::atomic::AtomicBool::new(false),
             camera: crate::camtrack::CamTrack::new(),
+            vcam: crate::vcam::Vcam::new(),
             cam_preview_until: std::sync::atomic::AtomicI64::new(0),
             cam_wants: Mutex::new(None),
         }
@@ -667,6 +670,7 @@ impl AppState {
             preview_open: self.cam_preview_until.load(std::sync::atomic::Ordering::SeqCst)
                 > crate::audio::capture::now_100ns(),
             locked: self.auto.screen_locked(),
+            vcam_consumer: self.vcam.watching(),
         };
         let mut last = self.cam_wants.lock();
         let (plan, wants) = crate::camtrack::plan_for(&config.facecam, &inputs, last.as_ref());
@@ -679,6 +683,12 @@ impl AppState {
     pub fn reconcile_cam(&self) {
         let plan = self.cam_plan();
         self.camera.apply(plan);
+    }
+
+    /// ClippiBoy Camera in line with its switch.
+    pub fn reconcile_vcam(&self) {
+        let on = self.config_snapshot().facecam.virtual_camera;
+        self.vcam.apply(on, self.camera.shared());
     }
 
     /// The settings, the start-up trouble with them and the clip database, as
@@ -778,6 +788,9 @@ impl AppState {
         // Takes effect with the next frame, no restart.
         crate::watermark::set_enabled(next.watermark);
         crate::telemetry::on_config(&next);
+        if next.facecam.virtual_camera != previous.facecam.virtual_camera {
+            self.reconcile_vcam();
+        }
         self.reconcile_cam();
         // Only a changed source list needs the streams brought in line: a gain
         // step is one, a clip-length or sound change is not.

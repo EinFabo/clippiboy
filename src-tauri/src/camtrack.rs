@@ -24,11 +24,13 @@ pub struct CamWants {
     pub preview_open: bool,
     /// The secure desktop has been up for the buffer's ten seconds.
     pub locked: bool,
+    /// An app streams ClippiBoy Camera.
+    pub vcam_consumer: bool,
 }
 
 /// The webcam runs only while something the user switched on needs it.
 pub fn cam_wanted(w: &CamWants) -> bool {
-    w.enabled && !w.locked && ((w.buffer_wanted && w.in_clips) || w.preview_open)
+    w.enabled && !w.locked && ((w.buffer_wanted && w.in_clips) || w.preview_open || w.vcam_consumer)
 }
 
 /// How long to wait before closing the camera after a change. `None` while it
@@ -71,6 +73,7 @@ pub struct PlanInputs {
     pub buffer_wanted: bool,
     pub preview_open: bool,
     pub locked: bool,
+    pub vcam_consumer: bool,
 }
 
 /// The plan for the cam, and the wants it was made from, to compare the next
@@ -82,6 +85,7 @@ pub fn plan_for(cam: &crate::model::FacecamConfig, inputs: &PlanInputs, before: 
         buffer_wanted: inputs.buffer_wanted,
         preview_open: inputs.preview_open,
         locked: inputs.locked,
+        vcam_consumer: inputs.vcam_consumer,
     };
     let stop_after = match before {
         // Nothing changed since the last plan: a stop already on its way keeps
@@ -136,6 +140,10 @@ pub struct CamShared {
     pub errors: crate::pipeline::ErrorSlot,
     /// The cam track's size while it runs.
     pub track: Mutex<(u32, u32)>,
+    /// ClippiBoy Camera's shared memory, once it exists.
+    pub vcam: Mutex<Option<Arc<vcam_protocol::Writer>>>,
+    /// An app streams ClippiBoy Camera: raw frames go into `vcam` meanwhile.
+    pub vcam_watching: Arc<std::sync::atomic::AtomicBool>,
 }
 
 type PlanSender = Arc<Mutex<Option<crossbeam_channel::Sender<CamPlan>>>>;
@@ -164,6 +172,8 @@ impl CamTrack {
                 status: Mutex::new(None),
                 errors: crate::pipeline::ErrorSlot::new(),
                 track: Mutex::new((1280, 720)),
+                vcam: Mutex::new(None),
+                vcam_watching: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
         }
     }
@@ -200,6 +210,11 @@ impl CamTrack {
 
     pub fn preview(&self) -> &PreviewSlot {
         &self.shared.preview
+    }
+
+    /// What the cam worker and ClippiBoy Camera share.
+    pub fn shared(&self) -> &Arc<CamShared> {
+        &self.shared
     }
 
     pub fn ring(&self) -> &Mutex<CamRing> {
@@ -490,7 +505,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn wants(enabled: bool, in_clips: bool, buffer: bool, preview: bool, locked: bool) -> CamWants {
-        CamWants { enabled, in_clips, buffer_wanted: buffer, preview_open: preview, locked }
+        CamWants { enabled, in_clips, buffer_wanted: buffer, preview_open: preview, locked, vcam_consumer: false }
     }
 
     fn inputs(buffer_wanted: bool, preview_open: bool) -> PlanInputs {
@@ -501,6 +516,7 @@ mod tests {
             buffer_wanted,
             preview_open,
             locked: false,
+            vcam_consumer: false,
         }
     }
 
@@ -571,6 +587,18 @@ mod tests {
         assert!(cam_wanted(&wants(true, false, false, true, false)));
         assert!(!cam_wanted(&wants(true, true, true, false, true)));
         assert!(!cam_wanted(&wants(true, true, false, true, true)));
+    }
+
+    #[test]
+    fn an_app_watching_the_virtual_camera_keeps_the_camera_on() {
+        let mut w = wants(true, false, false, false, false);
+        w.vcam_consumer = true;
+        assert!(cam_wanted(&w));
+        w.enabled = false;
+        assert!(!cam_wanted(&w), "the master switch still rules");
+        w.enabled = true;
+        w.locked = true;
+        assert!(!cam_wanted(&w));
     }
 
     #[test]
