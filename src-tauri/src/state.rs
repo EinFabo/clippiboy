@@ -1885,7 +1885,13 @@ impl AppState {
             edit: None,
             original: None,
             original_available: false,
-            facecam: None,
+            // Burned in once the row is stored (`reccam::job`).
+            facecam: crate::reccam::read_stored(&meta.id).map(|_| crate::model::ClipFacecam {
+                layout: config.facecam.layout,
+                portrait: config.facecam.portrait,
+                delay_ms: config.facecam.delay_ms,
+                state: crate::model::FacecamState::Pending,
+            }),
             screenshot: false,
             recording: true,
             // Not in the library yet — the caller stores them with the clip.

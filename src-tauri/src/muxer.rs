@@ -758,6 +758,21 @@ pub fn probe_video_start_us(path: &Path) -> Option<i64> {
     parse_start_us(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// A file's first video stream's size.
+pub fn probe_video_size(path: &Path) -> Option<(u32, u32)> {
+    let output = command("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .ok()?;
+    parse_size(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn parse_size(text: &str) -> Option<(u32, u32)> {
+    let (w, h) = text.trim().split_once(',')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?)).filter(|&(w, h)| w > 0 && h > 0)
+}
+
 pub fn parse_start_us(text: &str) -> Option<i64> {
     let seconds = text.trim().parse::<f64>().ok()?;
     seconds.is_finite().then(|| (seconds * 1e6).round() as i64)
@@ -771,6 +786,13 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::buffer::jump_limit_us;
+
+    #[test]
+    fn a_probed_size_is_read() {
+        assert_eq!(parse_size("1280,720\r\n"), Some((1280, 720)));
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("0,0"), None);
+    }
 
     fn raw(path: &str, rate: &str) -> VideoInput {
         VideoInput::Raw {

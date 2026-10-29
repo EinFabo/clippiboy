@@ -214,6 +214,7 @@ export const api = {
   clipFacecamView: (id: string) => invoke<FacecamView | null>("clip_facecam_view", { id }),
   /** Where the 9:16 export cuts; stored at once, no file is rewritten. */
   setClipPortrait: (id: string, portrait: PortraitLayout) => invoke<Clip>("set_clip_portrait", { id, portrait }),
+  retryRecordingCam: (id: string) => invoke<Clip>("retry_recording_cam", { id }),
   /** Bakes every clip's cam; returns what was freed. */
   bakeAllCams: () => invoke<TrimOriginals>("bake_all_cams"),
   /** What the originals, tracks and thumbnails occupy in the app data folder. */

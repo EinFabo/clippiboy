@@ -1636,6 +1636,27 @@ pub fn set_clip_portrait(state: State<'_, AppState>, id: String, portrait: crate
     })
 }
 
+/// Burns a recording's camera in once more after it failed.
+#[tauri::command(async)]
+pub fn retry_recording_cam(state: State<'_, AppState>, id: String) -> Result<Clip> {
+    let clip = {
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        let stored = crate::reccam::read_stored(&id).is_some();
+        let cam = clip.facecam.clone().filter(|cam| crate::reccam::retryable(clip.recording, Some(cam.state), stored));
+        let cam = cam.ok_or_else(|| "The camera of this recording is no longer there.".to_string())?;
+        let next = crate::model::ClipFacecam { state: crate::model::FacecamState::Pending, ..cam };
+        with_library(&state, |lib| {
+            lib.set_facecam(&id, Some(&next)).map_err(|e| e.to_string())?;
+            lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+        })?
+    };
+    crate::composite::enqueue_recording(&id);
+    Ok(clip)
+}
+
 /// What the player needs to show a clip's camera movable; `None` for a clip
 /// whose camera cannot move (none, baked, store gone).
 #[tauri::command(async)]

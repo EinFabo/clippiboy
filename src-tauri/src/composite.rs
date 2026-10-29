@@ -526,11 +526,46 @@ pub fn swap_given_up(failing_since_ms: Option<i64>, now_ms: i64) -> bool {
     failing_since_ms.is_some_and(|since| now_ms - since >= 24 * 3_600_000)
 }
 
-static QUEUE: LazyLock<(Mutex<Queue>, Condvar)> = LazyLock::new(|| (Mutex::new(Queue::default()), Condvar::new()));
+/// Two lanes: a recording's burn-in takes minutes and must not hold up the
+/// cam of a clip saved meanwhile. Whoever waits for a file waits for both.
+#[derive(Debug, Default)]
+struct Lanes {
+    clips: Queue,
+    recordings: Queue,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Lane {
+    Clips,
+    Recordings,
+}
+
+impl Lanes {
+    fn lane(&mut self, lane: Lane) -> &mut Queue {
+        match lane {
+            Lane::Clips => &mut self.clips,
+            Lane::Recordings => &mut self.recordings,
+        }
+    }
+
+    fn busy(&self, id: &str) -> bool {
+        self.clips.busy(id) || self.recordings.busy(id)
+    }
+}
+
+static QUEUE: LazyLock<(Mutex<Lanes>, Condvar)> = LazyLock::new(|| (Mutex::new(Lanes::default()), Condvar::new()));
 
 pub fn enqueue(clip_id: &str) {
     let (queue, changed) = &*QUEUE;
-    if queue.lock().push(clip_id) {
+    if queue.lock().clips.push(clip_id) {
+        changed.notify_all();
+    }
+}
+
+/// A stopped recording whose camera is to be burned in.
+pub fn enqueue_recording(clip_id: &str) {
+    let (queue, changed) = &*QUEUE;
+    if queue.lock().recordings.push(clip_id) {
         changed.notify_all();
     }
 }
@@ -538,7 +573,8 @@ pub fn enqueue(clip_id: &str) {
 /// Drops a queued job; `false` when none was waiting.
 pub fn cancel(clip_id: &str) -> bool {
     let (queue, changed) = &*QUEUE;
-    let dropped = queue.lock().drop_waiting(clip_id);
+    let mut lanes = queue.lock();
+    let dropped = lanes.clips.drop_waiting(clip_id) | lanes.recordings.drop_waiting(clip_id);
     changed.notify_all();
     dropped
 }
@@ -557,22 +593,28 @@ pub fn wait_settled(clip_id: &str, limit: Duration) -> bool {
     true
 }
 
-/// The one composite worker, below normal priority through its ffmpeg.
+/// The composite workers, one per lane, below normal priority through their
+/// ffmpeg.
 pub fn start(app: &tauri::AppHandle) {
+    run_lane(app, Lane::Clips, "clippiboy-composite", job);
+    run_lane(app, Lane::Recordings, "clippiboy-reccam", crate::reccam::job);
+}
+
+fn run_lane(app: &tauri::AppHandle, lane: Lane, name: &str, job: fn(&tauri::AppHandle, &str) -> Option<Instant>) {
     let app = app.clone();
-    let spawned = std::thread::Builder::new().name("clippiboy-composite".into()).spawn(move || loop {
+    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || loop {
         let id = {
             let (queue, changed) = &*QUEUE;
-            let mut q = queue.lock();
+            let mut lanes = queue.lock();
             loop {
-                if let Some(id) = q.next(Instant::now()) {
+                if let Some(id) = lanes.lane(lane).next(Instant::now()) {
                     break id;
                 }
-                match q.earliest_later() {
+                match lanes.lane(lane).earliest_later() {
                     Some(at) => {
-                        changed.wait_until(&mut q, at);
+                        changed.wait_until(&mut lanes, at);
                     }
-                    None => changed.wait(&mut q),
+                    None => changed.wait(&mut lanes),
                 }
             }
         };
@@ -582,7 +624,8 @@ pub fn start(app: &tauri::AppHandle) {
             None
         });
         let (queue, changed) = &*QUEUE;
-        let mut q = queue.lock();
+        let mut lanes = queue.lock();
+        let q = lanes.lane(lane);
         q.done(&id);
         if let Some(at) = later {
             q.push_later(&id, at);
@@ -601,19 +644,19 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn file_size(path: &Path) -> Option<u64> {
+pub(crate) fn file_size(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| m.len())
 }
 
 /// `<clip>.<pid>.cam.mp4`, next to the clip.
-fn temp_path(clip: &Path) -> PathBuf {
+pub(crate) fn temp_path(clip: &Path) -> PathBuf {
     let mut name = clip.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.cam.mp4", std::process::id()));
     clip.with_file_name(name)
 }
 
 /// Composites left by an earlier run of the app.
-fn stale_temps(clip: &Path) -> Vec<PathBuf> {
+pub(crate) fn stale_temps(clip: &Path) -> Vec<PathBuf> {
     let (Some(dir), Some(name)) = (clip.parent(), clip.file_name()) else { return Vec::new() };
     let prefix = format!("{}.", name.to_string_lossy());
     std::fs::read_dir(dir)

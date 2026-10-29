@@ -386,6 +386,9 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
                 }
             }
             tag_friends(app, &state, &mut clip);
+            if clip.facecam.is_some() {
+                composite::enqueue_recording(&clip.id);
+            }
             let _ = app.emit("clip-saved", clip.clone());
             let length = format::duration(clip.duration_ms);
             notify(app, "ok", format!("Recording saved · {length}"));
@@ -428,6 +431,9 @@ pub fn recover_recordings(app: &tauri::AppHandle) {
             // Only who was there at the start: who plays that game now has
             // nothing to do with a recording from last time.
             store_tags(&state, &mut clip, Vec::new());
+            if clip.facecam.is_some() {
+                composite::enqueue_recording(&clip.id);
+            }
             let _ = app.emit("clip-saved", clip.clone());
             notify(&app, "ok", "A recording from last time was finished");
         }
@@ -1618,6 +1624,8 @@ fn maintain_library(app: &tauri::AppHandle) {
             // A cam that was on its way when the app last stopped: put the
             // clean clip back, finish a swap, or composite again.
             announce(composite::recover(&state.library));
+            // A recording whose camera was being burned in.
+            announce(reccam::recover(&state.library));
             // Pictures from older versions still sit next to the videos.
             announce(thumbs::migrate(&state.library));
             // Game names first, folders second: a name that differs only in
@@ -1874,6 +1882,7 @@ pub fn run() {
             commands::bake_clip_cam,
             commands::clip_facecam_view,
             commands::set_clip_portrait,
+            commands::retry_recording_cam,
             commands::bake_all_cams,
             commands::list_audio_processes,
             commands::list_capture_targets,

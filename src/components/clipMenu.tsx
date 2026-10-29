@@ -212,6 +212,15 @@ export function useClipMenu() {
         onSelect: onExport,
       });
     }
+    if (clip.recording && clip.facecam?.state === "failed") {
+      entries.push({
+        kind: "item",
+        label: "Try adding the camera again",
+        icon: <IconCamera className={icon} />,
+        disabled: !inTauri,
+        onSelect: () => void run(api.retryRecordingCam(clip.id)),
+      });
+    }
     entries.push({
       kind: "item",
       label: "Copy path",

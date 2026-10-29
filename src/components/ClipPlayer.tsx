@@ -670,7 +670,8 @@ export function ClipPlayer({
   const saved = savedEdit(clip?.edit ?? null, duration, current.tracks);
   // A cam that failed to go in counts as a change: Save is the "try again
   // from the editor" its notice promises.
-  const camMissing = clip?.facecam?.state === "failed";
+  // A recording's camera is tried again from the gallery's menu instead.
+  const camMissing = clip?.facecam?.state === "failed" && !clip.recording;
   const dirty =
     duration > 0 &&
     !mix.loading &&

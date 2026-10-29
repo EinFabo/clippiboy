@@ -699,6 +699,12 @@
           "markdownDescription": "Enables the retry_ffmpeg command without any pre-configured scope."
         },
         {
+          "description": "Enables the retry_recording_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-retry-recording-cam",
+          "markdownDescription": "Enables the retry_recording_cam command without any pre-configured scope."
+        },
+        {
           "description": "Enables the reveal_clip command without any pre-configured scope.",
           "type": "string",
           "const": "allow-reveal-clip",
@@ -1255,6 +1261,12 @@
           "type": "string",
           "const": "deny-retry-ffmpeg",
           "markdownDescription": "Denies the retry_ffmpeg command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the retry_recording_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-retry-recording-cam",
+          "markdownDescription": "Denies the retry_recording_cam command without any pre-configured scope."
         },
         {
           "description": "Denies the reveal_clip command without any pre-configured scope.",

@@ -16,6 +16,7 @@ fn main() {
         "bake_clip_cam",
         "clip_facecam_view",
         "set_clip_portrait",
+        "retry_recording_cam",
         "bake_all_cams",
         "list_audio_processes",
         "list_capture_targets",
