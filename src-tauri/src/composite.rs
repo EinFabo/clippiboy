@@ -147,22 +147,149 @@ pub fn cam_filter(chain: &CamChain) -> String {
         graph += &format!(";[{mask}:v]format=gray[mask];[cam][mask]alphamerge[camm]");
         overlaid = "camm";
     }
-    let start = chain.video_start_us as f64 / 1e6;
-    let enable = if chain.gaps_ms.is_empty() {
-        String::new()
-    } else {
-        let hidden: Vec<String> = chain
-            .gaps_ms
-            .iter()
-            .map(|(a, b)| format!("between(t,{:.6},{:.6})", start + *a as f64 / 1000.0, start + *b as f64 / 1000.0))
-            .collect();
-        format!(":enable='not({})'", hidden.join("+"))
-    };
+    let enable = gap_enable(chain.gaps_ms, chain.video_start_us);
     graph += &format!(
         ";[{}][{overlaid}]overlay=x={}:y={}:eval=init:eof_action=repeat{enable}[v]",
         chain.main, rect.x, rect.y
     );
     graph
+}
+
+/// Where the parts of a 9:16 frame go, in its pixels. With a cam, the cam
+/// fills a band on top and the game, scaled to the rest's height, is cut to a
+/// window that `game_x` slides; without one, the game fits the width and sits
+/// in the middle. A blurred copy of the game fills everything behind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PortraitGeometry {
+    pub out: (u32, u32),
+    pub band: Option<Rect>,
+    /// The game scaled to this before it is cut.
+    pub game_scaled: (u32, u32),
+    /// The cut of the scaled game.
+    pub game_crop: Rect,
+    /// Where the cut lands in the frame.
+    pub game_at: (u32, u32),
+}
+
+pub fn portrait_geometry(
+    game: (u32, u32),
+    cam: Option<(u32, u32)>,
+    layout: &crate::model::PortraitLayout,
+    out: (u32, u32),
+) -> PortraitGeometry {
+    let (gw, gh) = (game.0.max(2) as f64, game.1.max(2) as f64);
+    let (ow, oh) = out;
+    let Some(_) = cam else {
+        let h = even(gh * ow as f64 / gw).min(oh);
+        return PortraitGeometry {
+            out,
+            band: None,
+            game_scaled: (ow, h),
+            game_crop: Rect { x: 0, y: 0, w: ow, h },
+            game_at: (0, even((oh - h) as f64 / 2.0).min(oh - h)),
+        };
+    };
+    let band_h = even(layout.split.clamp(0.25, 0.5) as f64 * oh as f64);
+    let area_h = oh - band_h;
+    // Cover the area: the larger scale wins, the window cuts the rest.
+    let scale = (ow as f64 / gw).max(area_h as f64 / gh);
+    let scaled = (even(gw * scale).max(ow), even(gh * scale).max(area_h));
+    let free_x = scaled.0 - ow;
+    let x = even(layout.game_x.clamp(0.0, 1.0) as f64 * free_x as f64).min(free_x);
+    let y = even((scaled.1 - area_h) as f64 / 2.0).min(scaled.1 - area_h);
+    PortraitGeometry {
+        out,
+        band: Some(Rect { x: 0, y: 0, w: ow, h: band_h }),
+        game_scaled: scaled,
+        game_crop: Rect { x, y, w: ow, h: area_h },
+        game_at: (0, band_h),
+    }
+}
+
+/// The cam's side of a 9:16 graph.
+pub struct PortraitCam {
+    pub input: usize,
+    pub size: (u32, u32),
+    pub timing: CamTiming,
+    /// Stretches without a camera, in this cut's milliseconds.
+    pub gaps_ms: Vec<(u64, u64)>,
+    pub video_start_us: i64,
+    pub mirror: bool,
+}
+
+/// The watermark drawn again on the 9:16 frame.
+pub struct MarkInput {
+    pub input: usize,
+    pub rect: Rect,
+}
+
+/// The game's own mark sits in its bottom-left corner: a window that starts
+/// at the left edge keeps it, any other cuts it — then, with the watermark
+/// on, it is drawn again on the 9:16 frame (Open for Fabi 6 (a)).
+pub fn mark_redrawn(watermark_on: bool, geometry: &PortraitGeometry) -> bool {
+    watermark_on && geometry.game_crop.x > 0
+}
+
+/// `enable` that hides the cam where it was gone while recording.
+fn gap_enable(gaps_ms: &[(u64, u64)], video_start_us: i64) -> String {
+    if gaps_ms.is_empty() {
+        return String::new();
+    }
+    let start = video_start_us as f64 / 1e6;
+    let hidden: Vec<String> = gaps_ms
+        .iter()
+        .map(|(a, b)| format!("between(t,{:.6},{:.6})", start + *a as f64 / 1000.0, start + *b as f64 / 1000.0))
+        .collect();
+    format!(":enable='not({})'", hidden.join("+"))
+}
+
+/// The 9:16 video graph from input 0 (the game), ending in `[v]`. Only
+/// numbers Rust worked out go in; overlays on a blurred fill, never vstack.
+pub fn portrait_filter(geometry: &PortraitGeometry, cam: Option<&PortraitCam>, mark: Option<&MarkInput>) -> String {
+    let (ow, oh) = geometry.out;
+    let (sw, sh) = geometry.game_scaled;
+    let c = geometry.game_crop;
+    let mut graph = format!(
+        "[0:v]split=2[g0][g1];\
+         [g0]scale={ow}:{oh}:force_original_aspect_ratio=increase,crop={ow}:{oh},boxblur=24:2[fill];\
+         [g1]scale={sw}:{sh},crop={}:{}:{}:{}[game];\
+         [fill][game]overlay=x={}:y={}[base]",
+        c.w, c.h, c.x, c.y, geometry.game_at.0, geometry.game_at.1
+    );
+    let mut last = "base".to_string();
+    if let (Some(cam), Some(band)) = (cam, geometry.band) {
+        // Cut the cam to the band's shape around its middle, then fill it.
+        let (cw, ch) = (cam.size.0.max(2) as f64, cam.size.1.max(2) as f64);
+        let band_aspect = band.w as f64 / band.h as f64;
+        let (kw, kh) = if cw / ch > band_aspect { (even(ch * band_aspect), cam.size.1 & !1) } else { (cam.size.0 & !1, even(cw / band_aspect)) };
+        let (kx, ky) = (even((cw - kw as f64) / 2.0), even((ch - kh as f64) / 2.0));
+        graph += &format!(
+            ";[{}:v]setpts=PTS+{:.6}/TB,trim=end={:.6},crop={kw}:{kh}:{kx}:{ky}{},scale={}:{}[cam];[{last}][cam]overlay=x={}:y={}:eval=init:eof_action=pass{}[withcam]",
+            cam.input,
+            cam.timing.shift_s,
+            cam.timing.end_s,
+            if cam.mirror { ",hflip" } else { "" },
+            band.w,
+            band.h,
+            band.x,
+            band.y,
+            gap_enable(&cam.gaps_ms, cam.video_start_us)
+        );
+        last = "withcam".into();
+    }
+    if let Some(mark) = mark {
+        graph += &format!(
+            ";[{}:v]format=rgba,colorchannelmixer=aa={},scale={}:{}[mark];[{last}][mark]overlay=x={}:y={}[marked]",
+            mark.input,
+            crate::watermark::OPACITY,
+            mark.rect.w,
+            mark.rect.h,
+            mark.rect.x,
+            mark.rect.y
+        );
+        last = "marked".into();
+    }
+    graph + &format!(";[{last}]null[v]")
 }
 
 /// Everything one background composite needs.
@@ -712,6 +839,99 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    fn portrait(split: f32, game_x: f32) -> crate::model::PortraitLayout {
+        crate::model::PortraitLayout { split, game_x }
+    }
+
+    fn even_all(g: &PortraitGeometry) -> bool {
+        let rects = [g.game_crop].into_iter().chain(g.band);
+        rects.into_iter().all(|r| [r.x, r.y, r.w, r.h].iter().all(|v| v % 2 == 0))
+            && [g.game_scaled.0, g.game_scaled.1, g.game_at.0, g.game_at.1, g.out.0, g.out.1].iter().all(|v| v % 2 == 0)
+    }
+
+    #[test]
+    fn the_game_window_follows_game_x() {
+        let at = |x| portrait_geometry((1920, 1080), Some((1280, 720)), &portrait(0.35, x), (1080, 1920));
+        let left = at(0.0);
+        assert_eq!(left.band, Some(Rect { x: 0, y: 0, w: 1080, h: 672 }));
+        assert_eq!(left.game_scaled, (2218, 1248));
+        assert_eq!((left.game_crop.x, left.game_crop.w, left.game_crop.h), (0, 1080, 1248));
+        assert_eq!(left.game_at, (0, 672));
+        assert_eq!(at(1.0).game_crop.x, 2218 - 1080);
+        let mid = at(0.5).game_crop.x;
+        assert!(mid.abs_diff((2218 - 1080) / 2) <= 2 && mid % 2 == 0, "{mid}");
+    }
+
+    #[test]
+    fn every_size_and_position_is_even() {
+        for game in [(1920, 1080), (2560, 1080), (1280, 720), (1366, 768)] {
+            for split in [0.25, 0.35, 0.5] {
+                for x in [0.0, 0.33, 1.0] {
+                    for cam in [Some((1280, 720)), None] {
+                        let g = portrait_geometry(game, cam, &portrait(split, x), (1080, 1920));
+                        assert!(even_all(&g), "{game:?} {split} {x} {cam:?}: {g:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn portrait_without_a_cam_centres_the_game_on_a_blurred_fill() {
+        let g = portrait_geometry((1920, 1080), None, &portrait(0.35, 0.5), (1080, 1920));
+        assert_eq!(g.band, None);
+        assert_eq!(g.game_scaled, (1080, 608));
+        assert_eq!(g.game_at, (0, 656));
+        let graph = portrait_filter(&g, None, None);
+        assert!(graph.contains("boxblur"), "{graph}");
+        assert!(graph.contains("overlay=x=0:y=656"), "{graph}");
+        assert!(!graph.contains("[1:v]"), "no cam input: {graph}");
+        assert!(graph.ends_with("[v]"), "{graph}");
+    }
+
+    fn portrait_cam(gaps: Vec<(u64, u64)>) -> PortraitCam {
+        PortraitCam {
+            input: 1,
+            size: (1280, 720),
+            timing: cam_timing(-412_000, -40, 21_333, 0, 30_000),
+            gaps_ms: gaps,
+            video_start_us: 21_333,
+            mirror: true,
+        }
+    }
+
+    #[test]
+    fn the_band_falls_back_to_a_blurred_strip_while_the_cam_is_absent() {
+        let g = portrait_geometry((1920, 1080), Some((1280, 720)), &portrait(0.35, 0.5), (1080, 1920));
+        let graph = portrait_filter(&g, Some(&portrait_cam(vec![(1500, 3000)])), None);
+        // The blurred fill covers the whole frame, band included; the cam
+        // leaves it showing in a gap and after its end.
+        assert!(graph.contains("boxblur"), "{graph}");
+        assert!(graph.contains("enable='not(between(t,1.521333,3.021333))'"), "{graph}");
+        assert!(graph.contains("eof_action=pass"), "{graph}");
+        assert!(graph.contains("hflip"), "mirrored: {graph}");
+        assert!(graph.contains("scale=1080:672"), "the cam fills the band: {graph}");
+    }
+
+    #[test]
+    fn portrait_never_uses_vstack_or_shortest() {
+        let g = portrait_geometry((1920, 1080), Some((1280, 720)), &portrait(0.35, 0.5), (1080, 1920));
+        let graph = portrait_filter(&g, Some(&portrait_cam(vec![])), None);
+        assert!(!graph.contains("vstack") && !graph.contains("shortest"), "{graph}");
+    }
+
+    #[test]
+    fn the_mark_is_drawn_again_when_the_window_cuts_it_out() {
+        let at = |x| portrait_geometry((1920, 1080), Some((1280, 720)), &portrait(0.35, x), (1080, 1920));
+        assert!(mark_redrawn(true, &at(0.5)));
+        assert!(!mark_redrawn(true, &at(0.0)), "the window keeps the bottom-left corner and its mark");
+        assert!(!mark_redrawn(false, &at(0.5)), "no mark while the watermark is off");
+        let mark = MarkInput { input: 3, rect: Rect { x: 40, y: 1800, w: 220, h: 60 } };
+        let graph = portrait_filter(&at(0.5), Some(&portrait_cam(vec![])), Some(&mark));
+        assert!(graph.contains("[3:v]"), "{graph}");
+        assert!(graph.contains("overlay=x=40:y=1800"), "{graph}");
     }
 
     #[test]
