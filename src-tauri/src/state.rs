@@ -132,6 +132,13 @@ pub fn settings_step(
     }
 }
 
+/// What a save hands on for the facecam's cut.
+#[derive(Debug, Clone, Copy)]
+pub struct CamSave {
+    pub window: crate::facecam::CamWindow,
+    pub game_gop: u32,
+}
+
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     /// The webcam's own track, next to the pipeline — see [`crate::camtrack`].
@@ -1410,7 +1417,9 @@ impl AppState {
 
     /// Writes the last `seconds` seconds as an MP4. `None` takes the clip length
     /// from the settings, which is what the hotkey, the tray and the button do.
-    pub fn save_clip(&self, seconds: Option<u32>) -> Result<Clip, String> {
+    /// The clip, and when the facecam is on for clips, the game's window the
+    /// cam is cut by afterwards with the game's keyframe interval in frames.
+    pub fn save_clip(&self, seconds: Option<u32>) -> Result<(Clip, Option<CamSave>), String> {
         let config = self.config_snapshot();
         // A length asked for from outside (a Stream Deck key set to 2:30) can
         // outlast a buffer shortened since; the buffer is all there is.
@@ -1460,13 +1469,24 @@ impl AppState {
         // packets: read afterwards, a restart in between gave the row the next
         // pipeline's size (BUF-8).
         let (width, height) = (snapshot.width, snapshot.height);
+        // Copied out before the snapshot moves into the request.
+        let cam = (config.facecam.enabled && config.facecam.in_clips).then(|| {
+            let fitted = self.active_recording.lock().clone().unwrap_or_else(|| config.recording.clone());
+            CamSave {
+                window: crate::facecam::CamWindow {
+                    g0_100ns: snapshot.start_100ns,
+                    length_us: ((snapshot.end_100ns() - snapshot.start_100ns) / 10).max(0) as u64,
+                },
+                game_gop: fitted.fps * fitted.keyframe_seconds,
+            }
+        });
         let result = crate::muxer::build(crate::muxer::ClipRequest {
             snapshot,
             clip_id: id.clone(),
             output,
         })?;
 
-        Ok(Clip {
+        Ok((Clip {
             id,
             path: result.path.to_string_lossy().to_string(),
             created_at: std::time::SystemTime::now()
@@ -1489,7 +1509,7 @@ impl AppState {
             screenshot: false,
             recording: false,
             tags: Vec::new(),
-        })
+        }, cam))
     }
 
     /// One picture from the recording source.

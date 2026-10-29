@@ -270,6 +270,7 @@ impl Worker {
                 self.stopped = false;
                 self.state = CamState::Starting;
                 self.track = plan.resolution.size();
+                *self.shared.track.lock() = self.track;
                 self.backoff.reset();
                 self.retry_at = None;
                 let bytes = crate::config::effective_cam_memory_bytes(

@@ -130,6 +130,85 @@ pub struct FacecamFacts {
     pub swap_failing_since_ms: Option<i64>,
 }
 
+/// ffmpeg's arguments for `cam.mp4`: the elementary stream at exactly 30
+/// fps — the grid made it constant — copied into an MP4.
+pub fn cam_mp4_arguments(h264: &std::path::Path, output: &std::path::Path) -> Vec<String> {
+    [
+        "-y", "-hide_banner", "-loglevel", "error", "-f", "h264", "-r", "30", "-i",
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain([h264.to_string_lossy().into_owned()])
+    .chain(["-c:v", "copy", "-an", "-movflags", "+faststart"].into_iter().map(String::from))
+    .chain([output.to_string_lossy().into_owned()])
+    .collect()
+}
+
+/// The cam cut for one clip, with what the facts need to say about it.
+pub struct CamCutOut {
+    pub cut: CamCut,
+    /// The cam encoder's SPS/PPS.
+    pub header: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub clock: ClockKind,
+    pub camera: String,
+    pub encoder: Option<EncoderId>,
+}
+
+/// Writes `cam.mp4` and then `facecam.json` into the clip's store. Any
+/// failure removes what was started and costs the cam, never the clip.
+pub fn write_phase_one(clip_id: &str, out: &CamCutOut, clip_length_us: u64, game_gop: u32) -> Result<FacecamFacts, String> {
+    let dir = crate::edit::dir(clip_id);
+    let h264 = dir.join("cam.part.h264");
+    let part = dir.join("cam.part.mp4");
+    let result = (|| {
+        std::fs::create_dir_all(&dir).map_err(|err| format!("cam store: {err}"))?;
+        let mut stream = out.header.clone();
+        for packet in &out.cut.packets {
+            stream.extend_from_slice(&packet.data);
+        }
+        std::fs::write(&h264, &stream).map_err(|err| format!("cam stream: {err}"))?;
+        let run = crate::muxer::command("ffmpeg")
+            .args(cam_mp4_arguments(&h264, &part))
+            .output()
+            .map_err(|err| format!("ffmpeg: {err}"))?;
+        if !run.status.success() {
+            return Err(format!("ffmpeg: {}", String::from_utf8_lossy(&run.stderr).trim()));
+        }
+        crate::muxer::probe_duration_ms(&part).ok_or("cam.mp4 cannot be read back")?;
+        std::fs::rename(&part, cam_path(clip_id)).map_err(|err| format!("cam.mp4: {err}"))?;
+        let facts = FacecamFacts {
+            version: 1,
+            width: out.width,
+            height: out.height,
+            fps: out.fps,
+            cam_offset_us: out.cut.offset_us,
+            frames: out.cut.frames,
+            clip_length_us,
+            gaps_ms: out.cut.gaps_ms.clone(),
+            clock: out.clock,
+            camera: out.camera.clone(),
+            encoder: out.encoder,
+            game_gop,
+            video_start_us: None,
+            applied: None,
+            applying: None,
+            swap_failing_since_ms: None,
+        };
+        write_facts(clip_id, &facts).map_err(|err| format!("facecam.json: {err}"))?;
+        Ok(facts)
+    })();
+    let _ = std::fs::remove_file(&h264);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(cam_path(clip_id));
+        let _ = std::fs::remove_file(facts_path(clip_id));
+    }
+    result
+}
+
 pub fn cam_path(clip_id: &str) -> PathBuf {
     crate::edit::dir(clip_id).join("cam.mp4")
 }
@@ -276,6 +355,18 @@ mod tests {
         let ring = ring(0, 0, 30 * 30, None);
         let cut = cam_cut(&ring, &window(4 * S, 4.0)).unwrap();
         assert_eq!(cut.packets[0].pts_us, 3_000_000);
+    }
+
+    /// The grid's stream is exact constant frame rate, so a raw elementary
+    /// stream read at 30 fps is right; copied, never re-encoded or cut.
+    #[test]
+    fn the_cam_file_is_copied_at_exactly_thirty_frames() {
+        let args = cam_mp4_arguments(std::path::Path::new("cam.part.h264"), std::path::Path::new("cam.part.mp4"));
+        let input = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(&args[input - 4..input], ["-f", "h264", "-r", "30"]);
+        assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]));
+        assert!(!args.iter().any(|a| a == "-filter_complex" || a == "-ss"));
+        assert_eq!(args.last().map(String::as_str), Some("cam.part.mp4"));
     }
 
     #[test]

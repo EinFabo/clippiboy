@@ -109,6 +109,42 @@ fn store_tags(state: &AppState, clip: &mut model::Clip, names: Vec<String>) {
 ///
 /// `seconds` is `None` for the configured clip length; a Stream Deck key can
 /// carry a length of its own.
+/// Phase one of the facecam: the cam cut by the clip's window into the clip's
+/// store. A cam that cannot be written costs the cam, never the clip.
+fn save_cam(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip, cam: state::CamSave) {
+    let Some(out) = state.camera.cut(&cam.window, std::time::Duration::from_millis(500)) else {
+        log::info!("no cam for clip {}: the cam had no picture in its window", clip.id);
+        return;
+    };
+    match facecam::write_phase_one(&clip.id, &out, cam.window.length_us, cam.game_gop) {
+        Ok(facts) => {
+            let config = state.config_snapshot();
+            let layout = config.facecam.layout;
+            let facecam = model::ClipFacecam {
+                layout,
+                portrait: config.facecam.portrait,
+                delay_ms: facecam::saved_delay_ms(config.facecam.delay_ms, facts.clock),
+                state: if layout.visible { model::FacecamState::Pending } else { model::FacecamState::Ready },
+            };
+            log::info!(
+                "cam for clip {}: {} frames, offset {} µs, clock {:?}",
+                clip.id,
+                facts.frames,
+                facts.cam_offset_us,
+                facts.clock
+            );
+            if let Some(library) = state.library.lock().as_ref() {
+                if let Err(err) = library.set_facecam(&clip.id, Some(&facecam)) {
+                    log::error!("could not note the clip's cam: {err}");
+                }
+            }
+            clip.facecam = Some(facecam);
+            let _ = app.emit("clips-changed", ());
+        }
+        Err(err) => log::warn!("cam for clip {} not written: {err}", clip.id),
+    }
+}
+
 pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
 
@@ -130,7 +166,7 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
     overlay::show(app, BannerKind::Clip, "Saving clip…", None);
 
     match state.save_clip(seconds) {
-        Ok(mut clip) => {
+        Ok((mut clip, cam)) => {
             let seconds = clip.duration_ms / 1000;
             if let Some(library) = state.library.lock().as_ref() {
                 if let Err(err) = library.insert(&clip) {
@@ -149,6 +185,11 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
                 Some(format!("Clip saved · {seconds} s")),
                 clip.thumb_path.clone(),
             );
+            // The cam after everything the user waits for: the banner came as
+            // fast as without it. Still inside `begin_save`.
+            if let Some(cam) = cam {
+                save_cam(app, &state, &mut clip, cam);
+            }
             Ok(clip)
         }
         Err(err) => {

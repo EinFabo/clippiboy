@@ -35,6 +35,26 @@ fn main() {
             None => println!("no status yet"),
         }
     }
+    // Phase one of a save, as if a 5 s clip had ended a second ago.
+    let now = clippiboy_lib::audio::capture::now_100ns();
+    let window = clippiboy_lib::facecam::CamWindow { g0_100ns: now - 60_000_000, length_us: 5_000_000 };
+    match track.cut(&window, Duration::from_millis(500)) {
+        Some(out) => {
+            let id = "clippiboy-test-cam-track";
+            match clippiboy_lib::facecam::write_phase_one(id, &out, window.length_us, 120) {
+                Ok(facts) => println!(
+                    "phase one: {} frames, offset {} µs, clock {:?}, gaps {:?} -> {}",
+                    facts.frames,
+                    facts.cam_offset_us,
+                    facts.clock,
+                    facts.gaps_ms,
+                    clippiboy_lib::facecam::cam_path(id).display()
+                ),
+                Err(err) => println!("phase one failed: {err}"),
+            }
+        }
+        None => println!("no cut"),
+    }
     let (header, packets, session, gaps) = {
         let ring = track.ring().lock();
         (ring.header.clone(), ring.ring.snapshot_range(0, i64::MAX), ring.session, ring.gaps.len())

@@ -125,6 +125,8 @@ pub struct CamShared {
     pub latest: Mutex<Option<Arc<Frame>>>,
     pub status: Mutex<Option<crate::model::CamStatus>>,
     pub errors: crate::pipeline::ErrorSlot,
+    /// The cam track's size while it runs.
+    pub track: Mutex<(u32, u32)>,
 }
 
 type PlanSender = Arc<Mutex<Option<crossbeam_channel::Sender<CamPlan>>>>;
@@ -152,6 +154,7 @@ impl CamTrack {
                 latest: Mutex::new(None),
                 status: Mutex::new(None),
                 errors: crate::pipeline::ErrorSlot::new(),
+                track: Mutex::new((1280, 720)),
             }),
         }
     }
@@ -204,6 +207,37 @@ impl CamTrack {
 
     pub fn take_unseen_error(&self) -> Option<String> {
         self.shared.errors.take_unseen()
+    }
+
+    /// The cam for a clip just saved. Waits up to `wait` — no lock held in
+    /// between — for the ring to reach past the window's end, then cuts.
+    pub fn cut(&self, window: &crate::facecam::CamWindow, wait: Duration) -> Option<crate::facecam::CamCutOut> {
+        let (_, end) = crate::facecam::cut_window(window);
+        let deadline = Instant::now() + wait;
+        loop {
+            let reached = {
+                let ring = self.shared.ring.lock();
+                ring.origin_100ns + ring.ring.newest_pts() * 10 >= end && !ring.ring.is_empty()
+            };
+            if reached || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let status = self.status()?;
+        let (width, height) = *self.shared.track.lock();
+        let ring = self.shared.ring.lock();
+        let cut = crate::facecam::cam_cut(&ring, window)?;
+        Some(crate::facecam::CamCutOut {
+            cut,
+            header: ring.header.clone(),
+            width,
+            height,
+            fps: 30,
+            clock: status.clock.unwrap_or(crate::camera::ClockKind::Arrival),
+            camera: status.camera.unwrap_or_default(),
+            encoder: status.encoder,
+        })
     }
 
     pub fn attach_tap(&self, tap: Arc<dyn PacketTap>, from_100ns: i64) -> Vec<EncodedPacket> {
