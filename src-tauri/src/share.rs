@@ -253,6 +253,16 @@ pub fn share_state(app: AppHandle) -> Vec<Transfer> {
 /// Offers a clip to a friend who is online.
 #[tauri::command]
 pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> Result<(), String> {
+    // A cam still being added goes in first: the friend gets the clip with it.
+    let waiting = clip_id.clone();
+    let settled = tauri::async_runtime::spawn_blocking(move || {
+        crate::composite::wait_settled(&waiting, std::time::Duration::from_secs(300))
+    })
+    .await
+    .unwrap_or(false);
+    if !settled {
+        return Err("The cam is still being added to this clip — try again in a moment.".into());
+    }
     let clip = {
         let state = app.state::<AppState>();
         let guard = state.library.lock();

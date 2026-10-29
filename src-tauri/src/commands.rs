@@ -1169,6 +1169,11 @@ pub fn export_for_discord(
     id: String,
     megabytes: u64,
 ) -> Result<String> {
+    // Before the clip's lock: a cam still being added to this clip finishes
+    // first, and its job needs that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
@@ -1326,6 +1331,11 @@ pub fn apply_clip_edit(
     end_ms: u64,
     tracks: Vec<TrackMix>,
 ) -> Result<Clip> {
+    // Before the clip's lock: a cam still being added to this clip finishes
+    // first, and its job needs that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     // From before the row is read until the new state is stored: a delete or
     // a move in between would leave the row describing a file that is gone or
     // elsewhere. `edit::run` takes the same lock again (it is reentrant) and
@@ -1363,6 +1373,11 @@ pub fn restore_clip_original(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Clip> {
+    // Before the clip's lock: a cam still being added to this clip finishes
+    // first, and its job needs that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     // As in `apply_clip_edit`: held across the run and `store`, the settings
     // read before it.
     let (encoder, quality) = encoder_for(&state);
@@ -1526,6 +1541,9 @@ pub(crate) fn shrink(
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
 ) -> Result<Shrunk> {
+    if !crate::composite::wait_settled(id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     // The settings before any lock: nothing takes one before `AppState.config`.
     let (encoder, _) = encoder_for(state);
     // Held for the whole ffmpeg run, which reads the clip file throughout: a
@@ -1843,6 +1861,9 @@ fn progress<'a>(app: &'a tauri::AppHandle, id: &'a str) -> impl Fn(f32) + 'a {
 
 /// Write a run's result into the database and read the clip back. `undo`:
 /// the run was "Undo trim", which put the untouched recording back.
+/// Said when an edit, export or share waited five minutes for a clip's cam.
+const CAM_ON_ITS_WAY: &str = "The cam is still being added to this clip — try again in a moment.";
+
 fn store(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
@@ -1864,6 +1885,14 @@ fn store(
         }
     };
     let clip = &clip;
+
+    // The cam was laid over the clean picture: the file shows it now.
+    if applied.composited {
+        if let Some(cam) = clip.facecam.clone() {
+            let ready = crate::model::ClipFacecam { state: crate::model::FacecamState::Ready, ..cam };
+            let _ = with_library(state, |lib| lib.set_facecam(&clip.id, Some(&ready)).map_err(|e| e.to_string()));
+        }
+    }
 
     // Baked into the file, the levels start over from there.
     let tracks = if applied.mix_baked {

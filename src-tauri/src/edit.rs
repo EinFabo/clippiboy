@@ -400,6 +400,50 @@ pub enum VideoSource {
     Clip,
     /// The untouched recording. Re-encoding only ever happens from here.
     Original,
+    /// The clean picture of a facecam clip with the cam laid over it again —
+    /// a cut at the front, an undo, or a cam that failed to go in.
+    CleanWithCam,
+}
+
+/// What the cam asks of an edit. `Shown` when the clip has a facecam store, a
+/// visible layout and a clean picture; `differs` when the file does not show
+/// the stored layout and delay yet (a cam that failed, or one moved since).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CamPart {
+    None,
+    Shown { differs: bool },
+}
+
+/// The cam's side of an edit that lays it over the clean picture.
+#[derive(Debug, Clone)]
+pub struct CamInputs {
+    pub cam: PathBuf,
+    pub mask: Option<PathBuf>,
+    pub facts: crate::facecam::FacecamFacts,
+    pub layout: crate::model::CamLayout,
+    pub delay_ms: i32,
+    /// The clean picture's real video start.
+    pub video_start_us: i64,
+    /// The clip's frame size.
+    pub frame: (u32, u32),
+    /// Stretches without a camera, in this cut's milliseconds.
+    pub gaps_ms: Vec<(u64, u64)>,
+}
+
+/// The cam part of `clip`, read off its row and its store.
+pub fn cam_part(clip: &Clip) -> CamPart {
+    use crate::model::FacecamState;
+    let Some(cam) = clip.facecam.as_ref() else { return CamPart::None };
+    if !cam.layout.visible || !matches!(cam.state, FacecamState::Ready | FacecamState::Failed) {
+        return CamPart::None;
+    }
+    let Some(facts) = crate::facecam::read_facts(&clip.id) else { return CamPart::None };
+    let failed = cam.state == FacecamState::Failed;
+    if !video_path(&clip.id).is_file() && !failed {
+        return CamPart::None;
+    }
+    let shows = facts.applied.as_ref().is_some_and(|a| a.layout == cam.layout && a.delay_ms == cam.delay_ms);
+    CamPart::Shown { differs: failed || !shows }
 }
 
 /// What the single ffmpeg run should do. Pure data, so the decision can be
@@ -436,6 +480,7 @@ pub fn plan(
     has_original: bool,
     clip_duration_ms: u64,
     trim: Trim,
+    cam: CamPart,
 ) -> RenderPlan {
     let (offset, full) = match base {
         Some(original) => (original.start_ms, original.duration_ms),
@@ -465,6 +510,13 @@ pub fn plan(
         (true, true) => (VideoSource::Original, absolute_start),
         (true, false) => (VideoSource::Clip, start),
     };
+    // A facecam clip cut at the front, or one whose file does not show its
+    // cam: the cam is laid over the clean picture again, never cut off or
+    // baked in a second time.
+    let (video, video_start_ms, reencode) = match cam {
+        CamPart::Shown { differs } if cuts_front || differs => (VideoSource::CleanWithCam, absolute_start, true),
+        _ => (video, video_start_ms, cuts_front),
+    };
 
     let trimmed = absolute_start > 0 || absolute_end < full;
     RenderPlan {
@@ -472,7 +524,7 @@ pub fn plan(
         video_start_ms,
         stems_start_ms: absolute_start,
         length_ms,
-        reencode: cuts_front,
+        reencode,
         original: trimmed.then_some(ClipOriginal {
             duration_ms: full,
             start_ms: absolute_start,
@@ -482,13 +534,14 @@ pub fn plan(
 }
 
 /// The job for undoing: the whole recording, copied losslessly.
-pub fn restore_plan(base: &ClipOriginal) -> RenderPlan {
+pub fn restore_plan(base: &ClipOriginal, cam: CamPart) -> RenderPlan {
+    let with_cam = matches!(cam, CamPart::Shown { .. });
     RenderPlan {
-        video: VideoSource::Original,
+        video: if with_cam { VideoSource::CleanWithCam } else { VideoSource::Original },
         video_start_ms: 0,
         stems_start_ms: 0,
         length_ms: base.duration_ms,
-        reencode: false,
+        reencode: with_cam,
         original: None,
     }
 }
@@ -501,6 +554,8 @@ pub struct Applied {
     /// The mix was applied to audio inside the clip file and now sits in it.
     /// Stored as it was asked for, the next save would apply it a second time.
     pub mix_baked: bool,
+    /// The cam was laid over the clean picture: the file shows it now.
+    pub composited: bool,
 }
 
 /// Rewrite the clip: apply the mix, carry out the trim, save the original.
@@ -526,12 +581,11 @@ pub fn apply(
         |clip| {
             // The record on the clip is the truth about the coordinates; the
             // store only says whether there is still a file to go with it.
-            Ok(plan(
-                clip.original.as_ref(),
-                has_original(&clip.id),
-                clip.duration_ms,
-                trim,
-            ))
+            let cam = cam_part(clip);
+            // A facecam clip's clean picture is an original to encode from,
+            // trim note or not.
+            let clean = matches!(cam, CamPart::Shown { .. }) && video_path(&clip.id).is_file();
+            Ok(plan(clip.original.as_ref(), has_original(&clip.id) || clean, clip.duration_ms, trim, cam))
         },
         Some(mix),
         encoder,
@@ -559,7 +613,7 @@ pub fn restore(
                 .original
                 .filter(|_| has_original(&clip.id))
                 .ok_or_else(|| "The original can no longer be found.".to_string())?;
-            Ok(restore_plan(&base))
+            Ok(restore_plan(&base, cam_part(clip)))
         },
         mix,
         encoder,
@@ -640,15 +694,23 @@ fn run(
     let video = match plan.video {
         VideoSource::Clip => target.clone(),
         VideoSource::Original => source.clone(),
+        // The clean picture in the store, or the clip file itself while its
+        // cam failed to go in.
+        VideoSource::CleanWithCam if video_path(&clip.id).is_file() => video_path(&clip.id),
+        VideoSource::CleanWithCam => target.clone(),
     };
     if !video.is_file() {
         return Err("The untouched recording can no longer be found.".into());
     }
+    let cam = match plan.video {
+        VideoSource::CleanWithCam => Some(cam_inputs(&clip, plan, &video)?),
+        _ => None,
+    };
 
     // ffmpeg must not write into its own input — so beside it, and over it
     // afterwards. The process id makes the file unique per run.
     let temp = target.with_extension(format!("{}.neu.mp4", std::process::id()));
-    let args = arguments(plan, &video, &list, mix, &temp, encoder, quality);
+    let args = arguments(plan, &video, &list, mix, &temp, encoder, quality, cam.as_ref());
 
     match run_with_progress(&args, plan.length_ms, on_progress) {
         Ok(()) => {}
@@ -664,8 +726,7 @@ fn run(
                 mix,
                 &temp,
                 EncoderId::X264,
-                quality,
-            );
+                quality, cam.as_ref(),);
             if let Err(err) = run_with_progress(&fallback, plan.length_ms, on_progress) {
                 let _ = std::fs::remove_file(&temp);
                 return Err(err);
@@ -679,6 +740,9 @@ fn run(
 
     swap_in(clip, plan, &temp, &target)?;
     on_progress(1.0);
+    if let Some(cam) = &cam {
+        note_cam_applied(&clip.id, cam, plan, &target);
+    }
 
     // What gets recorded is what really came out — not what was asked for.
     // Otherwise the bookkeeping drifts away from the file with every further
@@ -725,8 +789,62 @@ fn run(
             size_bytes: std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0),
             original,
             mix_baked: in_file,
+            composited: cam.is_some(),
         },
     ))
+}
+
+/// The cam's inputs for laying it over `video`, the clean picture.
+fn cam_inputs(clip: &Clip, plan: &RenderPlan, video: &Path) -> Result<CamInputs, String> {
+    let cam = clip.facecam.as_ref().ok_or("This clip has no cam.")?;
+    let facts = crate::facecam::read_facts(&clip.id).ok_or("The clip's cam can no longer be found.")?;
+    let frame = (clip.width, clip.height);
+    let rect = crate::composite::cam_rect(frame, &cam.layout);
+    let mask = crate::composite::mask_gray8(cam.layout.shape, rect.w, rect.h).and_then(|pixels| {
+        let dir = crate::config::data_dir().join("temp");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{}_mask_{}x{}.png", sanitize(&clip.id), rect.w, rect.h));
+        crate::composite::write_mask_png(&path, rect.w, rect.h, &pixels).ok().map(|_| path)
+    });
+    // The gaps were noted in the clean clip's time; this cut starts later.
+    let (start, end) = (plan.video_start_ms, plan.video_start_ms + plan.length_ms);
+    let gaps_ms = facts
+        .gaps_ms
+        .iter()
+        .filter(|(a, b)| *b > start && *a < end)
+        .map(|(a, b)| (a.saturating_sub(start), (*b).min(end) - start))
+        .collect();
+    Ok(CamInputs {
+        cam: crate::facecam::cam_path(&clip.id),
+        mask,
+        layout: cam.layout,
+        delay_ms: cam.delay_ms,
+        video_start_us: crate::muxer::probe_video_start_us(video).unwrap_or(0),
+        frame,
+        gaps_ms,
+        facts,
+    })
+}
+
+/// After a composite: the facts say what the file shows now.
+fn note_cam_applied(clip_id: &str, cam: &CamInputs, plan: &RenderPlan, target: &Path) {
+    if let Some(mask) = &cam.mask {
+        let _ = std::fs::remove_file(mask);
+    }
+    let Some(mut facts) = crate::facecam::read_facts(clip_id) else { return };
+    facts.video_start_us = Some(cam.video_start_us);
+    facts.applying = None;
+    facts.swap_failing_since_ms = None;
+    facts.applied = Some(crate::facecam::FacecamApplied {
+        layout: cam.layout,
+        delay_ms: cam.delay_ms,
+        start_ms: plan.video_start_ms,
+        length_ms: probe_duration_ms(target).unwrap_or(plan.length_ms),
+        size_bytes: std::fs::metadata(target).map(|m| m.len()).unwrap_or(0),
+    });
+    if let Err(err) = crate::facecam::write_facts(clip_id, &facts) {
+        log::warn!("clip '{clip_id}': facecam.json could not be updated: {err}");
+    }
 }
 
 /// Move a file, even onto another drive.
@@ -784,6 +902,14 @@ pub(crate) fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
 /// still stands afterwards, for the tracks' offset, exactly as after
 /// [`discard_original`].
 fn archives_the_clip(clip: &Clip, plan: &RenderPlan, archive_exists: bool) -> bool {
+    if archive_exists {
+        return false;
+    }
+    // A cam that failed to go in: the clip file is the clean picture, filed
+    // away before the cam goes over it.
+    if plan.video == VideoSource::CleanWithCam {
+        return true;
+    }
     // A file with the cam in it is no untouched recording; the clean one is
     // already in the store.
     let composited = clip.facecam.as_ref().is_some_and(|cam| {
@@ -892,6 +1018,7 @@ fn arguments(
     output: &Path,
     encoder: EncoderId,
     quality: u32,
+    cam: Option<&CamInputs>,
 ) -> Vec<String> {
     let gains = stems::levels(list, mix);
 
@@ -956,14 +1083,52 @@ fn arguments(
     };
     let filter = stems::mix_filter(&inputs);
 
-    if let Some(filter) = &filter {
+    // The cam after the stems, then its mask; its graph joins the audio's.
+    let cam_graph = cam.map(|cam| {
+        let cam_input = 1 + if from_stems { stem_files.len() } else { 0 };
+        let timing = crate::composite::cam_timing(
+            cam.facts.cam_offset_us,
+            cam.delay_ms,
+            cam.video_start_us,
+            plan.video_start_ms,
+            plan.length_ms,
+        );
+        if let Some(seek) = timing.seek_s {
+            args.push("-ss".into());
+            args.push(format!("{seek:.6}"));
+        }
+        args.push("-i".into());
+        args.push(cam.cam.to_string_lossy().to_string());
+        if let Some(mask) = &cam.mask {
+            args.extend(["-loop".into(), "1".into(), "-i".into(), mask.to_string_lossy().to_string()]);
+        }
+        crate::composite::cam_filter(&crate::composite::CamChain {
+            cam_input,
+            mask_input: cam.mask.as_ref().map(|_| cam_input + 1),
+            main: "0:v",
+            frame: cam.frame,
+            cam: (cam.facts.width, cam.facts.height),
+            layout: cam.layout,
+            timing,
+            gaps_ms: &cam.gaps_ms,
+            video_start_us: cam.video_start_us,
+        })
+    });
+
+    let graph = match (&filter, &cam_graph) {
+        (Some(audio), Some(video)) => Some(format!("{audio};{video}")),
+        (Some(audio), None) => Some(audio.clone()),
+        (None, Some(video)) => Some(video.clone()),
+        (None, None) => None,
+    };
+    if let Some(graph) = &graph {
         args.push("-filter_complex".into());
-        args.push(filter.clone());
+        args.push(graph.clone());
     }
 
     // Map the video first so it is track 0 in the result too.
     args.push("-map".into());
-    args.push("0:v:0".into());
+    args.push(if cam_graph.is_some() { "[v]".into() } else { "0:v:0".into() });
     match &filter {
         Some(_) => {
             args.push("-map".into());
@@ -1487,6 +1652,108 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_front_cut_on_a_facecam_clip_composites_from_the_clean_picture() {
+        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }, CamPart::Shown { differs: false });
+        assert_eq!(plan.video, VideoSource::CleanWithCam);
+        assert!(plan.reencode);
+        assert_eq!((plan.video_start_ms, plan.length_ms), (4_000, 8_000));
+    }
+
+    #[test]
+    fn a_tail_trim_on_a_facecam_clip_stays_a_copy() {
+        let plan = plan(None, true, 30_000, Trim { start_ms: 0, end_ms: 12_000 }, CamPart::Shown { differs: false });
+        assert_eq!(plan.video, VideoSource::Clip);
+        assert!(!plan.reencode);
+    }
+
+    #[test]
+    fn a_clip_whose_cam_failed_gets_it_on_the_next_save() {
+        let plan = plan(None, true, 30_000, Trim::whole(30_000), CamPart::Shown { differs: true });
+        assert_eq!(plan.video, VideoSource::CleanWithCam);
+        assert!(plan.reencode);
+    }
+
+    #[test]
+    fn undo_on_a_facecam_clip_re_composites() {
+        let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
+        let plan = restore_plan(&base, CamPart::Shown { differs: false });
+        assert_eq!(plan.video, VideoSource::CleanWithCam);
+        assert!(plan.reencode);
+        assert_eq!(plan.length_ms, base.duration_ms);
+    }
+
+    fn cam_inputs() -> CamInputs {
+        CamInputs {
+            cam: PathBuf::from("C:/data/originals/x/cam.mp4"),
+            mask: Some(PathBuf::from("C:/data/temp/x_mask.png")),
+            facts: crate::facecam::FacecamFacts {
+                version: 1,
+                width: 1280,
+                height: 720,
+                fps: 30,
+                cam_offset_us: -412_000,
+                frames: 900,
+                clip_length_us: 30_000_000,
+                gaps_ms: vec![],
+                clock: crate::camera::ClockKind::Device,
+                camera: "C920".into(),
+                encoder: None,
+                game_gop: 120,
+                video_start_us: None,
+                applied: None,
+                applying: None,
+                swap_failing_since_ms: None,
+            },
+            layout: crate::model::CamLayout::default(),
+            delay_ms: -40,
+            video_start_us: 21_333,
+            frame: (1920, 1080),
+            gaps_ms: vec![],
+        }
+    }
+
+    #[test]
+    fn the_cam_comes_after_the_stems() {
+        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }, CamPart::Shown { differs: false });
+        let list = vec![track(0, true), track(1, true)];
+        let cam = cam_inputs();
+        let args = arguments(
+            &plan,
+            Path::new("C:/data/originals/x/video.mp4"),
+            &list,
+            &[],
+            Path::new("C:/clips/x.neu.mp4"),
+            EncoderId::X264,
+            70,
+            Some(&cam),
+        );
+        let inputs: Vec<&String> =
+            args.iter().enumerate().filter(|(_, a)| *a == "-i").map(|(at, _)| &args[at + 1]).collect();
+        assert_eq!(inputs.len(), 5, "{args:?}");
+        assert!(inputs[0].ends_with("video.mp4"));
+        assert!(inputs[3].ends_with("cam.mp4"));
+        assert!(inputs[4].ends_with("x_mask.png"));
+        let cam_at = args.iter().position(|a| a.ends_with("cam.mp4")).unwrap();
+        assert_eq!(args[cam_at - 2], "4.452000");
+        let graphs: Vec<&String> =
+            args.iter().enumerate().filter(|(_, a)| *a == "-filter_complex").map(|(at, _)| &args[at + 1]).collect();
+        assert_eq!(graphs.len(), 1);
+        assert!(graphs[0].contains("[aout]") && graphs[0].contains("[v]"));
+        assert!(graphs[0].contains("[3:v]setpts=PTS+0.021333/TB"));
+        assert!(graphs[0].contains("[4:v]format=gray"));
+        assert!(args.windows(2).any(|w| w == ["-map", "[v]"]));
+        assert!(!args.windows(2).any(|w| w == ["-map", "0:v:0"]));
+    }
+
+    #[test]
+    fn a_failed_clip_files_its_clean_picture_before_the_cam_goes_in() {
+        let clip = Clip { id: "clippiboy-test-failed-cam".into(), ..plain_clip(None, None) };
+        let plan = plan(None, true, 30_000, Trim::whole(30_000), CamPart::Shown { differs: true });
+        assert!(archives_the_clip(&clip, &plan, false));
+        assert!(!archives_the_clip(&clip, &plan, true));
+    }
+
     fn store_with(id: &str, files: &[&str]) {
         let _ = std::fs::remove_dir_all(dir(id));
         std::fs::create_dir_all(dir(id)).unwrap();
@@ -1576,7 +1843,7 @@ mod tests {
             }),
             ..plain_clip(None, None)
         };
-        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 }, CamPart::None);
         assert!(!archives_the_clip(&clip, &first, false));
     }
     use crate::model::ClipTrack;
@@ -1803,15 +2070,15 @@ mod tests {
         // sees once it loads under the lock: the first trim's record and the
         // 50 s file it left.
         let front = Trim { start_ms: 10_000, end_ms: 50_000 };
-        let first = plan(None, true, 60_000, Trim { start_ms: 10_000, end_ms: 60_000 });
+        let first = plan(None, true, 60_000, Trim { start_ms: 10_000, end_ms: 60_000 }, CamPart::None);
         let after_first = first.original.unwrap();
-        let second = plan(Some(&after_first), true, 50_000, front);
+        let second = plan(Some(&after_first), true, 50_000, front, CamPart::None);
         assert_eq!(second.original.unwrap().start_ms, 20_000);
         assert_eq!(second.stems_start_ms, 20_000);
         assert_eq!(second.video_start_ms, 20_000);
         // On the snapshot from before the first save, the second cut lands at
         // 10 s again and the end is cut short as well.
-        let stale = plan(None, true, 60_000, front);
+        let stale = plan(None, true, 60_000, front, CamPart::None);
         assert_ne!(stale, second, "planning on the stale snapshot gives another cut");
         assert_eq!(stale.original.unwrap().start_ms, 10_000);
     }
@@ -1855,7 +2122,7 @@ mod tests {
 
     #[test]
     fn only_mixing_leaves_the_picture_alone() {
-        let plan = plan(None, true, 30_000, Trim::whole(30_000));
+        let plan = plan(None, true, 30_000, Trim::whole(30_000), CamPart::None);
         assert_eq!(plan.video, VideoSource::Clip);
         assert!(!plan.reencode);
         assert_eq!(plan.video_start_ms, 0);
@@ -1868,7 +2135,7 @@ mod tests {
     /// usual trim.
     #[test]
     fn trimming_only_the_tail_stays_a_copy() {
-        let plan = plan(None, true, 30_000, Trim { start_ms: 0, end_ms: 12_000 });
+        let plan = plan(None, true, 30_000, Trim { start_ms: 0, end_ms: 12_000 }, CamPart::None);
         assert_eq!(plan.video, VideoSource::Clip);
         assert!(!plan.reencode);
         assert_eq!(plan.length_ms, 12_000);
@@ -1883,7 +2150,7 @@ mod tests {
     /// original at that, so the loss stays at one generation.
     #[test]
     fn trimming_the_head_re_encodes_from_the_original() {
-        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 });
+        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }, CamPart::None);
         assert_eq!(plan.video, VideoSource::Original);
         assert!(plan.reencode);
         assert_eq!(plan.video_start_ms, 4_000);
@@ -1897,7 +2164,7 @@ mod tests {
     #[test]
     fn a_missing_original_falls_back_to_the_clip() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
-        let plan = plan(Some(&base), false, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 });
+        let plan = plan(Some(&base), false, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 }, CamPart::None);
         assert_eq!(plan.video, VideoSource::Clip);
         assert!(plan.reencode, "bildgenau muss es trotzdem sein");
         assert_eq!(plan.video_start_ms, 2_000, "the clip file already starts at 5 s");
@@ -1916,15 +2183,15 @@ mod tests {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
         let trim = Trim { start_ms: 2_000, end_ms: 8_000 };
 
-        let before = plan(Some(&base), true, 15_000, trim);
-        let after = plan(Some(&base), false, 15_000, trim);
+        let before = plan(Some(&base), true, 15_000, trim, CamPart::None);
+        let after = plan(Some(&base), false, 15_000, trim, CamPart::None);
         assert_eq!(
             before.stems_start_ms, after.stems_start_ms,
             "the tracks' offset may not depend on whether the file is still there"
         );
 
         // And what it would be if the record went too — the bug this guards.
-        let lost = plan(None, false, 15_000, trim);
+        let lost = plan(None, false, 15_000, trim, CamPart::None);
         assert_ne!(
             lost.stems_start_ms, after.stems_start_ms,
             "without the record the offset collapses to the clip's own timeline"
@@ -1935,7 +2202,7 @@ mod tests {
     /// encode run.
     #[test]
     fn a_hair_off_the_edge_is_not_a_cut() {
-        let plan = plan(None, true, 30_000, Trim { start_ms: 120, end_ms: 29_900 });
+        let plan = plan(None, true, 30_000, Trim { start_ms: 120, end_ms: 29_900 }, CamPart::None);
         assert!(!plan.reencode);
         assert_eq!(plan.video, VideoSource::Clip);
         assert_eq!(plan.original, None);
@@ -1947,7 +2214,7 @@ mod tests {
     #[test]
     fn cuts_compose_in_original_coordinates() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
-        let plan = plan(Some(&base), true, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 });
+        let plan = plan(Some(&base), true, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 }, CamPart::None);
         assert_eq!(plan.video_start_ms, 7_000);
         assert_eq!(plan.stems_start_ms, 7_000);
         assert_eq!(plan.length_ms, 6_000);
@@ -1963,7 +2230,7 @@ mod tests {
         let mut base = None;
         let mut duration = 60_000;
         for _ in 0..3 {
-            let plan = plan(base.as_ref(), true, duration, Trim { start_ms: 1_000, end_ms: duration - 1_000 });
+            let plan = plan(base.as_ref(), true, duration, Trim { start_ms: 1_000, end_ms: duration - 1_000 }, CamPart::None);
             duration = plan.length_ms;
             base = plan.original;
         }
@@ -1978,7 +2245,7 @@ mod tests {
     #[test]
     fn remixing_a_trimmed_clip_keeps_its_bounds() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
-        let plan = plan(Some(&base), true, 15_000, Trim::whole(15_000));
+        let plan = plan(Some(&base), true, 15_000, Trim::whole(15_000), CamPart::None);
         assert_eq!(plan.video, VideoSource::Clip);
         assert!(!plan.reencode);
         assert_eq!(plan.video_start_ms, 0, "the clip file already starts in the right place");
@@ -1990,7 +2257,7 @@ mod tests {
     #[test]
     fn restoring_is_a_lossless_copy_of_everything() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
-        let plan = restore_plan(&base);
+        let plan = restore_plan(&base, CamPart::None);
         assert_eq!(plan.video, VideoSource::Original);
         assert!(!plan.reencode);
         assert_eq!(plan.stems_start_ms, 0);
@@ -2003,7 +2270,7 @@ mod tests {
     /// game than the picture.
     #[test]
     fn every_input_gets_its_own_seek() {
-        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 });
+        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }, CamPart::None);
         let list = vec![track(0, true), track(1, true)];
         let args = arguments(
             &plan,
@@ -2012,7 +2279,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            70,
+            70, None,
         );
 
         let inputs: Vec<usize> = args
@@ -2032,7 +2299,7 @@ mod tests {
     /// front it would be an option of input 0.
     #[test]
     fn the_length_comes_after_the_last_input() {
-        let plan = plan(None, true, 30_000, Trim { start_ms: 0, end_ms: 12_000 });
+        let plan = plan(None, true, 30_000, Trim { start_ms: 0, end_ms: 12_000 }, CamPart::None);
         let list = vec![track(0, true)];
         let args = arguments(
             &plan,
@@ -2041,7 +2308,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            70,
+            70, None,
         );
         let last_input = args.iter().rposition(|arg| arg == "-i").unwrap();
         let length = args.iter().position(|arg| arg == "-t").unwrap();
@@ -2054,7 +2321,7 @@ mod tests {
     /// `-ss` of its own would cut it a second time.
     #[test]
     fn audio_inside_the_file_inherits_the_picture_offset() {
-        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 });
+        let plan = plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }, CamPart::None);
         let list = vec![track(0, false)];
         let args = arguments(
             &plan,
@@ -2063,7 +2330,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            70,
+            70, None,
         );
         assert_eq!(args.iter().filter(|arg| *arg == "-i").count(), 1, "{args:?}");
         assert_eq!(args.iter().filter(|arg| *arg == "-ss").count(), 1, "{args:?}");
@@ -2090,7 +2357,7 @@ mod tests {
             clip.original.as_ref(),
             archive_exists,
             30_000,
-            if keeps_original { Trim { start_ms: 1_000, end_ms: 20_000 } } else { Trim::whole(30_000) },
+            if keeps_original { Trim { start_ms: 1_000, end_ms: 20_000 } } else { Trim::whole(30_000) }, CamPart::None,
         );
         // Without a trim before it and none now, the plan keeps no record.
         assert_eq!(saved.original.is_some(), keeps_original || already_trimmed);
@@ -2161,15 +2428,15 @@ mod tests {
     #[test]
     fn a_written_clip_keeps_at_most_one_audio_track() {
         let cases = [
-            plan(None, true, 30_000, Trim::whole(30_000)),
-            plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }),
+            plan(None, true, 30_000, Trim::whole(30_000), CamPart::None),
+            plan(None, true, 30_000, Trim { start_ms: 4_000, end_ms: 12_000 }, CamPart::None),
             plan(
                 Some(&ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 }),
                 true,
                 15_000,
-                Trim { start_ms: 2_000, end_ms: 8_000 },
+                Trim { start_ms: 2_000, end_ms: 8_000 }, CamPart::None,
             ),
-            restore_plan(&ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 }),
+            restore_plan(&ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 }, CamPart::None),
         ];
         let list = vec![track(0, true), track(1, true), track(2, true)];
         for plan in &cases {
@@ -2180,7 +2447,7 @@ mod tests {
                 &[],
                 Path::new("C:/clips/x.neu.mp4"),
                 EncoderId::X264,
-                70,
+                70, None,
             );
             let audio = args
                 .iter()
@@ -2197,7 +2464,7 @@ mod tests {
     #[test]
     fn audio_inside_a_trimmed_file_ignores_the_tracks_offset() {
         let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 20_000 };
-        let plan = plan(Some(&base), false, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 });
+        let plan = plan(Some(&base), false, 15_000, Trim { start_ms: 2_000, end_ms: 8_000 }, CamPart::None);
         assert_eq!(plan.stems_start_ms, 7_000, "the tracks would sit at 7 s");
         assert_eq!(plan.video_start_ms, 2_000, "the file itself starts at 5 s");
 
@@ -2208,7 +2475,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            70,
+            70, None,
         );
         let seeks: Vec<&String> = args
             .iter()
@@ -2222,7 +2489,7 @@ mod tests {
     /// SAVE-7: a sound-only edit no longer moves the picture another 21.33 ms.
     #[test]
     fn an_edit_leaves_the_zero_point_where_it_is() {
-        let plan = plan(None, true, 30_000, Trim::whole(30_000));
+        let plan = plan(None, true, 30_000, Trim::whole(30_000), CamPart::None);
         let list = vec![track(0, true), track(1, true)];
         let args = arguments(
             &plan,
@@ -2231,7 +2498,7 @@ mod tests {
             &[],
             Path::new("C:/clips/x.neu.mp4"),
             EncoderId::X264,
-            70,
+            70, None,
         );
         assert!(!args.iter().any(|a| a == "-avoid_negative_ts"), "{args:?}");
     }
@@ -2294,7 +2561,7 @@ mod tests {
         std::fs::write(&temp, b"the excerpt").unwrap();
         let clip = Clip { path: target.to_string_lossy().into_owned(), ..clip };
         remove(&clip.id);
-        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 }, CamPart::None);
 
         let swapped = swap_in(&clip, &first, &temp, &target);
         let archived = video_path(&clip.id).is_file();
@@ -2319,7 +2586,7 @@ mod tests {
         };
         // The record still stands: the tracks sit in the recording's
         // coordinates, and a later remix needs the offset.
-        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 }, CamPart::None);
         assert!(!archives_the_clip(&recording, &first, false));
         assert_eq!(first.original.map(|original| original.start_ms), Some(5_000));
 
@@ -2389,7 +2656,7 @@ mod tests {
             recording: true,
             ..plain_clip(None, None)
         };
-        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 }, CamPart::None);
         let (row, marked) = crashed_after_an_in_place_cut(recording, &first, None);
         assert_eq!(row.original.map(|original| original.start_ms), Some(5_000));
         assert_eq!(row.size_bytes, b"the excerpt".len() as u64);
@@ -2405,7 +2672,7 @@ mod tests {
             id: "discarded-crash-test".into(),
             ..plain_clip(None, Some(before))
         };
-        let further = plan(Some(&before), false, 30_000, Trim { start_ms: 3_000, end_ms: 30_000 });
+        let further = plan(Some(&before), false, 30_000, Trim { start_ms: 3_000, end_ms: 30_000 }, CamPart::None);
         assert!(!archives_the_clip(&clip, &further, false));
         let (row, marked) = crashed_after_an_in_place_cut(clip, &further, None);
         assert_eq!(row.original.map(|original| original.start_ms), Some(8_000));
@@ -2423,7 +2690,7 @@ mod tests {
             recording: true,
             ..plain_clip(None, None)
         };
-        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 });
+        let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 }, CamPart::None);
         let stale = ClipOriginal { duration_ms: 30_000, start_ms: 2_000, end_ms: 30_000 };
         let (row, marked) = crashed_after_an_in_place_cut(recording, &first, Some(stale));
         assert_eq!(row.original.map(|original| original.start_ms), Some(5_000));

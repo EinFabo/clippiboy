@@ -622,13 +622,17 @@ export function ClipPlayer({
   // saving would send no levels and reset the stored mix, so nothing counts as
   // changed until it can be read.
   const saved = savedEdit(clip?.edit ?? null, duration, current.tracks);
+  // A cam that failed to go in counts as a change: Save is the "try again
+  // from the editor" its notice promises.
+  const camMissing = clip?.facecam?.state === "failed";
   const dirty =
     duration > 0 &&
     !mix.loading &&
     !mix.failed &&
-    (mix.tracks.length > 0
-      ? !sameEdit(current, saved, duration)
-      : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration));
+    (camMissing ||
+      (mix.tracks.length > 0
+        ? !sameEdit(current, saved, duration)
+        : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration)));
   dirtyRef.current = dirty;
   /** Where "Discard changes" leads: the mixer, a clip to either side, or out (0). */
   const leaveTo = (where: number | "mixer") => {

@@ -286,7 +286,9 @@ export function ClipEditor({
               ? reencodes
                 ? "The clip is being trimmed — the video is recomputed for it."
                 : "The clip is being rewritten, the video stays untouched."
-              : dirty
+              : dirty && clip.facecam?.state === "failed"
+                ? "The cam is not in the file yet — Save adds it."
+                : dirty
                 ? "Not saved yet — the file in the folder is still a different one."
                 : justSaved
                   ? "Saved. That is how the clip sits in the folder now — ready to send."
