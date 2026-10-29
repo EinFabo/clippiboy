@@ -304,22 +304,67 @@ struct Candidate {
     /// `None` for anything without a vendor of its own — the software encoder.
     id: Option<EncoderId>,
     name: String,
+    /// The card it belongs to, where the listing says so — for the log.
+    luid: Option<i64>,
     activate: IMFActivate,
 }
 
-/// The 64-bit value `MFT_ENUM_ADAPTER_LUID` wants: the LUID as DXGI states it
-/// (`HighPart` signed in the upper half), reinterpreted bit for bit.
-fn luid_attribute(luid: i64) -> u64 {
-    luid as u64
+/// `MFT_ENUM_ADAPTER_LUID` as Media Foundation wants it: a blob holding the
+/// `LUID` struct, `LowPart` then `HighPart`. `luid` packs `HighPart` into the
+/// upper half, so its little-endian bytes are exactly that.
+///
+/// It used to go in as a `UINT64`. `MFTEnum2` reads the attribute as a blob, and
+/// the filter quietly did nothing: an RTX 3070's listing still offered Intel's
+/// Quick Sync encoders.
+fn luid_blob(luid: i64) -> [u8; 8] {
+    luid.to_le_bytes()
+}
+
+/// The LUID from a blob made like [`luid_blob`]'s; `None` if it is not one.
+fn luid_from_blob(blob: &[u8]) -> Option<i64> {
+    Some(i64::from_le_bytes(blob.try_into().ok()?))
+}
+
+/// The card an activation object belongs to, where it says.
+fn luid_of(activate: &IMFActivate) -> Option<i64> {
+    let mut blob = [0u8; 8];
+    let mut size = 0u32;
+    unsafe { activate.GetBlob(&MFT_ENUM_ADAPTER_LUID, &mut blob, Some(&mut size)) }.ok()?;
+    luid_from_blob(blob.get(..size as usize)?)
+}
+
+/// Whether a listing has a hardware encoder in it, not just the software one.
+fn lists_hardware(ids: &[Option<EncoderId>]) -> bool {
+    ids.iter().any(Option::is_some)
 }
 
 /// The registry's H.264 encoders, optionally only those of one adapter.
 ///
 /// `MFTEnumEx` lists every adapter's transform, and the first one of a make
-/// need not belong to the card the device lives on. `MFTEnum2` with the LUID
-/// asks for that card's own. If it fails or finds nothing, the plain listing is
-/// used, so an old driver loses nothing.
+/// need not belong to the card the device lives on — a Ryzen's graphics next
+/// to a Radeon card, say. `MFTEnum2` with the LUID asks for that card's own.
+/// If it fails or finds no hardware encoder there — the software one comes
+/// along either way — the plain listing is used, so a driver that does not
+/// say which card its encoder belongs to loses nothing.
 fn enumerate(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
+    if let Some(luid) = adapter {
+        match list(Some(luid)) {
+            Ok(found) if lists_hardware(&found.iter().map(|c| c.id).collect::<Vec<_>>()) => {
+                return Ok(found);
+            }
+            Ok(_) => log::info!(
+                "no hardware encoder listed for adapter luid {luid:x} — listing all adapters"
+            ),
+            Err(err) => log::info!(
+                "no encoder listed for adapter luid {luid:x} ({err}) — listing all adapters"
+            ),
+        }
+    }
+    list(None)
+}
+
+/// One listing: `MFTEnum2` for the card `adapter`, `MFTEnumEx` for all.
+fn list(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -332,42 +377,24 @@ fn enumerate(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
 
     let mut array: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
-    if let Some(luid) = adapter {
-        let listed = unsafe {
+    let listed = match adapter {
+        Some(luid) => unsafe {
             let mut attributes: Option<IMFAttributes> = None;
-            MFCreateAttributes(&mut attributes, 1)
-                .and_then(|()| {
-                    let attributes = attributes.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    attributes.SetUINT64(&MFT_ENUM_ADAPTER_LUID, luid_attribute(luid))?;
-                    MFTEnum2(
-                        MFT_CATEGORY_VIDEO_ENCODER,
-                        flags,
-                        Some(&input),
-                        Some(&output),
-                        attributes,
-                        &mut array,
-                        &mut count,
-                    )
-                })
-        };
-        match listed {
-            Ok(()) if count > 0 => {}
-            other => {
-                release_array(array, count);
-                array = std::ptr::null_mut();
-                count = 0;
-                log::info!(
-                    "no encoder listed for adapter luid {luid:x} ({}) — listing all adapters",
-                    match other {
-                        Err(err) => err.to_string(),
-                        Ok(()) => "none there".into(),
-                    }
-                );
-            }
-        }
-    }
-    if array.is_null() {
-        unsafe {
+            MFCreateAttributes(&mut attributes, 1).and_then(|()| {
+                let attributes = attributes.as_ref().ok_or_else(windows::core::Error::empty)?;
+                attributes.SetBlob(&MFT_ENUM_ADAPTER_LUID, &luid_blob(luid))?;
+                MFTEnum2(
+                    MFT_CATEGORY_VIDEO_ENCODER,
+                    flags,
+                    Some(&input),
+                    Some(&output),
+                    attributes,
+                    &mut array,
+                    &mut count,
+                )
+            })
+        },
+        None => unsafe {
             MFTEnumEx(
                 MFT_CATEGORY_VIDEO_ENCODER,
                 flags,
@@ -376,8 +403,11 @@ fn enumerate(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
                 &mut array,
                 &mut count,
             )
-            .map_err(|err| format!("find encoders: {err}"))?;
-        }
+        },
+    };
+    if let Err(err) = listed {
+        release_array(array, count);
+        return Err(format!("find encoders: {err}"));
     }
 
     let mut found = Vec::new();
@@ -386,7 +416,8 @@ fn enumerate(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
             if let Some(activate) = (*array.add(index)).clone() {
                 let id = vendor_of(&activate).as_deref().and_then(vendor_to_encoder);
                 let name = name_of(&activate);
-                found.push(Candidate { id, name, activate });
+                let luid = luid_of(&activate);
+                found.push(Candidate { id, name, luid, activate });
             }
         }
     }
@@ -837,12 +868,16 @@ fn profile(
     lines.push(format!("  candidates       {}", candidates.len()));
     for (index, candidate) in candidates.iter().enumerate() {
         lines.push(format!(
-            "    [{index}]{} {} — {}",
+            "    [{index}]{} {} — {}{}",
             if index == pick { " *" } else { "  " },
             candidate.name,
             match candidate.id {
                 Some(id) => format!("{id:?}"),
                 None => "software".into(),
+            },
+            match candidate.luid {
+                Some(luid) => format!(", luid {luid:x}"),
+                None => String::new(),
             }
         ));
     }
@@ -1193,6 +1228,24 @@ fn opens_a_gop(data: &[u8]) -> bool {
 /// input that never came, until a restart.
 pub(crate) fn input_answered(prepared: bool) -> bool {
     prepared
+}
+
+/// What an event from an asynchronous encoder says about it failing, if it does.
+///
+/// An encoder that runs into trouble sends `MEError`, the reason as the event's
+/// status, and asks for no more input. That event used to be dropped unread
+/// with every other kind the loop does not handle, so an encoder that stopped
+/// this way — a Radeon that took one frame and went quiet — left nothing in
+/// the log but that it had taken no frame for 5 s.
+fn event_failure(kind: u32, status: windows::core::HRESULT) -> Option<String> {
+    if kind != MEError.0 as u32 {
+        return None;
+    }
+    Some(if status.is_ok() {
+        "the encoder reported an error".into()
+    } else {
+        format!("the encoder reported an error: {}", windows::core::Error::from(status))
+    })
 }
 
 /// The output attributes `set_up` chose, copied onto the type the encoder
@@ -1615,6 +1668,8 @@ fn run<F, H>(
             // match regardless, which is what keeps the average honest.
             let mut sent: VecDeque<Instant> = VecDeque::new();
             let mut finished = false;
+            // Event kinds the loop has no use for, each logged once.
+            let mut unhandled: Vec<u32> = Vec::new();
 
             while running.load(Ordering::Relaxed) && !finished {
                 // Did the encoder say anything at all this time round?
@@ -1681,6 +1736,23 @@ fn run<F, H>(
                         // sources and never arrives here.
                         finished = true;
                         break;
+                    } else {
+                        let status = unsafe { event.GetStatus() }
+                            .unwrap_or(windows::core::HRESULT(0));
+                        if let Some(why) = event_failure(kind, status) {
+                            // Nothing more comes after it: the buffer restarts
+                            // on the reason it gave, not 5 s later on a guess.
+                            stats.fail(why);
+                            finished = true;
+                            break;
+                        }
+                        if !unhandled.contains(&kind) {
+                            unhandled.push(kind);
+                            log::info!(
+                                "encoder ({}): event {kind} not handled (status {status})",
+                                settings.label
+                            );
+                        }
                     }
                 }
                 if finished {
@@ -1864,10 +1936,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_adapter_luid_goes_into_the_attribute_unchanged() {
+    fn an_adapter_luid_goes_in_as_the_luid_struct_lays_it_out() {
+        // `LowPart`, then `HighPart`, each little-endian: the eight bytes
+        // `SetBlob(&luid, sizeof(LUID))` hands over.
         let luid: i64 = (0x0000_0001_i64 << 32) | 0x0000_d3a7;
-        assert_eq!(luid_attribute(luid), 0x0000_0001_0000_d3a7);
-        assert_eq!(luid_attribute(-1), u64::MAX, "the high part is signed in the LUID");
+        assert_eq!(luid_blob(luid), [0xa7, 0xd3, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(luid_blob(-1), [0xff; 8], "the high part is signed in the LUID");
+    }
+
+    #[test]
+    fn a_luid_read_back_from_a_blob_is_the_same() {
+        let luid: i64 = (0x0000_0001_i64 << 32) | 0x0000_d3a7;
+        assert_eq!(luid_from_blob(&luid_blob(luid)), Some(luid));
+        assert_eq!(luid_from_blob(&[1, 2, 3]), None, "not a LUID");
+    }
+
+    #[test]
+    fn a_listing_with_only_the_software_encoder_is_no_listing_for_the_card() {
+        assert!(!lists_hardware(&[None]));
+        assert!(!lists_hardware(&[]));
+        assert!(lists_hardware(&[Some(EncoderId::Amf), None]));
+    }
+
+    #[test]
+    fn an_error_event_is_the_encoder_failing_with_its_code() {
+        use windows::Win32::Foundation::{E_FAIL, S_OK};
+        let why = event_failure(MEError.0 as u32, E_FAIL).expect("MEError is a failure");
+        assert!(why.contains("0x80004005"), "{why}");
+        assert_eq!(event_failure(METransformNeedInput.0 as u32, S_OK), None);
+        assert_eq!(event_failure(METransformHaveOutput.0 as u32, S_OK), None);
     }
 
     #[test]
