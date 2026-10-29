@@ -126,8 +126,10 @@ pub fn arguments(name: &str) -> Vec<String> {
         "-nostats",
         "-f",
         "dshow",
+        // About five 1080p frames. A larger buffer held a backlog instead of
+        // dropping it — seconds of delay on a busy PC.
         "-rtbufsize",
-        "64M",
+        "16M",
         "-i",
         &format!("video={name}"),
         "-an",
@@ -204,12 +206,12 @@ mod win {
     /// Normally 2 s for OBS Virtual Camera; past this it is tried again.
     const OPEN_LIMIT: Duration = Duration::from_secs(6);
 
-    /// ffmpeg reads the camera below normal priority; its log is drained on a
-    /// thread of its own, frames are read on another.
+    /// ffmpeg reads the camera above normal priority (`muxer::live`); its log
+    /// is drained on a thread of its own, frames are read on another.
     pub fn open(device: &CameraDevice, sink: Sink, cancelled: &dyn Fn() -> bool) -> Result<Box<dyn Source>, Error> {
         let name = name_of(&device.id).ok_or_else(|| Error::Unsupported(format!("the camera name {}", device.name)))?;
         // Verbose: when an open fails, its last lines say how far DirectShow got.
-        let mut child = crate::muxer::background("ffmpeg")
+        let mut child = crate::muxer::live("ffmpeg")
             .arg("-loglevel")
             .arg("verbose")
             .args(arguments(name))
@@ -426,6 +428,7 @@ Error opening input file dummy."#;
         let args = arguments("OBS Virtual Camera");
         assert!(args.windows(2).any(|w| w[0] == "-i" && w[1] == "video=OBS Virtual Camera"));
         assert!(args.contains(&"-nostdin".to_string()));
+        assert!(args.windows(2).any(|w| w == ["-rtbufsize", "16M"]), "a short live buffer: {args:?}");
         assert_eq!(args.last().map(String::as_str), Some("-"));
     }
 }

@@ -1123,6 +1123,9 @@ pub struct CamStatus {
     pub encoder: Option<EncoderId>,
     pub ring_seconds: f32,
     pub ring_bytes: u64,
+    /// The longest a frame waited for the worker in the last stretch.
+    #[serde(default)]
+    pub worker_lag_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

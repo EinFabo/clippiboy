@@ -119,7 +119,7 @@ pub fn health_text(status: &crate::model::CamStatus) -> String {
     };
     let encoder = status.encoder.map(|e| format!("{e:?}")).unwrap_or_else(|| "none".into());
     format!(
-        "cam: {:.1} fps in, {:.1} out, dup={} filler={} gaps={} clock={clock} encoder={encoder} ring {:.1} s {:.1} MB",
+        "cam: {:.1} fps in, {:.1} out, dup={} filler={} gaps={} clock={clock} encoder={encoder} ring {:.1} s {:.1} MB lag {} ms",
         status.fps_in,
         status.fps_out,
         status.duplicates,
@@ -127,6 +127,7 @@ pub fn health_text(status: &crate::model::CamStatus) -> String {
         status.gaps,
         status.ring_seconds,
         status.ring_bytes as f64 / 1_048_576.0,
+        status.worker_lag_ms,
     )
 }
 
@@ -574,10 +575,13 @@ mod tests {
             encoder: Some(crate::model::EncoderId::Nvenc),
             ring_seconds: 133.2,
             ring_bytes: 50_436_506,
+            worker_lag_ms: 87,
         };
+        // `lag`: the longest a frame waited for the worker in that stretch —
+        // what a stalled worker adds to the virtual camera and the clip.
         assert_eq!(
             health_text(&status),
-            "cam: 29.8 fps in, 30.0 out, dup=412 filler=0 gaps=0 clock=device encoder=Nvenc ring 133.2 s 48.1 MB"
+            "cam: 29.8 fps in, 30.0 out, dup=412 filler=0 gaps=0 clock=device encoder=Nvenc ring 133.2 s 48.1 MB lag 87 ms"
         );
     }
 

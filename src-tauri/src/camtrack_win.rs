@@ -80,7 +80,14 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
                 let result = match camera::find(id.as_deref(), name.as_deref()) {
                     None => Err((Error::NoCamera, None)),
                     Some(device) => {
-                        let sink = Box::new(move |event| {
+                        // ClippiBoy Camera gets each picture here, on the camera's
+                        // own thread, before it queues for the worker: a busy
+                        // worker must not delay what Discord shows.
+                        let vcam = shared.clone();
+                        let sink = Box::new(move |event: Event| {
+                            if let Event::Frame(frame) = &event {
+                                publish_to_vcam(&vcam, frame);
+                            }
                             let _ = events.send((generation, event));
                         });
                         let mode = OpenMode::Controlling { width: track.0, height: track.1 };
@@ -114,6 +121,16 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
             }
             Ask::StopEncoder(encoder) => encoder.stop(),
         }
+    }
+}
+
+/// A frame as it came, into ClippiBoy Camera's memory while it is listed.
+fn publish_to_vcam(shared: &CamShared, frame: &Frame) {
+    if !shared.vcam_on.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(writer) = shared.vcam.lock().as_ref() {
+        writer.publish(&frame.nv12, frame.probe.width, frame.probe.height, frame.probe.qpc_100ns, now_100ns());
     }
 }
 
@@ -151,6 +168,9 @@ struct Worker {
     qpc_last: i64,
     unbiased_last: i64,
     frames_in: u32,
+    /// The longest a frame waited for this worker since the last status.
+    lag_max_100ns: i64,
+    worker_lag_ms: u32,
     frames_out: u32,
     second: Instant,
     fps_in: f32,
@@ -212,6 +232,8 @@ impl Worker {
             qpc_last: now_100ns(),
             unbiased_last: unbiased_100ns(),
             frames_in: 0,
+            lag_max_100ns: 0,
+            worker_lag_ms: 0,
             frames_out: 0,
             second: Instant::now(),
             fps_in: 0.0,
@@ -460,14 +482,9 @@ impl Worker {
                 }
                 self.clock = Some(frame.probe.clock);
                 self.frames_in += 1;
+                self.lag_max_100ns = self.lag_max_100ns.max(now_100ns() - frame.probe.arrival_100ns);
                 let frame = Arc::new(frame);
                 *self.shared.latest.lock() = Some(frame.clone());
-                // ClippiBoy Camera gets the picture as it came while it is listed.
-                if self.shared.vcam_on.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Some(writer) = self.shared.vcam.lock().as_ref() {
-                        writer.publish(&frame.nv12, frame.probe.width, frame.probe.height, frame.probe.qpc_100ns, now_100ns());
-                    }
-                }
                 let size = (frame.probe.width, frame.probe.height);
                 self.shared.preview.offer(&frame, cover_crop(size, self.track), Instant::now());
                 let mut outs = Vec::new();
@@ -632,6 +649,8 @@ impl Worker {
         self.fps_out = self.frames_out as f32 / seconds;
         self.frames_in = 0;
         self.frames_out = 0;
+        self.worker_lag_ms = (self.lag_max_100ns / 10_000).clamp(0, u32::MAX as i64) as u32;
+        self.lag_max_100ns = 0;
         self.second = Instant::now();
         let stats = self.grid.stats();
         let (ring_seconds, ring_bytes, gaps) = {
@@ -650,6 +669,7 @@ impl Worker {
             encoder: self.chosen,
             ring_seconds,
             ring_bytes,
+            worker_lag_ms: self.worker_lag_ms,
         });
     }
 }

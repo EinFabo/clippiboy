@@ -77,6 +77,21 @@ pub fn ffmpeg() -> Command {
     command("ffmpeg")
 }
 
+/// A tool that carries a live picture, above normal priority. It does little
+/// work, but late: below normal, a busy PC (a game, a build) held a camera's
+/// frames back for seconds and let them out in a burst — a frozen face in the
+/// clip, and seconds of delay in ClippiBoy Camera.
+pub fn live(name: &str) -> Command {
+    let mut command = Command::new(tool(name));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+        command.creation_flags(CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+    command
+}
+
 pub fn run(command: &mut Command, what: &str) -> Result<(), String> {
     let output = command
         .output()
