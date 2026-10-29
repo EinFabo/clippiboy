@@ -2,7 +2,8 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, events, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
-import type { AppConfig, AudioSource, Clip, ConsoleStyle, EngineStatus, FriendUser } from "@/lib/types";
+import type { AppConfig, AudioSource, Clip, ConsoleStyle, EngineStatus, FacecamConfig, FriendUser } from "@/lib/types";
+import { camBox, startCamPreview } from "@/lib/facecam";
 import { Outbox } from "@/lib/outbox";
 import { changedFields, sourceWrite } from "@/lib/sourceWrite";
 import { cn } from "@/lib/cn";
@@ -956,6 +957,7 @@ export function Console() {
       }}
       className="fixed inset-0 select-none overflow-hidden text-ink"
     >
+      <CamTile opened={opened} closing={closing} inCapture={inCapture} />
       {/* Der Schein aus den unteren Ecken. Steht mit Absicht vor und außerhalb
           von `.cb-ui`: dahinter, weil er hinter allem Bedienbaren liegen soll,
           und außerhalb, weil `.cb-ui` die Größeneinstellung als `zoom` trägt —
@@ -1610,6 +1612,67 @@ function Stat({
       <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-muted">{label}</p>
       <p className={cn("mt-1 text-2xl font-bold tabular-nums", bad && "text-live")}>{value}</p>
       <p className="text-xs text-ink-faint">{hint}</p>
+    </div>
+  );
+}
+
+/**
+ * The cam where it will sit in a clip saved now, while the console is open:
+ * pulled frame by frame, so it stops with the page. Hidden while the console
+ * shows in recordings, with a hint instead. "Cam off" switches the camera off
+ * on the spot.
+ */
+function CamTile({ opened, closing, inCapture }: { opened: number; closing: boolean; inCapture: boolean }) {
+  const [cam, setCam] = useState<FacecamConfig | null>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
+
+  // The settings as they are at each opening.
+  useEffect(() => {
+    if (!inTauri || opened === 0) return;
+    void api
+      .getConfig()
+      .then((config) => setCam(config.facecam))
+      .catch(() => setCam(null));
+  }, [opened]);
+
+  const shown = !!cam && cam.enabled && cam.consolePreview && !closing;
+  useEffect(() => {
+    if (!shown || inCapture || !canvas.current) return;
+    return startCamPreview(canvas.current, { onlyWhileVisible: false });
+  }, [shown, inCapture]);
+
+  if (!shown || !cam) return null;
+  const box = camBox(cam.layout, window.innerWidth, window.innerHeight);
+  const radius = cam.layout.shape === "circle" ? "9999px" : cam.layout.shape === "rounded" ? "12%" : "0";
+  return (
+    <div className="cb-cam-tile" style={{ left: box.left, top: box.top, width: box.width, height: box.height }}>
+      {inCapture ? (
+        <p className="cb-cam-hint">The cam preview is hidden while the console shows in recordings.</p>
+      ) : (
+        <canvas
+          ref={canvas}
+          width={320}
+          height={180}
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            borderRadius: radius,
+            transform: cam.layout.mirror ? "scaleX(-1)" : undefined,
+          }}
+        />
+      )}
+      <button
+        type="button"
+        className="cb-cam-off"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => {
+          setCam(null);
+          void api.setFacecamEnabled(false).catch(() => {});
+        }}
+      >
+        Cam off
+      </button>
     </div>
   );
 }
