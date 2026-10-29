@@ -518,8 +518,11 @@ fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> Rate
     // Constant quality first. This is the whole point: a bitrate target spends
     // its budget whether the picture needs it or not, so a menu screen cost as
     // much as a firefight. Certified hardware encoders are required to support
-    // it, but a driver is still a driver.
-    if set_rate_control(codec, eAVEncCommonRateControlMode_Quality) {
+    // it, but a driver is still a driver. `CLIPPIBOY_CONSTANT_QUALITY=0` skips it,
+    // so a probe can tell whether a driver chokes on it.
+    if env_bool("CLIPPIBOY_CONSTANT_QUALITY", true)
+        && set_rate_control(codec, eAVEncCommonRateControlMode_Quality)
+    {
         if set_codec_property(
             codec,
             "quality",
@@ -885,9 +888,91 @@ fn profile(
     log::info!("{}", lines.join("\n"));
 }
 
+/// Which candidate to take: the `nth` of the make `requested` (the first when
+/// `nth` is absent or past the end), else the first hardware encoder, else the
+/// first at all.
+fn pick_candidate(ids: &[Option<EncoderId>], requested: EncoderId, nth: Option<usize>) -> usize {
+    let of_make = |wanted: EncoderId| ids.iter().enumerate().filter(move |(_, id)| **id == Some(wanted));
+    match requested {
+        EncoderId::X264 => None,
+        wanted => nth
+            .and_then(|nth| of_make(wanted).nth(nth))
+            .or_else(|| of_make(wanted).next())
+            .map(|(index, _)| index),
+    }
+    .or_else(|| ids.iter().position(Option::is_some))
+    .unwrap_or(0)
+}
+
+/// `CLIPPIBOY_ENCODER_LIST=all`: every card's encoders, the way 0.8.4 listed
+/// them without meaning to — for the probe, which tries each in turn.
+fn lists_every_card() -> bool {
+    std::env::var("CLIPPIBOY_ENCODER_LIST").is_ok_and(|raw| raw.trim().eq_ignore_ascii_case("all"))
+}
+
+/// How many encoders of `id`'s make Media Foundation lists over all cards.
+pub fn candidate_count(id: EncoderId) -> usize {
+    if startup().is_err() {
+        return 0;
+    }
+    list(None).map_or(0, |found| found.iter().filter(|c| c.id == Some(id)).count())
+}
+
+/// One listing a line per encoder: `adapter` asks `MFTEnum2` for that card's,
+/// `None` lists all. Unlike [`enumerate`] nothing falls back, so the probe
+/// shows what the filter really returns.
+pub fn describe_listing(adapter: Option<i64>) -> Vec<String> {
+    if let Err(err) = startup() {
+        return vec![err];
+    }
+    let found = match list(adapter) {
+        Ok(found) => found,
+        Err(err) => return vec![err],
+    };
+    if found.is_empty() {
+        return vec!["(none)".into()];
+    }
+    found
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let mut line = format!(
+                "[{index}] {} — {}",
+                candidate.name,
+                candidate.id.map_or("software".into(), |id| format!("{id:?}"))
+            );
+            if let Some(luid) = candidate.luid {
+                line.push_str(&format!(", luid {luid:x}"));
+            }
+            if let Some(url) = hardware_url(&candidate.activate) {
+                line.push_str(&format!(", {url}"));
+            }
+            line
+        })
+        .collect()
+}
+
+/// The device path of a hardware encoder, which names the card it sits on.
+fn hardware_url(activate: &IMFActivate) -> Option<String> {
+    unsafe {
+        let mut len = 0u32;
+        let mut buf = [0u16; 512];
+        activate
+            .GetString(&MFT_ENUM_HARDWARE_URL_Attribute, &mut buf, Some(&mut len))
+            .ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
 fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, String> {
     startup()?;
-    let candidates = enumerate(gpu.adapter.as_ref().map(|info| info.luid))?;
+    let adapter = if lists_every_card() {
+        log::info!("CLIPPIBOY_ENCODER_LIST=all — every card's encoders are listed");
+        None
+    } else {
+        gpu.adapter.as_ref().map(|info| info.luid)
+    };
+    let candidates = enumerate(adapter)?;
     if candidates.is_empty() {
         return Err("no H.264 encoder found".into());
     }
@@ -912,12 +997,12 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     // that has none at all. It then lands on the software transform below and
     // fails at the D3D manager, which is the truth: this pipeline cannot record
     // without a hardware encoder.
-    let pick = match settings.requested {
-        EncoderId::X264 => None,
-        wanted => candidates.iter().position(|c| c.id == Some(wanted)),
-    }
-    .or_else(|| candidates.iter().position(|c| c.id.is_some()))
-    .unwrap_or(0);
+    //
+    // `CLIPPIBOY_ENCODER_CANDIDATE=n` takes the n-th of the make instead of the
+    // first — for the probe, on a machine with more than one.
+    let ids: Vec<Option<EncoderId>> = candidates.iter().map(|c| c.id).collect();
+    let nth = env_opt_u32("CLIPPIBOY_ENCODER_CANDIDATE").map(|nth| nth as usize);
+    let pick = pick_candidate(&ids, settings.requested, nth);
     let chosen = candidates[pick].id.unwrap_or(EncoderId::X264);
 
     let activate = candidates[pick].activate.clone();
@@ -1949,6 +2034,17 @@ mod tests {
         let luid: i64 = (0x0000_0001_i64 << 32) | 0x0000_d3a7;
         assert_eq!(luid_from_blob(&luid_blob(luid)), Some(luid));
         assert_eq!(luid_from_blob(&[1, 2, 3]), None, "not a LUID");
+    }
+
+    #[test]
+    fn the_nth_encoder_of_a_make_can_be_asked_for() {
+        let ids = [Some(EncoderId::Nvenc), Some(EncoderId::Amf), Some(EncoderId::Amf), None];
+        assert_eq!(pick_candidate(&ids, EncoderId::Amf, None), 1, "the first of the make");
+        assert_eq!(pick_candidate(&ids, EncoderId::Amf, Some(1)), 2);
+        assert_eq!(pick_candidate(&ids, EncoderId::Amf, Some(5)), 1, "past the end: the first");
+        assert_eq!(pick_candidate(&ids, EncoderId::Qsv, None), 0, "none of it: first hardware");
+        assert_eq!(pick_candidate(&ids, EncoderId::X264, None), 0);
+        assert_eq!(pick_candidate(&[None], EncoderId::Amf, None), 0, "software alone");
     }
 
     #[test]

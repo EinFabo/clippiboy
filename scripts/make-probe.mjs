@@ -62,7 +62,7 @@ How it works:
   4. Keep a video playing while the test measures — any YouTube clip in a
      window will do, as long as something moves. On a still screen the
      encoder has almost nothing to do, and the test measures the wrong thing.
-  5. Wait until "Done" appears in the window — about four minutes. The test
+  5. Wait until "Done" appears in the window — about five minutes. The test
      is running the whole time, even when nothing seems to happen. Please
      don't start anything else meanwhile.
   6. Send back the file report.txt that will then be in this folder.

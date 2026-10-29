@@ -140,6 +140,11 @@ const VARIANTS: &[Variant] = &[
         why: "the other lever — quality/speed at the far end, low latency untouched",
         env: &[("CLIPPIBOY_QUALITY_VS_SPEED", "0")],
     },
+    Variant {
+        name: "bitrate",
+        why: "constant quality off — a capped bitrate instead, in case the driver chokes on it",
+        env: &[("CLIPPIBOY_CONSTANT_QUALITY", "0")],
+    },
     // The baseline again, last. Nothing is being tested here except the
     // machine: if these two disagree over the same amount of picture, something
     // else had the graphics card while we measured, and every row between them
@@ -158,6 +163,68 @@ const VARIANTS: &[Variant] = &[
 /// something.
 const BASELINE: &str = "as-is";
 const BASELINE_REPEAT: &str = "as-is-again";
+
+/// `all-cards-N`: the N-th encoder of the make over every card's listing.
+///
+/// A Radeon that took one frame and went quiet (0.8.4) sat in a machine that
+/// listed three AMD encoders, and 0.8.4 took the first without knowing whose
+/// card it was. Each one on its own says whether that was the wrong one.
+const ALL_CARDS: &str = "all-cards-";
+
+/// One run of the sweep.
+struct Run {
+    name: String,
+    why: String,
+    env: Vec<(String, String)>,
+}
+
+/// What a variant sets, by name — the same in the sweep and in a run by hand.
+fn variant_env(name: &str) -> Vec<(String, String)> {
+    if let Some(nth) = name.strip_prefix(ALL_CARDS) {
+        return vec![
+            ("CLIPPIBOY_ENCODER_LIST".into(), "all".into()),
+            ("CLIPPIBOY_ENCODER_CANDIDATE".into(), nth.into()),
+        ];
+    }
+    VARIANTS
+        .iter()
+        .find(|v| v.name == name)
+        .map(|v| v.env.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect())
+        .unwrap_or_default()
+}
+
+/// The runs for one encoder: the variants, then each encoder of its make on
+/// its own where there is more than one, then the baseline again.
+fn runs_for(id: EncoderId) -> Vec<Run> {
+    let fixed = |v: &Variant| Run {
+        name: v.name.into(),
+        why: v.why.into(),
+        env: variant_env(v.name),
+    };
+    let mut runs: Vec<Run> = VARIANTS.iter().filter(|v| v.name != BASELINE_REPEAT).map(fixed).collect();
+    #[cfg(not(windows))]
+    let _ = id;
+    #[cfg(windows)]
+    {
+        let count = clippiboy_lib::mft::candidate_count(id);
+        if count > 1 {
+            for nth in 0..count {
+                let name = format!("{ALL_CARDS}{nth}");
+                runs.push(Run {
+                    why: if nth == 0 {
+                        format!("the first {} encoder of every card's listing — what 0.8.4 took", tag(id))
+                    } else {
+                        format!("{} encoder #{nth} of every card's listing on its own", tag(id))
+                    },
+                    env: variant_env(&name),
+                    name,
+                });
+            }
+        }
+    }
+    runs.extend(VARIANTS.iter().filter(|v| v.name == BASELINE_REPEAT).map(fixed));
+    runs
+}
 
 /// What one run turned out to be, in numbers the parent can line up.
 ///
@@ -208,6 +275,13 @@ impl Outcome {
             0 => 0.0,
             total => (total - self.repeats.min(total)) as f32 / total as f32,
         }
+    }
+
+    /// Whether anything came out of the encoder at all. An encoder that takes
+    /// a frame and goes quiet (a Radeon on 0.8.4) shows no time per frame, and
+    /// read as a speed that is the fastest run in the table.
+    fn produced_video(&self) -> bool {
+        self.ring_mb > 0.0
     }
 }
 
@@ -395,7 +469,11 @@ fn insist_on_quiet() -> bool {
 /// What the machine is, before any encoder has run on it.
 fn header() -> String {
     let mut lines = vec![
-        format!("ClippiBoy probe {}", env!("CARGO_PKG_VERSION")),
+        format!(
+            "ClippiBoy probe {} — encoders listed per card (the fix after 0.8.4), \
+             encoder errors logged",
+            env!("CARGO_PKG_VERSION")
+        ),
         format!("ffmpeg found: {}", muxer::available()),
         String::new(),
         "graphics adapters".into(),
@@ -407,8 +485,28 @@ fn header() -> String {
         if adapters.is_empty() {
             lines.push("  (DXGI listed none — that alone is the fault)".into());
         }
-        for (info, _) in &adapters {
+        for (info, adapter) in &adapters {
             lines.push(format!("  {info}"));
+            lines.push(format!(
+                "      driver {}",
+                driver_version(adapter).unwrap_or_else(|| "unknown".into())
+            ));
+        }
+
+        // Which encoder belongs to which card: what this build asks each card
+        // for, and the listing 0.8.4 took its first of the make from.
+        lines.push(String::new());
+        lines.push("encoders per card (what this build takes from)".into());
+        for (info, _) in &adapters {
+            lines.push(format!("  card luid {:x}:", info.luid));
+            for line in clippiboy_lib::mft::describe_listing(Some(info.luid)) {
+                lines.push(format!("    {line}"));
+            }
+        }
+        lines.push(String::new());
+        lines.push("encoders over all cards (what 0.8.4 took the first of)".into());
+        for line in clippiboy_lib::mft::describe_listing(None) {
+            lines.push(format!("    {line}"));
         }
     }
     #[cfg(not(windows))]
@@ -423,11 +521,103 @@ fn header() -> String {
         ));
     }
 
+    #[cfg(windows)]
+    lines.push(system());
+
     let warning = rival_warning(&rivals());
     if !warning.is_empty() {
         lines.push(warning);
     }
     lines.join("\n")
+}
+
+/// The driver version DXGI reports for a card, as `a.b.c.d`.
+#[cfg(windows)]
+fn driver_version(adapter: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1) -> Option<String> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    let raw = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.ok()? as u64;
+    Some(format!(
+        "{}.{}.{}.{}",
+        raw >> 48,
+        (raw >> 32) & 0xffff,
+        (raw >> 16) & 0xffff,
+        raw & 0xffff
+    ))
+}
+
+/// Windows, the processor, and what else may be recording on this machine.
+///
+/// The rival list stops on programs by name; AMD's own recorder lives inside a
+/// service that runs whether it records or not, so here it is only described:
+/// the AMD and Radeon processes that run, and the settings AMD Software and
+/// the Xbox Game Bar keep their instant replay and background recording in.
+/// The processor says whether a graphics unit of its own could be the other
+/// AMD card.
+#[cfg(windows)]
+fn system() -> String {
+    let mut lines = vec![String::new(), "system".into()];
+    lines.push(format!("  {}", command_text("cmd", &["/c", "ver"])));
+    lines.push(reg_query(&[
+        r"HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+        "/v",
+        "ProcessorNameString",
+    ]));
+
+    let mut amd: Vec<String> = clippiboy_lib::audio::devices::process_tree()
+        .into_values()
+        .map(|(_, exe)| exe)
+        // By prefix: "amd" anywhere also matches "StreamDeck" and "AMD64".
+        // `ati…` is the old name AMD's event services still run under.
+        .filter(|exe| {
+            let exe = exe.to_ascii_lowercase();
+            exe.starts_with("amd") || exe.starts_with("ati") || exe.contains("radeon")
+        })
+        .collect();
+    amd.sort_unstable();
+    amd.dedup();
+    lines.push(String::new());
+    lines.push("AMD and Radeon processes running".into());
+    lines.push(if amd.is_empty() {
+        "  (none)".into()
+    } else {
+        format!("  {}", amd.join(", "))
+    });
+
+    lines.push(String::new());
+    lines.push("recording settings (AMD Software, Xbox Game Bar)".into());
+    lines.push(reg_query(&[r"HKCU\Software\AMD\DVR"]));
+    lines.push(reg_query(&[r"HKCU\Software\Microsoft\Windows\CurrentVersion\GameDVR"]));
+    lines.push(reg_query(&[r"HKCU\System\GameConfigStore", "/v", "GameDVR_Enabled"]));
+    lines.join("\n")
+}
+
+/// `reg query` with these arguments, as it printed it, or that the key is not there.
+#[cfg(windows)]
+fn reg_query(args: &[&str]) -> String {
+    let mut query = vec!["query"];
+    query.extend_from_slice(args);
+    let text = command_text("reg", &query);
+    if text.is_empty() {
+        format!("  {} — not present", args[0])
+    } else {
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| format!("  {}", line.trim_end()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// What a command printed when it succeeded, else nothing.
+#[cfg(windows)]
+fn command_text(program: &str, args: &[&str]) -> String {
+    match std::process::Command::new(program).args(args).output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => String::new(),
+    }
 }
 
 /// Every hardware encoder on the machine, each put through every variant.
@@ -478,7 +668,7 @@ fn sweep(seconds: u64, full: bool) {
     let mut outcomes: Vec<Outcome> = Vec::new();
 
     for id in &encoders {
-        for variant in VARIANTS {
+        for variant in runs_for(*id) {
             let banner = format!(
                 "\n\n======== {} · {} ========\n{}\n",
                 tag(*id),
@@ -494,21 +684,28 @@ fn sweep(seconds: u64, full: bool) {
                 .arg("--encoder")
                 .arg(tag(*id))
                 .arg("--variant")
-                .arg(variant.name)
+                .arg(&variant.name)
                 .arg(seconds.to_string());
-            for (key, value) in variant.env {
+            for (key, value) in &variant.env {
                 command.env(key, value);
             }
             if full {
                 command.arg("--full");
             }
 
-            match command.output() {
-                Ok(output) => {
-                    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                    text.push_str(&String::from_utf8_lossy(&output.stderr));
-                    if !output.status.success() {
-                        text.push_str(&format!("\nthe run ended with {}\n", output.status));
+            let limit = Duration::from_secs(seconds + RUN_SLACK_SECONDS);
+            match run_child(command, limit) {
+                Ok((mut text, status)) => {
+                    match status {
+                        Some(status) if !status.success() => {
+                            text.push_str(&format!("\nthe run ended with {status}\n"));
+                        }
+                        Some(_) => {}
+                        None => text.push_str(&format!(
+                            "\nthe run did not end within {} s and was stopped — the encoder \
+                             hung\n",
+                            limit.as_secs()
+                        )),
                     }
                     outcomes.extend(text.lines().filter_map(Outcome::parse));
                     print!("{text}");
@@ -547,6 +744,53 @@ fn sweep(seconds: u64, full: bool) {
     // person who did us the favour with nothing to look at and nothing to send.
     println!("\nDone. Send back the file report.txt. Press Enter to close.");
     let _ = std::io::stdin().read_line(&mut String::new());
+}
+
+/// How much longer than its measuring a run may take: starting the encoder
+/// (up to 10 s), draining it, and a test clip.
+const RUN_SLACK_SECONDS: u64 = 90;
+
+/// Run one child and collect what it printed, stopping it if it hangs.
+///
+/// `output()` waited forever, and an encoder wedged in its driver is exactly
+/// the machine this is for: one stuck run took the whole report with it.
+/// `None` for the status means it was stopped.
+fn run_child(
+    mut command: std::process::Command,
+    limit: Duration,
+) -> std::io::Result<(String, Option<std::process::ExitStatus>)> {
+    use std::process::Stdio;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    // Read while it runs: a pipe nobody empties fills and stalls the child.
+    let stdout = collect(child.stdout.take());
+    let stderr = collect(child.stderr.take());
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break Some(status),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    };
+    let mut text = String::from_utf8_lossy(&stdout.join().unwrap_or_default()).into_owned();
+    text.push_str(&String::from_utf8_lossy(&stderr.join().unwrap_or_default()));
+    Ok((text, status))
+}
+
+/// Everything a pipe delivers, read on a thread of its own.
+fn collect<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
 }
 
 /// The table the whole exercise exists for: which setting changes what.
@@ -594,6 +838,29 @@ fn summary(encoder: &str, outcomes: &[Outcome], seconds: u64) -> String {
             format!("{} ms", outcome.stall_ms),
             outcome.dropped,
         ));
+    }
+
+    // Before any timing: did the encoder give anything back at all.
+    out.push_str("\nvideo out of the encoder:\n");
+    for outcome in &mine {
+        out.push_str(&format!(
+            "  {:<14} {}\n",
+            outcome.variant,
+            if outcome.produced_video() {
+                format!("yes, {:.1} MB", outcome.ring_mb)
+            } else {
+                "NONE — it took frames and gave nothing back".into()
+            }
+        ));
+    }
+    if mine.iter().any(|o| o.variant == BASELINE && !o.produced_video()) {
+        out.push_str(
+            "\nas-is produced no video, so the timings above mean nothing. The rows that\n\
+             say yes are the settings or the encoder that work on this machine; the\n\
+             encoder's own reason, if it gave one, is in its run above (\"reported an\n\
+             error\").\n",
+        );
+        return out;
     }
 
     // A still screen is the cheapest input an encoder ever gets, and a table
@@ -719,7 +986,9 @@ fn summary(encoder: &str, outcomes: &[Outcome], seconds: u64) -> String {
             .iter()
             .filter(|o| o.variant != BASELINE && o.variant != BASELINE_REPEAT)
         {
-            let verdict = if outcome.late_us * 2 < baseline.late_us {
+            let verdict = if !outcome.produced_video() {
+                "produced no video"
+            } else if outcome.late_us * 2 < baseline.late_us {
                 "fixes it"
             } else if outcome.late_us * 4 < baseline.late_us * 5 {
                 "no real difference"
@@ -744,10 +1013,8 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool, hole: bool) {
     // availability check on purpose — an encoder that is not offered is the
     // interesting one.
     std::env::set_var("CLIPPIBOY_ENCODER", name);
-    if let Some(chosen) = VARIANTS.iter().find(|v| v.name == variant) {
-        for (key, value) in chosen.env {
-            std::env::set_var(key, value);
-        }
+    for (key, value) in variant_env(variant) {
+        std::env::set_var(key, value);
     }
 
     let recording = RecordingConfig {
