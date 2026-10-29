@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::model::CameraDevice;
 
+pub mod dshow;
 pub mod grid;
 #[cfg(windows)]
 pub mod windows;
@@ -234,11 +235,15 @@ pub fn pick_native(types: &[NativeType], track: (u32, u32)) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// The cameras Windows lists. Empty on other systems for now.
+/// The cameras Windows lists, then those only DirectShow knows (OBS Virtual
+/// Camera), never ClippiBoy Camera itself. Empty on other systems for now.
 pub fn list() -> Vec<CameraDevice> {
     #[cfg(windows)]
     {
-        self::windows::list()
+        let mut list = dshow::without_our_camera(self::windows::list());
+        let extra = dshow::extras(&list, dshow::list_names());
+        list.extend(extra);
+        list
     }
     #[cfg(not(windows))]
     {
@@ -250,6 +255,9 @@ pub fn list() -> Vec<CameraDevice> {
 pub fn open(device: &CameraDevice, mode: OpenMode, sink: Sink) -> Result<Box<dyn Source>, Error> {
     #[cfg(windows)]
     {
+        if device.id.starts_with(dshow::PREFIX) {
+            return dshow::open(device, sink);
+        }
         self::windows::open(device, mode, sink)
     }
     #[cfg(not(windows))]

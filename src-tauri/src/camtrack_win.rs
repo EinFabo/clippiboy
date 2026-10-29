@@ -95,7 +95,9 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
             }
             Ask::Close(source) => source.close(),
             Ask::Holder(device) => {
-                let _ = answer.send(Answer::Holder(camera::windows::holder(&device)));
+                // Frame Server's activity report knows only its own cameras.
+                let by = if device.id.starts_with(camera::dshow::PREFIX) { None } else { camera::windows::holder(&device) };
+                let _ = answer.send(Answer::Holder(by));
             }
             Ask::StartEncoder { session, gpu, settings } => {
                 let packets = shared.clone();

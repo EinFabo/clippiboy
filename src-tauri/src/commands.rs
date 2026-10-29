@@ -569,7 +569,10 @@ fn run_vcam_setup(state: &AppState, app: &tauri::AppHandle, verb: &str) -> Resul
     use tauri::Manager;
     let exe = crate::vcam::setup_exe(app.path().resource_dir().ok())
         .ok_or_else(|| "The virtual camera's setup is missing".to_string())?;
+    #[cfg(windows)]
     let owner = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize);
+    #[cfg(not(windows))]
+    let owner = None;
     let outcome = crate::vcam::run_setup(&exe, verb, owner);
     state.vcam.refresh_installed();
     match outcome? {
