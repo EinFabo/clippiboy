@@ -18,8 +18,9 @@ pub mod windows;
 /// facecam controls the camera and picks its format (`pick_native`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
-    /// The camera's own, at the native type `pick_native` chooses.
-    Controlling,
+    /// The camera's own, at the native type `pick_native` chooses for a
+    /// track of this size.
+    Controlling { width: u32, height: u32 },
     /// The MF sensor group in shared mode: whatever format the camera runs.
     MfSensorShared,
 }
