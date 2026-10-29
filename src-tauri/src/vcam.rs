@@ -48,6 +48,17 @@ pub fn setup_outcome(code: u32) -> Result<SetupDone, String> {
     }
 }
 
+/// Windows' camera activity report, per camera link: the processes and
+/// whether each streams. An app other than ClippiBoy streaming our link is
+/// watching — the vcam events' SOURCE_START never came on Windows 11 here.
+pub fn someone_streams(report: &[(String, Vec<(u32, bool)>)], link: &str, me: u32) -> bool {
+    report
+        .iter()
+        .filter(|(l, _)| l.eq_ignore_ascii_case(link))
+        .flat_map(|(_, processes)| processes)
+        .any(|(pid, streaming)| *streaming && *pid != me)
+}
+
 pub fn status_for(installed: Option<&str>, bundled: &str, switched_on: bool, running: bool, watching: bool) -> VcamStatus {
     let Some(installed) = installed else { return VcamStatus::NotInstalled };
     if older(installed, bundled) {
@@ -159,10 +170,13 @@ impl Vcam {
                     }
                     let watching = self.watching.clone();
                     let notify = self.on_change.lock().clone();
+                    // Two sources report it (events, activity monitor); only a
+                    // change is passed on.
                     match win::Running::start(move |active| {
-                        watching.store(active, Ordering::SeqCst);
-                        if let Some(f) = &notify {
-                            f();
+                        if watching.swap(active, Ordering::SeqCst) != active {
+                            if let Some(f) = &notify {
+                                f();
+                            }
                         }
                     }) {
                         Ok(camera) => {
@@ -337,9 +351,11 @@ mod win {
         }
     }
 
+    type OnActive = std::sync::Arc<dyn Fn(bool) + Send + Sync>;
+
     #[implement(IMFAsyncCallback)]
     struct Events {
-        on_active: Box<dyn Fn(bool) + Send + Sync>,
+        on_active: OnActive,
     }
 
     impl IMFAsyncCallback_Impl for Events_Impl {
@@ -378,12 +394,48 @@ mod win {
         }
     }
 
+    /// Watches Windows' camera activity for our camera's link.
+    #[implement(IMFSensorActivitiesReportCallback)]
+    struct Activity {
+        link: String,
+        on_active: OnActive,
+    }
+
+    impl IMFSensorActivitiesReportCallback_Impl for Activity_Impl {
+        fn OnActivitiesReport(&self, report: Option<&IMFSensorActivitiesReport>) -> WinResult<()> {
+            let Some(report) = report else { return Ok(()) };
+            let mut entries = Vec::new();
+            unsafe {
+                for i in 0..report.GetCount().unwrap_or(0) {
+                    let Ok(activity) = report.GetActivityReport(i) else { continue };
+                    let mut buf = [0u16; 512];
+                    let mut written = 0u32;
+                    if activity.GetSymbolicLink(&mut buf, &mut written).is_err() {
+                        continue;
+                    }
+                    let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+                    let processes = (0..activity.GetProcessCount().unwrap_or(0))
+                        .filter_map(|j| activity.GetProcessActivity(j).ok())
+                        .filter_map(|p| Some((p.GetProcessId().ok()?, p.GetStreamingState().ok()?.as_bool())))
+                        .collect();
+                    entries.push((String::from_utf16_lossy(&buf[..end]), processes));
+                }
+            }
+            (self.on_active)(super::someone_streams(&entries, &self.link, std::process::id()));
+            Ok(())
+        }
+    }
+
     /// The camera object, Session lifetime: it leaves Windows' camera list when
     /// it is shut down or the app ends.
-    pub struct Running(SendPtr<IMFVirtualCamera>);
+    pub struct Running {
+        camera: SendPtr<IMFVirtualCamera>,
+        monitor: Option<SendPtr<IMFSensorActivityMonitor>>,
+    }
 
     impl Running {
         pub fn start(on_active: impl Fn(bool) + Send + Sync + 'static) -> Result<Self, String> {
+            let on_active: OnActive = std::sync::Arc::new(on_active);
             unsafe {
                 let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
                 crate::mft::startup()?;
@@ -398,17 +450,37 @@ mod win {
                     None,
                 )
                 .map_err(|err| format!("MFCreateVirtualCamera: {err}"))?;
-                let events: IMFAsyncCallback = Events { on_active: Box::new(on_active) }.into();
+                let events: IMFAsyncCallback = Events { on_active: on_active.clone() }.into();
                 camera.Start(&events).map_err(|err| format!("Start: {err}"))?;
                 log::info!("ClippiBoy Camera is listed for other apps");
-                Ok(Self(SendPtr(camera)))
+                let monitor = Self::watch(&camera, on_active);
+                Ok(Self { camera: SendPtr(camera), monitor })
             }
+        }
+
+        /// The activity monitor on the link Windows gave the camera; without
+        /// it, "watching" stays unknown and frames still go out.
+        unsafe fn watch(camera: &IMFVirtualCamera, on_active: OnActive) -> Option<SendPtr<IMFSensorActivityMonitor>> {
+            let mut link = windows::core::PWSTR::null();
+            let mut len = 0u32;
+            camera.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &mut link, &mut len).ok()?;
+            let text = link.to_string().unwrap_or_default();
+            windows::Win32::System::Com::CoTaskMemFree(Some(link.0 as *const _));
+            let callback: IMFSensorActivitiesReportCallback = Activity { link: text, on_active }.into();
+            let monitor = MFCreateSensorActivityMonitor(&callback)
+                .map_err(|err| log::warn!("ClippiBoy Camera's activity monitor: {err}"))
+                .ok()?;
+            monitor.Start().map_err(|err| log::warn!("ClippiBoy Camera's activity monitor: {err}")).ok()?;
+            Some(SendPtr(monitor))
         }
 
         pub fn shutdown(self) {
             unsafe {
                 let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-                let _ = self.0.Shutdown();
+                if let Some(monitor) = &self.monitor {
+                    let _ = monitor.Stop();
+                }
+                let _ = self.camera.Shutdown();
             }
             log::info!("ClippiBoy Camera taken off the list");
         }
@@ -448,6 +520,22 @@ mod tests {
         assert_eq!(setup_outcome(3), Ok(SetupDone::AfterRestart));
         assert!(setup_outcome(2).is_err());
         assert!(setup_outcome(1).is_err());
+    }
+
+    #[test]
+    fn an_app_watches_while_it_streams_our_link() {
+        let ours = r"\\?\SWD#VCAMDEVAPI#clippiboy";
+        let other = r"\\?\usb#vid_046d";
+        let me = 100;
+        let report = |entries: Vec<(&str, Vec<(u32, bool)>)>| {
+            entries.into_iter().map(|(l, p)| (l.to_string(), p)).collect::<Vec<_>>()
+        };
+        assert!(someone_streams(&report(vec![(ours, vec![(7, true)])]), ours, me));
+        assert!(someone_streams(&report(vec![(&ours.to_uppercase(), vec![(7, true)])]), ours, me));
+        assert!(!someone_streams(&report(vec![(ours, vec![(7, false)])]), ours, me), "opened, not streaming");
+        assert!(!someone_streams(&report(vec![(other, vec![(7, true)])]), ours, me), "another camera");
+        assert!(!someone_streams(&report(vec![(ours, vec![(me, true)])]), ours, me), "ClippiBoy itself");
+        assert!(!someone_streams(&[], ours, me));
     }
 
     #[test]
