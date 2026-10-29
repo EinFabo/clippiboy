@@ -1670,6 +1670,8 @@ pub fn run() {
         // Here rather than in `setup`: the page asks for the transfers as soon
         // as it loads, and that can beat the three seconds `setup` takes.
         .manage(share::Share::default())
+        // The same for the friends list, which the page asks for on load too.
+        .manage(friends::Friends::default())
         .setup(move |app| {
             let handle = app.handle();
             // Only the start that got past single-instance gets here — also one

@@ -138,7 +138,6 @@ pub(crate) fn my_id(app: &AppHandle) -> Option<String> {
 
 /// At program start: signed in last time? Then connect straight away.
 pub fn start(app: &AppHandle) {
-    app.manage(Friends::default());
     let Some(token) = load_token() else { return };
     let friends = app.state::<Friends>();
     *friends.token.lock() = Some(token);
