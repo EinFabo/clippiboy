@@ -294,8 +294,13 @@ impl Worker {
                 self.shared.ring.lock().ring.set_capacity(plan.ring_seconds, bytes);
             }
         } else if !self.stopped {
-            let at = Instant::now() + plan.stop_after;
-            self.stop_at = Some(self.stop_at.map_or(at, |t| t.min(at)));
+            match Instant::now().checked_add(plan.stop_after) {
+                Some(at) => self.stop_at = Some(self.stop_at.map_or(at, |t| t.min(at))),
+                // A repeat of the last plan keeps a stop on its way; with none
+                // scheduled, the restart grace applies.
+                None if self.stop_at.is_none() => self.stop_at = Some(Instant::now() + Duration::from_secs(3)),
+                None => {}
+            }
         }
         self.plan = Some(plan);
     }

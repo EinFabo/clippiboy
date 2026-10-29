@@ -43,6 +43,9 @@ pub fn stop_delay(before: &CamWants, after: &CamWants) -> Option<Duration> {
     Some(if only_the_buffer { Duration::from_secs(3) } else { Duration::ZERO })
 }
 
+/// `CamPlan::stop_after` of a plan that only repeats the last one.
+pub const NO_NEWS: Duration = Duration::MAX;
+
 /// What the cam track is told to do.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CamPlan {
@@ -80,7 +83,13 @@ pub fn plan_for(cam: &crate::model::FacecamConfig, inputs: &PlanInputs, before: 
         preview_open: inputs.preview_open,
         locked: inputs.locked,
     };
-    let stop_after = before.and_then(|b| stop_delay(b, &wants)).unwrap_or(Duration::ZERO);
+    let stop_after = match before {
+        // Nothing changed since the last plan: a stop already on its way keeps
+        // its time (the status tick sends a plan every second).
+        Some(b) if *b == wants => NO_NEWS,
+        Some(b) => stop_delay(b, &wants).unwrap_or(Duration::ZERO),
+        None => Duration::ZERO,
+    };
     let plan = CamPlan {
         run: cam_wanted(&wants),
         stop_after,
@@ -511,6 +520,20 @@ mod tests {
         assert_eq!(plan.stop_after, Duration::from_secs(3));
         let (plan, _) = plan_for(&cam, &inputs(false, true), Some(&on));
         assert!(plan.run && plan.preview);
+    }
+
+    /// The status tick sends a plan every second. One that only repeats the
+    /// last wants must not cut the 3 s a pipeline restart gets down to nothing.
+    #[test]
+    fn an_unchanged_plan_does_not_cut_the_grace_short() {
+        let mut cam = crate::model::FacecamConfig::default();
+        cam.enabled = true;
+        let (_, on) = plan_for(&cam, &inputs(true, false), None);
+        let (plan, off) = plan_for(&cam, &inputs(false, false), Some(&on));
+        assert_eq!(plan.stop_after, Duration::from_secs(3));
+        let (again, _) = plan_for(&cam, &inputs(false, false), Some(&off));
+        assert!(!again.run);
+        assert_eq!(again.stop_after, NO_NEWS);
     }
 
     #[test]

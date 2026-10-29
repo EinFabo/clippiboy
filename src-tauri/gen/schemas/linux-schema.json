@@ -363,6 +363,24 @@
           "markdownDescription": "Enables the apply_clip_edit command without any pre-configured scope."
         },
         {
+          "description": "Enables the bake_all_cams command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bake-all-cams",
+          "markdownDescription": "Enables the bake_all_cams command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bake_clip_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bake-clip-cam",
+          "markdownDescription": "Enables the bake_clip_cam command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the cam_preview_frame command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cam-preview-frame",
+          "markdownDescription": "Enables the cam_preview_frame command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_update command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-update",
@@ -615,6 +633,12 @@
           "markdownDescription": "Enables the list_encoders command without any pre-configured scope."
         },
         {
+          "description": "Enables the open_camera_privacy command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-camera-privacy",
+          "markdownDescription": "Enables the open_camera_privacy command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_clip command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-clip",
@@ -709,6 +733,12 @@
           "type": "string",
           "const": "allow-set-config",
           "markdownDescription": "Enables the set_config command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_facecam_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-facecam-enabled",
+          "markdownDescription": "Enables the set_facecam_enabled command without any pre-configured scope."
         },
         {
           "description": "Enables the set_hotkeys command without any pre-configured scope.",
@@ -865,6 +895,24 @@
           "type": "string",
           "const": "deny-apply-clip-edit",
           "markdownDescription": "Denies the apply_clip_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bake_all_cams command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bake-all-cams",
+          "markdownDescription": "Denies the bake_all_cams command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bake_clip_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bake-clip-cam",
+          "markdownDescription": "Denies the bake_clip_cam command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cam_preview_frame command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cam-preview-frame",
+          "markdownDescription": "Denies the cam_preview_frame command without any pre-configured scope."
         },
         {
           "description": "Denies the check_update command without any pre-configured scope.",
@@ -1119,6 +1167,12 @@
           "markdownDescription": "Denies the list_encoders command without any pre-configured scope."
         },
         {
+          "description": "Denies the open_camera_privacy command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-camera-privacy",
+          "markdownDescription": "Denies the open_camera_privacy command without any pre-configured scope."
+        },
+        {
           "description": "Denies the open_clip command without any pre-configured scope.",
           "type": "string",
           "const": "deny-open-clip",
@@ -1213,6 +1267,12 @@
           "type": "string",
           "const": "deny-set-config",
           "markdownDescription": "Denies the set_config command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_facecam_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-facecam-enabled",
+          "markdownDescription": "Denies the set_facecam_enabled command without any pre-configured scope."
         },
         {
           "description": "Denies the set_hotkeys command without any pre-configured scope.",
