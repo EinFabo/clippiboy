@@ -28,6 +28,7 @@
     "allow-remove-virtual-camera",
     "allow-bake-clip-cam",
     "allow-clip-facecam-view",
+    "allow-set-clip-portrait",
     "allow-bake-all-cams",
     "allow-list-audio-processes",
     "allow-list-capture-targets",

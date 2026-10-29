@@ -915,6 +915,22 @@ mod tests {
         assert!(graph.contains("scale=1080:672"), "the cam fills the band: {graph}");
     }
 
+    /// The editor's 9:16 preview draws from `portraitBoxes`, the TS twin of
+    /// `portrait_geometry`; the export draws from the filter. Both must take
+    /// every number from the geometry.
+    #[test]
+    fn portrait_geometry_matches_the_filter() {
+        let g = portrait_geometry((1920, 1080), Some((1280, 720)), &portrait(0.4, 0.25), (1080, 1920));
+        let graph = portrait_filter(&g, Some(&portrait_cam(vec![])), None);
+        let c = g.game_crop;
+        assert!(graph.contains(&format!("scale={}:{},crop={}:{}:{}:{}[game]", g.game_scaled.0, g.game_scaled.1, c.w, c.h, c.x, c.y)), "{graph}");
+        assert!(graph.contains(&format!("overlay=x={}:y={}[base]", g.game_at.0, g.game_at.1)), "{graph}");
+        let band = g.band.unwrap();
+        assert!(graph.contains(&format!("scale={}:{}[cam]", band.w, band.h)), "{graph}");
+        // The TS twin's vectors (camGeometry.test.ts): split 0.4, game_x 0.25.
+        assert_eq!((band.h, g.game_scaled, c.x), (768, (2048, 1152), 242));
+    }
+
     #[test]
     fn portrait_never_uses_vstack_or_shortest() {
         let g = portrait_geometry((1920, 1080), Some((1280, 720)), &portrait(0.35, 0.5), (1080, 1920));

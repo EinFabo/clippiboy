@@ -6,7 +6,7 @@ import { ClipEditor, type Trim } from "@/components/ClipEditor";
 import { SaveVeil, type SaveVeilHandle } from "@/components/ui/BusyVeil";
 import { ExportDialog } from "@/components/ExportDialog";
 import { CamStage } from "@/components/CamStage";
-import { usePictureBox } from "@/lib/pictureBox";
+import { usePictureBox, useStageSize } from "@/lib/pictureBox";
 import { RectLayer } from "@/components/ui/RectLayer";
 import { camBox, layoutFromRect, sameFacecam, snapLayout, type FacecamDraft } from "@/lib/camGeometry";
 import { useClipMenu } from "@/components/clipMenu";
@@ -31,7 +31,7 @@ import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
 import { useGrants } from "@/lib/useGrants";
-import type { Clip, ClipEdit, FacecamView } from "@/lib/types";
+import type { Clip, ClipEdit, FacecamView, PortraitLayout } from "@/lib/types";
 
 interface Props {
   clips: Clip[];
@@ -188,6 +188,17 @@ export function ClipPlayer({
   useEffect(() => setCamDraft(savedCam), [clip?.id, savedCamKey]);
   const camChanged = !!(camView && camDraft && savedCam && !sameFacecam(camDraft, savedCam));
   const defaultCam = useEngine((s) => s.config.facecam);
+  // The 9:16 preview: what the portrait export will cut, dragged in place and
+  // stored as soon as it is let go — it rewrites no file.
+  const [portraitOn, setPortraitOn] = useState(false);
+  const savedPortrait = clip?.facecam?.portrait ?? null;
+  const [portraitDraft, setPortraitDraft] = useState<PortraitLayout | null>(savedPortrait);
+  const savedPortraitKey = savedPortrait ? `${savedPortrait.split}:${savedPortrait.gameX}` : "";
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => setPortraitDraft(savedPortrait), [clip?.id, savedPortraitKey]);
+  useEffect(() => setPortraitOn(false), [clip?.id]);
+  const setClipPortrait = useEngine((s) => s.setClipPortrait);
+  const stageSize = useStageSize(frame);
   /**
    * The write is through, but the fresh element has not reported a picture yet.
    * The veil stays up for that stretch — letting it go the moment the core is
@@ -1051,9 +1062,19 @@ export function ClipPlayer({
               frame={{ width: clip.width, height: clip.height }}
               released={saving || restoring || baking}
               elements={stageElements}
+              stageSize={stageSize}
+              portrait={
+                portraitOn && portraitDraft
+                  ? {
+                      layout: portraitDraft,
+                      onChange: setPortraitDraft,
+                      onCommit: (layout) => void setClipPortrait(clip.id, layout),
+                    }
+                  : null
+              }
             />
           )}
-          {camView && clip && camDraft?.layout.visible && source && !broken && !saving && !restoring && (
+          {camView && clip && camDraft?.layout.visible && !portraitOn && source && !broken && !saving && !restoring && (
             <RectLayer
               mode="box"
               stage={frame}
@@ -1182,6 +1203,8 @@ export function ClipPlayer({
                     onReset: () =>
                       setCamDraft({ layout: { ...defaultCam.layout, visible: true }, delayMs: defaultCam.delayMs }),
                     onBake: () => void bakeCam(),
+                    portrait: portraitOn,
+                    onPortrait: setPortraitOn,
                   }
                 : null
           }

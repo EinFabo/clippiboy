@@ -4,6 +4,7 @@ import type {
   CameraDevice,
   FacecamEdit,
   FacecamView,
+  PortraitLayout,
   AppConfig,
   AudioDevice,
   AudioProcess,
@@ -211,6 +212,8 @@ export const api = {
   bakeClipCam: (id: string) => invoke<Clip>("bake_clip_cam", { id }),
   /** What the player needs to show the clip's camera movable; null when it cannot move. */
   clipFacecamView: (id: string) => invoke<FacecamView | null>("clip_facecam_view", { id }),
+  /** Where the 9:16 export cuts; stored at once, no file is rewritten. */
+  setClipPortrait: (id: string, portrait: PortraitLayout) => invoke<Clip>("set_clip_portrait", { id, portrait }),
   /** Bakes every clip's cam; returns what was freed. */
   bakeAllCams: () => invoke<TrimOriginals>("bake_all_cams"),
   /** What the originals, tracks and thumbnails occupy in the app data folder. */

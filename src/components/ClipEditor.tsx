@@ -26,6 +26,9 @@ export type EditorCam =
       onChange: (patch: Partial<FacecamDraft>) => void;
       onReset: () => void;
       onBake: () => void;
+      /** The stage shows the 9:16 export. */
+      portrait: boolean;
+      onPortrait: (on: boolean) => void;
     };
 
 export interface Trim {
@@ -410,6 +413,9 @@ function CameraSection({ cam, busy }: { cam: EditorCam; busy: boolean }) {
       </CamRow>
       <CamRow label="Mirror">
         <Toggle checked={draft.layout.mirror} disabled={busy || hidden} onChange={(mirror) => layout({ mirror })} />
+      </CamRow>
+      <CamRow label="9:16">
+        <Toggle checked={cam.portrait} disabled={busy} onChange={cam.onPortrait} />
       </CamRow>
       <CamRow label="Sync">
         <div className={cn("flex w-44 items-center gap-2", (busy || hidden) && "pointer-events-none opacity-40")}>

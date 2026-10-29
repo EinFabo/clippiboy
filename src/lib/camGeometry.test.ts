@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { camBox, layoutFromRect, sameFacecam, snapLayout } from "./camGeometry.ts";
+import { camBox, layoutFromRect, portraitBoxes, sameFacecam, snapLayout } from "./camGeometry.ts";
 import type { CamLayout } from "./types.ts";
 
 const base: CamLayout = { visible: true, x: 1, y: 1, size: 0.25, shape: "rounded", mirror: false };
@@ -35,4 +35,19 @@ test("same facecam ignores moves inside the tolerance", () => {
   assert.equal(sameFacecam(a, { layout: base, delayMs: -30 }), false);
   assert.equal(sameFacecam(a, { layout: { ...base, mirror: true }, delayMs: -40 }), false);
   assert.equal(sameFacecam(a, { layout: { ...base, visible: false }, delayMs: -40 }), false);
+});
+
+// The core's portrait_geometry tests, same vectors (composite.rs).
+test("portrait boxes match the core", () => {
+  const out = { width: 1080, height: 1920 };
+  const g = portraitBoxes({ width: 1920, height: 1080 }, { width: 1280, height: 720 }, { split: 0.4, gameX: 0.25 }, out);
+  assert.deepEqual(g.band, { x: 0, y: 0, width: 1080, height: 768 });
+  assert.deepEqual(g.gameScaled, { width: 2048, height: 1152 });
+  assert.equal(g.gameCrop.x, 242);
+  assert.deepEqual(g.gameAt, { x: 0, y: 768 });
+  const left = portraitBoxes({ width: 1920, height: 1080 }, { width: 1280, height: 720 }, { split: 0.35, gameX: 0 }, out);
+  assert.deepEqual([left.band?.height, left.gameScaled.width, left.gameScaled.height, left.gameCrop.x], [672, 2218, 1248, 0]);
+  const bare = portraitBoxes({ width: 1920, height: 1080 }, null, { split: 0.35, gameX: 0.5 }, out);
+  assert.equal(bare.band, null);
+  assert.deepEqual([bare.gameScaled.width, bare.gameScaled.height, bare.gameAt.y], [1080, 608, 656]);
 });

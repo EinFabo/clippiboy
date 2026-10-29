@@ -1607,6 +1607,25 @@ fn note_baked(state: &State<'_, AppState>, clip: &Clip) -> Result<()> {
     with_library(state, |lib| lib.set_facecam(&clip.id, next.as_ref()).map_err(|e| e.to_string()))
 }
 
+/// Where a clip's 9:16 export cuts its band and its game window. Rewrites no
+/// file — the portrait is only made on export — so it is stored at once.
+#[tauri::command(async)]
+pub fn set_clip_portrait(state: State<'_, AppState>, id: String, portrait: crate::model::PortraitLayout) -> Result<Clip> {
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    let mut cam = clip.facecam.ok_or_else(|| "This clip has no camera.".to_string())?;
+    cam.portrait = crate::model::PortraitLayout {
+        split: portrait.split.clamp(0.25, 0.5),
+        game_x: portrait.game_x.clamp(0.0, 1.0),
+    };
+    with_library(&state, |lib| {
+        lib.set_facecam(&id, Some(&cam)).map_err(|e| e.to_string())?;
+        lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+    })
+}
+
 /// What the player needs to show a clip's camera movable; `None` for a clip
 /// whose camera cannot move (none, baked, store gone).
 #[tauri::command(async)]

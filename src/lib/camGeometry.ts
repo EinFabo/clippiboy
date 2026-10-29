@@ -72,3 +72,45 @@ export function sameFacecam(a: FacecamDraft, b: FacecamDraft): boolean {
     near(p.size, q.size)
   );
 }
+
+/** Where the parts of a 9:16 frame go — `composite::portrait_geometry`, kept
+ *  in step by hand (same test vectors). Only for drawing the preview. */
+export function portraitBoxes(
+  game: { width: number; height: number },
+  cam: { width: number; height: number } | null,
+  layout: { split: number; gameX: number },
+  out: { width: number; height: number },
+): {
+  band: { x: number; y: number; width: number; height: number } | null;
+  gameScaled: { width: number; height: number };
+  gameCrop: { x: number; y: number; width: number; height: number };
+  gameAt: { x: number; y: number };
+} {
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+  const gw = Math.max(2, game.width);
+  const gh = Math.max(2, game.height);
+  const { width: ow, height: oh } = out;
+  if (!cam) {
+    const h = Math.min(even((gh * ow) / gw), oh);
+    return {
+      band: null,
+      gameScaled: { width: ow, height: h },
+      gameCrop: { x: 0, y: 0, width: ow, height: h },
+      gameAt: { x: 0, y: Math.min(even((oh - h) / 2), oh - h) },
+    };
+  }
+  // The core keeps these as f32.
+  const bandH = even(Math.fround(clamp(Math.fround(layout.split), 0.25, 0.5)) * oh);
+  const areaH = oh - bandH;
+  const scale = Math.max(ow / gw, areaH / gh);
+  const scaled = { width: Math.max(even(gw * scale), ow), height: Math.max(even(gh * scale), areaH) };
+  const freeX = scaled.width - ow;
+  const x = Math.min(even(Math.fround(clamp(Math.fround(layout.gameX), 0, 1)) * freeX), freeX);
+  const y = Math.min(even((scaled.height - areaH) / 2), scaled.height - areaH);
+  return {
+    band: { x: 0, y: 0, width: ow, height: bandH },
+    gameScaled: scaled,
+    gameCrop: { x, y, width: ow, height: areaH },
+    gameAt: { x: 0, y: bandH },
+  };
+}

@@ -11,6 +11,7 @@ import type {
   CameraDevice,
   CamStatus,
   FacecamEdit,
+  PortraitLayout,
   VcamStatus,
   AudioProcess,
   AudioSource,
@@ -159,6 +160,8 @@ interface EngineState {
   /** Throw the untouched recording away, keep the trimmed clip. */
   discardClipOriginal: (id: string) => Promise<void>;
   bakeClipCam: (id: string) => Promise<void>;
+  /** Where a clip's 9:16 export cuts; stored at once. */
+  setClipPortrait: (id: string, portrait: PortraitLayout) => Promise<void>;
   /** The same for every trimmed clip at once. Returns what was freed. */
   discardAllOriginals: () => Promise<TrimOriginals>;
   /**
@@ -798,6 +801,16 @@ export const useEngine = create<EngineState>((set, get) => ({
     } catch (err) {
       set({ lastError: fail("Could not free up the space", err) });
       throw err;
+    }
+  },
+
+  async setClipPortrait(id, portrait) {
+    if (!inTauri) return;
+    try {
+      const clip = await api.setClipPortrait(id, portrait);
+      set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
+    } catch (err) {
+      set({ lastError: fail("9:16 layout", err) });
     }
   },
 

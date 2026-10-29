@@ -15,6 +15,7 @@ fn main() {
         "remove_virtual_camera",
         "bake_clip_cam",
         "clip_facecam_view",
+        "set_clip_portrait",
         "bake_all_cams",
         "list_audio_processes",
         "list_capture_targets",
