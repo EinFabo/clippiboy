@@ -74,6 +74,11 @@ pub fn rect(frame_width: u32, frame_height: u32, picture_width: u32, picture_hei
     })
 }
 
+/// The mark as the PNG it ships as, for ffmpeg.
+pub fn png() -> &'static [u8] {
+    PICTURE
+}
+
 /// The decoded picture: width, height, straight RGBA.
 pub fn picture() -> &'static (u32, u32, Vec<u8>) {
     static PICTURE_RGBA: OnceLock<(u32, u32, Vec<u8>)> = OnceLock::new();

@@ -225,11 +225,17 @@ export const api = {
    * save dialog the core opens, with `suggestedName` offered. Resolves to the
    * path written, `null` when the user cancelled.
    */
-  exportClip: (id: string, targetBytes: number, suggestedName: string) =>
+  exportClip: (
+    id: string,
+    targetBytes: number,
+    suggestedName: string,
+    orientation: "landscape" | "portrait" = "landscape",
+  ) =>
     invoke<string | null>("export_clip", {
       id,
       targetBytes: Math.floor(targetBytes),
       suggestedName,
+      orientation,
     }),
 };
 

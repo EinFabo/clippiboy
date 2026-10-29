@@ -1336,7 +1336,7 @@ pub fn export_for_discord(
     if !ready {
         // Straight to the work: the target is the core's own, in its data
         // folder — `export_target` would rightly refuse it for the dialog.
-        export_to(&state, &app, &id, target_bytes, &output)?;
+        export_to(&state, &app, &id, target_bytes, &output, crate::export::Orientation::Landscape)?;
     }
     crate::clipboard::copy_files(&[output.clone()])?;
     Ok(output.to_string_lossy().to_string())
@@ -1683,6 +1683,7 @@ pub(crate) fn shrink(
     target_bytes: u64,
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
+    orientation: crate::export::Orientation,
 ) -> Result<Shrunk> {
     if !crate::composite::wait_settled(id, std::time::Duration::from_secs(300)) {
         return Err(CAM_ON_ITS_WAY.into());
@@ -1713,13 +1714,15 @@ pub(crate) fn shrink(
     // it, and a row that drifted from its file would put the export over the
     // limit it exists to stay under.
     let duration_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(clip.duration_ms);
-    let recipe = crate::export::recipe(&crate::export::Target {
-        bytes: target_bytes,
-        duration_ms,
-        width: clip.width,
-        height: clip.height,
-    });
-    let args = crate::export::arguments(&source, &part, &recipe, clip.height, encoder);
+    let portrait = orientation == crate::export::Orientation::Portrait;
+    let (width, height) = if portrait { crate::export::PORTRAIT } else { (clip.width, clip.height) };
+    let recipe = crate::export::recipe(&crate::export::Target { bytes: target_bytes, duration_ms, width, height });
+    let job = portrait.then(|| portrait_job(&clip, duration_ms, (recipe.width, recipe.height)));
+    let build = |encoder| match &job {
+        Some(job) => crate::export::portrait_arguments(&job.inputs(), &job.graph, &part, &recipe, duration_ms, encoder),
+        None => crate::export::arguments(&source, &part, &recipe, clip.height, encoder),
+    };
+    let args = build(encoder);
 
     match edit::run_with_progress(&args, duration_ms, on_progress) {
         Ok(()) => {}
@@ -1728,13 +1731,7 @@ pub(crate) fn shrink(
         Err(err) if encoder != crate::model::EncoderId::X264 => {
             log::warn!("export with {encoder:?} failed ({err}) — retrying with x264");
             let _ = std::fs::remove_file(&part);
-            let args = crate::export::arguments(
-                &source,
-                &part,
-                &recipe,
-                clip.height,
-                crate::model::EncoderId::X264,
-            );
+            let args = build(crate::model::EncoderId::X264);
             edit::run_with_progress(&args, duration_ms, on_progress).inspect_err(
                 |_| {
                     let _ = std::fs::remove_file(&part);
@@ -1760,6 +1757,88 @@ pub(crate) fn shrink(
     Ok(Shrunk { bytes: written, too_long: recipe.too_long })
 }
 
+/// What a 9:16 export reads and the graph that puts it together.
+pub struct PortraitJob {
+    game: std::path::PathBuf,
+    game_seek_ms: u64,
+    cam: Option<(std::path::PathBuf, Option<f64>)>,
+    audio: std::path::PathBuf,
+    mark: Option<std::path::PathBuf>,
+    pub graph: String,
+}
+
+impl PortraitJob {
+    pub fn inputs(&self) -> crate::export::PortraitInputs<'_> {
+        crate::export::PortraitInputs {
+            game: &self.game,
+            game_seek_ms: self.game_seek_ms,
+            cam: self.cam.as_ref().map(|(path, seek)| (path.as_path(), *seek)),
+            audio: Path::new(&self.audio),
+            mark: self.mark.as_deref(),
+        }
+    }
+}
+
+/// The 9:16 export of `clip`: from the clean picture and the camera when it
+/// has them (a portrait never rewrites the clip), the game alone otherwise.
+pub fn portrait_job(clip: &Clip, length_ms: u64, out: (u32, u32)) -> PortraitJob {
+    use crate::composite::{cam_timing, mark_redrawn, portrait_filter, portrait_geometry, MarkInput, PortraitCam};
+    let view = crate::facecam::view_of(clip);
+    let facts = view.as_ref().and_then(|_| crate::facecam::read_facts(&clip.id));
+    let (game, game_seek_ms) = match &view {
+        Some(view) => (std::path::PathBuf::from(&view.clean_path), view.clean_lead_ms.max(0) as u64),
+        None => (std::path::PathBuf::from(&clip.path), 0),
+    };
+    let cam = match (&view, &facts, clip.facecam.as_ref()) {
+        (Some(view), Some(facts), Some(row)) if row.layout.visible => {
+            let video_start_us = crate::muxer::probe_video_start_us(&game).unwrap_or(0);
+            let timing = cam_timing(facts.cam_offset_us, row.delay_ms, video_start_us, game_seek_ms, length_ms);
+            // The gaps were noted in the clean picture's time; this cut starts later.
+            let end = game_seek_ms + length_ms;
+            let gaps_ms = facts
+                .gaps_ms
+                .iter()
+                .filter(|(a, b)| *b > game_seek_ms && *a < end)
+                .map(|(a, b)| (a.saturating_sub(game_seek_ms), (*b).min(end) - game_seek_ms))
+                .collect();
+            Some((
+                std::path::PathBuf::from(&view.cam_path),
+                PortraitCam { input: 1, size: (facts.width, facts.height), timing, gaps_ms, video_start_us, mirror: row.layout.mirror },
+            ))
+        }
+        _ => None,
+    };
+    let layout = clip.facecam.as_ref().map(|row| row.portrait).unwrap_or_default();
+    let geometry = portrait_geometry((clip.width, clip.height), cam.as_ref().map(|(_, c)| c.size), &layout, out);
+    // As large as on a landscape frame of the same width, bottom left.
+    let mark = mark_redrawn(crate::watermark::enabled(), &geometry)
+        .then(|| {
+            let (pw, ph, _) = crate::watermark::picture();
+            let at = crate::watermark::rect(out.0, out.0 * 9 / 16, *pw, *ph)?;
+            let png = crate::config::data_dir().join("temp").join("watermark.png");
+            std::fs::create_dir_all(png.parent()?).ok()?;
+            std::fs::write(&png, crate::watermark::png()).ok()?;
+            let below = (out.0 * 9 / 16) - at.y;
+            let rect = crate::camera::Rect { x: at.x, y: out.1 - below, w: at.width, h: at.height };
+            Some((png, rect))
+        })
+        .flatten();
+    let mark_input = 2 + usize::from(cam.is_some());
+    let graph = portrait_filter(
+        &geometry,
+        cam.as_ref().map(|(_, c)| c),
+        mark.as_ref().map(|(_, rect)| MarkInput { input: mark_input, rect: *rect }).as_ref(),
+    );
+    PortraitJob {
+        game,
+        game_seek_ms,
+        cam: cam.map(|(path, c)| (path, c.timing.seek_s)),
+        audio: std::path::PathBuf::from(&clip.path),
+        mark: mark.map(|(png, _)| png),
+        graph,
+    }
+}
+
 /// Write a copy of a clip that comes in under a size.
 ///
 /// The counterpart to everything else here: recording and trimming aim at a
@@ -1780,8 +1859,10 @@ pub fn export_clip(
     id: String,
     target_bytes: u64,
     suggested_name: String,
+    orientation: Option<crate::export::Orientation>,
 ) -> Result<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
+    let orientation = orientation.unwrap_or_default();
 
     let chosen = (|| -> Result<Option<std::path::PathBuf>> {
         let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
@@ -1823,7 +1904,7 @@ pub fn export_clip(
     let Some(output) = chosen else {
         return Ok(None);
     };
-    export_to(&state, &app, &id, target_bytes, &output)?;
+    export_to(&state, &app, &id, target_bytes, &output, orientation)?;
     Ok(Some(output.to_string_lossy().to_string()))
 }
 
@@ -1836,10 +1917,11 @@ fn export_to(
     id: &str,
     target_bytes: u64,
     output: &Path,
+    orientation: crate::export::Orientation,
 ) -> Result<()> {
     // The target is settled: the window can show the copy being written.
     progress(app, id)(0.0);
-    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id))
+    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id), orientation)
         .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
     let written = shrunk.bytes;
     progress(app, id)(1.0);

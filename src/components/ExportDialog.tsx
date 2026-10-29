@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/Button";
+import { Segmented } from "@/components/ui/Controls";
 import { BusyRing } from "@/components/ui/BusyVeil";
 import { api, events, inTauri } from "@/lib/ipc";
 import { clipName } from "@/lib/format";
@@ -37,7 +38,11 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
   const [stage, setStage] = useState<"idle" | "choosing" | "writing">("idle");
   const busy = stage !== "idle";
   const [progress, setProgress] = useState(0);
-  const plan = planExport(clip, Math.floor(targetMb * MB));
+  const [orientation, setOrientation] = useState<"landscape" | "portrait">("landscape");
+  const portrait = orientation === "portrait";
+  // A 9:16 export starts from a 1080×1920 frame, whatever the clip's size.
+  const frame = portrait ? { durationMs: clip.durationMs, width: 1080, height: 1920 } : clip;
+  const plan = planExport(frame, Math.floor(targetMb * MB));
 
   // Escape closes — but not mid-run, where it would leave a half-written file
   // behind with nothing saying so.
@@ -73,13 +78,13 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
   async function run() {
     // Not "<name> (<n> MB).mp4": that is the console's Discord copy, which goes
     // when the clip is edited or deleted (`manual_export_name` in the core).
-    const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} - ${roundMb(targetMb)} MB.mp4`;
+    const suggested = `${clipName(clip).replace(/\.[^.]+$/, "")} - ${roundMb(targetMb)} MB${portrait ? ", 9x16" : ""}.mp4`;
     setStage("choosing");
     setProgress(0);
     try {
       // The core opens the save dialog itself and only takes the name as a
       // suggestion; `null` means it was cancelled, which leaves this open.
-      const written = await api.exportClip(clip.id, Math.floor(targetMb * MB), suggested);
+      const written = await api.exportClip(clip.id, Math.floor(targetMb * MB), suggested, orientation);
       if (written === null) setStage("idle");
       else onClose();
     } catch (failure) {
@@ -115,7 +120,19 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
           enough to send.
         </p>
 
-        <div className="mt-5 space-y-2">
+        <div className="mt-5">
+          <Segmented<"landscape" | "portrait">
+            value={orientation}
+            disabled={busy}
+            options={[
+              { key: "landscape", label: "Landscape" },
+              { key: "portrait", label: "Portrait 9:16" },
+            ]}
+            onChange={setOrientation}
+          />
+        </div>
+
+        <div className="mt-3 space-y-2">
           {PRESETS.map((preset) => (
             <button
               key={preset.mb}
@@ -180,7 +197,7 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
             larger size.
           </p>
         )}
-        {plan.height < clip.height && (
+        {!portrait && plan.height < clip.height && (
           <p className="mt-1 text-xs text-ink-faint">
             Scaled down from {clip.height}p — at this size a sharp smaller
             picture beats a blurred large one.
