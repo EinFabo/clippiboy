@@ -61,6 +61,18 @@ pub fn command(name: &str) -> Command {
     command
 }
 
+/// A tool at below-normal priority, for work that runs next to a game.
+pub fn background(name: &str) -> Command {
+    let mut command = Command::new(tool(name));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    }
+    command
+}
+
 pub fn ffmpeg() -> Command {
     command("ffmpeg")
 }

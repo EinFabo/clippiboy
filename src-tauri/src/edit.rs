@@ -695,7 +695,7 @@ fn run(
 /// once complete. Copied straight onto the target, a crash halfway left a
 /// truncated file under the real name — for the originals store a "recording"
 /// with no index that `repair` took at its word.
-fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {
             let part = to.with_extension("part");
@@ -1022,7 +1022,18 @@ pub(crate) fn run_with_progress(
     length_ms: u64,
     on_progress: &impl Fn(f32),
 ) -> Result<(), String> {
-    let mut child = ffmpeg()
+    run_command_with_progress(ffmpeg(), args, length_ms, on_progress)
+}
+
+/// [`run_with_progress`] with a command of the caller's — the composite after
+/// a save runs ffmpeg below normal priority.
+pub(crate) fn run_command_with_progress(
+    mut command: std::process::Command,
+    args: &[String],
+    length_ms: u64,
+    on_progress: &impl Fn(f32),
+) -> Result<(), String> {
+    let mut child = command
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

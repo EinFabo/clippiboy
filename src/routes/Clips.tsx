@@ -511,6 +511,9 @@ export function Clips({
                       {/* Only on a real trim: you cannot see a changed mix on a
                           clip, but you can see its length — and that the original
                           still sits beside it is the fact that counts here. */}
+                      {clip.facecam?.state === "pending" && (
+                        <Pill title="The cam is being added to this clip">Adding cam</Pill>
+                      )}
                       {clip.original && (
                         <Pill title="Trimmed — the original sits beside it">
                           <IconScissors className="h-3 w-3" />

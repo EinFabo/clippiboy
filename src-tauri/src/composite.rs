@@ -238,12 +238,473 @@ pub fn attempts(encoder: EncoderId) -> Vec<(EncoderId, bool)> {
     out
 }
 
+// ---------------------------------------------------------------- phase two
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use parking_lot::{Condvar, Mutex};
+use tauri::{Emitter, Manager};
+
+use crate::facecam::FacecamApplied;
+use crate::model::{ClipFacecam, FacecamState};
+
+/// The background composites: one at a time, in the order they came; a swap
+/// waiting for a player to let go of the file comes back after the others.
+#[derive(Debug, Default)]
+pub struct Queue {
+    waiting: VecDeque<String>,
+    later: Vec<(String, Instant)>,
+    running: Option<String>,
+}
+
+impl Queue {
+    /// `false` when the clip is queued or running already.
+    pub fn push(&mut self, id: &str) -> bool {
+        if self.busy(id) {
+            return false;
+        }
+        self.waiting.push_back(id.to_string());
+        true
+    }
+
+    /// A swap tried again at `at`.
+    pub fn push_later(&mut self, id: &str, at: Instant) -> bool {
+        if self.waiting.iter().any(|w| w == id) || self.later.iter().any(|(l, _)| l == id) {
+            return false;
+        }
+        self.later.push((id.to_string(), at));
+        true
+    }
+
+    /// The waiting first, then a later one whose time has come.
+    pub fn next(&mut self, now: Instant) -> Option<String> {
+        let id = self.waiting.pop_front().or_else(|| {
+            let due = self.later.iter().position(|(_, at)| *at <= now)?;
+            Some(self.later.remove(due).0)
+        })?;
+        self.running = Some(id.clone());
+        Some(id)
+    }
+
+    pub fn done(&mut self, id: &str) {
+        if self.running.as_deref() == Some(id) {
+            self.running = None;
+        }
+    }
+
+    pub fn busy(&self, id: &str) -> bool {
+        self.running.as_deref() == Some(id)
+            || self.waiting.iter().any(|w| w == id)
+            || self.later.iter().any(|(l, _)| l == id)
+    }
+
+    /// Takes a waiting job out; a running one is waited for through the clip lock.
+    pub fn drop_waiting(&mut self, id: &str) -> bool {
+        let before = self.waiting.len() + self.later.len();
+        self.waiting.retain(|w| w != id);
+        self.later.retain(|(l, _)| l != id);
+        before != self.waiting.len() + self.later.len()
+    }
+
+    fn earliest_later(&self) -> Option<Instant> {
+        self.later.iter().map(|(_, at)| *at).min()
+    }
+}
+
+/// Room for one composite: the clip's drive holds the composite next to the
+/// clip, the data drive (when it is another) the clean clip filed away.
+pub fn room_for_composite(clip_bytes: u64, free_clip_drive: u64, free_data_drive: u64, same_drive: bool) -> bool {
+    const SLACK: u64 = 64 * 1024 * 1024;
+    let composite = clip_bytes + clip_bytes / 5 + SLACK;
+    if same_drive {
+        free_clip_drive >= composite
+    } else {
+        free_clip_drive >= composite && free_data_drive >= clip_bytes + SLACK
+    }
+}
+
+/// What a start finds after a quit or a crash in the middle of phase two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    Nothing,
+    /// The clean clip was filed away and the composite never arrived.
+    PutCleanBack,
+    /// The composite is in place; only the facts did not say so yet.
+    FinishSwap,
+    Requeue,
+}
+
+pub fn after_crash(facts: &FacecamFacts, clip_bytes: Option<u64>, clean_in_store: bool, state: FacecamState) -> Recovery {
+    if clip_bytes.is_none() {
+        return if clean_in_store { Recovery::PutCleanBack } else { Recovery::Nothing };
+    }
+    if facts.applying.as_ref().is_some_and(|a| Some(a.size_bytes) == clip_bytes) {
+        return Recovery::FinishSwap;
+    }
+    if state == FacecamState::Pending {
+        return Recovery::Requeue;
+    }
+    Recovery::Nothing
+}
+
+/// How long a swap waits for a player to let go of the file, about a minute.
+pub fn swap_waits() -> [Duration; 5] {
+    [2, 5, 10, 20, 30].map(Duration::from_secs)
+}
+
+/// After those, the swap is tried again this often while the app runs.
+pub const SWAP_RETRY_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// A swap failing for a day is given up.
+pub fn swap_given_up(failing_since_ms: Option<i64>, now_ms: i64) -> bool {
+    failing_since_ms.is_some_and(|since| now_ms - since >= 24 * 3_600_000)
+}
+
+static QUEUE: LazyLock<(Mutex<Queue>, Condvar)> = LazyLock::new(|| (Mutex::new(Queue::default()), Condvar::new()));
+
+pub fn enqueue(clip_id: &str) {
+    let (queue, changed) = &*QUEUE;
+    if queue.lock().push(clip_id) {
+        changed.notify_all();
+    }
+}
+
+/// Drops a queued job; `false` when none was waiting.
+pub fn cancel(clip_id: &str) -> bool {
+    let (queue, changed) = &*QUEUE;
+    let dropped = queue.lock().drop_waiting(clip_id);
+    changed.notify_all();
+    dropped
+}
+
+/// Waits until the clip has no job queued or running, up to `limit`. Called
+/// before taking the clip's lock, never while holding it.
+pub fn wait_settled(clip_id: &str, limit: Duration) -> bool {
+    let (queue, changed) = &*QUEUE;
+    let deadline = Instant::now() + limit;
+    let mut q = queue.lock();
+    while q.busy(clip_id) {
+        if changed.wait_until(&mut q, deadline).timed_out() {
+            return !q.busy(clip_id);
+        }
+    }
+    true
+}
+
+/// The one composite worker, below normal priority through its ffmpeg.
+pub fn start(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("clippiboy-composite".into()).spawn(move || loop {
+        let id = {
+            let (queue, changed) = &*QUEUE;
+            let mut q = queue.lock();
+            loop {
+                if let Some(id) = q.next(Instant::now()) {
+                    break id;
+                }
+                match q.earliest_later() {
+                    Some(at) => {
+                        changed.wait_until(&mut q, at);
+                    }
+                    None => changed.wait(&mut q),
+                }
+            }
+        };
+        // The queue's lock is released before the clip's is taken.
+        let later = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&app, &id))).unwrap_or_else(|_| {
+            log::error!("cam composite of {id} panicked");
+            None
+        });
+        let (queue, changed) = &*QUEUE;
+        let mut q = queue.lock();
+        q.done(&id);
+        if let Some(at) = later {
+            q.push_later(&id, at);
+        }
+        changed.notify_all();
+    });
+    if let Err(err) = spawned {
+        log::error!("composite thread: {err}");
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
+/// `<clip>.<pid>.cam.mp4`, next to the clip.
+fn temp_path(clip: &Path) -> PathBuf {
+    let mut name = clip.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.cam.mp4", std::process::id()));
+    clip.with_file_name(name)
+}
+
+/// Composites left by an earlier run of the app.
+fn stale_temps(clip: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (clip.parent(), clip.file_name()) else { return Vec::new() };
+    let prefix = format!("{}.", name.to_string_lossy());
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    let n = p.file_name().unwrap_or_default().to_string_lossy();
+                    n.starts_with(&prefix) && n.ends_with(".cam.mp4")
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn set_state(app: &tauri::AppHandle, id: &str, cam: &ClipFacecam, state: FacecamState) {
+    let library = &app.state::<crate::state::AppState>().library;
+    let next = ClipFacecam { state, ..cam.clone() };
+    if let Some(Err(err)) = crate::clips::with_library(library, |lib| lib.set_facecam(id, Some(&next))) {
+        log::error!("could not note the cam's state: {err}");
+    }
+    let _ = app.emit("clips-changed", ());
+}
+
+fn fail(app: &tauri::AppHandle, id: &str, cam: &ClipFacecam, message: &str) {
+    log::warn!("cam for clip {id}: {message}");
+    set_state(app, id, cam, FacecamState::Failed);
+    crate::notify(app, "error", message);
+}
+
+/// Files the clean clip away and puts the composite in its place. A clip open
+/// in a player refuses both; the clean clip then goes back where it was.
+fn swap(id: &str, clip: &Path, temp: &Path) -> Result<(), String> {
+    let clean = crate::edit::video_path(id);
+    let moved = if clean.exists() {
+        false
+    } else {
+        crate::edit::move_across(clip, &clean).map_err(|err| format!("filing the clean clip: {err}"))?;
+        true
+    };
+    if let Err(err) = crate::muxer::replace_file(temp, clip) {
+        if moved {
+            let _ = crate::edit::move_across(&clean, clip);
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// After a swap: the facts say what the file shows, the thumbnail and the row
+/// follow the new file.
+fn finish(app: &tauri::AppHandle, id: &str, clip: &Path, cam: &ClipFacecam, mut facts: FacecamFacts) {
+    facts.applied = facts.applying.take();
+    facts.swap_failing_since_ms = None;
+    if let Err(err) = crate::facecam::write_facts(id, &facts) {
+        log::warn!("facecam.json for {id}: {err}");
+    }
+    if let Err(err) = crate::thumbs::make(clip, id) {
+        log::warn!("thumbnail for {id}: {err}");
+    }
+    let length = crate::muxer::probe_duration_ms(clip);
+    let size = file_size(clip);
+    let library = &app.state::<crate::state::AppState>().library;
+    if let (Some(length), Some(size)) = (length, size) {
+        let _ = crate::clips::with_library(library, |lib| lib.set_file_state(id, length, size));
+    }
+    log::info!("cam added to clip {id}");
+    set_state(app, id, cam, FacecamState::Ready);
+}
+
+/// One composite. `Some(at)` when the swap has to be tried again later.
+fn job(app: &tauri::AppHandle, id: &str) -> Option<Instant> {
+    let state = app.state::<crate::state::AppState>();
+    let clip_lock = crate::edit::clip_lock(id);
+    let guard = clip_lock.lock();
+    let clip = crate::clips::fresh(&state.library, id)?;
+    let cam = clip.facecam.clone()?;
+    if cam.state != FacecamState::Pending {
+        return None;
+    }
+    let Some(mut facts) = crate::facecam::read_facts(id) else {
+        let _ = crate::clips::with_library(&state.library, |lib| lib.set_facecam(id, None));
+        let _ = app.emit("clips-changed", ());
+        return None;
+    };
+    let clip_path = PathBuf::from(&clip.path);
+    let temp = temp_path(&clip_path);
+    // A swap tried again finds its composite still there.
+    let composited = facts.applying.as_ref().is_some_and(|a| file_size(&temp) == Some(a.size_bytes));
+    if !composited {
+        let config = state.config_snapshot();
+        let data = crate::config::data_dir();
+        let clip_dir = clip_path.parent().map(Path::to_path_buf).unwrap_or_else(|| data.clone());
+        let clip_bytes = file_size(&clip_path).unwrap_or(clip.size_bytes);
+        let room = room_for_composite(
+            clip_bytes,
+            crate::disk::free_bytes(&clip_dir).unwrap_or(u64::MAX),
+            crate::disk::free_bytes(&data).unwrap_or(u64::MAX),
+            crate::disk::same_volume(&clip_dir, &data),
+        );
+        if !room {
+            fail(app, id, &cam, "Not enough free space to add the cam — the clip was kept without it.");
+            return None;
+        }
+        let video_start_us = crate::muxer::probe_video_start_us(&clip_path).unwrap_or(0);
+        let frame = (clip.width, clip.height);
+        let rect = cam_rect(frame, &cam.layout);
+        let mask = mask_gray8(cam.layout.shape, rect.w, rect.h).and_then(|pixels| {
+            let dir = data.join("temp");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(format!("{}_mask_{}x{}.png", id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_"), rect.w, rect.h));
+            write_mask_png(&path, rect.w, rect.h, &pixels).ok().map(|_| path)
+        });
+        let length_ms = clip.duration_ms;
+        let encoder = crate::encode::effective(config.recording.encoder);
+        let mut done = false;
+        for (encoder, hwaccel) in attempts(encoder) {
+            let args = composite_arguments(&CompositeJob {
+                clip: &clip_path,
+                cam: &crate::facecam::cam_path(id),
+                mask: mask.as_deref(),
+                output: &temp,
+                frame,
+                facts: &facts,
+                layout: cam.layout,
+                delay_ms: cam.delay_ms,
+                video_start_us,
+                start_ms: 0,
+                length_ms,
+                gaps_ms: &facts.gaps_ms,
+                encoder,
+                quality: config.recording.quality,
+                gop: facts.game_gop,
+                hwaccel,
+            });
+            match crate::edit::run_command_with_progress(crate::muxer::background("ffmpeg"), &args, length_ms, &|_| {}) {
+                Ok(()) => {
+                    done = true;
+                    break;
+                }
+                Err(err) => {
+                    log::warn!("cam composite of {id} with {encoder:?} (hardware decoding {hwaccel}): {err}");
+                    let _ = std::fs::remove_file(&temp);
+                }
+            }
+        }
+        if let Some(mask) = &mask {
+            let _ = std::fs::remove_file(mask);
+        }
+        if !done {
+            fail(app, id, &cam, "The cam couldn't be added — try again from the editor");
+            return None;
+        }
+        let size = file_size(&temp)?;
+        facts.video_start_us = Some(video_start_us);
+        facts.applying = Some(FacecamApplied {
+            layout: cam.layout,
+            delay_ms: cam.delay_ms,
+            start_ms: 0,
+            length_ms: crate::muxer::probe_duration_ms(&temp).unwrap_or(length_ms),
+            size_bytes: size,
+        });
+        if let Err(err) = crate::facecam::write_facts(id, &facts) {
+            log::warn!("facecam.json for {id}: {err}");
+        }
+    }
+    if swap(id, &clip_path, &temp).is_ok() {
+        finish(app, id, &clip_path, &cam, facts);
+        return None;
+    }
+    // A player holds the file. Wait for it without holding the clip.
+    if facts.swap_failing_since_ms.is_none() {
+        facts.swap_failing_since_ms = Some(now_ms());
+        let _ = crate::facecam::write_facts(id, &facts);
+    }
+    if swap_given_up(facts.swap_failing_since_ms, now_ms()) {
+        let _ = std::fs::remove_file(&temp);
+        fail(app, id, &cam, "The cam couldn't be added — try again from the editor");
+        return None;
+    }
+    drop(guard);
+    for wait in swap_waits() {
+        std::thread::sleep(wait);
+        let _guard = clip_lock.lock();
+        let still = crate::clips::fresh(&state.library, id)
+            .and_then(|c| c.facecam)
+            .is_some_and(|c| c.state == FacecamState::Pending);
+        if !still {
+            let _ = std::fs::remove_file(&temp);
+            return None;
+        }
+        if swap(id, &clip_path, &temp).is_ok() {
+            finish(app, id, &clip_path, &cam, facts);
+            return None;
+        }
+    }
+    log::info!("cam for clip {id}: the file is still in use — tried again in five minutes");
+    Some(Instant::now() + SWAP_RETRY_EVERY)
+}
+
+/// At start: every clip whose cam was on its way when the app last stopped.
+/// Takes each clip's lock, like the other start-up passes.
+pub fn recover(library: &parking_lot::Mutex<Option<crate::clips::Library>>) -> usize {
+    let clips = crate::clips::with_library(library, |lib| lib.list()).and_then(Result::ok).unwrap_or_default();
+    let mut changed = 0;
+    for clip in clips {
+        let Some(cam) = clip.facecam.clone() else { continue };
+        if !crate::facecam::has_store(&clip.id) {
+            continue;
+        }
+        let lock = crate::edit::clip_lock(&clip.id);
+        let _guard = lock.lock();
+        let Some(mut facts) = crate::facecam::read_facts(&clip.id) else { continue };
+        let clip_path = PathBuf::from(&clip.path);
+        for stale in stale_temps(&clip_path) {
+            let _ = std::fs::remove_file(stale);
+        }
+        let clean = crate::edit::video_path(&clip.id);
+        match after_crash(&facts, file_size(&clip_path), clean.exists(), cam.state) {
+            Recovery::Nothing => continue,
+            Recovery::PutCleanBack => {
+                if let Err(err) = crate::edit::move_across(&clean, &clip_path) {
+                    log::warn!("could not put the clean clip {} back: {err}", clip.id);
+                    continue;
+                }
+                facts.applying = None;
+                let _ = crate::facecam::write_facts(&clip.id, &facts);
+                enqueue(&clip.id);
+            }
+            Recovery::FinishSwap => {
+                facts.applied = facts.applying.take();
+                facts.swap_failing_since_ms = None;
+                let _ = crate::facecam::write_facts(&clip.id, &facts);
+                let next = ClipFacecam { state: FacecamState::Ready, ..cam };
+                let _ = crate::clips::with_library(library, |lib| lib.set_facecam(&clip.id, Some(&next)));
+            }
+            Recovery::Requeue => {
+                facts.applying = None;
+                let _ = crate::facecam::write_facts(&clip.id, &facts);
+                enqueue(&clip.id);
+            }
+        }
+        changed += 1;
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::camera::Rect;
     use crate::model::{CamLayout, CamShape, EncoderId};
     use std::path::Path;
+    use std::time::Instant;
 
     fn layout(x: f32, y: f32, size: f32, shape: CamShape, mirror: bool) -> CamLayout {
         CamLayout { visible: true, x, y, size, shape, mirror }
@@ -251,6 +712,110 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn a_clip_is_never_queued_twice() {
+        let mut q = Queue::default();
+        assert!(q.push("a"));
+        assert!(!q.push("a"));
+        assert_eq!(q.next(Instant::now()).as_deref(), Some("a"));
+        assert!(!q.push("a"), "running counts too");
+    }
+
+    #[test]
+    fn a_running_clip_counts_as_busy() {
+        let mut q = Queue::default();
+        q.push("a");
+        assert!(q.busy("a"));
+        q.next(Instant::now());
+        assert!(q.busy("a"));
+        q.done("a");
+        assert!(!q.busy("a"));
+    }
+
+    #[test]
+    fn jobs_run_in_the_order_they_came() {
+        let mut q = Queue::default();
+        q.push("a");
+        q.push("b");
+        let now = Instant::now();
+        assert_eq!(q.next(now).as_deref(), Some("a"));
+        q.done("a");
+        assert_eq!(q.next(now).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_deleted_clip_leaves_the_queue() {
+        let mut q = Queue::default();
+        q.push("a");
+        q.push("b");
+        q.next(Instant::now());
+        assert!(!q.drop_waiting("a"), "the running one is waited for, not dropped");
+        assert!(q.drop_waiting("b"));
+        assert!(!q.busy("b"));
+    }
+
+    #[test]
+    fn a_swap_retry_waits_its_turn() {
+        let mut q = Queue::default();
+        let now = Instant::now();
+        assert!(q.push_later("a", now + SWAP_RETRY_EVERY));
+        q.push("b");
+        assert_eq!(q.next(now).as_deref(), Some("b"));
+        q.done("b");
+        assert_eq!(q.next(now), None);
+        assert_eq!(q.next(now + SWAP_RETRY_EVERY).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_composite_needs_room_for_the_clip_once_more() {
+        assert!(room_for_composite(1_000_000_000, 1_300_000_000, 0, true));
+        assert!(!room_for_composite(1_000_000_000, 1_200_000_000, 0, true));
+        assert!(room_for_composite(1_000_000_000, 1_300_000_000, 1_100_000_000, false));
+        assert!(!room_for_composite(1_000_000_000, 1_300_000_000, 900_000_000, false));
+    }
+
+    fn crash_facts(applying: Option<u64>, applied: bool, failing: Option<i64>) -> crate::facecam::FacecamFacts {
+        let mark = |size| crate::facecam::FacecamApplied {
+            layout: CamLayout::default(),
+            delay_ms: -40,
+            start_ms: 0,
+            length_ms: 30_000,
+            size_bytes: size,
+        };
+        crate::facecam::FacecamFacts {
+            applying: applying.map(mark),
+            applied: applied.then(|| mark(100)),
+            swap_failing_since_ms: failing,
+            ..facts()
+        }
+    }
+
+    #[test]
+    fn a_crash_mid_composite_is_resolved_from_the_file_size() {
+        use crate::model::FacecamState::{Pending, Ready};
+        assert_eq!(after_crash(&crash_facts(Some(100), false, None), None, true, Pending), Recovery::PutCleanBack);
+        assert_eq!(after_crash(&crash_facts(Some(100), false, None), Some(100), true, Pending), Recovery::FinishSwap);
+        assert_eq!(after_crash(&crash_facts(Some(100), false, None), Some(90), true, Pending), Recovery::Requeue);
+        assert_eq!(after_crash(&crash_facts(None, false, None), Some(90), false, Pending), Recovery::Requeue);
+        assert_eq!(after_crash(&crash_facts(None, true, None), Some(100), true, Ready), Recovery::Nothing);
+        assert_eq!(after_crash(&crash_facts(None, false, None), Some(100), false, Ready), Recovery::Nothing);
+    }
+
+    #[test]
+    fn a_clip_open_in_a_player_is_waited_for_not_failed() {
+        let total: u64 = swap_waits().iter().map(|d| d.as_secs()).sum();
+        assert!((60..=75).contains(&total), "{total}");
+        let t = 1_800_000_000_000;
+        let hour = 3_600_000;
+        assert!(!swap_given_up(Some(t), t + 23 * hour));
+        assert!(swap_given_up(Some(t), t + 25 * hour));
+        assert!(!swap_given_up(None, t));
+        assert_eq!(
+            after_crash(&crash_facts(None, false, Some(t)), Some(90), false, crate::model::FacecamState::Pending),
+            Recovery::Requeue
+        );
     }
 
     #[test]

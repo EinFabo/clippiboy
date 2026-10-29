@@ -139,8 +139,12 @@ fn save_cam(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip, ca
                     log::error!("could not note the clip's cam: {err}");
                 }
             }
+            let pending = facecam.state == model::FacecamState::Pending;
             clip.facecam = Some(facecam);
             let _ = app.emit("clips-changed", ());
+            if pending {
+                composite::enqueue(&clip.id);
+            }
         }
         Err(err) => log::warn!("cam for clip {} not written: {err}", clip.id),
     }
@@ -1608,6 +1612,9 @@ fn maintain_library(app: &tauri::AppHandle) {
                 }
             };
             announce(edit::repair(&state.library));
+            // A cam that was on its way when the app last stopped: put the
+            // clean clip back, finish a swap, or composite again.
+            announce(composite::recover(&state.library));
             // Pictures from older versions still sit next to the videos.
             announce(thumbs::migrate(&state.library));
             // Game names first, folders second: a name that differs only in
@@ -1759,6 +1766,9 @@ pub fn run() {
             // The passes over the library touch every clip's file — on a thread
             // of its own, so a clip folder on a sleeping disk holds no window.
             maintain_library(handle);
+            // The background composites: idle until a save or the recovery
+            // in `maintain_library` hands it a clip.
+            composite::start(handle);
             // What saves, edits and exports cut short left in the clip folder
             // and the data folder — on a thread of its own.
             sweep::run(handle);
