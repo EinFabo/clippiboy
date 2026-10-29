@@ -287,6 +287,31 @@ export interface PortraitLayout {
   gameX: number;
 }
 
+export type ClockKind = "device" | "deviceReference" | "sampleTime" | "arrival";
+
+export type CamState =
+  | { kind: "starting" }
+  | { kind: "live" }
+  | { kind: "taken"; by: string | null }
+  | { kind: "blocked" }
+  | { kind: "noCamera" }
+  | { kind: "failed"; message: string };
+
+/** What the cam track is doing (`model::CamStatus`). */
+export interface CamStatus {
+  state: CamState;
+  camera: string | null;
+  fpsIn: number;
+  fpsOut: number;
+  duplicates: number;
+  fillers: number;
+  gaps: number;
+  clock: ClockKind | null;
+  encoder: EncoderId | null;
+  ringSeconds: number;
+  ringBytes: number;
+}
+
 /** One notification's sound. `volume` is 0–1, on top of `SoundConfig.volume`. */
 export interface SoundSetting {
   on: boolean;
@@ -560,6 +585,8 @@ export interface EngineStatus {
   /** The chosen screen is not connected and capture runs on this one instead —
       its name. `null` while it runs where it was told to. */
   screenFallback: string | null;
+  /** The webcam while it runs; `null` when it is off. */
+  cam: CamStatus | null;
 }
 
 /** A rectangle in pixels of a screenshot's original. */

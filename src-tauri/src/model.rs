@@ -1059,6 +1059,41 @@ pub struct EngineStatus {
     /// instead — its name. `None` while it runs where it was told to.
     #[serde(default)]
     pub screen_fallback: Option<String>,
+    /// The webcam, while it runs; `None` when it is off.
+    #[serde(default)]
+    pub cam: Option<CamStatus>,
+}
+
+/// What the cam track is doing, for the Facecam tab and the health log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CamStatus {
+    pub state: CamState,
+    /// The camera's name.
+    pub camera: Option<String>,
+    pub fps_in: f32,
+    pub fps_out: f32,
+    pub duplicates: u64,
+    pub fillers: u64,
+    pub gaps: u32,
+    pub clock: Option<crate::camera::ClockKind>,
+    pub encoder: Option<EncoderId>,
+    pub ring_seconds: f32,
+    pub ring_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CamState {
+    Starting,
+    /// Running. ClippiBoy controls the camera, so other apps cannot use it meanwhile.
+    Live,
+    /// Another app holds the camera.
+    Taken { by: Option<String> },
+    /// Windows' camera privacy blocks desktop apps.
+    Blocked,
+    NoCamera,
+    Failed { message: String },
 }
 
 #[cfg(test)]

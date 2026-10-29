@@ -247,6 +247,30 @@ pub struct EncoderSettings {
     /// How deep the job channel is, from [`queue_depth`]. The caller reads it
     /// because it sizes the converter's slots from the same figure.
     pub queue_depth: usize,
+    /// B-frames to ask for; `None` leaves it to the driver (or
+    /// `CLIPPIBOY_BFRAMES`). The cam asks for none: its cut starts on any
+    /// keyframe and its packets go out in order.
+    pub bframes: Option<u32>,
+    pub rate: RateMode,
+}
+
+/// How the encoder spends bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateMode {
+    /// Constant quality first, a capped bitrate if the encoder cannot (the game).
+    Quality,
+    /// A capped bitrate straight away: a ring budgeted for its bitrate (the cam)
+    /// would be ignored by constant quality.
+    PeakVbr,
+}
+
+fn tries_constant_quality(rate: RateMode) -> bool {
+    rate == RateMode::Quality
+}
+
+/// The B-frame count asked for: the caller's, else the environment's.
+fn bframe_count(requested: Option<u32>, env: Option<u32>) -> Option<u32> {
+    requested.or(env)
 }
 
 /// Bring Media Foundation up once per process.
@@ -488,7 +512,7 @@ fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> Rate
     // its budget whether the picture needs it or not, so a menu screen cost as
     // much as a firefight. Certified hardware encoders are required to support
     // it, but a driver is still a driver.
-    if set_rate_control(codec, eAVEncCommonRateControlMode_Quality) {
+    if tries_constant_quality(settings.rate) && set_rate_control(codec, eAVEncCommonRateControlMode_Quality) {
         if set_codec_property(
             codec,
             "quality",
@@ -551,8 +575,8 @@ fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> Rate
 ///
 /// Set **before** `SetOutputType`: MSDN puts it in the same class as
 /// `AVEncCommonQuality`, which is accepted and then ignored afterwards.
-fn configure_bframes(codec: &ICodecAPI) -> Option<(u32, bool)> {
-    let count = env_opt_u32("CLIPPIBOY_BFRAMES")?;
+fn configure_bframes(codec: &ICodecAPI, requested: Option<u32>) -> Option<(u32, bool)> {
+    let count = bframe_count(requested, env_opt_u32("CLIPPIBOY_BFRAMES"))?;
     let taken = set_codec_property(
         codec,
         "B-frames",
@@ -965,7 +989,7 @@ fn set_up(
             RateControl::UnconstrainedVbr
         }
     };
-    let bframes = codec.as_ref().and_then(configure_bframes);
+    let bframes = codec.as_ref().and_then(|codec| configure_bframes(codec, settings.bframes));
 
     // The order is prescribed: output type before input type.
     let output = media_type_video(MFVideoFormat_H264, settings)?;
@@ -1862,6 +1886,20 @@ fn run<F, H>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cam's ring is budgeted for its bitrate; constant quality would ignore it.
+    #[test]
+    fn a_cam_encoder_never_tries_constant_quality() {
+        assert!(tries_constant_quality(RateMode::Quality));
+        assert!(!tries_constant_quality(RateMode::PeakVbr));
+    }
+
+    #[test]
+    fn the_cam_asks_for_no_b_frames_whatever_the_environment() {
+        assert_eq!(bframe_count(Some(0), Some(2)), Some(0));
+        assert_eq!(bframe_count(None, Some(2)), Some(2));
+        assert_eq!(bframe_count(None, None), None);
+    }
 
     #[test]
     fn an_adapter_luid_goes_into_the_attribute_unchanged() {

@@ -90,16 +90,16 @@ const _: () = assert!(
 /// Colour space bitfield from `d3d11.h`:
 /// bit 0 `Usage`, bit 1 `RGB_Range`, bit 2 `YCbCr_Matrix`, bit 3 `YCbCr_Xvycc`,
 /// bits 4–5 `Nominal_Range`.
-const fn color_space(ycbcr_709: bool, nominal_range: u32) -> D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+pub(crate) const fn color_space(ycbcr_709: bool, nominal_range: u32) -> D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
     let bits = ((ycbcr_709 as u32) << 2) | ((nominal_range & 0x3) << 4);
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: bits }
 }
 
 /// `D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235` — the range H.264 and every
 /// player assume by default.
-const RANGE_STUDIO: u32 = 1;
+pub(crate) const RANGE_STUDIO: u32 = 1;
 /// `D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255` — that is how the desktop arrives.
-const RANGE_FULL: u32 = 2;
+pub(crate) const RANGE_FULL: u32 = 2;
 
 struct Slot {
     texture: ID3D11Texture2D,

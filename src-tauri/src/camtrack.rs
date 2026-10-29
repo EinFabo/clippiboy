@@ -43,6 +43,182 @@ pub fn stop_delay(before: &CamWants, after: &CamWants) -> Option<Duration> {
     Some(if only_the_buffer { Duration::from_secs(3) } else { Duration::ZERO })
 }
 
+/// What the cam track is told to do.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CamPlan {
+    pub run: bool,
+    /// How long to keep the camera open once `run` went false.
+    pub stop_after: Duration,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub resolution: crate::model::CamResolution,
+    pub fps: u32,
+    pub ring_seconds: u32,
+    pub encoder: crate::model::EncoderId,
+    /// Somebody looks at the preview.
+    pub preview: bool,
+}
+
+/// What the plan is made from besides the cam's own settings.
+#[derive(Debug, Clone)]
+pub struct PlanInputs {
+    pub buffer_seconds: u32,
+    pub keyframe_seconds: u32,
+    pub encoder: crate::model::EncoderId,
+    pub buffer_wanted: bool,
+    pub preview_open: bool,
+    pub locked: bool,
+}
+
+/// The plan for the cam, and the wants it was made from, to compare the next
+/// one against (`stop_delay`).
+pub fn plan_for(cam: &crate::model::FacecamConfig, inputs: &PlanInputs, before: Option<&CamWants>) -> (CamPlan, CamWants) {
+    let wants = CamWants {
+        enabled: cam.enabled,
+        in_clips: cam.in_clips,
+        buffer_wanted: inputs.buffer_wanted,
+        preview_open: inputs.preview_open,
+        locked: inputs.locked,
+    };
+    let stop_after = before.and_then(|b| stop_delay(b, &wants)).unwrap_or(Duration::ZERO);
+    let plan = CamPlan {
+        run: cam_wanted(&wants),
+        stop_after,
+        device_id: cam.device_id.clone(),
+        device_name: cam.device_name.clone(),
+        resolution: cam.resolution,
+        fps: cam.fps,
+        ring_seconds: crate::config::cam_ring_seconds(inputs.buffer_seconds, inputs.keyframe_seconds),
+        encoder: inputs.encoder,
+        preview: inputs.preview_open && cam.enabled,
+    };
+    (plan, wants)
+}
+
+/// The cam's line in the five-second health log.
+pub fn health_text(status: &crate::model::CamStatus) -> String {
+    let clock = match status.clock {
+        Some(crate::camera::ClockKind::Device) => "device",
+        Some(crate::camera::ClockKind::DeviceReference) => "device-reference",
+        Some(crate::camera::ClockKind::SampleTime) => "sample-time",
+        Some(crate::camera::ClockKind::Arrival) => "arrival",
+        None => "none",
+    };
+    let encoder = status.encoder.map(|e| format!("{e:?}")).unwrap_or_else(|| "none".into());
+    format!(
+        "cam: {:.1} fps in, {:.1} out, dup={} filler={} gaps={} clock={clock} encoder={encoder} ring {:.1} s {:.1} MB",
+        status.fps_in,
+        status.fps_out,
+        status.duplicates,
+        status.fillers,
+        status.gaps,
+        status.ring_seconds,
+        status.ring_bytes as f64 / 1_048_576.0,
+    )
+}
+
+/// What the cam's threads and the rest of the app share.
+pub struct CamShared {
+    pub ring: Mutex<CamRing>,
+    pub preview: PreviewSlot,
+    /// The newest raw frame with its QPC — screenshots (stage 4) take it.
+    pub latest: Mutex<Option<Arc<Frame>>>,
+    pub status: Mutex<Option<crate::model::CamStatus>>,
+    pub errors: crate::pipeline::ErrorSlot,
+}
+
+type PlanSender = Arc<Mutex<Option<crossbeam_channel::Sender<CamPlan>>>>;
+
+/// The cam track, held by `AppState` next to the game pipeline. No thread
+/// until a plan says run; the worker ends once the camera is closed again.
+pub struct CamTrack {
+    plans: PlanSender,
+    shared: Arc<CamShared>,
+}
+
+impl Default for CamTrack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CamTrack {
+    pub fn new() -> Self {
+        Self {
+            plans: Arc::new(Mutex::new(None)),
+            shared: Arc::new(CamShared {
+                ring: Mutex::new(CamRing::new(1, 16 * 1024 * 1024)),
+                preview: PreviewSlot::new(),
+                latest: Mutex::new(None),
+                status: Mutex::new(None),
+                errors: crate::pipeline::ErrorSlot::new(),
+            }),
+        }
+    }
+
+    /// Hands the worker a plan; never blocks. A plan that arrives while the
+    /// worker is on its way out starts a new one — the worker only ends by
+    /// taking the same lock and finding nothing waiting.
+    pub fn apply(&self, plan: CamPlan) {
+        #[cfg(windows)]
+        {
+            let mut plans = self.plans.lock();
+            if let Some(tx) = plans.as_ref() {
+                if tx.send(plan.clone()).is_ok() {
+                    return;
+                }
+            }
+            if !plan.run {
+                return;
+            }
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let _ = tx.send(plan);
+            *plans = Some(tx);
+            win::spawn(self.shared.clone(), rx, self.plans.clone());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (&self.plans, plan);
+        }
+    }
+
+    pub fn latest_frame(&self) -> Option<Arc<Frame>> {
+        self.shared.latest.lock().clone()
+    }
+
+    pub fn preview(&self) -> &PreviewSlot {
+        &self.shared.preview
+    }
+
+    pub fn ring(&self) -> &Mutex<CamRing> {
+        &self.shared.ring
+    }
+
+    pub fn status(&self) -> Option<crate::model::CamStatus> {
+        self.shared.status.lock().clone()
+    }
+
+    pub fn health_line(&self) -> Option<String> {
+        self.status().map(|status| health_text(&status))
+    }
+
+    pub fn take_unseen_error(&self) -> Option<String> {
+        self.shared.errors.take_unseen()
+    }
+
+    pub fn attach_tap(&self, tap: Arc<dyn PacketTap>, from_100ns: i64) -> Vec<EncodedPacket> {
+        self.shared.ring.lock().attach_tap(tap, from_100ns)
+    }
+
+    pub fn detach_tap(&self) {
+        self.shared.ring.lock().detach_tap();
+    }
+}
+
+#[cfg(windows)]
+#[path = "camtrack_win.rs"]
+mod win;
+
 /// A stretch without cam frames, QPC in 100 ns; open while `to_100ns` is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gap {
@@ -272,6 +448,56 @@ mod tests {
 
     fn wants(enabled: bool, in_clips: bool, buffer: bool, preview: bool, locked: bool) -> CamWants {
         CamWants { enabled, in_clips, buffer_wanted: buffer, preview_open: preview, locked }
+    }
+
+    fn inputs(buffer_wanted: bool, preview_open: bool) -> PlanInputs {
+        PlanInputs {
+            buffer_seconds: 120,
+            keyframe_seconds: 2,
+            encoder: crate::model::EncoderId::Nvenc,
+            buffer_wanted,
+            preview_open,
+            locked: false,
+        }
+    }
+
+    #[test]
+    fn the_plan_follows_the_switches() {
+        let mut cam = crate::model::FacecamConfig::default();
+        let (plan, off) = plan_for(&cam, &inputs(true, false), None);
+        assert!(!plan.run);
+        assert_eq!(plan.stop_after, Duration::ZERO);
+        cam.enabled = true;
+        let (plan, on) = plan_for(&cam, &inputs(true, false), Some(&off));
+        assert!(plan.run);
+        assert_eq!(plan.ring_seconds, 134);
+        assert_eq!(plan.resolution, crate::model::CamResolution::P720);
+        let (plan, _) = plan_for(&cam, &inputs(false, false), Some(&on));
+        assert!(!plan.run);
+        assert_eq!(plan.stop_after, Duration::from_secs(3));
+        let (plan, _) = plan_for(&cam, &inputs(false, true), Some(&on));
+        assert!(plan.run && plan.preview);
+    }
+
+    #[test]
+    fn the_health_line_says_what_the_cam_does() {
+        let status = crate::model::CamStatus {
+            state: crate::model::CamState::Live,
+            camera: Some("HD Pro Webcam C920".into()),
+            fps_in: 29.84,
+            fps_out: 30.0,
+            duplicates: 412,
+            fillers: 0,
+            gaps: 0,
+            clock: Some(crate::camera::ClockKind::Device),
+            encoder: Some(crate::model::EncoderId::Nvenc),
+            ring_seconds: 133.2,
+            ring_bytes: 50_436_506,
+        };
+        assert_eq!(
+            health_text(&status),
+            "cam: 29.8 fps in, 30.0 out, dup=412 filler=0 gaps=0 clock=device encoder=Nvenc ring 133.2 s 48.1 MB"
+        );
     }
 
     #[test]

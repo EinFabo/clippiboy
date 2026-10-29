@@ -134,6 +134,13 @@ pub fn settings_step(
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
+    /// The webcam's own track, next to the pipeline — see [`crate::camtrack`].
+    pub camera: crate::camtrack::CamTrack,
+    /// Until when (QPC, 100 ns) the settings' preview counts as open; each
+    /// frame the page asks for renews it.
+    pub cam_preview_until: std::sync::atomic::AtomicI64,
+    /// The wants the last cam plan was made from, for `stop_delay`.
+    cam_wants: Mutex<Option<crate::camtrack::CamWants>>,
     /// The last configs handed out, by revision, for merging a write built on
     /// an older one (`config::accept`). Only ever locked inside `config`,
     /// never the other way round.
@@ -599,6 +606,7 @@ impl AppState {
             recording_seconds: 0.0,
             recording_bytes: 0,
             screen_fallback: None,
+            cam: None,
         };
         let audio = Arc::new(AudioEngine::new());
         let mut history = std::collections::VecDeque::new();
@@ -634,7 +642,36 @@ impl AppState {
             drift_seen: std::sync::atomic::AtomicU8::new(0),
             restarts: RestartQueue::default(),
             settings_waiting: std::sync::atomic::AtomicBool::new(false),
+            camera: crate::camtrack::CamTrack::new(),
+            cam_preview_until: std::sync::atomic::AtomicI64::new(0),
+            cam_wants: Mutex::new(None),
         }
+    }
+
+    /// The cam's plan from the settings and what the app is doing, compared
+    /// with the last one so a buffer restart does not close the camera.
+    pub fn cam_plan(&self) -> crate::camtrack::CamPlan {
+        let config = self.config_snapshot();
+        let inputs = crate::camtrack::PlanInputs {
+            buffer_seconds: config.buffer.seconds,
+            keyframe_seconds: config.recording.keyframe_seconds,
+            encoder: crate::encode::for_recording(config.recording.encoder),
+            buffer_wanted: self.buffer_wanted(),
+            preview_open: self.cam_preview_until.load(std::sync::atomic::Ordering::SeqCst)
+                > crate::audio::capture::now_100ns(),
+            locked: self.auto.screen_locked(),
+        };
+        let mut last = self.cam_wants.lock();
+        let (plan, wants) = crate::camtrack::plan_for(&config.facecam, &inputs, last.as_ref());
+        *last = Some(wants);
+        plan
+    }
+
+    /// Brings the cam in line with the settings and the buffer. Cheap and
+    /// never blocking: called after every settings write and once a second.
+    pub fn reconcile_cam(&self) {
+        let plan = self.cam_plan();
+        self.camera.apply(plan);
     }
 
     /// The settings, the start-up trouble with them and the clip database, as
@@ -734,6 +771,7 @@ impl AppState {
         // Takes effect with the next frame, no restart.
         crate::watermark::set_enabled(next.watermark);
         crate::telemetry::on_config(&next);
+        self.reconcile_cam();
         // Only a changed source list needs the streams brought in line: a gain
         // step is one, a clip-length or sound change is not.
         let sources_changed = previous.sources != next.sources;
@@ -1272,6 +1310,7 @@ impl AppState {
     /// Carry the running recording's current metrics into the status.
     pub fn status_snapshot(&self) -> EngineStatus {
         let mut status = self.status.lock().clone();
+        status.cam = self.camera.status();
         if let Some(recorder) = self.recorder.lock().as_ref() {
             status.recording = true;
             let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);

@@ -1375,6 +1375,13 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     sounds::play(&handle, SoundKind::Error);
                     overlay::show(&handle, BannerKind::Error, "Recording disrupted", Some(err));
                 }
+                // The cam follows the buffer and the lock screen from here,
+                // once a second; a settings write reconciles it at once.
+                state.reconcile_cam();
+                if let Some(err) = state.camera.take_unseen_error() {
+                    notify(&handle, "error", err.clone());
+                    overlay::show(&handle, BannerKind::Error, "Facecam stopped", Some(err));
+                }
                 // The recording cannot write any more — a full disk, most
                 // likely. Stop it while what is there is still whole. Once:
                 // the failure stays set until the stop has closed the
@@ -1409,6 +1416,9 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     .as_ref()
                     .map(|shared| shared.health_line());
                 if let Some(line) = line {
+                    log::info!("{line}");
+                }
+                if let Some(line) = state.camera.health_line() {
                     log::info!("{line}");
                 }
             }
