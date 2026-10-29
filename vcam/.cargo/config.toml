@@ -1,0 +1,3 @@
+# Without the static CRT the DLL fails to load in Frame Server (MOD_NOT_FOUND).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

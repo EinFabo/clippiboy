@@ -25,3 +25,6 @@ shot.png
 
 # Lokale Messskripte.
 ram-probe.ps1
+
+# The virtual camera workspace builds on its own.
+vcam/target/
