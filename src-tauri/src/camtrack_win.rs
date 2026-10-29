@@ -509,6 +509,10 @@ impl Worker {
             queue_depth: crate::mft::QUEUE_DEPTH,
             bframes: Some(0),
             rate: RateMode::PeakVbr,
+            // Measured on a C920 at 720p30: 4.1 % of the video-encode engine
+            // with the game's settings, 2.9 % this way.
+            quality_vs_speed: Some(0),
+            low_latency: Some(true),
         };
         self.encoder_starting = Some(session);
         let _ = self.ask.send(Ask::StartEncoder { session, gpu, settings });
