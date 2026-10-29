@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod buffer;
+pub mod camera;
 pub mod capture;
 pub mod clipboard;
 pub mod clips;
@@ -1786,6 +1787,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_audio_devices,
+            commands::list_cameras,
             commands::list_audio_processes,
             commands::list_capture_targets,
             commands::list_encoders,

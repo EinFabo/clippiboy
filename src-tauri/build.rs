@@ -7,6 +7,7 @@ fn main() {
     // here and granted to its window, or calling it is refused.
     let commands = &[
         "list_audio_devices",
+        "list_cameras",
         "list_audio_processes",
         "list_capture_targets",
         "list_encoders",

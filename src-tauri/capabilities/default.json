@@ -20,6 +20,7 @@
     "dialog:allow-open",
     "global-shortcut:default",
     "allow-list-audio-devices",
+    "allow-list-cameras",
     "allow-list-audio-processes",
     "allow-list-capture-targets",
     "allow-list-encoders",

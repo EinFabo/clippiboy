@@ -2,6 +2,12 @@
 
 export type DeviceKind = "output" | "input";
 
+/** A camera Windows lists; `id` is its symbolic link. */
+export interface CameraDevice {
+  id: string;
+  name: string;
+}
+
 export interface AudioDevice {
   id: string;
   name: string;

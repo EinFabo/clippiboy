@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  CameraDevice,
   AppConfig,
   AudioDevice,
   AudioProcess,
@@ -35,6 +36,7 @@ export function fileUrl(path: string | null): string | undefined {
 
 export const api = {
   listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
+  listCameras: () => invoke<CameraDevice[]>("list_cameras"),
   /** Whether a clip has a live share link (deleting the clip takes it down). */
   linkExists: (id: string) => invoke<boolean>("link_exists", { id }),
   listAudioProcesses: () => invoke<AudioProcess[]>("list_audio_processes"),

@@ -4,6 +4,7 @@ import type {
   AppConfig,
   AudioDevice,
   AudioProcess,
+  CameraDevice,
   CaptureTarget,
   Clip,
   ClipTrack,
@@ -15,6 +16,11 @@ export const mockDevices: AudioDevice[] = [
   { id: "out-2", name: "LG HDR 4K (NVIDIA High Definition Audio)", kind: "output", isDefault: false },
   { id: "in-1", name: "Mikrofon (Elgato Wave XLR)", kind: "input", isDefault: true },
   { id: "in-2", name: "Line In (Focusrite Scarlett)", kind: "input", isDefault: false },
+];
+
+export const mockCameras: CameraDevice[] = [
+  { id: "\\\\?\\usb#vid_046d&pid_08e5#c920", name: "HD Pro Webcam C920" },
+  { id: "\\\\?\\usb#vid_328f&pid_006d#c960", name: "EMEET SmartCam C960" },
 ];
 
 export const mockProcesses: AudioProcess[] = [

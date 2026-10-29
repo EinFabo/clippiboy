@@ -24,6 +24,13 @@ pub fn list_audio_devices() -> Vec<AudioDevice> {
     devices::list_devices()
 }
 
+/// The cameras for the Facecam tab. Async: listing takes a moment and runs on
+/// a worker, which joins the multithreaded apartment itself.
+#[tauri::command(async)]
+pub fn list_cameras() -> Vec<crate::model::CameraDevice> {
+    crate::camera::list()
+}
+
 #[tauri::command(async)]
 pub fn list_audio_processes() -> Vec<AudioProcess> {
     devices::list_processes()
