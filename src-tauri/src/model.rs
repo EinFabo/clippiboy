@@ -1094,6 +1094,9 @@ pub struct EngineStatus {
     /// The webcam, while it runs; `None` when it is off.
     #[serde(default)]
     pub cam: Option<CamStatus>,
+    /// ClippiBoy Camera, the virtual camera.
+    #[serde(default)]
+    pub vcam: Option<crate::vcam::VcamStatus>,
 }
 
 /// What the cam track is doing, for the Facecam tab and the health log.

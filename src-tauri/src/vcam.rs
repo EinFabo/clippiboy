@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// What the Camera tab says about ClippiBoy Camera.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum VcamStatus {
     NotInstalled,
@@ -27,6 +27,27 @@ pub fn older(a: &str, b: &str) -> bool {
     parts(a) < parts(b)
 }
 
+/// The elevated setup has to run before the camera can be listed.
+pub fn needs_setup(installed: Option<&str>, bundled: &str) -> bool {
+    installed.is_none_or(|v| older(v, bundled))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupDone {
+    Done,
+    /// A file was still in use; Windows finishes after a restart.
+    AfterRestart,
+}
+
+/// The setup's exit codes: 0 done, 3 a file in use, anything else refused.
+pub fn setup_outcome(code: u32) -> Result<SetupDone, String> {
+    match code {
+        0 => Ok(SetupDone::Done),
+        3 => Ok(SetupDone::AfterRestart),
+        code => Err(format!("The virtual camera's setup failed ({code})")),
+    }
+}
+
 pub fn status_for(installed: Option<&str>, bundled: &str, switched_on: bool, running: bool, watching: bool) -> VcamStatus {
     let Some(installed) = installed else { return VcamStatus::NotInstalled };
     if older(installed, bundled) {
@@ -41,6 +62,8 @@ pub fn status_for(installed: Option<&str>, bundled: &str, switched_on: bool, run
 
 /// ClippiBoy Camera's producer: owned by `AppState` for the life of the app.
 pub struct Vcam {
+    /// The installed DLL's version, read at start and after each setup run.
+    installed: Mutex<Option<String>>,
     watching: Arc<AtomicBool>,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(windows)]
@@ -56,6 +79,7 @@ impl Default for Vcam {
 impl Vcam {
     pub fn new() -> Self {
         Self {
+            installed: Mutex::new(Self::installed_version()),
             watching: Arc::new(AtomicBool::new(false)),
             on_change: Mutex::new(None),
             #[cfg(windows)]
@@ -95,9 +119,17 @@ impl Vcam {
         }
     }
 
+    pub fn installed(&self) -> Option<String> {
+        self.installed.lock().clone()
+    }
+
+    pub fn refresh_installed(&self) {
+        *self.installed.lock() = Self::installed_version();
+    }
+
     pub fn status(&self, switched_on: bool) -> VcamStatus {
         status_for(
-            Self::installed_version().as_deref(),
+            self.installed().as_deref(),
             vcam_protocol::DLL_VERSION,
             switched_on,
             self.running(),
@@ -111,7 +143,7 @@ impl Vcam {
     pub fn apply(&self, on: bool, shared: &crate::camtrack::CamShared) {
         #[cfg(windows)]
         {
-            let usable = on && Self::installed_version().is_some_and(|v| !older(&v, vcam_protocol::DLL_VERSION));
+            let usable = on && !needs_setup(self.installed().as_deref(), vcam_protocol::DLL_VERSION);
             let mut running = self.running.lock();
             match (usable, running.is_some()) {
                 (true, false) => {
@@ -170,6 +202,32 @@ impl Vcam {
     }
 }
 
+/// The setup helper: a resource of the installed app; a dev build takes the
+/// one `vcam/build.ps1` made.
+pub fn setup_exe(resource_dir: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    const NAME: &str = "clippiboy-vcam-setup.exe";
+    let bundled = resource_dir.map(|dir| dir.join("resources").join(NAME));
+    #[cfg(debug_assertions)]
+    let dev = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vcam/target/release").join(NAME));
+    #[cfg(not(debug_assertions))]
+    let dev: Option<std::path::PathBuf> = None;
+    [bundled, dev].into_iter().flatten().find(|path| path.is_file())
+}
+
+/// Runs the setup with "runas": Windows asks once, then the helper does its
+/// work and ends. Blocks until it has.
+pub fn run_setup(exe: &std::path::Path, verb: &str, owner: Option<isize>) -> Result<SetupDone, String> {
+    #[cfg(windows)]
+    {
+        setup_outcome(win::run_elevated(exe, verb, owner)?)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (exe, verb, owner);
+        Err("Windows only".into())
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use windows::core::{implement, Interface, Result as WinResult, HSTRING, PCWSTR};
@@ -181,6 +239,48 @@ mod win {
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
     use crate::gpu::SendPtr;
+
+    /// The helper elevated; the exit code, or why it never ran.
+    pub fn run_elevated(exe: &std::path::Path, verb: &str, owner: Option<isize>) -> Result<u32, String> {
+        use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+        use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+        use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+        let file = HSTRING::from(exe.as_os_str());
+        let params = HSTRING::from(verb);
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            hwnd: HWND(owner.unwrap_or(0) as *mut _),
+            lpVerb: windows::core::w!("runas"),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(params.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        unsafe {
+            if let Err(err) = ShellExecuteExW(&mut info) {
+                // ERROR_CANCELLED: the UAC prompt was declined.
+                return Err(if err.code().0 as u32 == 0x8007_04C7 {
+                    "Cancelled".into()
+                } else {
+                    format!("The virtual camera's setup did not start: {err}")
+                });
+            }
+            if info.hProcess.is_invalid() {
+                return Err("The virtual camera's setup did not start".into());
+            }
+            let waited = WaitForSingleObject(info.hProcess, INFINITE);
+            let mut code = 1u32;
+            let read = GetExitCodeProcess(info.hProcess, &mut code);
+            let _ = CloseHandle(info.hProcess);
+            if waited != WAIT_OBJECT_0 || read.is_err() {
+                return Err("The virtual camera's setup did not finish".into());
+            }
+            Ok(code)
+        }
+    }
 
     pub fn installed_version() -> Option<String> {
         let key = HSTRING::from(vcam_protocol::REGISTRY_KEY);
@@ -315,6 +415,22 @@ mod tests {
         assert_eq!(status_for(Some("1.0.0"), "1.0.0", true, true, true), VcamStatus::Live);
         // A newer DLL than this app carries is fine: the protocol keeps its major.
         assert_eq!(status_for(Some("1.2.0"), "1.0.0", true, true, false), VcamStatus::Ready);
+    }
+
+    #[test]
+    fn the_setup_runs_only_when_the_dll_is_missing_or_older() {
+        assert!(needs_setup(None, "1.0.0"));
+        assert!(needs_setup(Some("0.9.0"), "1.0.0"));
+        assert!(!needs_setup(Some("1.0.0"), "1.0.0"));
+        assert!(!needs_setup(Some("1.1.0"), "1.0.0"));
+    }
+
+    #[test]
+    fn the_setups_exit_code_says_what_happened() {
+        assert_eq!(setup_outcome(0), Ok(SetupDone::Done));
+        assert_eq!(setup_outcome(3), Ok(SetupDone::AfterRestart));
+        assert!(setup_outcome(2).is_err());
+        assert!(setup_outcome(1).is_err());
     }
 
     #[test]

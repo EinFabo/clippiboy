@@ -71,6 +71,7 @@ const RESTING: EngineStatus = {
   recordingBytes: 0,
   screenFallback: null,
   cam: null,
+  vcam: null,
 };
 
 type Panel = "clips" | "audio" | "perf" | "friends" | null;

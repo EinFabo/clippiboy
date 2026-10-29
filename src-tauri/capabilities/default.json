@@ -24,6 +24,8 @@
     "allow-cam-preview-frame",
     "allow-set-facecam-enabled",
     "allow-open-camera-privacy",
+    "allow-set-virtual-camera",
+    "allow-remove-virtual-camera",
     "allow-bake-clip-cam",
     "allow-bake-all-cams",
     "allow-list-audio-processes",

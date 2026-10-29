@@ -297,6 +297,14 @@ export type CamState =
   | { kind: "noCamera" }
   | { kind: "failed"; message: string };
 
+/** ClippiBoy Camera, the virtual camera (`vcam::VcamStatus`). */
+export type VcamStatus =
+  | { kind: "notInstalled" }
+  | { kind: "needsUpdate"; installed: string; bundled: string }
+  | { kind: "off" }
+  | { kind: "ready" }
+  | { kind: "live" };
+
 /** What the cam track is doing (`model::CamStatus`). */
 export interface CamStatus {
   state: CamState;
@@ -602,6 +610,7 @@ export interface EngineStatus {
   screenFallback: string | null;
   /** The webcam while it runs; `null` when it is off. */
   cam: CamStatus | null;
+  vcam: VcamStatus | null;
 }
 
 /** A rectangle in pixels of a screenshot's original. */

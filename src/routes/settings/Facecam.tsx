@@ -13,15 +13,29 @@ import { CornerPad, Row } from "./shared";
 const FIRST = "__first";
 
 export function FacecamTab() {
-  const { config, cameras, camStatus, patchConfig, refreshCameras } = useEngine(
-    useShallow((s) => ({
-      config: s.config,
-      cameras: s.cameras,
-      camStatus: s.camStatus,
-      patchConfig: s.patchConfig,
-      refreshCameras: s.refreshCameras,
-    })),
-  );
+  const { config, cameras, camStatus, vcamStatus, patchConfig, refreshCameras, setVirtualCamera, removeVirtualCamera } =
+    useEngine(
+      useShallow((s) => ({
+        config: s.config,
+        cameras: s.cameras,
+        camStatus: s.camStatus,
+        vcamStatus: s.vcamStatus,
+        patchConfig: s.patchConfig,
+        refreshCameras: s.refreshCameras,
+        setVirtualCamera: s.setVirtualCamera,
+        removeVirtualCamera: s.removeVirtualCamera,
+      })),
+    );
+  // While Windows asks for admin rights and the setup runs.
+  const [vcamBusy, setVcamBusy] = useState(false);
+  const vcamDo = async (action: () => Promise<void>) => {
+    setVcamBusy(true);
+    try {
+      await action();
+    } finally {
+      setVcamBusy(false);
+    }
+  };
   const cam = config.facecam;
   const patch = (p: Partial<FacecamConfig>) => patchConfig({ facecam: { ...cam, ...p } });
   const [sizeDraft, setSizeDraft] = useState<number | null>(null);
@@ -100,6 +114,26 @@ export function FacecamTab() {
             disabled={off}
             onChange={(consolePreview) => patch({ consolePreview })}
           />
+        </Row>
+        <Row label="Virtual camera">
+          <div className="flex items-center gap-3">
+            {vcamStatus?.kind === "live" && <span className="text-xs text-ink-muted">In use</span>}
+            {vcamStatus?.kind === "needsUpdate" && (
+              <Button size="sm" disabled={vcamBusy} onClick={() => void vcamDo(() => setVirtualCamera(true))}>
+                Update
+              </Button>
+            )}
+            {vcamStatus && vcamStatus.kind !== "notInstalled" && !cam.virtualCamera && (
+              <Button size="sm" variant="ghost" disabled={vcamBusy} onClick={() => void vcamDo(removeVirtualCamera)}>
+                Remove
+              </Button>
+            )}
+            <Toggle
+              checked={cam.virtualCamera}
+              disabled={off || vcamBusy}
+              onChange={(on) => void vcamDo(() => setVirtualCamera(on))}
+            />
+          </div>
         </Row>
       </Card>
 

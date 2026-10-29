@@ -616,6 +616,7 @@ impl AppState {
             recording_bytes: 0,
             screen_fallback: None,
             cam: None,
+            vcam: None,
         };
         let audio = Arc::new(AudioEngine::new());
         let mut history = std::collections::VecDeque::new();
@@ -1331,6 +1332,7 @@ impl AppState {
     pub fn status_snapshot(&self) -> EngineStatus {
         let mut status = self.status.lock().clone();
         status.cam = self.camera.status();
+        status.vcam = Some(self.vcam.status(self.config_snapshot().facecam.virtual_camera));
         if let Some(recorder) = self.recorder.lock().as_ref() {
             status.recording = true;
             let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);

@@ -11,6 +11,8 @@ fn main() {
         "cam_preview_frame",
         "set_facecam_enabled",
         "open_camera_privacy",
+        "set_virtual_camera",
+        "remove_virtual_camera",
         "bake_clip_cam",
         "bake_all_cams",
         "list_audio_processes",

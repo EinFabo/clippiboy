@@ -42,6 +42,9 @@ export const api = {
   /** The facecam's master switch alone; answers with the saved settings. */
   setFacecamEnabled: (enabled: boolean) => invoke<AppConfig>("set_facecam_enabled", { enabled }),
   openCameraPrivacy: () => invoke<void>("open_camera_privacy"),
+  /** ClippiBoy Camera's switch; turning it on may ask Windows for admin rights once. */
+  setVirtualCamera: (on: boolean) => invoke<AppConfig>("set_virtual_camera", { on }),
+  removeVirtualCamera: () => invoke<AppConfig>("remove_virtual_camera"),
   /** Whether a clip has a live share link (deleting the clip takes it down). */
   linkExists: (id: string) => invoke<boolean>("link_exists", { id }),
   listAudioProcesses: () => invoke<AudioProcess[]>("list_audio_processes"),

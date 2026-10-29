@@ -541,6 +541,46 @@ pub fn open_camera_privacy(app: tauri::AppHandle) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// ClippiBoy Camera's switch. On runs the elevated setup first when the DLL is
+/// missing or older (one UAC prompt), then lists the camera; off takes it off
+/// the list and leaves the DLL. `async`: the setup waits for the prompt.
+#[tauri::command(async)]
+pub fn set_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle, on: bool) -> Result<AppConfig> {
+    if on && crate::vcam::needs_setup(state.vcam.installed().as_deref(), vcam_protocol::DLL_VERSION) {
+        run_vcam_setup(&state, &app, "install")?;
+    }
+    let mut next = state.config_snapshot();
+    next.facecam.virtual_camera = on;
+    Ok(state.replace_config(next))
+}
+
+/// Takes ClippiBoy Camera off the machine: switch off, then the elevated
+/// uninstall.
+#[tauri::command(async)]
+pub fn remove_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<AppConfig> {
+    let mut next = state.config_snapshot();
+    next.facecam.virtual_camera = false;
+    let saved = state.replace_config(next);
+    run_vcam_setup(&state, &app, "uninstall")?;
+    Ok(saved)
+}
+
+fn run_vcam_setup(state: &AppState, app: &tauri::AppHandle, verb: &str) -> Result<()> {
+    use tauri::Manager;
+    let exe = crate::vcam::setup_exe(app.path().resource_dir().ok())
+        .ok_or_else(|| "The virtual camera's setup is missing".to_string())?;
+    let owner = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize);
+    let outcome = crate::vcam::run_setup(&exe, verb, owner);
+    state.vcam.refresh_installed();
+    match outcome? {
+        crate::vcam::SetupDone::Done => Ok(()),
+        crate::vcam::SetupDone::AfterRestart => {
+            log::info!("virtual camera {verb}: finishes after a restart");
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn tell_main(app: &tauri::AppHandle, config: &AppConfig) {
     use tauri::Emitter;
     let _ = app.emit_to("main", "config-changed", config);

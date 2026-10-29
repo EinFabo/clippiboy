@@ -1868,6 +1868,8 @@ pub fn run() {
             commands::cam_preview_frame,
             commands::set_facecam_enabled,
             commands::open_camera_privacy,
+            commands::set_virtual_camera,
+            commands::remove_virtual_camera,
             commands::bake_clip_cam,
             commands::bake_all_cams,
             commands::list_audio_processes,
