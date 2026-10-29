@@ -1435,6 +1435,7 @@ mod tests {
             edit,
             original,
             original_available: false,
+            facecam: None,
             favorite: false,
             screenshot: false,
             recording: false,

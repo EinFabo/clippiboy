@@ -65,6 +65,7 @@ fn main() {
         edit: None,
         original: None,
         original_available: false,
+        facecam: None,
         screenshot: false,
         recording: false,
         tags: Vec::new(),

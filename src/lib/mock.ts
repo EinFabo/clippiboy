@@ -192,6 +192,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: { layout: { visible: true, x: 1, y: 1, size: 0.25, shape: "rounded", mirror: false }, portrait: { split: 0.35, gameX: 0.5 }, delayMs: -40, state: "pending" },
     screenshot: false,
     recording: false,
     tags: ["ace", "clutch"],
@@ -212,6 +214,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: { layout: { visible: true, x: 0, y: 1, size: 0.25, shape: "circle", mirror: false }, portrait: { split: 0.35, gameX: 0.5 }, delayMs: -40, state: "ready" },
     screenshot: false,
     recording: false,
     tags: ["clutch"],
@@ -232,6 +236,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: false,
     recording: false,
     tags: [],
@@ -256,6 +262,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: false,
     recording: false,
     tags: [],
@@ -280,6 +288,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: false,
     recording: false,
     tags: [],
@@ -301,6 +311,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: true,
     recording: false,
     tags: [],

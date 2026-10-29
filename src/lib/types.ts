@@ -421,6 +421,17 @@ export interface Transfer {
   recording: boolean;
 }
 
+/** `pending` while the cam is being added, `ready` once the file shows it, `failed`, or `baked` in for good. */
+export type FacecamState = "pending" | "ready" | "failed" | "baked";
+
+/** A clip's cam (`model::ClipFacecam`). */
+export interface ClipFacecam {
+  layout: CamLayout;
+  portrait: PortraitLayout;
+  delayMs: number;
+  state: FacecamState;
+}
+
 export interface Clip {
   id: string;
   path: string;
@@ -453,6 +464,8 @@ export interface Clip {
    * because the individual tracks are stored in its coordinates.
    */
   originalAvailable: boolean;
+  /** The cam over the clip; `null` for a clip without one. */
+  facecam: ClipFacecam | null;
   /**
    * A still instead of a recording. Everything to do with time — the duration,
    * the trim, the individual tracks, the waveform — does not apply to it, and

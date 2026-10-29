@@ -1023,6 +1023,7 @@ fn file_clip(
         }),
         original: None,
         original_available: false,
+        facecam: None,
         screenshot: meta.screenshot,
         recording: meta.recording,
         tags: vec![crate::clips::from_tag(&from)],

@@ -825,6 +825,32 @@ pub fn clean_accent(color: Option<&str>) -> Option<String> {
         .then(|| format!("#{}", hex.to_ascii_lowercase()))
 }
 
+/// A clip's cam: where it sits, its delay, and whether the file shows it yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipFacecam {
+    #[serde(default)]
+    pub layout: CamLayout,
+    #[serde(default)]
+    pub portrait: PortraitLayout,
+    pub delay_ms: i32,
+    #[serde(default)]
+    pub state: FacecamState,
+}
+
+/// `pending` while the cam is being added, `ready` once the file shows what the
+/// layout says, `failed` when adding it failed (the file is the clean clip),
+/// `baked` when the clean picture is gone and the cam can no longer move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FacecamState {
+    #[default]
+    Pending,
+    Ready,
+    Failed,
+    Baked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
@@ -869,6 +895,9 @@ pub struct Clip {
     /// was no longer there.
     #[serde(default)]
     pub original_available: bool,
+    /// The cam laid over the clip — its own column, not part of `edit`.
+    #[serde(default)]
+    pub facecam: Option<ClipFacecam>,
     /// A still instead of a recording. Everything to do with time — trimming,
     /// the tracks, the waveform — does not apply to it.
     #[serde(default)]

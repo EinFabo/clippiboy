@@ -1485,6 +1485,7 @@ impl AppState {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             screenshot: false,
             recording: false,
             tags: Vec::new(),
@@ -1572,6 +1573,7 @@ impl AppState {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             screenshot: true,
             recording: false,
             tags: Vec::new(),
@@ -1816,6 +1818,7 @@ impl AppState {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             screenshot: false,
             recording: true,
             // Not in the library yet — the caller stores them with the clip.

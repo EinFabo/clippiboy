@@ -98,6 +98,9 @@ impl Library {
         // Started and stopped by hand. Likewise: whatever is already there was
         // cut out of the buffer.
         self.add_column("recording", "INTEGER NOT NULL DEFAULT 0")?;
+        // The cam over the clip, its own column: three places rebuild `edit`
+        // from scratch and could drop it by accident.
+        self.add_column("facecam", "TEXT")?;
         Ok(())
     }
 
@@ -129,8 +132,8 @@ impl Library {
             "INSERT OR REPLACE INTO clips
              (id, path, created_at, duration_ms, game, width, height, size_bytes,
               thumb_path, title, description, edit, original, favorite, screenshot,
-              recording)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              recording, facecam)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 clip.id,
                 clip.path,
@@ -148,6 +151,7 @@ impl Library {
                 clip.favorite,
                 clip.screenshot,
                 clip.recording,
+                encode_facecam(clip.facecam.as_ref()),
             ],
         )?;
         for tag in kept {
@@ -340,6 +344,15 @@ impl Library {
         Ok(())
     }
 
+    /// The clip's cam; `None` takes it off the row.
+    pub fn set_facecam(&self, id: &str, facecam: Option<&crate::model::ClipFacecam>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET facecam = ?2 WHERE id = ?1",
+            params![id, encode_facecam(facecam)],
+        )?;
+        Ok(())
+    }
+
     /// Note the originals store. `None` means there is no original any more;
     /// the clip is (again, or still) the whole recording.
     pub fn set_original(&self, id: &str, original: Option<&ClipOriginal>) -> rusqlite::Result<()> {
@@ -426,6 +439,21 @@ fn decode_edit(raw: Option<String>) -> Option<ClipEdit> {
     }
 }
 
+fn encode_facecam(facecam: Option<&crate::model::ClipFacecam>) -> Option<String> {
+    facecam.and_then(|value| serde_json::to_string(value).ok())
+}
+
+/// An unreadable entry costs the clip its cam data, never the gallery.
+fn decode_facecam(raw: Option<String>) -> Option<crate::model::ClipFacecam> {
+    match serde_json::from_str(&raw?) {
+        Ok(facecam) => Some(facecam),
+        Err(err) => {
+            log::warn!("facecam entry unreadable ({err}) — discarding it");
+            None
+        }
+    }
+}
+
 /// The originals store as JSON.
 fn encode_original(original: Option<&ClipOriginal>) -> Option<String> {
     original.and_then(|value| serde_json::to_string(value).ok())
@@ -464,8 +492,8 @@ pub fn remove_file_patiently(path: &Path, attempts: u32) -> std::io::Result<()> 
 }
 
 const CLIP_COLUMNS: &str = "SELECT id, path, created_at, duration_ms, game, width, height,
-    size_bytes, thumb_path, title, description, edit, original, favorite, screenshot, recording
-    FROM clips";
+    size_bytes, thumb_path, title, description, edit, original, favorite, screenshot, recording,
+    facecam FROM clips";
 
 /// One `CLIP_COLUMNS` row as a clip, tags left empty. Shared by `list` and
 /// `get`, so the two cannot drift apart. It costs a file check per row
@@ -493,6 +521,7 @@ fn row_to_clip(row: &rusqlite::Row) -> rusqlite::Result<Clip> {
         favorite: row.get(13)?,
         screenshot: row.get(14)?,
         recording: row.get(15)?,
+        facecam: decode_facecam(row.get::<_, Option<String>>(16)?),
         // Filled in by the caller, from the table of their own.
         tags: Vec::new(),
     })
@@ -530,6 +559,7 @@ mod tests {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             favorite: false,
             screenshot: false,
             recording: false,
@@ -661,6 +691,44 @@ mod tests {
 
         lib.set_original("a", None).unwrap();
         assert!(lib.get("a").unwrap().unwrap().original.is_none());
+    }
+
+    fn sample_facecam() -> crate::model::ClipFacecam {
+        crate::model::ClipFacecam {
+            layout: crate::model::CamLayout { x: 0.0, ..Default::default() },
+            portrait: Default::default(),
+            delay_ms: -80,
+            state: crate::model::FacecamState::Pending,
+        }
+    }
+
+    #[test]
+    fn the_facecam_survives_the_roundtrip() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        assert!(lib.get("a").unwrap().unwrap().facecam.is_none());
+        lib.set_facecam("a", Some(&sample_facecam())).unwrap();
+        assert_eq!(lib.get("a").unwrap().unwrap().facecam, Some(sample_facecam()));
+        lib.set_facecam("a", None).unwrap();
+        assert!(lib.get("a").unwrap().unwrap().facecam.is_none());
+    }
+
+    /// `insert` is `INSERT OR REPLACE`: a column missing from its list would be
+    /// wiped by every re-insert.
+    #[test]
+    fn the_facecam_column_survives_a_reinsert() {
+        let lib = Library::in_memory().unwrap();
+        let mut with_cam = clip("a", 1);
+        with_cam.facecam = Some(sample_facecam());
+        lib.insert(&with_cam).unwrap();
+        let back = lib.get("a").unwrap().unwrap();
+        lib.insert(&back).unwrap();
+        assert_eq!(lib.get("a").unwrap().unwrap().facecam, Some(sample_facecam()));
+    }
+
+    #[test]
+    fn a_broken_facecam_entry_is_dropped_not_fatal() {
+        assert!(decode_facecam(Some("{broken".into())).is_none());
     }
 
     /// Otherwise the gallery still shows the old length after a trim.

@@ -1058,6 +1058,7 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
         edit: None,
         original: None,
         original_available: false,
+        facecam: None,
         screenshot: false,
         recording: false,
         tags: Vec::new(),
