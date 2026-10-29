@@ -72,6 +72,11 @@ impl Recipe {
     pub fn scales(&self, source_height: u32) -> bool {
         self.height < source_height
     }
+
+    /// The same for a frame of either orientation.
+    pub fn scales_frame(&self, frame: (u32, u32)) -> bool {
+        self.width < frame.0 || self.height < frame.1
+    }
 }
 
 /// Video bitrate left over for a target, in kbit/s. The clip's real length in
@@ -102,11 +107,14 @@ pub fn recipe(target: &Target) -> Recipe {
         budget = video_budget(target.bytes, target.duration_ms, audio_kbps);
     }
 
-    // Never upscale: the source height is the ceiling and the first try.
-    let mut height = target.height;
-    for step in std::iter::once(target.height).chain(HEIGHTS.into_iter().filter(|h| *h < target.height)) {
-        height = step;
-        let wants = crate::encode::bitrate_for(width_for(target, step), step, 30);
+    // Steps on the short side — the height of a landscape frame, the width of
+    // a 9:16 one. Never upscale: the source's short side is the ceiling and
+    // the first try.
+    let short = target.width.min(target.height);
+    let mut size = (target.width, target.height);
+    for step in std::iter::once(short).chain(HEIGHTS.into_iter().filter(|h| *h < short)) {
+        size = size_for(target, step);
+        let wants = crate::encode::bitrate_for(size.0, size.1, 30);
         if budget >= wants / STARVED {
             break;
         }
@@ -116,8 +124,8 @@ pub fn recipe(target: &Target) -> Recipe {
         // A floor, or ffmpeg is handed a bitrate it cannot encode at all.
         video_kbps: budget.max(VIDEO_FLOOR_KBPS),
         audio_kbps,
-        width: width_for(target, height),
-        height,
+        width: size.0,
+        height: size.1,
         too_long: budget < VIDEO_FLOOR_KBPS,
     }
 }
@@ -130,6 +138,17 @@ pub fn megabytes(bytes: u64) -> String {
         format!("{}", tenths / 10)
     } else {
         format!("{}.{}", tenths / 10, tenths % 10)
+    }
+}
+
+/// The size whose short side is `short`, keeping the source's shape, the long
+/// side rounded down even — H.264 will not take an odd one.
+fn size_for(target: &Target, short: u32) -> (u32, u32) {
+    if target.width < target.height {
+        let height = (target.height as u64 * short as u64 / target.width.max(1) as u64).max(2) as u32 & !1;
+        (short, height)
+    } else {
+        (width_for(target, short), short)
     }
 }
 
@@ -170,9 +189,14 @@ pub fn arguments(
     args.extend(["-map", "0:v:0", "-map", "0:a:0?"].map(String::from));
 
     if recipe.scales(source_height) {
-        // `-2` keeps the aspect ratio and lands on an even width by itself.
+        // `-2` keeps the aspect ratio and lands on an even side by itself;
+        // a 9:16 frame is scaled by its width, its short side.
         args.push("-vf".into());
-        args.push(format!("scale=-2:{}", recipe.height));
+        args.push(if recipe.width < recipe.height {
+            format!("scale={}:-2", recipe.width)
+        } else {
+            format!("scale=-2:{}", recipe.height)
+        });
     }
 
     args.extend(video_args(encoder, recipe.video_kbps));
@@ -239,6 +263,20 @@ mod tests {
 
     /// The common case: a short highlight at the Nitro limit has room to spare,
     /// so the picture is left alone.
+    /// A 9:16 export steps on its short side, the width: 1080×1920, then
+    /// 720×1280, then 480×852 — never 608×1080 from stepping on the height.
+    #[test]
+    fn a_portrait_export_is_never_squashed() {
+        let at = |mb: u64| recipe(&Target { bytes: mb * 1024 * 1024, duration_ms: 30_000, width: 1080, height: 1920 });
+        let roomy = at(100);
+        assert_eq!((roomy.width, roomy.height), (1080, 1920));
+        let tighter = at(8);
+        assert_eq!((tighter.width, tighter.height), (720, 1280));
+        let starved = at(3);
+        assert_eq!((starved.width, starved.height), (480, 852));
+        assert!(starved.scales(1920) && starved.scales_frame((1080, 1920)));
+    }
+
     #[test]
     fn a_short_clip_at_25_mb_stays_at_its_size() {
         let plan = recipe(&target(25 * MB, 30_000, 1920, 1080));
@@ -418,8 +456,17 @@ mod tests {
     }
 
     #[test]
-    fn a_portrait_clip_on_a_thin_budget_goes_to_480() {
+    fn a_portrait_export_is_scaled_by_its_width() {
         let plan = recipe(&target((6.1 * MB as f64) as u64, 60_000, 1080, 1920));
-        assert_eq!((plan.width, plan.height), (270, 480));
+        let args = arguments(Path::new("in.mp4"), Path::new("out.mp4"), &plan, 1920, EncoderId::X264);
+        assert!(args.windows(2).any(|w| w == ["-vf", "scale=480:-2"]), "{args:?}");
+    }
+
+    /// The short side steps (spec 3.5): 480 wide, not 480 high — 270×480
+    /// was the squashed size this used to give.
+    #[test]
+    fn a_portrait_clip_on_a_thin_budget_goes_to_480_wide() {
+        let plan = recipe(&target((6.1 * MB as f64) as u64, 60_000, 1080, 1920));
+        assert_eq!((plan.width, plan.height), (480, 852));
     }
 }

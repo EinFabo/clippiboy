@@ -7,9 +7,16 @@ test("the bitrate mirror clamps like the core", () => {
   assert.equal(bitrateFor(404, 720, 30), 2000);
   assert.equal(bitrateFor(1920, 1080, 60), 19000);
 });
-test("a portrait clip on a thin budget goes to 480, as the core does", () => {
+test("a portrait clip on a thin budget goes to 480 wide, as the core does", () => {
   const plan = planExport({ durationMs: 60_000, width: 1080, height: 1920 }, Math.floor(6.1 * MB));
-  assert.deepEqual([plan.width, plan.height], [270, 480]);
+  assert.deepEqual([plan.width, plan.height], [480, 852]);
+});
+// The core's `a_portrait_export_is_never_squashed`, same vectors.
+test("a portrait export is never squashed", () => {
+  const at = (mb: number) => planExport({ durationMs: 30_000, width: 1080, height: 1920 }, mb * MB);
+  assert.deepEqual([at(100).width, at(100).height], [1080, 1920]);
+  assert.deepEqual([at(8).width, at(8).height], [720, 1280]);
+  assert.deepEqual([at(3).width, at(3).height], [480, 852]);
 });
 test("a 1440p clip with room keeps its height", () =>
   assert.equal(planExport({ durationMs: 30_000, width: 2560, height: 1440 }, 100 * MB).height, 1440));
