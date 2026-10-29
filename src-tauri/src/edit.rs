@@ -1605,6 +1605,8 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
                         log::info!("note for '{}' reconstructed", clip.id);
                         let _ = write_note(&clip.id, original);
                     }
+                    // A facecam clip's clean picture has no note by design.
+                    None if crate::facecam::has_store(&clip.id) => {}
                     None => {
                         log::info!(
                             "original of '{}' with nothing to tie it to — cleared away",
