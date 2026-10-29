@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   CameraDevice,
+  FacecamView,
   AppConfig,
   AudioDevice,
   AudioProcess,
@@ -205,6 +206,8 @@ export const api = {
     invoke<Clip>("discard_clip_original", { id }),
   /** Bakes a clip's cam in for good; the cam can no longer be moved. */
   bakeClipCam: (id: string) => invoke<Clip>("bake_clip_cam", { id }),
+  /** What the player needs to show the clip's camera movable; null when it cannot move. */
+  clipFacecamView: (id: string) => invoke<FacecamView | null>("clip_facecam_view", { id }),
   /** Bakes every clip's cam; returns what was freed. */
   bakeAllCams: () => invoke<TrimOriginals>("bake_all_cams"),
   /** What the originals, tracks and thumbnails occupy in the app data folder. */

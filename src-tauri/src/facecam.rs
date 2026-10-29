@@ -209,6 +209,76 @@ pub fn write_phase_one(clip_id: &str, out: &CamCutOut, clip_length_us: u64, game
     result
 }
 
+/// What the player needs to show a clip's camera movable: the clean picture,
+/// the cam, and where each sits against the clip file's own time
+/// (element time = clip time + lead). Asked for on demand when a clip opens —
+/// it reads the store, which a list of every clip must not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FacecamView {
+    pub clean_path: String,
+    pub cam_path: String,
+    pub cam_width: u32,
+    pub cam_height: u32,
+    pub clean_lead_ms: i64,
+    pub cam_lead_ms: i64,
+    pub gaps_ms: Vec<(u64, u64)>,
+    /// The clip file has the cam in it.
+    pub shows_cam: bool,
+}
+
+/// Does the clip file show the cam? Its facts say what went in; the row says
+/// only what is wanted.
+pub fn file_shows_cam(clip_id: &str) -> bool {
+    read_facts(clip_id).is_some_and(|facts| shows(&facts))
+}
+
+fn shows(facts: &FacecamFacts) -> bool {
+    facts.applied.as_ref().is_some_and(|a| a.layout.visible)
+}
+
+/// The view of `clip`, from its facts and whether a clean copy is stored.
+/// `None` without a cam, without a store, once baked, or when the file has
+/// the cam in it and no clean copy is left to show.
+pub fn view_from(clip: &crate::model::Clip, facts: Option<&FacecamFacts>, clean_stored: bool) -> Option<FacecamView> {
+    let cam = clip.facecam.as_ref()?;
+    if cam.state == crate::model::FacecamState::Baked {
+        return None;
+    }
+    let facts = facts?;
+    let shows_cam = shows(facts);
+    let start_ms = clip.original.map(|o| o.start_ms).unwrap_or(0);
+    let (clean_path, clean_lead_ms) = if clean_stored {
+        (crate::edit::video_path(&clip.id).to_string_lossy().into_owned(), start_ms as i64)
+    } else if !shows_cam {
+        (clip.path.clone(), 0)
+    } else {
+        return None;
+    };
+    // The inverse of `composite::cam_timing`: the composite shows cam time c
+    // at clip time c - seek + shift, so c = t + e - video_start.
+    let d = facts.cam_offset_us + cam.delay_ms as i64 * 1000;
+    let e = start_ms as i64 * 1000 - d;
+    let cam_lead_ms = ((e - facts.video_start_us.unwrap_or(0)) as f64 / 1000.0).round() as i64;
+    Some(FacecamView {
+        clean_path,
+        cam_path: cam_path(&clip.id).to_string_lossy().into_owned(),
+        cam_width: facts.width,
+        cam_height: facts.height,
+        clean_lead_ms,
+        cam_lead_ms,
+        gaps_ms: facts.gaps_ms.clone(),
+        shows_cam,
+    })
+}
+
+/// [`view_from`] off the disk.
+pub fn view_of(clip: &crate::model::Clip) -> Option<FacecamView> {
+    clip.facecam.as_ref()?;
+    let facts = read_facts(&clip.id)?;
+    view_from(clip, Some(&facts), crate::edit::video_path(&clip.id).is_file())
+}
+
 pub fn cam_path(clip_id: &str) -> PathBuf {
     crate::edit::dir(clip_id).join("cam.mp4")
 }
@@ -396,6 +466,72 @@ mod tests {
             applying: None,
             swap_failing_since_ms: None,
         }
+    }
+
+    fn facecam_clip(state: crate::model::FacecamState, start_ms: Option<u64>) -> crate::model::Clip {
+        let mut clip = crate::edit::tests::plain_clip(None, None);
+        clip.facecam = Some(crate::model::ClipFacecam {
+            layout: crate::model::CamLayout::default(),
+            portrait: Default::default(),
+            delay_ms: -40,
+            state,
+        });
+        clip.original = start_ms.map(|start| crate::model::ClipOriginal { duration_ms: 60_000, start_ms: start, end_ms: start + 30_000 });
+        clip
+    }
+
+    fn shown(facts: FacecamFacts) -> FacecamFacts {
+        let layout = crate::model::CamLayout::default();
+        FacecamFacts {
+            applied: Some(FacecamApplied { layout, delay_ms: -40, start_ms: 0, length_ms: 30_000, size_bytes: 1 }),
+            ..facts
+        }
+    }
+
+    #[test]
+    fn the_view_takes_its_leads_from_cam_timing() {
+        let facts = FacecamFacts { cam_offset_us: 120_000, video_start_us: Some(21_333), ..shown(facts()) };
+        let clip = facecam_clip(crate::model::FacecamState::Ready, Some(5_000));
+        let view = view_from(&clip, Some(&facts), true).expect("a view");
+        let timing = crate::composite::cam_timing(120_000, -40, 21_333, 5_000, 30_000);
+        for t in [0.0, 3.0] {
+            // The composite shows cam time c at clip time c - seek + shift.
+            let c = t + timing.seek_s.unwrap_or(0.0) - timing.shift_s;
+            let ours = t + view.cam_lead_ms as f64 / 1000.0;
+            assert!((ours - c).abs() < 0.001, "t={t}: {ours} vs {c}");
+        }
+        assert_eq!(view.clean_lead_ms, 5_000, "the stored clean picture is the whole recording");
+        assert!(view.shows_cam);
+    }
+
+    #[test]
+    fn a_clip_without_facecam_reads_as_none() {
+        let mut clip = facecam_clip(crate::model::FacecamState::Ready, None);
+        clip.facecam = None;
+        assert_eq!(view_from(&clip, Some(&shown(facts())), true), None);
+    }
+
+    #[test]
+    fn the_view_is_none_once_the_store_is_gone() {
+        let clip = facecam_clip(crate::model::FacecamState::Ready, None);
+        assert_eq!(view_from(&clip, None, true), None);
+    }
+
+    #[test]
+    fn a_baked_clip_has_no_view() {
+        let clip = facecam_clip(crate::model::FacecamState::Baked, None);
+        assert_eq!(view_from(&clip, Some(&shown(facts())), true), None);
+    }
+
+    #[test]
+    fn a_clip_saved_with_the_cam_hidden_plays_its_own_file_as_the_clean_picture() {
+        let clip = facecam_clip(crate::model::FacecamState::Ready, None);
+        let view = view_from(&clip, Some(&facts()), false).expect("a view");
+        assert_eq!(view.clean_path, clip.path);
+        assert_eq!(view.clean_lead_ms, 0);
+        assert!(!view.shows_cam);
+        // A file with the cam in it and no clean copy: nothing clean to show.
+        assert_eq!(view_from(&clip, Some(&shown(facts())), false), None);
     }
 
     #[test]

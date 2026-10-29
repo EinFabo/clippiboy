@@ -1649,7 +1649,7 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1859,7 +1859,7 @@ mod tests {
 
     /// The most common case: only the sliders were moved. Then the video stays
     /// untouched and the file is rewritten in seconds.
-    fn plain_clip(edit: Option<ClipEdit>, original: Option<ClipOriginal>) -> Clip {
+    pub(crate) fn plain_clip(edit: Option<ClipEdit>, original: Option<ClipOriginal>) -> Clip {
         Clip {
             // No originals folder exists under this id.
             id: "audio-untouched-test-clip".into(),

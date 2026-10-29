@@ -1605,6 +1605,14 @@ fn note_baked(state: &State<'_, AppState>, clip: &Clip) -> Result<()> {
     with_library(state, |lib| lib.set_facecam(&clip.id, next.as_ref()).map_err(|e| e.to_string()))
 }
 
+/// What the player needs to show a clip's camera movable; `None` for a clip
+/// whose camera cannot move (none, baked, store gone).
+#[tauri::command(async)]
+pub fn clip_facecam_view(state: State<'_, AppState>, id: String) -> Result<Option<crate::facecam::FacecamView>> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?;
+    Ok(clip.as_ref().and_then(crate::facecam::view_of))
+}
+
 /// Bakes one clip's cam in for good: its clean picture and cam are freed, the
 /// cam can no longer be moved.
 #[tauri::command(async)]

@@ -1871,6 +1871,7 @@ pub fn run() {
             commands::set_virtual_camera,
             commands::remove_virtual_camera,
             commands::bake_clip_cam,
+            commands::clip_facecam_view,
             commands::bake_all_cams,
             commands::list_audio_processes,
             commands::list_capture_targets,

@@ -297,6 +297,20 @@ export type CamState =
   | { kind: "noCamera" }
   | { kind: "failed"; message: string };
 
+/** What the player needs to show a clip's camera movable (`facecam::FacecamView`).
+    Element time = clip time + lead. */
+export interface FacecamView {
+  cleanPath: string;
+  camPath: string;
+  camWidth: number;
+  camHeight: number;
+  cleanLeadMs: number;
+  camLeadMs: number;
+  gapsMs: [number, number][];
+  /** The clip file has the camera in it. */
+  showsCam: boolean;
+}
+
 /** ClippiBoy Camera, the virtual camera (`vcam::VcamStatus`). */
 export type VcamStatus =
   | { kind: "notInstalled" }
