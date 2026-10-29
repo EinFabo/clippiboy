@@ -460,6 +460,12 @@ impl AutoBuffer {
         }
     }
 
+    /// Has the secure desktop been up for the buffer's ten seconds? Also while
+    /// no buffer runs: the cam stops behind a lock screen during a recording.
+    pub fn screen_locked(&self) -> bool {
+        self.locked.load(std::sync::atomic::Ordering::SeqCst) >= LOCK_POLLS
+    }
+
     /// One round for running without "only in game": the buffer should run as
     /// long as nobody has switched it off by hand.
     ///
@@ -2254,6 +2260,19 @@ mod tests {
     /// machine was still on the lock screen. WGC never delivers a frame there
     /// and never says so, the clock keeps repeating the one it had, and every
     /// clip afterwards was ninety seconds of lock screen.
+    #[test]
+    fn the_cam_lock_follows_the_buffers_ten_seconds() {
+        let auto = AutoBuffer::default();
+        for _ in 0..4 {
+            auto.poll_lock(true, false);
+            assert!(!auto.screen_locked());
+        }
+        auto.poll_lock(true, false);
+        assert!(auto.screen_locked());
+        auto.poll_lock(false, false);
+        assert!(!auto.screen_locked());
+    }
+
     #[test]
     fn a_locked_screen_stops_the_buffer() {
         let auto = AutoBuffer::default();

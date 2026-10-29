@@ -301,6 +301,11 @@ impl ReplayBuffer {
     }
 
     /// The latest pts the ring has seen, in µs.
+    /// The pts of the frontmost packet.
+    pub fn oldest_pts(&self) -> Option<i64> {
+        self.packets.front().map(|p| p.pts_us)
+    }
+
     pub fn newest_pts(&self) -> i64 {
         self.newest_pts
     }

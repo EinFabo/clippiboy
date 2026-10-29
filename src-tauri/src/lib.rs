@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod buffer;
 pub mod camera;
+pub mod camtrack;
 pub mod capture;
 pub mod clipboard;
 pub mod clips;
