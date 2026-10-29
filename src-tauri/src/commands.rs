@@ -551,7 +551,11 @@ pub fn set_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle, on:
     }
     let mut next = state.config_snapshot();
     next.facecam.virtual_camera = on;
-    Ok(state.replace_config(next))
+    let saved = state.replace_config(next);
+    // An update leaves the switch as it was, so the config change alone would
+    // not list the camera again.
+    state.reconcile_vcam();
+    Ok(saved)
 }
 
 /// Takes ClippiBoy Camera off the machine: switch off, then the elevated
