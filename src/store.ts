@@ -10,6 +10,7 @@ import type {
   AudioDevice,
   CameraDevice,
   CamStatus,
+  FacecamEdit,
   VcamStatus,
   AudioProcess,
   AudioSource,
@@ -151,6 +152,7 @@ interface EngineState {
     startMs: number,
     endMs: number,
     tracks: TrackMix[],
+    facecam?: FacecamEdit | null,
   ) => Promise<Clip | undefined>;
   /** Undo the trim and pull the whole recording back. */
   restoreClipOriginal: (id: string) => Promise<void>;
@@ -760,13 +762,13 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
   },
 
-  async applyClipEdit(id, startMs, endMs, tracks) {
+  async applyClipEdit(id, startMs, endMs, tracks, facecam = null) {
     if (!inTauri) return;
     // Deliberately without an optimistic update: a file is rewritten here. If
     // that fails — because it is still open, say — the UI must not claim it was
     // saved.
     try {
-      const clip = await api.applyClipEdit(id, startMs, endMs, tracks);
+      const clip = await api.applyClipEdit(id, startMs, endMs, tracks, facecam);
       set((st) => ({ clips: st.clips.map((c) => (c.id === id ? clip : c)) }));
       return clip;
     } catch (err) {

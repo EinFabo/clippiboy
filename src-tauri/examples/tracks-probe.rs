@@ -116,7 +116,7 @@ fn main() {
     println!("\nSaving with mixed levels:");
     let whole = edit::Trim::whole(clip.duration_ms);
     let snapshot = Clip::clone(&clip);
-    match edit::apply(&clip.id, move || Ok(snapshot), whole, &mix, EncoderId::X264, 40_000, |_| {}) {
+    match edit::apply(&clip.id, move || Ok(snapshot), whole, &mix, None, EncoderId::X264, 40_000, |_| {}) {
         Ok((_, applied)) => println!(
             "  written, {:.1} MB",
             applied.size_bytes as f64 / 1_048_576.0

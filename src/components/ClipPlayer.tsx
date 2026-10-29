@@ -716,7 +716,9 @@ export function ClipPlayer({
     element?.removeAttribute("src");
     element?.load();
     try {
-      const written = await applyClipEdit(clip.id, current.startMs, current.endMs, current.tracks);
+      const facecam =
+        camView && clip.facecam && camDraft ? { layout: camDraft, delayMs: clip.facecam.delayMs } : null;
+      const written = await applyClipEdit(clip.id, current.startMs, current.endMs, current.tracks, facecam);
       // A mix baked into the file (a single track without its untouched copy)
       // is stored as level zero: the sliders follow, or the next save would
       // apply the same −6 dB a second time.

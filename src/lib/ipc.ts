@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   CameraDevice,
+  FacecamEdit,
   FacecamView,
   AppConfig,
   AudioDevice,
@@ -194,7 +195,9 @@ export const api = {
     startMs: number,
     endMs: number,
     tracks: TrackMix[],
-  ) => invoke<Clip>("apply_clip_edit", { id, startMs, endMs, tracks }),
+    /** The camera the editor asks for; `null` leaves it as it is. */
+    facecam: FacecamEdit | null = null,
+  ) => invoke<Clip>("apply_clip_edit", { id, startMs, endMs, tracks, facecam }),
   /** Undo the trim: the whole recording back, keep the mix. */
   restoreClipOriginal: (id: string) =>
     invoke<Clip>("restore_clip_original", { id }),

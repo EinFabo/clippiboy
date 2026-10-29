@@ -1100,6 +1100,7 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
         move || Ok(snapshot),
         whole,
         &mix,
+        None,
         EncoderId::X264,
         clippiboy_lib::model::default_quality(),
         |_| {},

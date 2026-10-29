@@ -297,6 +297,12 @@ export type CamState =
   | { kind: "noCamera" }
   | { kind: "failed"; message: string };
 
+/** The camera a save in the editor asks for (`model::FacecamEdit`). */
+export interface FacecamEdit {
+  layout: CamLayout;
+  delayMs: number;
+}
+
 /** What the player needs to show a clip's camera movable (`facecam::FacecamView`).
     Element time = clip time + lead. */
 export interface FacecamView {

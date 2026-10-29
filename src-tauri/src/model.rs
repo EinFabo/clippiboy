@@ -838,6 +838,14 @@ pub struct ClipFacecam {
     pub state: FacecamState,
 }
 
+/// The camera a save in the editor asks for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FacecamEdit {
+    pub layout: CamLayout,
+    pub delay_ms: i32,
+}
+
 /// `pending` while the cam is being added, `ready` once the file shows what the
 /// layout says, `failed` when adding it failed (the file is the clean clip),
 /// `baked` when the clean picture is gone and the cam can no longer move.

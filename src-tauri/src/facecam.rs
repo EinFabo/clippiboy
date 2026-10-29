@@ -311,7 +311,7 @@ pub fn write_facts(clip_id: &str, facts: &FacecamFacts) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::buffer::EncodedPacket;
     use crate::camera::grid::pts_of;
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(saved_delay_ms(-300, ClockKind::Arrival), -300);
     }
 
-    fn facts() -> FacecamFacts {
+    pub(crate) fn facts() -> FacecamFacts {
         FacecamFacts {
             version: 1,
             width: 1280,

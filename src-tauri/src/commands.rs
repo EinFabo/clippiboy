@@ -1461,6 +1461,7 @@ pub fn apply_clip_edit(
     start_ms: u64,
     end_ms: u64,
     tracks: Vec<TrackMix>,
+    facecam: Option<crate::model::FacecamEdit>,
 ) -> Result<Clip> {
     // Before the clip's lock: a cam still being added to this clip finishes
     // first, and its job needs that lock.
@@ -1483,6 +1484,7 @@ pub fn apply_clip_edit(
         load_editable(&state, &id, &loaded),
         trim,
         &tracks,
+        facecam.as_ref(),
         encoder,
         quality,
         progress(&app, &id),
@@ -2025,8 +2027,10 @@ fn store(
     };
     let clip = &clip;
 
-    // The cam was laid over the clean picture: the file shows it now.
-    if applied.composited {
+    // A save that asked for a camera: the row follows the file.
+    if let Some(cam) = &applied.facecam {
+        let _ = with_library(state, |lib| lib.set_facecam(&clip.id, Some(cam)).map_err(|e| e.to_string()));
+    } else if applied.composited {
         if let Some(cam) = clip.facecam.clone() {
             let ready = crate::model::ClipFacecam { state: crate::model::FacecamState::Ready, ..cam };
             let _ = with_library(state, |lib| lib.set_facecam(&clip.id, Some(&ready)).map_err(|e| e.to_string()));

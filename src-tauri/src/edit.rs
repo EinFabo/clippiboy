@@ -408,10 +408,33 @@ pub enum VideoSource {
 /// What the cam asks of an edit. `Shown` when the clip has a facecam store, a
 /// visible layout and a clean picture; `differs` when the file does not show
 /// the stored layout and delay yet (a cam that failed, or one moved since).
+/// `Hidden` when the layout hides a cam the file shows: the picture comes
+/// from the clean copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CamPart {
     None,
     Shown { differs: bool },
+    Hidden,
+}
+
+/// Within this share of the frame two placements are the same: the editor's
+/// "unsaved" uses it too.
+const LAYOUT_TOLERANCE: f32 = 0.002;
+
+pub fn same_layout(a: &crate::model::CamLayout, b: &crate::model::CamLayout) -> bool {
+    let near = |x: f32, y: f32| (x - y).abs() <= LAYOUT_TOLERANCE;
+    a.visible == b.visible && a.shape == b.shape && a.mirror == b.mirror && near(a.x, b.x) && near(a.y, b.y) && near(a.size, b.size)
+}
+
+/// The row as a save in the editor leaves it: the wanted place and delay,
+/// and `ready` — the file shows what the layout says.
+pub fn facecam_after(found: &crate::model::ClipFacecam, wanted: &crate::model::FacecamEdit) -> crate::model::ClipFacecam {
+    crate::model::ClipFacecam {
+        layout: wanted.layout,
+        delay_ms: wanted.delay_ms,
+        state: crate::model::FacecamState::Ready,
+        portrait: found.portrait,
+    }
 }
 
 /// The cam's side of an edit that lays it over the clean picture.
@@ -432,18 +455,36 @@ pub struct CamInputs {
 
 /// The cam part of `clip`, read off its row and its store.
 pub fn cam_part(clip: &Clip) -> CamPart {
+    let facts = clip.facecam.as_ref().and_then(|_| crate::facecam::read_facts(&clip.id));
+    cam_part_from(clip.facecam.as_ref(), facts.as_ref(), video_path(&clip.id).is_file())
+}
+
+/// [`cam_part`] from the row (what is wanted), the facts (what the file
+/// shows) and whether a clean copy is stored. The clip file is the clean
+/// picture itself while it shows no cam: a cam that failed, or one hidden at
+/// the save.
+pub fn cam_part_from(
+    cam: Option<&crate::model::ClipFacecam>,
+    facts: Option<&crate::facecam::FacecamFacts>,
+    clean_stored: bool,
+) -> CamPart {
     use crate::model::FacecamState;
-    let Some(cam) = clip.facecam.as_ref() else { return CamPart::None };
-    if !cam.layout.visible || !matches!(cam.state, FacecamState::Ready | FacecamState::Failed) {
+    let (Some(cam), Some(facts)) = (cam, facts) else { return CamPart::None };
+    if !matches!(cam.state, FacecamState::Ready | FacecamState::Failed) {
         return CamPart::None;
     }
-    let Some(facts) = crate::facecam::read_facts(&clip.id) else { return CamPart::None };
-    let failed = cam.state == FacecamState::Failed;
-    if !video_path(&clip.id).is_file() && !failed {
+    let file_shows = facts.applied.as_ref().is_some_and(|a| a.layout.visible);
+    if !cam.layout.visible {
+        return if file_shows && clean_stored { CamPart::Hidden } else { CamPart::None };
+    }
+    if !clean_stored && file_shows {
         return CamPart::None;
     }
-    let shows = facts.applied.as_ref().is_some_and(|a| a.layout == cam.layout && a.delay_ms == cam.delay_ms);
-    CamPart::Shown { differs: failed || !shows }
+    let shows = facts
+        .applied
+        .as_ref()
+        .is_some_and(|a| a.layout.visible && same_layout(&a.layout, &cam.layout) && a.delay_ms == cam.delay_ms);
+    CamPart::Shown { differs: cam.state == FacecamState::Failed || !shows }
 }
 
 /// What the single ffmpeg run should do. Pure data, so the decision can be
@@ -515,6 +556,9 @@ pub fn plan(
     // baked in a second time.
     let (video, video_start_ms, reencode) = match cam {
         CamPart::Shown { differs } if cuts_front || differs => (VideoSource::CleanWithCam, absolute_start, true),
+        // The file has the cam in it: the picture comes from the clean copy —
+        // copied while it starts where the recording does, cut otherwise.
+        CamPart::Hidden => (VideoSource::Original, absolute_start, absolute_start > 0),
         _ => (video, video_start_ms, cuts_front),
     };
 
@@ -556,6 +600,8 @@ pub struct Applied {
     pub mix_baked: bool,
     /// The cam was laid over the clean picture: the file shows it now.
     pub composited: bool,
+    /// The row's camera after a save that asked for one.
+    pub facecam: Option<crate::model::ClipFacecam>,
 }
 
 /// Rewrite the clip: apply the mix, carry out the trim, save the original.
@@ -566,16 +612,30 @@ pub struct Applied {
 /// itself (see [`run`]), and the cut is planned on what it returns. Read any
 /// earlier, an edit queued behind another planned on the row from before that
 /// one — and cut the already trimmed file at the old offsets.
+///
+/// `facecam` is the camera the editor asks for: the run plans on the row with
+/// it in place, so the cam goes where it stands now; the row itself is written
+/// by the caller, from `Applied::facecam`, once the file is.
 pub fn apply(
     clip_id: &str,
     load: impl FnOnce() -> Result<Clip, String>,
     trim: Trim,
     mix: &[TrackMix],
+    facecam: Option<&crate::model::FacecamEdit>,
     encoder: EncoderId,
     quality: u32,
     on_progress: impl Fn(f32),
 ) -> Result<(Clip, Applied), String> {
-    run(
+    let load = move || {
+        load().map(|mut clip| {
+            if let (Some(cam), Some(wanted)) = (clip.facecam.as_mut(), facecam) {
+                cam.layout = wanted.layout;
+                cam.delay_ms = wanted.delay_ms;
+            }
+            clip
+        })
+    };
+    let ran = run(
         clip_id,
         load,
         |clip| {
@@ -584,14 +644,18 @@ pub fn apply(
             let cam = cam_part(clip);
             // A facecam clip's clean picture is an original to encode from,
             // trim note or not.
-            let clean = matches!(cam, CamPart::Shown { .. }) && video_path(&clip.id).is_file();
+            let clean = matches!(cam, CamPart::Shown { .. } | CamPart::Hidden) && video_path(&clip.id).is_file();
             Ok(plan(clip.original.as_ref(), has_original(&clip.id) || clean, clip.duration_ms, trim, cam))
         },
         Some(mix),
         encoder,
         quality,
         &on_progress,
-    )
+    );
+    ran.map(|(clip, mut applied)| {
+        applied.facecam = facecam.and_then(|wanted| clip.facecam.as_ref().map(|found| facecam_after(found, wanted)));
+        (clip, applied)
+    })
 }
 
 /// Undo the trim: pull the whole recording back, keep the mix — `mix`, or
@@ -738,10 +802,17 @@ fn run(
         }
     }
 
+    // Asked before the swap: what the file showed until now.
+    let hid_cam = plan.video == VideoSource::Original
+        && clip.facecam.as_ref().is_some_and(|cam| !cam.layout.visible)
+        && crate::facecam::file_shows_cam(&clip.id);
     swap_in(clip, plan, &temp, &target)?;
     on_progress(1.0);
     if let Some(cam) = &cam {
         note_cam_applied(&clip.id, cam, plan, &target);
+    }
+    if hid_cam {
+        note_cam_hidden(&clip.id);
     }
 
     // What gets recorded is what really came out — not what was asked for.
@@ -790,6 +861,7 @@ fn run(
             original,
             mix_baked: in_file,
             composited: cam.is_some(),
+            facecam: None,
         },
     ))
 }
@@ -827,6 +899,16 @@ fn cam_inputs(clip: &Clip, plan: &RenderPlan, video: &Path) -> Result<CamInputs,
 }
 
 /// After a composite: the facts say what the file shows now.
+/// The file now shows no cam: the clean picture went in without one.
+fn note_cam_hidden(clip_id: &str) {
+    let Some(mut facts) = crate::facecam::read_facts(clip_id) else { return };
+    facts.applied = None;
+    facts.applying = None;
+    if let Err(err) = crate::facecam::write_facts(clip_id, &facts) {
+        log::warn!("facecam.json after hiding the cam: {err}");
+    }
+}
+
 fn note_cam_applied(clip_id: &str, cam: &CamInputs, plan: &RenderPlan, target: &Path) {
     if let Some(mask) = &cam.mask {
         let _ = std::fs::remove_file(mask);
@@ -911,11 +993,9 @@ fn archives_the_clip(clip: &Clip, plan: &RenderPlan, archive_exists: bool) -> bo
         return true;
     }
     // A file with the cam in it is no untouched recording; the clean one is
-    // already in the store.
-    let composited = clip.facecam.as_ref().is_some_and(|cam| {
-        cam.state == crate::model::FacecamState::Ready && cam.layout.visible
-    });
-    if composited {
+    // already in the store. The facts say what went in — the row only what
+    // is wanted, which a save hiding the cam has already changed.
+    if crate::facecam::file_shows_cam(&clip.id) {
         return false;
     }
     let already_trimmed = clip.original.is_some();
@@ -1756,6 +1836,131 @@ pub(crate) mod tests {
         assert!(!archives_the_clip(&clip, &plan, true));
     }
 
+    fn cam_row(layout: crate::model::CamLayout, delay_ms: i32, state: crate::model::FacecamState) -> crate::model::ClipFacecam {
+        crate::model::ClipFacecam { layout, portrait: Default::default(), delay_ms, state }
+    }
+
+    fn facts_showing(layout: Option<crate::model::CamLayout>, delay_ms: i32) -> crate::facecam::FacecamFacts {
+        crate::facecam::FacecamFacts {
+            applied: layout.map(|layout| crate::facecam::FacecamApplied { layout, delay_ms, start_ms: 0, length_ms: 30_000, size_bytes: 1 }),
+            ..crate::facecam::tests::facts()
+        }
+    }
+
+    fn moved() -> crate::model::CamLayout {
+        crate::model::CamLayout { x: 0.0, y: 0.0, ..Default::default() }
+    }
+
+    fn hidden() -> crate::model::CamLayout {
+        crate::model::CamLayout { visible: false, ..Default::default() }
+    }
+
+    use crate::model::FacecamState::{Failed, Ready};
+
+    #[test]
+    fn a_moved_cam_composites_from_the_clean_sources() {
+        let part = cam_part_from(Some(&cam_row(moved(), -40, Ready)), Some(&facts_showing(Some(Default::default()), -40)), true);
+        assert_eq!(part, CamPart::Shown { differs: true });
+        let p = plan(None, true, 30_000, Trim::whole(30_000), part);
+        assert_eq!((p.video, p.reencode), (VideoSource::CleanWithCam, true));
+    }
+
+    #[test]
+    fn a_changed_delay_composites() {
+        let part = cam_part_from(Some(&cam_row(Default::default(), -100, Ready)), Some(&facts_showing(Some(Default::default()), -40)), true);
+        assert_eq!(part, CamPart::Shown { differs: true });
+    }
+
+    #[test]
+    fn a_move_inside_the_tolerance_is_no_change() {
+        let nudged = crate::model::CamLayout { x: 1.0 - 0.001, ..Default::default() };
+        let part = cam_part_from(Some(&cam_row(nudged, -40, Ready)), Some(&facts_showing(Some(Default::default()), -40)), true);
+        assert_eq!(part, CamPart::Shown { differs: false });
+        let p = plan(None, true, 30_000, Trim::whole(30_000), part);
+        assert_eq!((p.video, p.reencode), (VideoSource::Clip, false), "row 3: the clip file, copied");
+    }
+
+    /// A save that hides the cam must not read the clip file: it has the cam
+    /// burned in.
+    #[test]
+    fn a_hidden_cam_reads_the_clean_picture() {
+        let part = cam_part_from(Some(&cam_row(hidden(), -40, Ready)), Some(&facts_showing(Some(Default::default()), -40)), true);
+        assert_eq!(part, CamPart::Hidden);
+        // A file that shows no cam has nothing to take away.
+        let clean = cam_part_from(Some(&cam_row(hidden(), -40, Ready)), Some(&facts_showing(None, -40)), false);
+        assert_eq!(clean, CamPart::None);
+    }
+
+    #[test]
+    fn a_hidden_cam_without_a_front_cut_copies_the_clean_picture() {
+        let p = plan(None, true, 30_000, Trim::whole(30_000), CamPart::Hidden);
+        assert_eq!((p.video, p.video_start_ms, p.reencode), (VideoSource::Original, 0, false));
+    }
+
+    #[test]
+    fn a_hidden_cam_on_a_trimmed_clip_reencodes() {
+        let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 35_000 };
+        let p = plan(Some(&base), true, 30_000, Trim::whole(30_000), CamPart::Hidden);
+        assert_eq!((p.video, p.video_start_ms, p.reencode), (VideoSource::Original, 5_000, true));
+    }
+
+    #[test]
+    fn a_hidden_cam_with_a_front_cut_reencodes_without_an_overlay() {
+        let p = plan(None, true, 30_000, Trim { start_ms: 2_000, end_ms: 30_000 }, CamPart::Hidden);
+        assert_eq!((p.video, p.video_start_ms, p.reencode), (VideoSource::Original, 2_000, true));
+    }
+
+    #[test]
+    fn a_cam_shown_after_a_hidden_save_composites_from_the_clip_file() {
+        // Saved with the cam hidden: no clean copy filed away, the clip file is clean.
+        let part = cam_part_from(Some(&cam_row(Default::default(), -40, Ready)), Some(&facts_showing(None, -40)), false);
+        assert_eq!(part, CamPart::Shown { differs: true });
+        let clip = Clip { id: "clippiboy-test-shown-after-hidden".into(), ..plain_clip(None, None) };
+        let p = plan(None, true, 30_000, Trim::whole(30_000), part);
+        assert!(archives_the_clip(&clip, &p, false), "the clean clip file is filed away before the cam goes in");
+    }
+
+    #[test]
+    fn a_failed_cam_still_composites_from_the_clip_file() {
+        let part = cam_part_from(Some(&cam_row(Default::default(), -40, Failed)), Some(&facts_showing(None, -40)), false);
+        assert_eq!(part, CamPart::Shown { differs: true });
+    }
+
+    #[test]
+    fn a_clip_without_facecam_plans_exactly_as_before() {
+        assert_eq!(cam_part_from(None, Some(&facts_showing(Some(Default::default()), -40)), true), CamPart::None);
+        assert_eq!(cam_part_from(Some(&cam_row(Default::default(), -40, Ready)), None, true), CamPart::None);
+    }
+
+    /// The row holds what is wanted, the facts what the file shows. A save
+    /// that hides the cam of a trimmed clip keeps an original — and the clip
+    /// file, cam and all, must not be filed away as it.
+    #[test]
+    fn the_file_not_the_row_says_whether_the_cam_is_in_it() {
+        let id = "clippiboy-test-file-not-row";
+        store_with(id, &["cam.mp4"]);
+        crate::facecam::write_facts(id, &facts_showing(Some(Default::default()), -40)).unwrap();
+        let mut clip = Clip { id: id.into(), ..plain_clip(None, None) };
+        clip.facecam = Some(cam_row(hidden(), -40, Ready));
+        let p = plan(None, false, 30_000, Trim { start_ms: 0, end_ms: 20_000 }, CamPart::None);
+        assert!(p.original.is_some());
+        assert!(!archives_the_clip(&clip, &p, false));
+        remove_everything(id);
+    }
+
+    #[test]
+    fn undo_after_a_move_keeps_the_new_place() {
+        let found = cam_row(Default::default(), -40, Ready);
+        let wanted = crate::model::FacecamEdit { layout: moved(), delay_ms: -60 };
+        let after = facecam_after(&found, &wanted);
+        assert_eq!((after.layout, after.delay_ms, after.state), (moved(), -60, Ready));
+        // The file shows the move once saved; undo plans on that row.
+        let part = cam_part_from(Some(&after), Some(&facts_showing(Some(moved()), -60)), true);
+        assert_eq!(part, CamPart::Shown { differs: false });
+        let base = ClipOriginal { duration_ms: 60_000, start_ms: 5_000, end_ms: 35_000 };
+        assert_eq!(restore_plan(&base, part).video, VideoSource::CleanWithCam);
+    }
+
     fn store_with(id: &str, files: &[&str]) {
         let _ = std::fs::remove_dir_all(dir(id));
         std::fs::create_dir_all(dir(id)).unwrap();
@@ -1845,8 +2050,12 @@ pub(crate) mod tests {
             }),
             ..plain_clip(None, None)
         };
+        // What the file shows is in its facts.
+        store_with(&clip.id, &["cam.mp4"]);
+        crate::facecam::write_facts(&clip.id, &facts_showing(Some(Default::default()), -40)).unwrap();
         let first = plan(None, false, 30_000, Trim { start_ms: 5_000, end_ms: 20_000 }, CamPart::None);
         assert!(!archives_the_clip(&clip, &first, false));
+        remove_everything(&clip.id);
     }
     use crate::model::ClipTrack;
 
@@ -2005,7 +2214,7 @@ pub(crate) mod tests {
         let worker = std::thread::spawn(move || {
             let id = clip.id.clone();
             let load = move || Ok(clip);
-            let result = apply(&id, load, Trim::whole(30_000), &[], EncoderId::X264, 70, |_| {});
+            let result = apply(&id, load, Trim::whole(30_000), &[], None, EncoderId::X264, 70, |_| {});
             let _ = tx.send(result.err());
         });
         assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "ran past the lock");
@@ -2038,6 +2247,7 @@ pub(crate) mod tests {
             },
             Trim::whole(30_000),
             &[],
+            None,
             EncoderId::X264,
             70,
             |_| {},

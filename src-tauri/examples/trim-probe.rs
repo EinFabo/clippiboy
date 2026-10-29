@@ -153,7 +153,7 @@ fn mix_for(clip: &Clip) -> Vec<TrackMix> {
 fn step(clip: &mut Clip, trim: edit::Trim, mix: &[TrackMix], want_ms: u64) -> u32 {
     let id = clip.id.clone();
     let snapshot = clip.clone();
-    match edit::apply(&id, move || Ok(snapshot), trim, mix, EncoderId::X264, 40_000, |value| {
+    match edit::apply(&id, move || Ok(snapshot), trim, mix, None, EncoderId::X264, 40_000, |value| {
         if value >= 1.0 {
             println!("  done");
         }
