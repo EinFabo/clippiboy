@@ -43,6 +43,7 @@ pub mod telemetry;
 pub mod tools;
 pub mod tray;
 pub mod ts;
+pub mod reccam;
 pub mod updater;
 pub mod vcam;
 pub mod watermark;

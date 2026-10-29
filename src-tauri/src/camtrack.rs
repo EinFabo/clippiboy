@@ -270,7 +270,7 @@ impl CamTrack {
         })
     }
 
-    pub fn attach_tap(&self, tap: Arc<dyn PacketTap>, from_100ns: i64) -> Vec<EncodedPacket> {
+    pub fn attach_tap(&self, tap: Arc<dyn PacketTap>, from_100ns: i64) -> usize {
         self.shared.ring.lock().attach_tap(tap, from_100ns)
     }
 
@@ -294,6 +294,8 @@ pub struct Gap {
 /// while the ring's lock is held, like `Recorder::video`.
 pub trait PacketTap: Send + Sync {
     fn cam(&self, packet: &EncodedPacket);
+    /// A session's SPS/PPS: the session's packets follow it.
+    fn header(&self, _session: u64, _origin_100ns: i64, _header: &[u8]) {}
 }
 
 /// The cam's own ring. Packet times count from `origin_100ns`, the grid's
@@ -333,6 +335,9 @@ impl CamRing {
 
     pub fn set_header(&mut self, session: u64, header: Vec<u8>) {
         if session == self.session {
+            if let Some(tap) = &self.tap {
+                tap.header(session, self.origin_100ns, &header);
+            }
             self.header = header;
         }
     }
@@ -359,11 +364,19 @@ impl CamRing {
         }
     }
 
-    /// Hands every packet from now on to `tap`; returns the backlog from the
-    /// cam keyframe at or before `from_100ns`.
-    pub fn attach_tap(&mut self, tap: Arc<dyn PacketTap>, from_100ns: i64) -> Vec<EncodedPacket> {
+    /// Hands `tap` the header, the backlog from the cam keyframe at or before
+    /// `from_100ns`, and every packet from now on — all under this ring's
+    /// lock, so none comes twice or out of order. Returns the backlog's size.
+    pub fn attach_tap(&mut self, tap: Arc<dyn PacketTap>, from_100ns: i64) -> usize {
+        if !self.header.is_empty() {
+            tap.header(self.session, self.origin_100ns, &self.header);
+        }
+        let backlog = self.ring.snapshot_range((from_100ns - self.origin_100ns) / 10, i64::MAX);
+        for packet in &backlog {
+            tap.cam(packet);
+        }
         self.tap = Some(tap);
-        self.ring.snapshot_range((from_100ns - self.origin_100ns) / 10, i64::MAX)
+        backlog.len()
     }
 
     pub fn detach_tap(&mut self) {
@@ -706,16 +719,20 @@ mod tests {
         ring.reset(0);
         filled(&mut ring, 2_966);
         let seen = Arc::new(Seen(StdMutex::new(Vec::new())));
+        // The backlog goes to the tap itself, under the ring's lock, so no
+        // live packet can slip in before it.
         let backlog = ring.attach_tap(seen.clone(), 15_000_000);
-        assert_eq!(backlog[0].pts_us, 1_000_000);
-        assert!(backlog[0].keyframe);
+        assert_eq!(seen.0.lock().unwrap()[0], 1_000_000, "from the keyframe before 1.5 s");
+        assert_eq!(seen.0.lock().unwrap().len(), backlog);
         let session = ring.session;
         ring.push(session, packet(3_000));
         ring.push(session, packet(3_033));
-        assert_eq!(*seen.0.lock().unwrap(), vec![3_000_000, 3_033_000]);
+        let all = seen.0.lock().unwrap().clone();
+        assert_eq!(all[backlog..], [3_000_000, 3_033_000]);
+        assert!(all.windows(2).all(|w| w[0] < w[1]), "in order");
         ring.detach_tap();
         ring.push(session, packet(3_066));
-        assert_eq!(seen.0.lock().unwrap().len(), 2);
+        assert_eq!(seen.0.lock().unwrap().len(), backlog + 2);
     }
 
     fn grey(width: u32, height: u32) -> Frame {

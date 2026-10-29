@@ -143,6 +143,8 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
     /// The webcam's own track, next to the pipeline — see [`crate::camtrack`].
     pub camera: crate::camtrack::CamTrack,
+    /// The running recording's camera, while it has one.
+    recording_cam: Mutex<Option<Arc<crate::reccam::RecordingCam>>>,
     /// ClippiBoy Camera, the virtual camera other apps can pick.
     pub vcam: crate::vcam::Vcam,
     /// Until when (QPC, 100 ns) the settings' preview counts as open; each
@@ -653,6 +655,7 @@ impl AppState {
             restarts: RestartQueue::default(),
             settings_waiting: std::sync::atomic::AtomicBool::new(false),
             camera: crate::camtrack::CamTrack::new(),
+            recording_cam: Mutex::new(None),
             vcam: crate::vcam::Vcam::new(),
             cam_preview_until: std::sync::atomic::AtomicI64::new(0),
             cam_wants: Mutex::new(None),
@@ -1725,10 +1728,21 @@ impl AppState {
             None => Err((prepared, "The capture is not running.".to_string())),
         };
         // Cleared away with no lock held: it joins the writer and deletes.
-        outcome.map_err(|(prepared, why)| {
+        let recorder = outcome.map_err(|(prepared, why)| {
             prepared.discard();
             why
-        })
+        })?;
+        // The camera beside it, from its keyframe at or before the picture's
+        // first frame — outside the game ring's lock. A camera that starts
+        // later begins its first segment then.
+        let cam = &config.facecam;
+        if cam.enabled && cam.in_recordings && cam.layout.visible {
+            let tap = crate::reccam::RecordingCam::start(&recorder.dir, recorder.start_100ns);
+            let backlog = self.camera.attach_tap(tap.clone(), recorder.start_100ns);
+            log::info!("recording camera: attached, {backlog} packets of backlog");
+            *self.recording_cam.lock() = Some(tap);
+        }
+        Ok(recorder)
     }
 
     /// Stop writing and settle the folder, without muxing it. Fast — what
@@ -1738,6 +1752,12 @@ impl AppState {
     /// Returns the folder and its description, for a caller that does mux.
     fn close_recording(&self) -> Option<(Arc<Recorder>, recorder::Meta)> {
         let recorder = self.recorder.lock().take()?;
+        // The camera first: off the ring, its writer finished, `cam.json` final.
+        if let Some(cam) = self.recording_cam.lock().take() {
+            self.camera.detach_tap();
+            let file = cam.close();
+            log::info!("recording camera: {} segment(s) written", file.segments.len());
+        }
         if let Some(pipeline) = self.pipeline.lock().as_ref() {
             pipeline.take_recording();
         }
