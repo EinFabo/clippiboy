@@ -14,6 +14,7 @@ pub mod disk;
 pub mod edit;
 pub mod encode;
 pub mod export;
+pub mod facecam;
 pub mod filing;
 pub mod friends;
 pub mod game;
