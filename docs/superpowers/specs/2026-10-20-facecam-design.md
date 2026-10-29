@@ -165,6 +165,10 @@ hotkey ─► game snapshot (as today) ─► cam cut ─► phase 1: clean clip
   touching the rest. The one exception is the virtual camera (section 4):
   while it is on, ClippiBoy is the only client of the real camera and may open it
   controlling, with full format choice.
+  **After stage 1:** sharing mode does not share with Discord desktop (see
+  "Result of the stage-1 test"), so stage 2 opens the camera controlling, with
+  the format closest to the cam track's size at 30 fps (MJPEG first), and says
+  so on the Facecam tab; the virtual camera follows right after stage 2.
 - **Frames:** whatever format arrives (MJPEG decoded by MF to NV12, YUY2, NV12, any
   size) is uploaded into a texture and scaled on the GPU into the cam track's
   fixed size, 1280×720 NV12 by default, **cover-cropped** so a 4:3 camera fills
@@ -841,9 +845,48 @@ diagnosed.
 
 ## Result of the stage-1 test
 
-*Pending.* To be filled in after `docs/superpowers/plans/2026-10-22-facecam-stage-1-camera-sharing-test.md`
-has been run: the result table of both phases, the API chosen for the camera
-source, Discord's capture API, and the decision on when the virtual camera comes.
+Run on 2026-10-29 on Windows 11 25H2 (26200.9711), camera privacy on, the
+multi-app switch off (its default), with a Logitech C920 (046d:08e5, the camera
+Discord uses) and an eMeet C960 (328f:006d), both registered under
+`KSCATEGORY_VIDEO_CAMERA`, and Discord desktop app-1.0.9265. A throwaway probe
+(`scratch/`, never committed) opened the camera three ways: the MF sensor group
+in shared mode, the 26100+ share-mode attribute, and the plain, controlling way.
+
+| Case | Result |
+|---|---|
+| Probe alone, C920 | all three ways work; the camera then runs YUY2 640×480 at 30 fps, which is what a sharing reader gets when nobody controls it |
+| Probe alone, C960 | all three ways work; NV12 1920×1080, about 15 fps in room light |
+| Discord's video on first, then the probe | every way fails on its first read with `0xC00D3704`; ffmpeg's DirectShow capture fails too |
+| Probe (shared sensor group) first, then Discord | Discord: "Camera couldn't be started, error 2011"; the probe keeps 30 fps for 90 s |
+| Discord's capture API | `Discord.exe` loads `ksproxy.ax` and `mfksproxy.dll`: DirectShow |
+| Clock | `MFSampleExtension_DeviceTimestamp` on both cameras, equal to the reader's sample time on the QPC clock: `ClockKind::Device` |
+
+The row "A2 fails" of the stage-1 plan's Task 6 applies: a sharing reader does
+not share with Discord desktop in either order, and it blocks Discord when it
+comes first. The multi-app switch and Windows 10 were not tested: Fabi chose to
+go straight to the virtual camera.
+
+**Virtual-camera spike, the same day** (stage 5, Task 1, `scratch/vcam-spike`):
+a Rust media source DLL in Program Files with an HKLM CLSID, and a host that
+creates a Session/CurrentUser camera with `MFCreateVirtualCamera` (no admin)
+and hands it frames through a section in its own session, which Frame Server
+opens as `Session\1\…` with LocalService read access.
+- Windows lists it as "ClippiBoy Camera (Windows virtuelle Kamera)", with a
+  localized suffix of its own, in Media Foundation and in DirectShow;
+  DirectShow sees YUY2 and NV12 at 1280×720, 1920×1080 and 640×360, 30 fps.
+- **Discord desktop shows the C920 through it while the host holds the C920
+  controlling**; Discord negotiated NV12 1280×720.
+- Only Frame Server and the host load the DLL. A host killed hard: the camera
+  leaves both lists at once.
+- The Start callback reports SOURCE_INITIALIZE/UNINITIALIZE when apps enumerate
+  and SOURCE_START/STOP while a client streams. FrameServer's service SID type is
+  unrestricted.
+
+**Consequences:** Open for Fabi 3 is decided, (a). Stage 2 opens the camera
+controlling, with a format it chooses (2.2): sharing mode neither lets Discord
+in nor gets a usable picture from the C920 alone. Until the virtual camera
+exists, the Facecam tab says that other apps cannot use the camera while the
+facecam has it.
 
 ## Open for Fabi
 
@@ -868,6 +911,8 @@ recommendation until Fabi decides otherwise.
    as planned with a clear "taken by Discord" state (and, if a sharing reader
    even blocks Discord, a warning on the master switch), virtual camera at stage 5
    as planned.
+   **Decided (Fabi, 2026-10-29): (a).** Stage 1 found the block in both orders;
+   the virtual-camera spike works with Discord.
 4. **Virtual camera needs administrator rights once and code signing.** The
    per-user, admin-free install stays for the app; only the virtual camera is
    machine-wide. Acceptable? (*recommended: yes, opt-in, with a code-signing
@@ -901,6 +946,9 @@ recommendation until Fabi decides otherwise.
     `prime` test shows whether the format survives; the price is that Discord can
     fail once if it starts in exactly that second (*recommended if `prime`
     works*). (b) Never control it; take what comes and scale.
+    **Overtaken by stage 1:** sharing lets nobody in either, so stage 2 controls
+    the camera for as long as it runs and picks 720p30 or 1080p30 itself (2.2).
+    A ruling made while building stage 2; Fabi can still overrule it.
 12. **Recordings and screenshots: movable or burned in?** Screenshots: keep the
     clean PNG so the cam can be moved later (*recommended*, it costs little).
     Recordings: (a) burn the cam in at stop with the default layout and keep no
