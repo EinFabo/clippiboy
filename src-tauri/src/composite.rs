@@ -575,6 +575,10 @@ pub fn cancel(clip_id: &str) -> bool {
     let (queue, changed) = &*QUEUE;
     let mut lanes = queue.lock();
     let dropped = lanes.clips.drop_waiting(clip_id) | lanes.recordings.drop_waiting(clip_id);
+    // A burn-in runs without the recording's lock: it is stopped, not waited for.
+    if lanes.recordings.running.as_deref() == Some(clip_id) {
+        crate::reccam::abort(clip_id);
+    }
     changed.notify_all();
     dropped
 }

@@ -1047,8 +1047,9 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
             own.lock()
         }
     };
-    // A cam still waiting to be added goes with the clip; one being added
-    // has finished by now, the lock above waited for it.
+    // A cam still waiting to be added goes with the clip; a clip's being
+    // added has finished by now, the lock above waited for it. A recording's
+    // burn-in runs without that lock and is stopped here instead.
     crate::composite::cancel(&id);
     // The clip first, and the stores by its stored id. The stores are named
     // after a sanitised id, so an id that is empty or spelled differently

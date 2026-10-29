@@ -1336,10 +1336,25 @@ pub(crate) fn run_with_progress(
 /// [`run_with_progress`] with a command of the caller's — the composite after
 /// a save runs ffmpeg below normal priority.
 pub(crate) fn run_command_with_progress(
-    mut command: std::process::Command,
+    command: std::process::Command,
     args: &[String],
     length_ms: u64,
     on_progress: &impl Fn(f32),
+) -> Result<(), String> {
+    run_command_watched(command, args, length_ms, on_progress, &|| false)
+}
+
+/// What [`run_command_watched`] says when it was stopped.
+pub(crate) const STOPPED: &str = "stopped";
+
+/// Like [`run_command_with_progress`], and ends the program as soon as `stop`
+/// says so — asked at every line it writes, with `-progress` twice a second.
+pub(crate) fn run_command_watched(
+    mut command: std::process::Command,
+    args: &[String],
+    length_ms: u64,
+    on_progress: &dyn Fn(f32),
+    stop: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     let mut child = command
         .args(args)
@@ -1362,8 +1377,14 @@ pub(crate) fn run_command_with_progress(
         text
     });
 
+    let mut stopped = false;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if stop() {
+                stopped = true;
+                let _ = child.kill();
+                break;
+            }
             let Some(time) = line.strip_prefix("out_time=") else {
                 continue;
             };
@@ -1375,6 +1396,9 @@ pub(crate) fn run_command_with_progress(
 
     let status = child.wait().map_err(|err| err.to_string())?;
     let stderr = collector.join().unwrap_or_default();
+    if stopped {
+        return Err(STOPPED.into());
+    }
     if status.success() {
         return Ok(());
     }
@@ -1740,6 +1764,17 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A burn-in of a recording deleted half way is stopped, not waited for.
+    #[cfg(windows)]
+    #[test]
+    fn a_watched_command_stops_when_asked() {
+        let started = std::time::Instant::now();
+        let args: Vec<String> = ["-n", "30", "127.0.0.1"].into_iter().map(String::from).collect();
+        let outcome = run_command_watched(std::process::Command::new("ping"), &args, 30_000, &|_| {}, &|| true);
+        assert_eq!(outcome, Err(STOPPED.to_string()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    }
 
     #[test]
     fn a_front_cut_on_a_facecam_clip_composites_from_the_clean_picture() {

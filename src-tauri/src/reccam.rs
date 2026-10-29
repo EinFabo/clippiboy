@@ -489,14 +489,56 @@ fn fail(app: &tauri::AppHandle, id: &str, cam: &crate::model::ClipFacecam, why: 
     crate::notify(app, "error", "The camera couldn't be added to the recording — it was kept without it.");
 }
 
+/// Burn-ins asked to stop: their recording is being deleted.
+static ABORTED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Stops the running burn-in of `id` at ffmpeg's next progress line.
+pub fn abort(id: &str) {
+    ABORTED.lock().insert(id.to_string());
+}
+
+fn aborted(id: &str) -> bool {
+    ABORTED.lock().contains(id)
+}
+
+/// Clears a job's stop when it ends, however it ends.
+struct Unmark<'a>(&'a str);
+
+impl Drop for Unmark<'_> {
+    fn drop(&mut self) {
+        ABORTED.lock().remove(self.0);
+    }
+}
+
+/// What the burn-in does once it has the recording's lock again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settle {
+    Swap,
+    /// Deleted, or no longer waiting for its camera: the composite goes.
+    Leave,
+    /// The recording changed meanwhile: neither the composite nor the
+    /// segments fit it any more.
+    Drop,
+}
+
+pub fn settle(aborted: bool, pending: bool, resume: Resume) -> Settle {
+    match (aborted || !pending, resume) {
+        (true, _) | (false, Resume::Finish) => Settle::Leave,
+        (false, Resume::Burn) => Settle::Swap,
+        (false, Resume::GiveUp) => Settle::Drop,
+    }
+}
+
 /// One burn-in. `Some(at)` when the swap has to be tried again later.
 pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
     use crate::composite::{file_size, temp_path};
     use crate::model::FacecamState;
     use tauri::Manager;
+    let _unmark = Unmark(id);
     let state = app.state::<crate::state::AppState>();
     let clip_lock = crate::edit::clip_lock(id);
-    let guard = clip_lock.lock();
+    let mut guard = Some(clip_lock.lock());
     let clip = crate::clips::fresh(&state.library, id)?;
     let cam = clip.facecam.clone()?;
     if cam.state != FacecamState::Pending {
@@ -551,6 +593,10 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
             })
             .collect();
         let encoder = crate::encode::effective(config.recording.encoder);
+        // The encode runs without the recording's lock — it takes minutes, and
+        // a delete stops it instead of waiting for it. Whoever else wants the
+        // file waits for the queue first.
+        guard.take();
         let mut done = false;
         for (encoder, hwaccel) in crate::composite::attempts(encoder) {
             let args = recording_arguments(&BurnIn {
@@ -567,11 +613,13 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
                 gop: stored.fps * config.recording.keyframe_seconds,
                 hwaccel,
             });
-            match crate::edit::run_command_with_progress(crate::muxer::background("ffmpeg"), &args, length_ms, &|_| {}) {
+            let stop = || aborted(id);
+            match crate::edit::run_command_watched(crate::muxer::background("ffmpeg"), &args, length_ms, &|_| {}, &stop) {
                 Ok(()) => {
                     done = true;
                     break;
                 }
+                Err(err) if err == crate::edit::STOPPED => break,
                 Err(err) => {
                     log::warn!("recording camera for {id} with {encoder:?} (hardware decoding {hwaccel}): {err}");
                     let _ = std::fs::remove_file(&temp);
@@ -580,6 +628,24 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
         }
         if let Some(mask) = &mask {
             let _ = std::fs::remove_file(mask);
+        }
+        guard = Some(clip_lock.lock());
+        let pending = crate::clips::fresh(&state.library, id)
+            .and_then(|c| c.facecam)
+            .is_some_and(|c| c.state == FacecamState::Pending);
+        match settle(aborted(id), pending, resume(&stored, file_size(&path))) {
+            Settle::Swap => {}
+            Settle::Leave => {
+                let _ = std::fs::remove_file(&temp);
+                return None;
+            }
+            Settle::Drop => {
+                log::info!("recording camera for {id}: the recording changed during the burn-in — not burned in");
+                let _ = std::fs::remove_file(&temp);
+                drop_stored(id);
+                set_row(app, id, None);
+                return None;
+            }
         }
         if !done {
             fail(app, id, &cam, "ffmpeg failed with every encoder");
@@ -595,7 +661,7 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
         return None;
     }
     // A player holds the file. Wait for it without holding the recording.
-    drop(guard);
+    guard.take();
     for wait in crate::composite::swap_waits() {
         std::thread::sleep(wait);
         let _guard = clip_lock.lock();
@@ -829,6 +895,16 @@ mod tests {
         assert!(!retryable(true, Some(Baked), true));
         assert!(!retryable(true, None, true));
         assert!(!retryable(false, Some(Failed), true), "a clip retries from the editor");
+    }
+
+    /// The burn-in runs without the recording's lock: what it finds when it
+    /// takes it again decides.
+    #[test]
+    fn a_recording_deleted_during_its_burn_in_is_left_alone() {
+        assert_eq!(settle(false, true, Resume::Burn), Settle::Swap);
+        assert_eq!(settle(true, true, Resume::Burn), Settle::Leave, "deleted: stopped");
+        assert_eq!(settle(false, false, Resume::Burn), Settle::Leave, "row gone");
+        assert_eq!(settle(false, true, Resume::GiveUp), Settle::Drop, "changed meanwhile");
     }
 
     #[test]
