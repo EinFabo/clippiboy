@@ -6,6 +6,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod clips;
 pub mod commands;
+pub mod composite;
 pub mod config;
 pub mod console;
 pub mod control;

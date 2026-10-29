@@ -711,6 +711,31 @@ fn probe_duration_by(mut program: Command, path: &Path) -> Result<Option<u64>, S
         .map(|seconds| (seconds * 1000.0) as u64))
 }
 
+/// Where a file's video really starts, in µs: a clip's first frame sits a
+/// little after 0 (SAVE-7), and the cam has to follow it.
+pub fn probe_video_start_us(path: &Path) -> Option<i64> {
+    let output = command("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=start_time",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    parse_start_us(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn parse_start_us(text: &str) -> Option<i64> {
+    let seconds = text.trim().parse::<f64>().ok()?;
+    seconds.is_finite().then(|| (seconds * 1e6).round() as i64)
+}
+
 pub fn probe_duration_ms(path: &Path) -> Option<u64> {
     probe_duration(path).ok().flatten()
 }

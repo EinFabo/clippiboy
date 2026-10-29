@@ -968,6 +968,20 @@ fn quantiser(quality: u32) -> u32 {
 /// generation of quality poorer. The x264 branch always did this right with
 /// `-crf`; the hardware branches now match it.
 fn video_args(encoder: EncoderId, quality: u32) -> Vec<String> {
+    video_args_at(encoder, quality, Speed::Edit)
+}
+
+/// How fast a re-encode has to be. An edit is waited for in the editor and
+/// gets the better presets; the composite after a save runs next to a game
+/// and takes the fast ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Speed {
+    Edit,
+    Save,
+}
+
+pub(crate) fn video_args_at(encoder: EncoderId, quality: u32, speed: Speed) -> Vec<String> {
+    let fast = speed == Speed::Save;
     let qp = quantiser(quality).to_string();
     let common = |mut args: Vec<&str>| -> Vec<String> {
         args.extend(["-pix_fmt", "yuv420p"]);
@@ -977,22 +991,22 @@ fn video_args(encoder: EncoderId, quality: u32) -> Vec<String> {
         // `-b:v 0` is not decoration: without it NVENC treats `-cq` as a ceiling
         // on top of a bitrate target rather than as the target itself.
         EncoderId::Nvenc => {
-            let mut args = common(vec!["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr"]);
+            let mut args = common(vec!["-c:v", "h264_nvenc", "-preset", if fast { "p3" } else { "p5" }, "-rc", "vbr"]);
             args.extend(["-cq".into(), qp, "-b:v".into(), "0".into()]);
             args
         }
         EncoderId::Amf => {
-            let mut args = common(vec!["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp"]);
+            let mut args = common(vec!["-c:v", "h264_amf", "-quality", if fast { "speed" } else { "balanced" }, "-rc", "cqp"]);
             args.extend(["-qp_i".into(), qp.clone(), "-qp_p".into(), qp]);
             args
         }
         EncoderId::Qsv => {
-            let mut args = common(vec!["-c:v", "h264_qsv", "-preset", "medium"]);
+            let mut args = common(vec!["-c:v", "h264_qsv", "-preset", if fast { "veryfast" } else { "medium" }]);
             args.extend(["-global_quality".into(), qp]);
             args
         }
         EncoderId::X264 => {
-            let mut args = common(vec!["-c:v", "libx264", "-preset", "veryfast"]);
+            let mut args = common(vec!["-c:v", "libx264", "-preset", if fast { "superfast" } else { "veryfast" }]);
             args.extend(["-crf".into(), qp]);
             args
         }
