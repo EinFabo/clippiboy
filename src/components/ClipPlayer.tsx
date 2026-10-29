@@ -7,6 +7,8 @@ import { SaveVeil, type SaveVeilHandle } from "@/components/ui/BusyVeil";
 import { ExportDialog } from "@/components/ExportDialog";
 import { CamStage } from "@/components/CamStage";
 import { usePictureBox } from "@/lib/pictureBox";
+import { RectLayer } from "@/components/ui/RectLayer";
+import { camBox, layoutFromRect, snapLayout } from "@/lib/camGeometry";
 import { useClipMenu } from "@/components/clipMenu";
 import { useLinks } from "@/lib/links";
 import { IconTrash } from "@/components/icons";
@@ -29,7 +31,7 @@ import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
 import { useGrants } from "@/lib/useGrants";
-import type { Clip, ClipEdit, FacecamView } from "@/lib/types";
+import type { CamLayout, Clip, ClipEdit, FacecamView } from "@/lib/types";
 
 interface Props {
   clips: Clip[];
@@ -173,6 +175,10 @@ export function ClipPlayer({
     };
   }, [camId, camState, reload]);
   const picture = usePictureBox(frame, clip?.width ?? 1, clip?.height ?? 1);
+  // Where the camera stands in the editor: the saved layout until it is moved.
+  const savedLayout = clip?.facecam?.layout ?? null;
+  const [camDraft, setCamDraft] = useState<CamLayout | null>(savedLayout);
+  useEffect(() => setCamDraft(savedLayout), [clip?.id, savedLayout]);
   /**
    * The write is through, but the fresh element has not reported a picture yet.
    * The veil stays up for that stretch — letting it go the moment the core is
@@ -986,15 +992,33 @@ export function ClipPlayer({
               }}
             />
           )}
-          {camView && clip?.facecam && source && !broken && (
+          {camView && clip?.facecam && camDraft && source && !broken && (
             <CamStage
               view={camView}
-              layout={clip.facecam.layout}
+              layout={camDraft}
               master={video}
               bindKey={reload}
               box={picture}
               frame={{ width: clip.width, height: clip.height }}
               released={saving || restoring}
+            />
+          )}
+          {camView && clip && camDraft?.visible && source && !broken && !saving && !restoring && (
+            <RectLayer
+              mode="box"
+              stage={frame}
+              width={clip.width}
+              height={clip.height}
+              ratio={camDraft.shape === "circle" ? 1 : 16 / 9}
+              rect={(() => {
+                const b = camBox(camDraft, clip.width, clip.height);
+                return { x: b.left, y: b.top, width: b.width, height: b.height };
+              })()}
+              onRect={(rect) =>
+                setCamDraft((draft) =>
+                  draft && snapLayout({ ...draft, ...layoutFromRect(rect, clip, draft.shape) }),
+                )
+              }
             />
           )}
 

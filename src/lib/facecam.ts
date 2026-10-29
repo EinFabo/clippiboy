@@ -1,26 +1,7 @@
 // The facecam's shared helpers for the settings tab and the console.
 import { api } from "./ipc";
 import type { CamLayout, CamState, OverlayCorner } from "./types";
-
-const even = (v: number) => 2 * Math.round(v / 2);
-
-/** Where the cam sits in a frame — `composite::cam_rect`, kept in step by hand. */
-export function camBox(layout: CamLayout, width: number, height: number) {
-  const circle = layout.shape === "circle";
-  const m = even(0.025 * height);
-  let h = Math.max(2, even(layout.size * height));
-  let w = circle ? h : even((h * 16) / 9);
-  const room = Math.max(0, width - 2 * m);
-  if (w > room) {
-    w = room - (room % 2);
-    h = circle ? w : even((w * 9) / 16);
-  }
-  const freeX = Math.max(0, width - w - 2 * m);
-  const freeY = Math.max(0, height - h - 2 * m);
-  const x = Math.min(1, Math.max(0, layout.x));
-  const y = Math.min(1, Math.max(0, layout.y));
-  return { left: m + Math.min(even(x * freeX), freeX), top: m + Math.min(even(y * freeY), freeY), width: w, height: h };
-}
+export { camBox } from "./camGeometry";
 
 /** The corner a layout sits in, or `null` when it sits anywhere else. */
 export function cornerOf(layout: CamLayout): OverlayCorner | null {

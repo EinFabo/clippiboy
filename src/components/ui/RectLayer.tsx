@@ -19,7 +19,9 @@ export interface Rect {
  * core gets it in the only unit it can use.
  *
  * `crop`: a press on the picture draws a new selection, everything outside it
- * goes dark, thirds are drawn. `onRelease` hears every let-go.
+ * goes dark, thirds are drawn. `box`: only the rectangle takes the pointer —
+ * a click beside it reaches what lies below (the player's pause and
+ * fullscreen). `onRelease` hears every let-go.
  */
 export function RectLayer({
   stage,
@@ -29,6 +31,7 @@ export function RectLayer({
   rect,
   onRect,
   onRelease,
+  mode = "crop",
 }: {
   stage: RefObject<HTMLDivElement | null>;
   width: number;
@@ -37,7 +40,9 @@ export function RectLayer({
   rect: Rect | null;
   onRect: (rect: Rect) => void;
   onRelease?: (rect: Rect | null) => void;
+  mode?: "crop" | "box";
 }) {
+  const crop = mode === "crop";
   const box = usePictureBox(stage, width, height);
   /** What the pointer is doing right now. `null` means: nothing. */
   const drag = useRef<
@@ -145,15 +150,15 @@ export function RectLayer({
 
   return (
     <div
-      className="absolute cursor-crosshair touch-none"
+      className={cn("absolute touch-none", crop ? "cursor-crosshair" : "pointer-events-none")}
       style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
-      onPointerDown={(event) => onDown(event, "draw")}
+      onPointerDown={crop ? (event) => onDown(event, "draw") : undefined}
       onPointerMove={onMove}
       onPointerUp={onUp}
     >
       {rect && rect.width > 0 && rect.height > 0 && (
         <div
-          className="absolute cursor-move"
+          className={cn("absolute cursor-move", !crop && "pointer-events-auto")}
           style={{
             left: percent(rect.x, width),
             top: percent(rect.y, height),
@@ -162,15 +167,15 @@ export function RectLayer({
             // Everything outside the selection goes dark. One shadow instead of
             // four panels — it can never leave a seam. As wide as the picture:
             // zoomed in, that is far beyond any fixed number.
-            boxShadow: `0 0 0 ${Math.ceil(Math.max(box.width, box.height))}px rgba(0, 0, 0, 0.62)`,
-            outline: "1px solid rgba(255, 255, 255, 0.9)",
+            boxShadow: crop ? `0 0 0 ${Math.ceil(Math.max(box.width, box.height))}px rgba(0, 0, 0, 0.62)` : undefined,
+            outline: crop ? "1px solid rgba(255, 255, 255, 0.9)" : "1px dashed rgba(255, 255, 255, 0.7)",
           }}
           onPointerDown={(event) => onDown(event, "move")}
           onPointerMove={onMove}
           onPointerUp={onUp}
         >
           {/* Thirds. They are the reason to crop by eye rather than by number. */}
-          <div className="pointer-events-none absolute inset-0 opacity-40">
+          <div className={cn("pointer-events-none absolute inset-0 opacity-40", !crop && "hidden")}>
             <div className="absolute top-1/3 right-0 left-0 border-t border-white/60" />
             <div className="absolute top-2/3 right-0 left-0 border-t border-white/60" />
             <div className="absolute top-0 bottom-0 left-1/3 border-l border-white/60" />
