@@ -110,6 +110,9 @@ export function FacecamTab() {
         <Row label="In clips">
           <Toggle checked={cam.inClips} disabled={off} onChange={(inClips) => patch({ inClips })} />
         </Row>
+        <Row label="In recordings">
+          <Toggle checked={cam.inRecordings} disabled={off} onChange={(inRecordings) => patch({ inRecordings })} />
+        </Row>
         <Row label="In screenshots">
           <Toggle checked={cam.inScreenshots} disabled={off} onChange={(inScreenshots) => patch({ inScreenshots })} />
         </Row>

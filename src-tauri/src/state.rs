@@ -675,6 +675,7 @@ impl AppState {
                 > crate::audio::capture::now_100ns(),
             locked: self.auto.screen_locked(),
             vcam_consumer: self.vcam.watching(),
+            recording: self.recorder.lock().is_some(),
         };
         let mut last = self.cam_wants.lock();
         let (plan, wants) = crate::camtrack::plan_for(&config.facecam, &inputs, last.as_ref());
@@ -1672,6 +1673,8 @@ impl AppState {
         let recorder = outcome?;
         *self.recorder.lock() = Some(recorder);
         self.status.lock().recording = true;
+        // "In recordings" may want the camera now, not at the next tick.
+        self.reconcile_cam();
         Ok(())
     }
 
@@ -1777,6 +1780,7 @@ impl AppState {
             self.halt_pipeline();
         }
         self.status.lock().recording = false;
+        self.reconcile_cam();
         Some((recorder, meta))
     }
 

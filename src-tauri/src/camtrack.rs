@@ -26,11 +26,17 @@ pub struct CamWants {
     pub locked: bool,
     /// An app streams ClippiBoy Camera.
     pub vcam_consumer: bool,
+    /// *Camera in recordings*.
+    pub in_recordings: bool,
+    /// A recording runs.
+    pub recording: bool,
 }
 
 /// The webcam runs only while something the user switched on needs it.
 pub fn cam_wanted(w: &CamWants) -> bool {
-    w.enabled && !w.locked && ((w.buffer_wanted && w.in_clips) || w.preview_open || w.vcam_consumer)
+    w.enabled
+        && !w.locked
+        && ((w.buffer_wanted && w.in_clips) || (w.recording && w.in_recordings) || w.preview_open || w.vcam_consumer)
 }
 
 /// How long to wait before closing the camera after a change. `None` while it
@@ -74,6 +80,7 @@ pub struct PlanInputs {
     pub preview_open: bool,
     pub locked: bool,
     pub vcam_consumer: bool,
+    pub recording: bool,
 }
 
 /// The plan for the cam, and the wants it was made from, to compare the next
@@ -86,6 +93,8 @@ pub fn plan_for(cam: &crate::model::FacecamConfig, inputs: &PlanInputs, before: 
         preview_open: inputs.preview_open,
         locked: inputs.locked,
         vcam_consumer: inputs.vcam_consumer,
+        in_recordings: cam.in_recordings,
+        recording: inputs.recording,
     };
     let stop_after = match before {
         // Nothing changed since the last plan: a stop already on its way keeps
@@ -527,7 +536,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn wants(enabled: bool, in_clips: bool, buffer: bool, preview: bool, locked: bool) -> CamWants {
-        CamWants { enabled, in_clips, buffer_wanted: buffer, preview_open: preview, locked, vcam_consumer: false }
+        CamWants {
+            enabled,
+            in_clips,
+            buffer_wanted: buffer,
+            preview_open: preview,
+            locked,
+            vcam_consumer: false,
+            in_recordings: false,
+            recording: false,
+        }
     }
 
     fn inputs(buffer_wanted: bool, preview_open: bool) -> PlanInputs {
@@ -539,7 +557,23 @@ mod tests {
             preview_open,
             locked: false,
             vcam_consumer: false,
+            recording: false,
         }
+    }
+
+    /// The buffer off, "In clips" off: a recording with "In recordings" on
+    /// still needs the camera — and only while it runs.
+    #[test]
+    fn the_cam_runs_for_a_recording_when_asked() {
+        let mut cam = crate::model::FacecamConfig { enabled: true, in_clips: false, in_recordings: true, ..Default::default() };
+        let recording = PlanInputs { recording: true, ..inputs(false, false) };
+        assert!(plan_for(&cam, &recording, None).0.run);
+        assert!(!plan_for(&cam, &inputs(false, false), None).0.run, "no recording, nothing needs it");
+        cam.in_recordings = false;
+        assert!(!plan_for(&cam, &recording, None).0.run);
+        cam.in_recordings = true;
+        let locked = PlanInputs { locked: true, ..recording };
+        assert!(!plan_for(&cam, &locked, None).0.run, "never behind the lock screen");
     }
 
     #[test]
