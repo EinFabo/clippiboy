@@ -1852,6 +1852,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_audio_devices,
             commands::list_cameras,
+            commands::cam_preview_frame,
+            commands::set_facecam_enabled,
+            commands::open_camera_privacy,
             commands::bake_clip_cam,
             commands::bake_all_cams,
             commands::list_audio_processes,

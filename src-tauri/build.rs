@@ -8,6 +8,9 @@ fn main() {
     let commands = &[
         "list_audio_devices",
         "list_cameras",
+        "cam_preview_frame",
+        "set_facecam_enabled",
+        "open_camera_privacy",
         "bake_clip_cam",
         "bake_all_cams",
         "list_audio_processes",

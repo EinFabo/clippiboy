@@ -457,6 +457,90 @@ pub fn default_clip_dir() -> String {
 /// unmuted there, and that copy is what the mixer's own rows are built from.
 /// Only to `main`, and only for changes it did not start: an echo of its own
 /// write would land on its newer, not yet answered edits.
+/// Who may pull the cam preview: the main window while the facecam is on, the
+/// console only while it is on screen, its preview is on and it is kept out of
+/// recordings.
+pub fn preview_allowed(
+    label: &str,
+    console_shown: bool,
+    cam_enabled: bool,
+    console_preview: bool,
+    in_capture: bool,
+) -> std::result::Result<(), &'static str> {
+    match label {
+        "main" if cam_enabled => Ok(()),
+        "main" => Err("The facecam is off."),
+        "console" if console_shown && cam_enabled && console_preview && !in_capture => Ok(()),
+        "console" => Err("No cam preview in the console right now."),
+        _ => Err("Not for this window."),
+    }
+}
+
+/// The newest small cam frame as raw bytes (`camtrack::encode_preview`), newer
+/// than `after`; empty when none came within half a second. From the main
+/// window it renews the preview's lease, which keeps the camera open.
+#[tauri::command]
+pub async fn cam_preview_frame(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    after: u64,
+) -> Result<tauri::ipc::Response> {
+    use std::sync::atomic::Ordering;
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let config = state.config_snapshot();
+    preview_allowed(
+        webview.label(),
+        crate::console::CONSOLE_SHOWN.load(Ordering::SeqCst),
+        config.facecam.enabled,
+        config.facecam.console_preview,
+        config.console_in_capture,
+    )
+    .map_err(String::from)?;
+    if webview.label() == "main" {
+        let now = crate::audio::capture::now_100ns();
+        let before = state.cam_preview_until.swap(now + 30_000_000, Ordering::SeqCst);
+        if before <= now {
+            // The lease starts: the camera opens without waiting for the tick.
+            state.reconcile_cam();
+        }
+    }
+    let handle = app.clone();
+    let frame = tauri::async_runtime::spawn_blocking(move || {
+        handle.state::<AppState>().camera.preview().wait_after(after, std::time::Duration::from_millis(500))
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    Ok(tauri::ipc::Response::new(frame.map(|f| crate::camtrack::encode_preview(&f)).unwrap_or_default()))
+}
+
+/// The facecam's master switch on its own — the console has no `set_config`.
+/// `async`: it writes the config, and a plain command runs on the main thread.
+#[tauri::command(async)]
+pub fn set_facecam_enabled(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    enabled: bool,
+) -> AppConfig {
+    let mut next = state.config_snapshot();
+    next.facecam.enabled = enabled;
+    let saved = state.replace_config(next);
+    if webview.label() != "main" {
+        tell_main(&app, &saved);
+    }
+    saved
+}
+
+/// Windows' camera privacy page, for "Blocked by Windows privacy".
+#[tauri::command]
+pub fn open_camera_privacy(app: tauri::AppHandle) -> Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url("ms-settings:privacy-webcam", None::<&str>)
+        .map_err(|err| err.to_string())
+}
+
 pub(crate) fn tell_main(app: &tauri::AppHandle, config: &AppConfig) {
     use tauri::Emitter;
     let _ = app.emit_to("main", "config-changed", config);
@@ -2080,6 +2164,20 @@ pub fn retry_ffmpeg() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The console is never throttled while hidden, so the core refuses as well
+    /// as the page stopping.
+    #[test]
+    fn the_console_sees_the_cam_only_while_it_is_shown_and_out_of_recordings() {
+        assert!(preview_allowed("console", true, true, true, false).is_ok());
+        assert!(preview_allowed("console", false, true, true, false).is_err());
+        assert!(preview_allowed("console", true, false, true, false).is_err());
+        assert!(preview_allowed("console", true, true, false, false).is_err());
+        assert!(preview_allowed("console", true, true, true, true).is_err());
+        assert!(preview_allowed("main", false, true, false, true).is_ok());
+        assert!(preview_allowed("main", true, false, true, false).is_err());
+        assert!(preview_allowed("overlay", true, true, true, false).is_err());
+    }
 
     /// "Undo trim" renders the file again from the untouched recording, so a
     /// mix baked into the trimmed file is no longer in it. Left set, the clip

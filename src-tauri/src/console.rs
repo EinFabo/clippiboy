@@ -47,6 +47,11 @@ static PREVIOUS: AtomicIsize = AtomicIsize::new(0);
 /// console I was asked to close" from "closed and opened again since".
 static OPENINGS: AtomicU64 = AtomicU64::new(0);
 
+/// Is the console on screen? The cam preview is refused while it is not: a
+/// hidden console is never throttled, and a page that kept asking would keep
+/// the camera's frames flowing for nobody.
+pub static CONSOLE_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// How long the page gets to play its way out before the hotkey closes the
 /// window anyway — `CLOSE_MS` in Console.tsx plus room for a slow frame.
 const CLOSE_GRACE: Duration = Duration::from_millis(600);
@@ -88,7 +93,11 @@ pub fn create(app: &tauri::AppHandle) {
             // user chose, so there is nothing to hand back.
             let handle = window.clone();
             window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    CONSOLE_SHOWN.store(false, Ordering::SeqCst);
+                }
                 if matches!(event, tauri::WindowEvent::Focused(false)) {
+                    CONSOLE_SHOWN.store(false, Ordering::SeqCst);
                     let _ = handle.hide();
                     // Whoever was in front before is no longer where the user
                     // is going — they just chose somewhere else themselves.
@@ -190,6 +199,7 @@ pub fn open(app: &tauri::AppHandle) {
     protect(app, &window);
     let mut layout = place(&window).unwrap_or_default();
     let _ = window.show();
+    CONSOLE_SHOWN.store(true, Ordering::SeqCst);
     let _ = window.set_always_on_top(true);
     let _ = window.set_focus();
     // Once more now that it is up: a hidden window is not always on the monitor
@@ -221,6 +231,7 @@ pub fn close(app: &tauri::AppHandle) {
     // and the game would go deaf, which is the one thing this function exists to
     // prevent. Taking it first makes the order stop mattering.
     let previous = take_foreground();
+    CONSOLE_SHOWN.store(false, Ordering::SeqCst);
     let _ = window.hide();
     restore_foreground(previous);
 }
@@ -233,6 +244,7 @@ pub fn close(app: &tauri::AppHandle) {
 /// only the process that already owns the foreground may hand it on. The main
 /// window would blink in the task bar and stay where it was.
 pub fn hide(app: &tauri::AppHandle) {
+    CONSOLE_SHOWN.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.hide();
     }

@@ -37,6 +37,11 @@ export function fileUrl(path: string | null): string | undefined {
 export const api = {
   listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
   listCameras: () => invoke<CameraDevice[]>("list_cameras"),
+  /** The newest small cam frame after `after`; an empty buffer means none yet. */
+  camPreviewFrame: (after: number) => invoke<ArrayBuffer>("cam_preview_frame", { after }),
+  /** The facecam's master switch alone; answers with the saved settings. */
+  setFacecamEnabled: (enabled: boolean) => invoke<AppConfig>("set_facecam_enabled", { enabled }),
+  openCameraPrivacy: () => invoke<void>("open_camera_privacy"),
   /** Whether a clip has a live share link (deleting the clip takes it down). */
   linkExists: (id: string) => invoke<boolean>("link_exists", { id }),
   listAudioProcesses: () => invoke<AudioProcess[]>("list_audio_processes"),
