@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../vcam/target/release/clippiboy-vcam-setup.exe": "resources/clippiboy-vcam-setup.exe"
+    }
+  }
+}

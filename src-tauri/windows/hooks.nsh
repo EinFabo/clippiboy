@@ -54,6 +54,27 @@
   ${EndIf}
 !macroend
 
+; Runs before the uninstall removes any file, never during an update.
+;
+; ClippiBoy Camera lives outside the install folder (Program Files, HKLM), put
+; there by its own elevated setup. When it was installed, that setup takes it
+; away again - one UAC prompt - while it still sits in the resources folder.
+; Declining the prompt leaves the camera; the uninstall goes on either way.
+!macro NSIS_HOOK_PREUNINSTALL
+  ${If} $UpdateMode <> 1
+  ${AndIf} ${FileExists} "$INSTDIR\resources\clippiboy-vcam-setup.exe"
+    Push $R8
+    SetRegView 64
+    ClearErrors
+    ReadRegStr $R8 HKLM "SOFTWARE\ClippiBoy\VirtualCamera" "Version"
+    SetRegView lastused
+    ${IfNot} ${Errors}
+      ExecShellWait "runas" "$INSTDIR\resources\clippiboy-vcam-setup.exe" "uninstall" SW_HIDE
+    ${EndIf}
+    Pop $R8
+  ${EndIf}
+!macroend
+
 ; Runs at the end of the uninstall, after Tauri's own clean-up.
 ;
 ; Tauri's uninstaller already removes the HKCU Run entry (the autostart

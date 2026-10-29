@@ -35,7 +35,9 @@ jobs:
       # The Rust build is the long part; without a cache every run takes ~15 min.
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            vcam
 
       - run: npm ci
 
@@ -50,6 +52,14 @@ jobs:
           npm ci
           npm ci --prefix com.einfabo.clippiboy.sdPlugin
           npm run pack
+
+      # ClippiBoy Camera's setup, which carries the camera's DLL. It goes into
+      # the installer through tauri.release.conf.json only: a resource that is
+      # missing fails every build, and dev and CI builds do not make this one.
+      - name: Build ClippiBoy Camera
+        working-directory: vcam
+        shell: pwsh
+        run: ./build.ps1
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -69,6 +79,7 @@ jobs:
           prerelease: false
           # Additionally produces `latest.json`, which the updater queries.
           includeUpdaterJson: true
+          args: --config src-tauri/tauri.release.conf.json
 
       # The action above created the release; this hangs the plugin next to the
       # installer. Only on a real tag — a `workflow_dispatch` trial run has no
