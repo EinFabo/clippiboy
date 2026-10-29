@@ -888,6 +888,25 @@ in nor gets a usable picture from the C920 alone. Until the virtual camera
 exists, the Facecam tab says that other apps cannot use the camera while the
 facecam has it.
 
+## What stage 2 measured
+
+Measured on 2026-10-29 on the stage-1 machine (Windows 11 26200, NVIDIA,
+C920 08e5), without a game running. The rows marked *pending* need a game,
+Discord or a clap in front of the camera and are Fabi's to run.
+
+| What | Result |
+|---|---|
+| Cam track alone (example `cam-track`, C920) | 29.6–30.9 fps in and out, clock `device`, NVENC, 1 s GOP, H.264 High 1280×720 without B-frames; the first packet 0.23–0.3 s after the session start (frames before the encoder was ready are dropped, as designed) |
+| Cam ring cost | 10.2 s held 3.7 MB, about 0.36 MB/s (2.9 Mbit/s); for the default 134 s that is about 49 MB, inside the 72 MiB the formula budgets |
+| Phase one (`cam.mp4` from a live ring) | 197 frames, 6.567 s, 30/1, offset −1.26 s against the clip's first frame (inside −1.3…−0.3 s) |
+| Composite, 10 s 1080p60 test clip | NVENC p3 2.2 s (4.5× realtime); x264 superfast, mirrored circle with mask 2.3 s (4.3×) |
+| Composite, 30 s 1440p60 test clip | NVENC p3 11.3 s (2.6×); x264 superfast 13.8 s (2.2×) — the CPU overlay, not the encoder, sets the pace |
+| C920 stop time | about 2.1 s from close to the LED going off (the eMeet 0.35 s); runs on the cam helper thread |
+| Composite with a game running | *pending* |
+| Clap test for the delay default | *pending* — the default stays −40 ms until then |
+| NVENC sessions with game + cam + composite + Discord | *pending* |
+| Console preview CPU | *pending* |
+
 ## Open for Fabi
 
 Most important first. Each has a recommendation; the design above follows the
