@@ -55,21 +55,23 @@ impl SegmentLog {
         Some(index)
     }
 
-    /// A packet of the current session: the segment it goes into, or `None`
-    /// before a header or before the segment's first keyframe.
-    pub fn packet(&mut self, pts_us: i64, keyframe: bool) -> Option<usize> {
+    /// A packet of the current session: the segment it goes into and whether
+    /// it is the segment's first — its offset is known from then on — or
+    /// `None` before a header or before the segment's first keyframe.
+    pub fn packet(&mut self, pts_us: i64, keyframe: bool) -> Option<(usize, bool)> {
         let (_, origin) = self.current?;
         if !self.keyed && !keyframe {
             return None;
         }
         let index = self.segments.len() - 1;
         let segment = &mut self.segments[index];
-        if !self.keyed {
+        let first = !self.keyed;
+        if first {
             self.keyed = true;
             segment.offset_us = (origin + pts_us * 10 - self.start_100ns) / 10;
         }
         segment.frames += 1;
-        Some(index)
+        Some((index, first))
     }
 
     /// Every segment begun — what a crash leaves to recover; counts may lag.
@@ -129,9 +131,18 @@ impl RecordingCam {
 
 impl crate::camtrack::PacketTap for RecordingCam {
     fn cam(&self, packet: &crate::buffer::EncodedPacket) {
-        let index = self.log.lock().packet(packet.pts_us, packet.keyframe);
-        if let Some(index) = index {
+        let (placed, file) = {
+            let mut log = self.log.lock();
+            let placed = log.packet(packet.pts_us, packet.keyframe);
+            let file = placed.filter(|(_, first)| *first).map(|_| log.file());
+            (placed, file)
+        };
+        if let Some((index, _)) = placed {
             self.send(Write::Packet(index, packet.data.clone()));
+        }
+        // The offset is known now: written down before a crash can need it.
+        if let Some(file) = file {
+            self.send(Write::Describe(file));
         }
     }
 
@@ -721,13 +732,13 @@ mod tests {
     fn a_new_session_starts_a_new_segment() {
         let mut log = SegmentLog::new(START);
         assert_eq!(log.header(1, START), Some(0));
-        assert_eq!(log.packet(0, true), Some(0));
-        assert_eq!(log.packet(33_333, false), Some(0));
+        assert_eq!(log.packet(0, true), Some((0, true)));
+        assert_eq!(log.packet(33_333, false), Some((0, false)));
         // The same session's header again (a resend) is no new segment.
         assert_eq!(log.header(1, START), None);
         // A lock or a sleep: the camera comes back with a new session.
         assert_eq!(log.header(2, START + 600_000_000), Some(1));
-        assert_eq!(log.packet(0, true), Some(1));
+        assert_eq!(log.packet(0, true), Some((1, true)));
         let file = log.file();
         assert_eq!(file.segments.len(), 2);
         assert_eq!((file.segments[0].file.as_str(), file.segments[0].frames), ("cam.0.h264", 2));
@@ -750,8 +761,20 @@ mod tests {
         assert_eq!(log.packet(0, true), None, "no header yet");
         log.header(1, START);
         assert_eq!(log.packet(0, false), None, "a segment starts on a keyframe");
-        assert_eq!(log.packet(33_333, true), Some(0));
+        assert_eq!(log.packet(33_333, true), Some((0, true)));
         assert_eq!(log.file().segments[0].frames, 1);
+    }
+
+    /// `cam.json` is written as a segment begins, when its offset is not known
+    /// yet, and again on its first frame: a crash later on found 0 there and
+    /// put the camera up to a keyframe interval off.
+    #[test]
+    fn the_first_frame_settles_the_offset_on_disk() {
+        let mut log = SegmentLog::new(START);
+        log.header(1, START - 10_000_000);
+        assert_eq!(log.packet(500_000, true), Some((0, true)), "describe again now");
+        assert_eq!(log.file().segments[0].offset_us, -500_000);
+        assert_eq!(log.packet(533_333, false), Some((0, false)));
     }
 
     /// Written as a segment begins, before its first frame: a crash right
