@@ -235,6 +235,41 @@ pub fn pick_native(types: &[NativeType], track: (u32, u32)) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// The camera to open. A `dshow:` id opens by its name, a webcam needs only
+/// Media Foundation's list: listing DirectShow means ffmpeg instantiating
+/// every capture filter, 1–4 s measured, so it is asked only when no other
+/// camera is there and none was chosen.
+pub fn find_for_open(
+    id: Option<&str>,
+    name: Option<&str>,
+    mf: Vec<CameraDevice>,
+    dshow_names: impl FnOnce() -> Vec<String>,
+) -> Option<CameraDevice> {
+    if let Some(id) = id.filter(|id| id.starts_with(dshow::PREFIX)) {
+        return dshow::name_of(id).map(|name| CameraDevice { id: id.to_string(), name: name.to_string() });
+    }
+    let mf = dshow::without_our_camera(mf);
+    if let Some(device) = pick_device(&mf, id, name) {
+        return Some(device.clone());
+    }
+    if id.is_none() && name.is_none() && mf.is_empty() {
+        return dshow::extras(&mf, dshow_names()).into_iter().next();
+    }
+    None
+}
+
+/// The camera to open, found the quick way (`find_for_open`).
+pub fn find(id: Option<&str>, name: Option<&str>) -> Option<CameraDevice> {
+    #[cfg(windows)]
+    {
+        find_for_open(id, name, self::windows::list(), dshow::list_names)
+    }
+    #[cfg(not(windows))]
+    {
+        find_for_open(id, name, Vec::new(), Vec::new)
+    }
+}
+
 /// The cameras Windows lists, then those only DirectShow knows (OBS Virtual
 /// Camera), never ClippiBoy Camera itself. Empty on other systems for now.
 pub fn list() -> Vec<CameraDevice> {
@@ -252,17 +287,19 @@ pub fn list() -> Vec<CameraDevice> {
 }
 
 /// Opens `device`; frames and events go to `sink` on a thread of the camera's.
-pub fn open(device: &CameraDevice, mode: OpenMode, sink: Sink) -> Result<Box<dyn Source>, Error> {
+/// `cancelled` says the open is no longer wanted; only the slow DirectShow
+/// open looks at it.
+pub fn open(device: &CameraDevice, mode: OpenMode, sink: Sink, cancelled: &dyn Fn() -> bool) -> Result<Box<dyn Source>, Error> {
     #[cfg(windows)]
     {
         if device.id.starts_with(dshow::PREFIX) {
-            return dshow::open(device, sink);
+            return dshow::open(device, sink, cancelled);
         }
         self::windows::open(device, mode, sink)
     }
     #[cfg(not(windows))]
     {
-        let _ = (device, mode, sink);
+        let _ = (device, mode, sink, cancelled);
         Err(Error::NoCamera)
     }
 }
@@ -321,6 +358,37 @@ mod tests {
 
     fn cam(id: &str, name: &str) -> CameraDevice {
         CameraDevice { id: id.into(), name: name.into() }
+    }
+
+    fn never_listed() -> Vec<String> {
+        panic!("DirectShow was listed")
+    }
+
+    #[test]
+    fn a_directshow_camera_opens_by_its_name_without_listing() {
+        let found = find_for_open(Some("dshow:OBS Virtual Camera"), Some("OBS Virtual Camera"), vec![], never_listed);
+        assert_eq!(found, Some(cam("dshow:OBS Virtual Camera", "OBS Virtual Camera")));
+        assert_eq!(find_for_open(Some("dshow:Capture: Card"), None, vec![], never_listed), None);
+    }
+
+    #[test]
+    fn a_webcam_needs_only_media_foundations_list() {
+        let mf = vec![cam("usb#c960", "HD Webcam eMeet C960"), cam("usb#c920", "HD Pro Webcam C920")];
+        assert_eq!(find_for_open(Some("usb#c920"), None, mf.clone(), never_listed), Some(cam("usb#c920", "HD Pro Webcam C920")));
+        assert_eq!(find_for_open(None, None, mf.clone(), never_listed), Some(cam("usb#c960", "HD Webcam eMeet C960")));
+        assert_eq!(find_for_open(Some("usb#gone"), Some("Gone Cam"), mf, never_listed), None);
+    }
+
+    #[test]
+    fn the_first_camera_is_never_clippiboy_camera() {
+        let mf = vec![cam("swd#vcam", "ClippiBoy Camera (Windows virtuelle Kamera)"), cam("usb#c920", "HD Pro Webcam C920")];
+        assert_eq!(find_for_open(None, None, mf, never_listed), Some(cam("usb#c920", "HD Pro Webcam C920")));
+    }
+
+    #[test]
+    fn directshow_is_asked_only_when_no_other_camera_is_there() {
+        let found = find_for_open(None, None, vec![], || vec!["OBS Virtual Camera".into()]);
+        assert_eq!(found, Some(cam("dshow:OBS Virtual Camera", "OBS Virtual Camera")));
     }
 
     #[test]

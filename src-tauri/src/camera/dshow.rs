@@ -65,6 +65,42 @@ impl SizeWatch {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum SizeWait {
+    Size((u32, u32)),
+    /// ffmpeg ended before it said.
+    Ended,
+    TimedOut,
+    /// The camera is no longer wanted (another was chosen meanwhile).
+    Cancelled,
+}
+
+/// Waits for the size ffmpeg reports, looking every 100 ms whether the open
+/// is still wanted: DirectShow sometimes sits on an open for good, and the
+/// next camera must not wait for that.
+pub fn wait_for_size(
+    rx: &std::sync::mpsc::Receiver<(u32, u32)>,
+    limit: std::time::Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> SizeWait {
+    use std::sync::mpsc::RecvTimeoutError;
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if cancelled() {
+            return SizeWait::Cancelled;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return SizeWait::TimedOut;
+        }
+        match rx.recv_timeout(left.min(std::time::Duration::from_millis(100))) {
+            Ok(size) => return SizeWait::Size(size),
+            Err(RecvTimeoutError::Disconnected) => return SizeWait::Ended,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
 /// What ffmpeg's last words say about the camera.
 pub fn error_from(stderr_tail: &str) -> Error {
     if stderr_tail.contains("Could not run graph") || stderr_tail.contains("already in use") {
@@ -165,11 +201,17 @@ mod win {
         }
     }
 
+    /// Normally 2 s for OBS Virtual Camera; past this it is tried again.
+    const OPEN_LIMIT: Duration = Duration::from_secs(6);
+
     /// ffmpeg reads the camera below normal priority; its log is drained on a
     /// thread of its own, frames are read on another.
-    pub fn open(device: &CameraDevice, sink: Sink) -> Result<Box<dyn Source>, Error> {
+    pub fn open(device: &CameraDevice, sink: Sink, cancelled: &dyn Fn() -> bool) -> Result<Box<dyn Source>, Error> {
         let name = name_of(&device.id).ok_or_else(|| Error::Unsupported(format!("the camera name {}", device.name)))?;
+        // Verbose: when an open fails, its last lines say how far DirectShow got.
         let mut child = crate::muxer::background("ffmpeg")
+            .arg("-loglevel")
+            .arg("verbose")
             .args(arguments(name))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -202,14 +244,20 @@ mod win {
                 .map_err(|err| Error::Other(err.to_string()))?;
         }
         let last_words = |tail: &Mutex<VecDeque<String>>| tail.lock().iter().cloned().collect::<Vec<_>>().join(" / ");
-        let size = match size_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(size) => size,
-            Err(_) => {
+        let size = match wait_for_size(&size_rx, OPEN_LIMIT, cancelled) {
+            SizeWait::Size(size) => size,
+            outcome => {
                 let _ = child.kill();
                 let _ = child.wait();
                 // The log thread ends with the process; its last lines are in.
                 std::thread::sleep(Duration::from_millis(50));
-                return Err(error_from(&last_words(&tail)));
+                let words = last_words(&tail);
+                log::info!("cam: ffmpeg did not open {} ({outcome:?}): {words}", device.name);
+                return Err(match outcome {
+                    SizeWait::Cancelled => Error::Other("cancelled".into()),
+                    SizeWait::TimedOut if words.is_empty() => Error::Other("DirectShow did not answer".into()),
+                    _ => error_from(&words),
+                });
             }
         };
         let closing = Arc::new(AtomicBool::new(false));
@@ -347,6 +395,30 @@ Error opening input file dummy."#;
         assert!(filter.contains(&format!("min(ih,{})", vcam_protocol::MAX_HEIGHT)), "{filter}");
         assert!(filter.contains("force_original_aspect_ratio=decrease"), "{filter}");
         assert!(filter.contains("force_divisible_by=2"), "{filter}");
+    }
+
+    #[test]
+    fn waiting_for_the_size_ends_as_soon_as_the_open_is_no_longer_wanted() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        let (_tx, rx) = mpsc::channel::<(u32, u32)>();
+        let started = Instant::now();
+        let got = wait_for_size(&rx, Duration::from_secs(5), &|| started.elapsed() > Duration::from_millis(150));
+        assert_eq!(got, SizeWait::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn waiting_for_the_size_reports_each_outcome() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (tx, rx) = mpsc::channel();
+        tx.send((1280, 720)).unwrap();
+        assert_eq!(wait_for_size(&rx, Duration::from_secs(1), &|| false), SizeWait::Size((1280, 720)));
+        drop(tx);
+        assert_eq!(wait_for_size(&rx, Duration::from_secs(1), &|| false), SizeWait::Ended);
+        let (_tx, rx) = mpsc::channel::<(u32, u32)>();
+        assert_eq!(wait_for_size(&rx, Duration::from_millis(150), &|| false), SizeWait::TimedOut);
     }
 
     #[test]

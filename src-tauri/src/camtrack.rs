@@ -140,6 +140,9 @@ pub struct CamShared {
     pub errors: crate::pipeline::ErrorSlot,
     /// The cam track's size while it runs.
     pub track: Mutex<(u32, u32)>,
+    /// The worker's newest open (or close): an older open still running is no
+    /// longer wanted.
+    pub open_generation: std::sync::atomic::AtomicU64,
     /// ClippiBoy Camera's shared memory, once it exists.
     pub vcam: Mutex<Option<Arc<vcam_protocol::Writer>>>,
     /// ClippiBoy Camera is listed: every raw frame goes into `vcam`, whether or
@@ -173,6 +176,7 @@ impl CamTrack {
                 status: Mutex::new(None),
                 errors: crate::pipeline::ErrorSlot::new(),
                 track: Mutex::new((1280, 720)),
+                open_generation: std::sync::atomic::AtomicU64::new(0),
                 vcam: Mutex::new(None),
                 vcam_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
@@ -386,7 +390,10 @@ pub struct PreviewFrame {
 
 /// The preview's width in pixels.
 pub const PREVIEW_WIDTH: u32 = 320;
-const PREVIEW_EVERY: Duration = Duration::from_millis(1000 / 15);
+const PREVIEW_EVERY: Duration = Duration::from_micros(1_000_000 / 30);
+/// A frame a little early still counts: without it, a camera's jitter made
+/// every other frame miss and the preview ran at 10 fps, unevenly.
+const PREVIEW_SLACK: Duration = Duration::from_millis(8);
 /// A frame is made only while someone asked in this long.
 const PREVIEW_INTEREST: Duration = Duration::from_secs(2);
 
@@ -398,7 +405,7 @@ struct PreviewInner {
     asked: Option<Instant>,
 }
 
-/// The newest preview frame. Made at most 15 times a second, and only while
+/// The newest preview frame. Made at most 30 times a second, and only while
 /// somebody looks.
 pub struct PreviewSlot {
     inner: Mutex<PreviewInner>,
@@ -420,7 +427,7 @@ impl PreviewSlot {
         {
             let inner = self.inner.lock();
             let wanted = inner.asked.is_some_and(|t| now.saturating_duration_since(t) < PREVIEW_INTEREST);
-            let due = inner.made.map_or(true, |t| now.saturating_duration_since(t) >= PREVIEW_EVERY);
+            let due = inner.made.map_or(true, |t| now.saturating_duration_since(t) + PREVIEW_SLACK >= PREVIEW_EVERY);
             if !wanted || !due {
                 return;
             }
@@ -749,6 +756,43 @@ mod tests {
         assert_eq!(&bytes[8..12], &2u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &1u32.to_le_bytes());
         assert_eq!(&bytes[16..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn the_preview_keeps_up_with_a_jittery_30_fps_camera() {
+        let slot = PreviewSlot::new();
+        let start = Instant::now();
+        slot.wait_after(0, Duration::ZERO);
+        let mut made = 0;
+        let mut seen = 0;
+        // 30 frames in a second, each up to 3 ms early or late.
+        for i in 0..30u64 {
+            let jitter = if i % 2 == 0 { 3 } else { 0 };
+            let at = start + Duration::from_micros(i * 33_333) - Duration::from_millis(jitter).min(Duration::from_micros(i * 33_333));
+            slot.offer(&grey(64, 36), Rect { x: 0, y: 0, w: 64, h: 36 }, at);
+            if let Some(frame) = slot.wait_after(seen, Duration::ZERO) {
+                seen = frame.seq;
+                made += 1;
+            }
+        }
+        assert!(made >= 29, "{made} previews from 30 frames");
+    }
+
+    #[test]
+    fn a_60_fps_camera_is_previewed_at_30() {
+        let slot = PreviewSlot::new();
+        let start = Instant::now();
+        slot.wait_after(0, Duration::ZERO);
+        let mut seen = 0;
+        let mut made = 0;
+        for i in 0..60u64 {
+            slot.offer(&grey(64, 36), Rect { x: 0, y: 0, w: 64, h: 36 }, start + Duration::from_micros(i * 16_667));
+            if let Some(frame) = slot.wait_after(seen, Duration::ZERO) {
+                seen = frame.seq;
+                made += 1;
+            }
+        }
+        assert!((29..=31).contains(&made), "{made} previews from 60 frames");
     }
 
     #[test]

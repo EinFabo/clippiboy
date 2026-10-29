@@ -17,7 +17,7 @@ use windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
 use super::{CamPlan, CamShared, PlanSender};
 use crate::audio::capture::now_100ns;
 use crate::camera::grid::{Grid, Out};
-use crate::camera::{self, colour_of, cover_crop, pick_device, Backoff, CameraDevice, ClockKind, Error, Event, Frame, OpenMode, Source};
+use crate::camera::{self, colour_of, cover_crop, Backoff, CameraDevice, ClockKind, Error, Event, Frame, OpenMode, Source};
 use crate::gpu::GpuDevice;
 use crate::mft::{EncoderSettings, RateMode, VideoEncoder};
 use crate::model::{CamState, CamStatus, EncoderId};
@@ -77,15 +77,15 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
     while let Ok(ask) = asks.recv() {
         match ask {
             Ask::Open { id, name, track, generation, events } => {
-                let list = camera::list();
-                let result = match pick_device(&list, id.as_deref(), name.as_deref()).cloned() {
+                let result = match camera::find(id.as_deref(), name.as_deref()) {
                     None => Err((Error::NoCamera, None)),
                     Some(device) => {
                         let sink = Box::new(move |event| {
                             let _ = events.send((generation, event));
                         });
                         let mode = OpenMode::Controlling { width: track.0, height: track.1 };
-                        match camera::open(&device, mode, sink) {
+                        let cancelled = || shared.open_generation.load(std::sync::atomic::Ordering::SeqCst) != generation;
+                        match camera::open(&device, mode, sink, &cancelled) {
                             Ok(source) => Ok((source, device)),
                             Err(err) => Err((err, Some(device))),
                         }
@@ -333,6 +333,7 @@ impl Worker {
     fn open_camera(&mut self) {
         let Some(plan) = &self.plan else { return };
         self.generation += 1;
+        self.shared.open_generation.store(self.generation, std::sync::atomic::Ordering::SeqCst);
         self.opening = true;
         let _ = self.ask.send(Ask::Open {
             id: plan.device_id.clone(),
@@ -348,6 +349,7 @@ impl Worker {
             let _ = self.ask.send(Ask::Close(source));
         }
         self.generation += 1;
+        self.shared.open_generation.store(self.generation, std::sync::atomic::Ordering::SeqCst);
         self.device = None;
         self.scaler = None;
         self.last_frame_at = None;
