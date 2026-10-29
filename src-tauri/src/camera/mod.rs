@@ -236,9 +236,9 @@ pub fn pick_native(types: &[NativeType], track: (u32, u32)) -> Option<usize> {
 }
 
 /// The camera to open. A `dshow:` id opens by its name, a webcam needs only
-/// Media Foundation's list: listing DirectShow means ffmpeg instantiating
-/// every capture filter, 1–4 s measured, so it is asked only when no other
-/// camera is there and none was chosen.
+/// Media Foundation's list: listing DirectShow means an ffmpeg run that asks
+/// every capture filter (about 0.25 s, longer when one is slow to answer), so
+/// it is asked only when no other camera is there and none was chosen.
 pub fn find_for_open(
     id: Option<&str>,
     name: Option<&str>,
