@@ -76,7 +76,14 @@ pub fn error_from(stderr_tail: &str) -> Error {
     }
 }
 
+/// Up to 1080p as it comes; larger (an OBS canvas at 1440p) is scaled down,
+/// or ClippiBoy Camera's slots would refuse every frame of it.
 pub fn arguments(name: &str) -> Vec<String> {
+    let fit = format!(
+        "scale=w='min(iw,{})':h='min(ih,{})':force_original_aspect_ratio=decrease:force_divisible_by=2",
+        vcam_protocol::MAX_WIDTH,
+        vcam_protocol::MAX_HEIGHT
+    );
     [
         "-hide_banner",
         "-nostdin",
@@ -88,6 +95,8 @@ pub fn arguments(name: &str) -> Vec<String> {
         "-i",
         &format!("video={name}"),
         "-an",
+        "-vf",
+        &fit,
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -328,6 +337,16 @@ Error opening input file dummy."#;
         );
         assert_eq!(error_from("[in#0 @ 01] Could not find video device with name [OBS Virtual Camera] among source devices of type video."), Error::Gone);
         assert_eq!(error_from("something else"), Error::Other("something else".into()));
+    }
+
+    #[test]
+    fn a_picture_larger_than_clippiboy_cameras_slots_is_scaled_down() {
+        let args = arguments("OBS Virtual Camera");
+        let filter = args.windows(2).find(|w| w[0] == "-vf").map(|w| w[1].clone()).unwrap_or_default();
+        assert!(filter.contains(&format!("min(iw,{})", vcam_protocol::MAX_WIDTH)), "{filter}");
+        assert!(filter.contains(&format!("min(ih,{})", vcam_protocol::MAX_HEIGHT)), "{filter}");
+        assert!(filter.contains("force_original_aspect_ratio=decrease"), "{filter}");
+        assert!(filter.contains("force_divisible_by=2"), "{filter}");
     }
 
     #[test]
