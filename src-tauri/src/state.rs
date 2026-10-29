@@ -1551,6 +1551,18 @@ impl AppState {
             recording.target_stable_id.as_deref(),
         )?;
 
+        // The camera, burned in where new clips get it — from the frame it
+        // already has: a screenshot never starts the webcam, and a frame older
+        // than half a second (a stalled camera) stays out.
+        let cam = &config.facecam;
+        if cam.enabled && cam.in_screenshots && cam.layout.visible {
+            if let Some(frame) = self.camera.latest_frame() {
+                if crate::composite::fresh_for_shot(frame.probe.qpc_100ns, crate::audio::capture::now_100ns()) {
+                    crate::composite::lay_cam_still(&mut shot, &frame, &cam.layout);
+                }
+            }
+        }
+
         // Ein Bild ist ein Augenblick: es gehört zu dem Spiel, das jetzt läuft.
         let game = self.current_game.lock().clone();
         let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)

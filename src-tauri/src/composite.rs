@@ -113,6 +113,42 @@ pub fn write_mask_png(path: &Path, w: u32, h: u32, pixels: &[u8]) -> std::io::Re
     writer.write_image_data(pixels).map_err(std::io::Error::other)
 }
 
+/// A camera frame older than this stays out of a screenshot: the camera
+/// stalled, or it is not running.
+const STILL_LIMIT_100NS: i64 = 5_000_000;
+
+pub fn fresh_for_shot(frame_100ns: i64, now_100ns: i64) -> bool {
+    now_100ns - frame_100ns <= STILL_LIMIT_100NS
+}
+
+/// Burns the camera into a screenshot where `layout` puts it — the same place,
+/// cut and shape a clip's composite gives it. Before the watermark, so the
+/// mark stays on top.
+pub fn lay_cam_still(shot: &mut crate::shot::Shot, frame: &crate::camera::Frame, layout: &CamLayout) {
+    let rect = cam_rect((shot.width, shot.height), layout);
+    if rect.w < 2 || rect.h < 2 || rect.x + rect.w > shot.width || rect.y + rect.h > shot.height {
+        return;
+    }
+    let crop = crate::camera::cover_crop((frame.probe.width, frame.probe.height), (rect.w, rect.h));
+    let (w, h, bgra) = crate::camtrack::preview_bgra(frame, crop, rect.w);
+    let mask = mask_gray8(layout.shape, rect.w, rect.h);
+    for y in 0..rect.h {
+        let sy = (y * h / rect.h).min(h - 1);
+        for x in 0..rect.w {
+            let sx = (x * w / rect.w).min(w - 1);
+            let sx = if layout.mirror { w - 1 - sx } else { sx };
+            let src = &bgra[((sy * w + sx) * 4) as usize..][..4];
+            let alpha = mask.as_ref().map_or(255, |m| m[(y * rect.w + x) as usize]) as u32;
+            let at = (((rect.y + y) * shot.width + rect.x + x) * 3) as usize;
+            // BGRA in, RGB out.
+            for (c, value) in [src[2], src[1], src[0]].into_iter().enumerate() {
+                let under = shot.rgb[at + c] as u32;
+                shot.rgb[at + c] = ((value as u32 * alpha + under * (255 - alpha)) / 255) as u8;
+            }
+        }
+    }
+}
+
 /// What the cam's part of a filter graph is made from.
 pub struct CamChain<'a> {
     pub cam_input: usize,
@@ -849,6 +885,80 @@ mod tests {
         let rects = [g.game_crop].into_iter().chain(g.band);
         rects.into_iter().all(|r| [r.x, r.y, r.w, r.h].iter().all(|v| v % 2 == 0))
             && [g.game_scaled.0, g.game_scaled.1, g.game_at.0, g.game_at.1, g.out.0, g.out.1].iter().all(|v| v % 2 == 0)
+    }
+
+    /// A frame whose left half has luma `left`, its right half `right`,
+    /// neutral colour.
+    fn halves(w: u32, h: u32, left: u8, right: u8) -> crate::camera::Frame {
+        let mut nv12 = vec![128u8; (w * h * 3 / 2) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                nv12[(y * w + x) as usize] = if x < w / 2 { left } else { right };
+            }
+        }
+        crate::camera::Frame {
+            probe: crate::camera::ProbeFrame {
+                qpc_100ns: 0,
+                clock: crate::camera::ClockKind::Device,
+                sample_time_100ns: None,
+                device_ts_100ns: None,
+                device_ref_ts_100ns: None,
+                arrival_100ns: 0,
+                subtype: *b"NV12",
+                width: w,
+                height: h,
+                bytes: nv12.len(),
+            },
+            nv12: nv12.into(),
+        }
+    }
+
+    fn grey_shot(w: u32, h: u32) -> crate::shot::Shot {
+        crate::shot::Shot { width: w, height: h, rgb: vec![60u8; (w * h * 3) as usize] }
+    }
+
+    fn pixel(shot: &crate::shot::Shot, x: u32, y: u32) -> [u8; 3] {
+        let i = ((y * shot.width + x) * 3) as usize;
+        [shot.rgb[i], shot.rgb[i + 1], shot.rgb[i + 2]]
+    }
+
+    #[test]
+    fn the_cam_lands_in_a_screenshot_where_the_layout_puts_it() {
+        let mut shot = grey_shot(1920, 1080);
+        let layout = CamLayout { shape: CamShape::Rect, ..CamLayout::default() };
+        lay_cam_still(&mut shot, &halves(1280, 720, 235, 235), &layout);
+        let r = cam_rect((1920, 1080), &layout);
+        assert!(pixel(&shot, r.x + r.w / 2, r.y + r.h / 2)[0] > 240, "white inside");
+        assert_eq!(pixel(&shot, r.x - 2, r.y + r.h / 2), [60, 60, 60], "untouched beside it");
+        assert_eq!(pixel(&shot, 10, 10), [60, 60, 60]);
+    }
+
+    #[test]
+    fn a_rounded_cam_leaves_its_corners_to_the_picture() {
+        let mut shot = grey_shot(1920, 1080);
+        let layout = CamLayout::default();
+        assert_eq!(layout.shape, CamShape::Rounded);
+        lay_cam_still(&mut shot, &halves(1280, 720, 235, 235), &layout);
+        let r = cam_rect((1920, 1080), &layout);
+        assert_eq!(pixel(&shot, r.x, r.y), [60, 60, 60], "the corner stays the picture's");
+        assert!(pixel(&shot, r.x + r.w / 2, r.y)[0] > 240, "the edge's middle is the cam's");
+    }
+
+    #[test]
+    fn a_mirrored_cam_is_flipped_in_a_screenshot() {
+        let layout = CamLayout { shape: CamShape::Rect, mirror: true, ..CamLayout::default() };
+        let mut shot = grey_shot(1920, 1080);
+        // Dark on the camera's left, bright on its right.
+        lay_cam_still(&mut shot, &halves(1280, 720, 16, 235), &layout);
+        let r = cam_rect((1920, 1080), &layout);
+        assert!(pixel(&shot, r.x + r.w / 8, r.y + r.h / 2)[0] > 240, "mirrored: bright on the left");
+        assert!(pixel(&shot, r.x + r.w * 7 / 8, r.y + r.h / 2)[0] < 20);
+    }
+
+    #[test]
+    fn a_stale_cam_frame_stays_out_of_a_screenshot() {
+        assert!(fresh_for_shot(1_000_000_000, 1_000_000_000 + 3_000_000));
+        assert!(!fresh_for_shot(1_000_000_000, 1_000_000_000 + 6_000_000), "more than half a second old");
     }
 
     #[test]
