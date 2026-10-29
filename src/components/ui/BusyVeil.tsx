@@ -6,7 +6,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { freezeFrame } from "@/lib/dom";
+import { freezeFrame, type FrozenCam } from "@/lib/dom";
 import { prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
 import { ARC, Mark } from "@/components/ui/Logo";
@@ -46,7 +46,7 @@ export interface SaveVeilHandle {
    * Take the picture. Has to be called *before* the video lets go of the file —
    * an element whose `src` is already gone has nothing left to draw.
    */
-  freeze: (video: HTMLVideoElement | null) => void;
+  freeze: (video: HTMLVideoElement | null, cam?: FrozenCam | null) => void;
 }
 
 interface SaveVeilProps {
@@ -70,8 +70,8 @@ export const SaveVeil = forwardRef<SaveVeilHandle, SaveVeilProps>(
     if (progress !== null) reported.current = true;
 
     useImperativeHandle(ref, () => ({
-      freeze(video) {
-        freezeFrame(video, [todo.current, done.current]);
+      freeze(video, cam) {
+        freezeFrame(video, [todo.current, done.current], cam);
       },
     }));
 

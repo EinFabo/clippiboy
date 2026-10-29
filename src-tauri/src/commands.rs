@@ -1640,8 +1640,10 @@ pub fn bake_clip_cam(state: State<'_, AppState>, app: tauri::AppHandle, id: Stri
 pub fn bake_all_cams(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<TrimOriginals> {
     let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))?;
     let mut freed = TrimOriginals::default();
-    for clip in clips.into_iter().filter(|c| crate::facecam::has_store(&c.id)) {
-        if !crate::composite::wait_settled(&clip.id, std::time::Duration::from_secs(60)) {
+    for clip in clips.into_iter().filter(|c| edit::bakeable(c) && crate::facecam::has_store(&c.id)) {
+        // A cam job still running gets a moment; past it the clip waits for
+        // the next time instead of holding every other one up.
+        if !crate::composite::wait_settled(&clip.id, std::time::Duration::from_secs(5)) {
             continue;
         }
         let own = edit::clip_lock(&clip.id);

@@ -48,3 +48,27 @@ export function snapLayout<T extends Pick<CamLayout, "x" | "y">>(layout: T): T {
   const snap = (v: number) => (v < SNAP ? 0 : v > 1 - SNAP ? 1 : v);
   return { ...layout, x: snap(layout.x), y: snap(layout.y) };
 }
+
+/** The camera as the editor holds it until Save. */
+export interface FacecamDraft {
+  layout: CamLayout;
+  delayMs: number;
+}
+
+/** The core's `edit::same_layout` tolerance: closer than this is no change. */
+const TOLERANCE = 0.002;
+
+/** Is `a` what `b` is — the rule that decides "Not saved yet"? */
+export function sameFacecam(a: FacecamDraft, b: FacecamDraft): boolean {
+  const near = (x: number, y: number) => Math.abs(x - y) <= TOLERANCE + 1e-9;
+  const [p, q] = [a.layout, b.layout];
+  return (
+    a.delayMs === b.delayMs &&
+    p.visible === q.visible &&
+    p.shape === q.shape &&
+    p.mirror === q.mirror &&
+    near(p.x, q.x) &&
+    near(p.y, q.y) &&
+    near(p.size, q.size)
+  );
+}

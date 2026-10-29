@@ -1,14 +1,32 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
-import { Slider } from "@/components/ui/Controls";
+import { Segmented, Slider, Toggle } from "@/components/ui/Controls";
 import { IconSpeaker } from "@/components/icons";
 import { ClipMeta } from "@/components/ClipMeta";
 import { inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { isTrimmed } from "@/lib/editRules";
 import type { TrackState } from "@/lib/useClipMix";
-import type { Clip, ClipTrack } from "@/lib/types";
+import type { CamShape, Clip, ClipTrack } from "@/lib/types";
+import type { FacecamDraft } from "@/lib/camGeometry";
+
+/** The clip's camera as the editor offers it; `null` hides the section. */
+export type EditorCam =
+  | { baked: true }
+  | {
+      baked: false;
+      draft: FacecamDraft;
+      /** Differs from what is saved. */
+      changed: boolean;
+      /** Stands where the settings would put it. */
+      atDefault: boolean;
+      /** Untrimmed with its camera in: Free up space bakes it. */
+      canBake: boolean;
+      onChange: (patch: Partial<FacecamDraft>) => void;
+      onReset: () => void;
+      onBake: () => void;
+    };
 
 export interface Trim {
   /** Seconds, like the player's timeline. */
@@ -52,6 +70,7 @@ interface Props {
   onDiscard: () => void;
   /** Switch to the audio mixer — that is where the separated tracks come from. */
   onOpenMixer: () => void;
+  cam?: EditorCam | null;
 }
 
 /** Range of the track sliders. More than +12 dB only brings distortion. */
@@ -89,6 +108,7 @@ export function ClipEditor({
   restoring,
   onDiscard,
   onOpenMixer,
+  cam = null,
 }: Props) {
   // Local, like `askingDelete` in the player: the confirmation replaces the
   // button that opened it and nobody else needs to know about it.
@@ -165,6 +185,8 @@ export function ClipEditor({
             </p>
           )}
         </section>
+
+        {cam && <CameraSection cam={cam} busy={saving || restoring} />}
 
         <section className="space-y-3">
           <div className="flex items-center justify-between">
@@ -283,7 +305,9 @@ export function ClipEditor({
           {restoring
             ? "The whole recording is being written back."
             : saving
-              ? reencodes
+              ? cam && !cam.baked && cam.changed
+                ? "Placing the camera…"
+                : reencodes
                 ? "The clip is being trimmed — the video is recomputed for it."
                 : "The clip is being rewritten, the video stays untouched."
               : dirty && clip.facecam?.state === "failed"
@@ -347,6 +371,96 @@ function SectionHead({ children }: { children: React.ReactNode }) {
 }
 
 /** Only appears once there is something to take back. */
+/** Where the clip's camera sits, how it looks, and how it lines up with the game. */
+function CameraSection({ cam, busy }: { cam: EditorCam; busy: boolean }) {
+  const [syncDraft, setSyncDraft] = useState<number | null>(null);
+  const [baking, setBaking] = useState(false);
+  if (cam.baked) {
+    return (
+      <section className="space-y-3">
+        <SectionHead>Camera</SectionHead>
+        <p className="text-xs text-ink-muted">The camera is fixed in this clip.</p>
+      </section>
+    );
+  }
+  const { draft, onChange } = cam;
+  const layout = (patch: Partial<FacecamDraft["layout"]>) => onChange({ layout: { ...draft.layout, ...patch } });
+  const hidden = !draft.layout.visible;
+  const sync = syncDraft ?? draft.delayMs;
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <SectionHead>Camera</SectionHead>
+        <Reset show={!cam.atDefault} onClick={cam.onReset} />
+      </div>
+      <CamRow label="Show">
+        <Toggle checked={draft.layout.visible} disabled={busy} onChange={(visible) => layout({ visible })} />
+      </CamRow>
+      <CamRow label="Shape">
+        <Segmented<CamShape>
+          value={draft.layout.shape}
+          disabled={busy || hidden}
+          options={[
+            { key: "rect", label: "Rectangle" },
+            { key: "rounded", label: "Rounded" },
+            { key: "circle", label: "Circle" },
+          ]}
+          onChange={(shape) => layout({ shape })}
+        />
+      </CamRow>
+      <CamRow label="Mirror">
+        <Toggle checked={draft.layout.mirror} disabled={busy || hidden} onChange={(mirror) => layout({ mirror })} />
+      </CamRow>
+      <CamRow label="Sync">
+        <div className={cn("flex w-44 items-center gap-2", (busy || hidden) && "pointer-events-none opacity-40")}>
+          <Slider
+            label="Sync"
+            value={sync}
+            min={-300}
+            max={300}
+            step={10}
+            onChange={setSyncDraft}
+            onRelease={() => setSyncDraft(null)}
+            onCommit={(delayMs) => {
+              setSyncDraft(null);
+              onChange({ delayMs });
+            }}
+          />
+          <span className="w-14 shrink-0 text-right font-mono text-xs text-ink-muted tabular-nums">
+            {sync.toString().replace("-", "−")} ms
+          </span>
+        </div>
+      </CamRow>
+      {cam.canBake &&
+        (baking ? (
+          <ConfirmDelete
+            question="Bake the camera into the clip?"
+            confirmLabel="Bake"
+            confirmTitle="The camera can no longer be moved in this clip."
+            onConfirm={() => {
+              setBaking(false);
+              cam.onBake();
+            }}
+            onCancel={() => setBaking(false)}
+          />
+        ) : (
+          <Button size="sm" variant="ghost" disabled={busy || cam.changed || !inTauri} onClick={() => setBaking(true)}>
+            Free up space
+          </Button>
+        ))}
+    </section>
+  );
+}
+
+function CamRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-sm">{label}</span>
+      {children}
+    </div>
+  );
+}
+
 function Reset({ show, onClick }: { show: boolean; onClick: () => void }) {
   if (!show) return null;
   return (

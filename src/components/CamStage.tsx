@@ -20,6 +20,7 @@ export function CamStage({
   box,
   frame,
   released,
+  elements,
 }: {
   view: FacecamView;
   layout: CamLayout;
@@ -31,9 +32,12 @@ export function CamStage({
   frame: { width: number; height: number };
   /** A save or undo has the files: let go of them. */
   released: boolean;
+  /** Filled with the two elements, for the frozen frame behind a save. */
+  elements?: { current: { clean: HTMLVideoElement | null; cam: HTMLVideoElement | null } };
 }) {
   const [clean, setClean] = useState<HTMLVideoElement | null>(null);
   const [cam, setCam] = useState<HTMLVideoElement | null>(null);
+  if (elements) elements.current = { clean, cam };
   useSlavedMedia(
     master,
     [

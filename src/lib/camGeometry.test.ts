@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { camBox, layoutFromRect, snapLayout } from "./camGeometry.ts";
+import { camBox, layoutFromRect, sameFacecam, snapLayout } from "./camGeometry.ts";
 import type { CamLayout } from "./types.ts";
 
 const base: CamLayout = { visible: true, x: 1, y: 1, size: 0.25, shape: "rounded", mirror: false };
@@ -26,4 +26,13 @@ test("the size stays between 12 % and 50 %", () => {
   assert.equal(tiny.size, 0.12);
   const huge = layoutFromRect({ x: 0, y: 0, width: 1900, height: 1000 }, { width: 1920, height: 1080 }, "rect");
   assert.equal(huge.size, 0.5);
+});
+
+test("same facecam ignores moves inside the tolerance", () => {
+  const a = { layout: base, delayMs: -40 };
+  assert.equal(sameFacecam(a, { layout: { ...base, x: base.x - 0.001 }, delayMs: -40 }), true);
+  assert.equal(sameFacecam(a, { layout: { ...base, x: base.x - 0.003 }, delayMs: -40 }), false);
+  assert.equal(sameFacecam(a, { layout: base, delayMs: -30 }), false);
+  assert.equal(sameFacecam(a, { layout: { ...base, mirror: true }, delayMs: -40 }), false);
+  assert.equal(sameFacecam(a, { layout: { ...base, visible: false }, delayMs: -40 }), false);
 });

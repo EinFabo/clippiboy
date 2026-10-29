@@ -421,6 +421,13 @@ pub enum CamPart {
 /// "unsaved" uses it too.
 const LAYOUT_TOLERANCE: f32 = 0.002;
 
+/// Whether "Free up space" for every clip takes this one's cam store now: not
+/// while its cam is still being added — that one is skipped, not waited for.
+pub fn bakeable(clip: &Clip) -> bool {
+    use crate::model::FacecamState;
+    clip.facecam.as_ref().is_some_and(|cam| !matches!(cam.state, FacecamState::Pending | FacecamState::Baked))
+}
+
 pub fn same_layout(a: &crate::model::CamLayout, b: &crate::model::CamLayout) -> bool {
     let near = |x: f32, y: f32| (x - y).abs() <= LAYOUT_TOLERANCE;
     a.visible == b.visible && a.shape == b.shape && a.mirror == b.mirror && near(a.x, b.x) && near(a.y, b.y) && near(a.size, b.size)
@@ -1856,6 +1863,19 @@ pub(crate) mod tests {
     }
 
     use crate::model::FacecamState::{Failed, Ready};
+
+    /// Freeing every clip's space must not wait on a cam still on its way:
+    /// that clip is skipped and keeps its store.
+    #[test]
+    fn bake_all_cams_skips_a_clip_whose_job_is_pending() {
+        use crate::model::FacecamState::{Baked, Pending};
+        let clip = |state| Clip { facecam: Some(cam_row(Default::default(), -40, state)), ..plain_clip(None, None) };
+        assert!(!bakeable(&clip(Pending)));
+        assert!(bakeable(&clip(Ready)));
+        assert!(bakeable(&clip(Failed)));
+        assert!(!bakeable(&clip(Baked)));
+        assert!(!bakeable(&plain_clip(None, None)), "no cam, nothing to bake");
+    }
 
     #[test]
     fn a_moved_cam_composites_from_the_clean_sources() {
