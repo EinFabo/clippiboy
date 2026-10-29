@@ -1226,9 +1226,14 @@ pub fn reveal_clip(
 /// Put a clip's video file on the clipboard.
 ///
 /// Not the path, the **file**: in Discord or WhatsApp, Ctrl+V then attaches the
-/// clip; in Explorer it drops a copy.
-#[tauri::command]
+/// clip; in Explorer it drops a copy. A clip whose camera is still being added
+/// is waited for: copied a second after saving, it went out without one.
+/// `async`: the wait must not hold the main thread.
+#[tauri::command(async)]
 pub fn copy_clip_file(state: State<'_, AppState>, id: String) -> Result<()> {
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     let path = std::path::PathBuf::from(&clip.path);
@@ -1342,10 +1347,15 @@ pub fn export_for_discord(
     Ok(output.to_string_lossy().to_string())
 }
 
-/// Open the clip in whichever player Windows has chosen for it.
-#[tauri::command]
+/// Open the clip in whichever player Windows has chosen for it — once its
+/// camera is in: that player would show it without, and hold the file the
+/// camera has to go into.
+#[tauri::command(async)]
 pub fn open_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri_plugin_opener::OpenerExt;
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
 
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
