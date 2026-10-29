@@ -223,6 +223,9 @@ pub fn read_cam_file(dir: &std::path::Path) -> Option<CamFile> {
 pub struct StoredSegment {
     pub file: String,
     pub offset_us: i64,
+    /// Its picture's size: another camera half way is another size.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A stopped recording's camera, kept beside it until it is burned in:
@@ -230,8 +233,6 @@ pub struct StoredSegment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredCam {
-    pub width: u32,
-    pub height: u32,
     /// The recording's frame rate, for its keyframe interval.
     pub fps: u32,
     pub segments: Vec<StoredSegment>,
@@ -308,7 +309,6 @@ pub fn secure(
     let store = crate::edit::dir(clip_id);
     std::fs::create_dir_all(&store).ok()?;
     let mut segments = Vec::new();
-    let mut size = None;
     for segment in keep {
         let name = segment.file.replace(".h264", ".mp4");
         let out = store.join(&name);
@@ -325,17 +325,18 @@ pub fn secure(
                 continue;
             }
         }
-        size = size.or_else(|| crate::muxer::probe_video_size(&out));
-        segments.push(StoredSegment { file: name, offset_us: recording_time(segment.offset_us, gaps) });
+        let Some((width, height)) = crate::muxer::probe_video_size(&out) else {
+            log::warn!("recording camera: {name} has no picture");
+            let _ = std::fs::remove_file(&out);
+            continue;
+        };
+        segments.push(StoredSegment { file: name, offset_us: recording_time(segment.offset_us, gaps), width, height });
     }
-    let Some((width, height)) = size.filter(|_| !segments.is_empty()) else {
-        for segment in &segments {
-            let _ = std::fs::remove_file(store.join(&segment.file));
-        }
+    if segments.is_empty() {
         let _ = std::fs::remove_dir(&store);
         return None;
-    };
-    let stored = StoredCam { width, height, fps, segments, clean_bytes, applying_bytes: None };
+    }
+    let stored = StoredCam { fps, segments, clean_bytes, applying_bytes: None };
     if let Err(err) = write_stored(clip_id, &stored) {
         log::warn!("recording camera: reccam.json: {err}");
         return None;
@@ -347,6 +348,7 @@ pub fn secure(
 /// One segment going into the burn-in.
 pub struct SegmentInput {
     pub path: std::path::PathBuf,
+    pub cam: (u32, u32),
     pub timing: crate::composite::CamTiming,
 }
 
@@ -356,7 +358,6 @@ pub struct BurnIn<'a> {
     pub mask: Option<&'a std::path::Path>,
     pub output: &'a std::path::Path,
     pub frame: (u32, u32),
-    pub cam: (u32, u32),
     pub layout: crate::model::CamLayout,
     pub length_ms: u64,
     pub encoder: crate::model::EncoderId,
@@ -403,7 +404,7 @@ pub fn recording_arguments(job: &BurnIn) -> Vec<String> {
             segment.timing.shift_s,
             segment.timing.end_s
         );
-        if let Some(crop) = crate::composite::cam_crop(job.cam, job.layout.shape) {
+        if let Some(crop) = crate::composite::cam_crop(segment.cam, job.layout.shape) {
             cam += &format!(",crop={}:{}:{}:{}", crop.w, crop.h, crop.x, crop.y);
         }
         if job.layout.mirror {
@@ -600,6 +601,7 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
             .iter()
             .map(|segment| SegmentInput {
                 path: crate::edit::dir(id).join(&segment.file),
+                cam: (segment.width, segment.height),
                 timing: crate::composite::cam_timing(segment.offset_us, cam.delay_ms, video_start_us, 0, length_ms),
             })
             .collect();
@@ -616,7 +618,6 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
                 mask: mask.as_deref(),
                 output: &temp,
                 frame,
-                cam: (stored.width, stored.height),
                 layout: cam.layout,
                 length_ms,
                 encoder,
@@ -818,19 +819,23 @@ mod tests {
     fn input(path: &str, offset_us: i64) -> SegmentInput {
         SegmentInput {
             path: std::path::PathBuf::from(path),
+            cam: (1280, 720),
             timing: crate::composite::cam_timing(offset_us, -40, 0, 0, 120_000),
         }
     }
 
     fn args(segments: &[SegmentInput], mask: bool) -> Vec<String> {
+        args_in(segments, mask, crate::model::CamLayout::default())
+    }
+
+    fn args_in(segments: &[SegmentInput], mask: bool, layout: crate::model::CamLayout) -> Vec<String> {
         recording_arguments(&BurnIn {
             clean: std::path::Path::new("rec.mp4"),
             segments,
             mask: mask.then(|| std::path::Path::new("mask.png")),
             output: std::path::Path::new("out.mp4"),
             frame: (1920, 1080),
-            cam: (1280, 720),
-            layout: crate::model::CamLayout::default(),
+            layout,
             length_ms: 120_000,
             encoder: crate::model::EncoderId::X264,
             quality: 23,
@@ -855,6 +860,18 @@ mod tests {
         // The second segment starts a minute in: shifted, not seeked.
         let joined = a.join(" ");
         assert!(joined.contains("-i cam.0.mp4") && joined.contains("-i cam.1.mp4"), "{joined}");
+    }
+
+    /// Another camera half way — 720p, then 1080p: each segment is cut at
+    /// its own size.
+    #[test]
+    fn each_segment_is_cut_at_its_own_size() {
+        let mut second = input("cam.1.mp4", 60_000_000);
+        second.cam = (1920, 1080);
+        let layout = crate::model::CamLayout { shape: crate::model::CamShape::Circle, ..Default::default() };
+        let g = graph(&args_in(&[input("cam.0.mp4", 0), second], true, layout));
+        assert!(g.contains("crop=720:720:280:0"), "{g}");
+        assert!(g.contains("crop=1080:1080:420:0"), "{g}");
     }
 
     #[test]
@@ -893,7 +910,7 @@ mod tests {
     }
 
     fn stored(clean_bytes: u64, applying_bytes: Option<u64>) -> StoredCam {
-        StoredCam { width: 1280, height: 720, fps: 60, segments: Vec::new(), clean_bytes, applying_bytes }
+        StoredCam { fps: 60, segments: Vec::new(), clean_bytes, applying_bytes }
     }
 
     #[test]
