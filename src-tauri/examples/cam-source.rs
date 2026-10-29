@@ -30,9 +30,14 @@ fn main() {
         return;
     }
     let (tx, rx) = std::sync::mpsc::channel();
-    let source = match camera::open(device, mode, Box::new(move |event| {
-        let _ = tx.send(event);
-    })) {
+    let source = match camera::open(
+        device,
+        mode,
+        Box::new(move |event| {
+            let _ = tx.send(event);
+        }),
+        &|| false,
+    ) {
         Ok(source) => source,
         Err(err) => {
             eprintln!("open failed: {err} ({err:?})");

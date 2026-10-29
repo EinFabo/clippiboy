@@ -78,7 +78,7 @@ fn main() {
     //    video has to stay identical frame for frame.
     let want = full - 3_000;
     println!("\n1. Shorten at the back to {want} ms (copy, no re-encode)");
-    let plan = edit::plan(None, true, full, edit::Trim { start_ms: 0, end_ms: want });
+    let plan = edit::plan(None, true, full, edit::Trim { start_ms: 0, end_ms: want }, edit::CamPart::None);
     assert!(!plan.reencode, "shortening at the end must not encode");
     failures += step(&mut clip, edit::Trim { start_ms: 0, end_ms: want }, &mix, want);
 
