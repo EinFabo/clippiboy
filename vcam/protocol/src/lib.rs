@@ -14,6 +14,12 @@
 use std::sync::atomic::{fence, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 pub const NAME: &str = "ClippiBoy.VCam.v1";
+/// The media source's COM class, fixed for good: Windows keys the camera on it.
+pub const CLSID: &str = "{23b5c234-8158-430a-b8f3-681b7e370ec6}";
+/// The camera's name; Windows appends its own virtual-camera suffix.
+pub const FRIENDLY_NAME: &str = "ClippiBoy Camera";
+/// Where the installer notes what it installed.
+pub const REGISTRY_KEY: &str = r"SOFTWARE\ClippiBoy\VirtualCamera";
 pub const MAGIC: u32 = u32::from_le_bytes(*b"CBVC");
 pub const MAJOR: u32 = 1;
 pub const MINOR: u32 = 0;

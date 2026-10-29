@@ -887,6 +887,11 @@ mod tests {
     }
 
     #[test]
+    fn the_class_id_is_the_one_the_installer_registers() {
+        assert_eq!(format!("{{{:?}}}", CLSID).to_lowercase(), vcam_protocol::CLSID);
+    }
+
+    #[test]
     fn only_a_frame_shows_live() {
         use vcam_protocol::{IdleReason, ReadResult};
         assert_eq!(picture_for(&ReadResult::Frame { width: 2, height: 2, qpc_100ns: 0 }), Picture::Live);

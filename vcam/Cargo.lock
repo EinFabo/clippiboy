@@ -12,6 +12,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clippiboy-vcam-setup"
+version = "1.0.0"
+dependencies = [
+ "vcam-protocol",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
