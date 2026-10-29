@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
-import { api, inTauri } from "@/lib/ipc";
+import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Segmented, Select, Slider, Toggle } from "@/components/ui/Controls";
-import { camStateLine, cornerOf, layoutAt, startCamPreview } from "@/lib/facecam";
-import type { CamShape, FacecamConfig } from "@/lib/types";
-import { CornerPad, Row } from "./shared";
+import { camStateLine, startCamPreview } from "@/lib/facecam";
+import { camBox, layoutFromRect, snapLayout } from "@/lib/camGeometry";
+import { usePictureBox } from "@/lib/pictureBox";
+import { RectLayer } from "@/components/ui/RectLayer";
+import type { CamLayout, CamShape, FacecamConfig } from "@/lib/types";
+import { Row } from "./shared";
 
 /** The value the camera dropdown uses for "no camera chosen". */
 const FIRST = "__first";
@@ -38,7 +41,6 @@ export function FacecamTab() {
   };
   const cam = config.facecam;
   const patch = (p: Partial<FacecamConfig>) => patchConfig({ facecam: { ...cam, ...p } });
-  const [sizeDraft, setSizeDraft] = useState<number | null>(null);
   const [delayDraft, setDelayDraft] = useState<number | null>(null);
 
   // The list when the tab opens, never in the store's start.
@@ -67,7 +69,7 @@ export function FacecamTab() {
         </Row>
         {cam.enabled && (
           <div className="p-4">
-            <Preview layout={cam.layout} />
+            <Placement layout={cam.layout} onCommit={(layout) => patch({ layout })} />
             <div className="mt-3 flex items-center justify-between gap-4">
               <p className="text-xs text-ink-muted">{state ? camStateLine(state) : "Starting…"}</p>
               {state?.kind === "blocked" && (
@@ -139,33 +141,6 @@ export function FacecamTab() {
 
       <SectionTitle title="Position" />
       <Card className="divide-y divide-line">
-        <Row label="Corner">
-          <CornerPad
-            mark="cam"
-            value={cornerOf(cam.layout)}
-            disabled={off}
-            onChange={(corner) => patch({ layout: { ...cam.layout, ...layoutAt(corner) } })}
-          />
-        </Row>
-        <Row label="Size">
-          <div className={off ? "pointer-events-none flex w-56 items-center gap-3 opacity-40" : "flex w-56 items-center gap-3"}>
-            <Slider
-              label="Size"
-              value={Math.round((sizeDraft ?? cam.layout.size) * 100)}
-              min={12}
-              max={50}
-              onChange={(v) => setSizeDraft(v / 100)}
-              onRelease={() => setSizeDraft(null)}
-              onCommit={(v) => {
-                setSizeDraft(null);
-                patch({ layout: { ...cam.layout, size: v / 100 } });
-              }}
-            />
-            <span className="w-12 shrink-0 text-right font-mono text-xs text-ink-muted">
-              {Math.round((sizeDraft ?? cam.layout.size) * 100)} %
-            </span>
-          </div>
-        </Row>
         <Row label="Shape">
           <Segmented<CamShape>
             value={cam.layout.shape}
@@ -210,29 +185,66 @@ export function FacecamTab() {
   );
 }
 
-/** The live picture, shaped and mirrored like the clip will show it. */
-function Preview({ layout }: { layout: FacecamConfig["layout"] }) {
+/** The 1080p frame the camera's place is reckoned in. */
+const FRAME = { width: 1920, height: 1080 };
+
+/**
+ * Where new clips get the camera: the live picture at its place on the
+ * newest clip's thumbnail, dragged and resized as in the clip editor, stored
+ * when it is let go.
+ */
+function Placement({ layout, onCommit }: { layout: CamLayout; onCommit: (layout: CamLayout) => void }) {
+  const stage = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const [draft, setDraft] = useState<CamLayout | null>(null);
+  const backdrop = useEngine((s) => s.clips.find((c) => c.thumbPath && !c.screenshot)?.thumbPath ?? null);
+  const box = usePictureBox(stage, FRAME.width, FRAME.height);
   useEffect(() => {
     if (!canvas.current || !inTauri) return;
     return startCamPreview(canvas.current, { onlyWhileVisible: true });
   }, []);
-  const radius = layout.shape === "circle" ? "9999px" : layout.shape === "rounded" ? "12%" : "0";
+  const shown = draft ?? layout;
+  const place = camBox(shown, FRAME.width, FRAME.height);
+  const radius = shown.shape === "circle" ? "50%" : shown.shape === "rounded" ? `${0.12 * place.height * (box?.scale ?? 0)}px` : 0;
   return (
-    <div className="flex justify-center">
+    <div ref={stage} className="relative mx-auto aspect-video w-full max-w-md overflow-hidden rounded-inner bg-elevated">
+      {backdrop && <img src={fileUrl(backdrop)} alt="" draggable={false} className="absolute inset-0 h-full w-full object-cover opacity-60" />}
+      {/* Always there: the preview starts on mount, before the stage knows its size. */}
       <canvas
         ref={canvas}
         width={320}
         height={180}
-        className="bg-elevated"
-        style={{
-          width: layout.shape === "circle" ? 180 : 320,
-          height: 180,
-          objectFit: "cover",
-          borderRadius: radius,
-          transform: layout.mirror ? "scaleX(-1)" : undefined,
-        }}
+        className="absolute bg-black object-cover"
+        style={
+          box
+            ? {
+                left: box.left + place.left * box.scale,
+                top: box.top + place.top * box.scale,
+                width: place.width * box.scale,
+                height: place.height * box.scale,
+                borderRadius: radius,
+                transform: shown.mirror ? "scaleX(-1)" : undefined,
+              }
+            : { visibility: "hidden" }
+        }
       />
+      {/* Only once the stage has its size: mounted with it, the layer measured
+          before the stage's ref was set and never again. */}
+      {box && (
+        <RectLayer
+          mode="box"
+          stage={stage}
+          width={FRAME.width}
+          height={FRAME.height}
+          ratio={shown.shape === "circle" ? 1 : 16 / 9}
+          rect={{ x: place.left, y: place.top, width: place.width, height: place.height }}
+          onRect={(rect) => setDraft(snapLayout({ ...shown, ...layoutFromRect(rect, FRAME, shown.shape) }))}
+          onRelease={() => {
+            if (draft) onCommit(draft);
+            setDraft(null);
+          }}
+        />
+      )}
     </div>
   );
 }
