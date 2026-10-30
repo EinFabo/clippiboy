@@ -964,6 +964,168 @@ fn hardware_url(activate: &IMFActivate) -> Option<String> {
     }
 }
 
+/// Whether a make's encoders are tried out before one is taken: only when
+/// there is more than one, and the probe has not asked for one by number.
+fn needs_trial(of_make: usize, forced: Option<usize>) -> bool {
+    forced.is_none() && of_make > 1
+}
+
+/// The first of `count` encoders `answers` says yes to, asked in order.
+fn first_answering(count: usize, mut answers: impl FnMut(usize) -> bool) -> Option<usize> {
+    (0..count).find(|&nth| answers(nth))
+}
+
+/// A make on a card — or on every card, `None`, when they are all listed.
+type TrialKey = (EncoderId, Option<i64>);
+
+fn recall(list: &[(TrialKey, usize)], key: TrialKey) -> Option<usize> {
+    list.iter().find(|(known, _)| *known == key).map(|(_, nth)| *nth)
+}
+
+fn remember(list: &mut Vec<(TrialKey, usize)>, key: TrialKey, nth: usize) {
+    list.retain(|(known, _)| *known != key);
+    list.push((key, nth));
+}
+
+/// The encoder that answered, as the n-th of its make, for as long as the app
+/// runs: the buffer restarts without trying them all again.
+static ANSWERING: parking_lot::Mutex<Vec<(TrialKey, usize)>> = parking_lot::Mutex::new(Vec::new());
+
+/// How long an encoder has to hand back the test frame. A working one takes a
+/// few dozen milliseconds, its start included.
+const TRIAL_WAIT: Duration = Duration::from_millis(1500);
+
+/// Which of a make's encoders to take, when there is more than one.
+///
+/// A Ryzen 7800X3D's graphics next to an RX 7800 XT: Media Foundation lists
+/// three AMD encoders, the same three for either card, and nothing says whose
+/// is whose. The first took one frame and never handed anything back — no
+/// error, no event — and ClippiBoy, which took the first, never recorded on
+/// that machine; the second and third worked. So each gets one frame, in order,
+/// and the first to hand back a picture is taken. `None` when none does: the
+/// first, as before.
+fn answering(gpu: &GpuDevice, settings: &EncoderSettings, adapter: Option<i64>, of_make: usize) -> Option<usize> {
+    let key = (settings.requested, adapter);
+    if let Some(nth) = recall(&ANSWERING.lock(), key) {
+        return Some(nth);
+    }
+    let Some(frame) = test_frame(gpu, settings) else {
+        log::warn!("encoder ({}): no texture for a test frame — taking the first", settings.label);
+        return None;
+    };
+    // A listing of its own: these activation objects are shut down after their
+    // trial, and the one the buffer gets is activated fresh.
+    let listed = enumerate(adapter).ok()?;
+    let ids: Vec<Option<EncoderId>> = listed.iter().map(|c| c.id).collect();
+    let found = first_answering(of_make, |nth| {
+        let pick = pick_candidate(&ids, settings.requested, Some(nth));
+        let answered = try_candidate(gpu, settings, &listed, pick, &frame);
+        log::info!(
+            "encoder ({}): {} #{nth} of {of_make} {}",
+            settings.label,
+            listed[pick].name,
+            if answered { "handed back a test frame" } else { "handed back nothing for a test frame" }
+        );
+        answered
+    });
+    match found {
+        Some(nth) => remember(&mut ANSWERING.lock(), key, nth),
+        None => log::warn!(
+            "encoder ({}): none of the {of_make} handed back a test frame — taking the first",
+            settings.label
+        ),
+    }
+    found
+}
+
+/// Start `listed[pick]`, give it the test frame, and shut it down again.
+fn try_candidate(
+    gpu: &GpuDevice,
+    settings: &EncoderSettings,
+    listed: &[Candidate],
+    pick: usize,
+    frame: &ID3D11Texture2D,
+) -> bool {
+    let candidate = &listed[pick];
+    let Some(chosen) = candidate.id else { return false };
+    let Ok(transform) = (unsafe { candidate.activate.ActivateObject::<IMFTransform>() }) else {
+        return false;
+    };
+    match set_up(gpu, settings, listed, pick, chosen, &transform, &candidate.activate, false) {
+        // Dropping it shuts it down.
+        Ok(built) => hands_back(&built, settings, frame),
+        Err(err) => {
+            log::info!("encoder ({}): {} #{pick} would not start: {err}", settings.label, candidate.name);
+            shut_down(&transform, &candidate.activate, settings.label);
+            false
+        }
+    }
+}
+
+/// Whether an encoder hands back a picture for one frame — in, drained, out —
+/// within [`TRIAL_WAIT`]. The drain matters: an encoder with a lookahead holds
+/// a lone frame back until more arrive.
+fn hands_back(transform: &Transform, settings: &EncoderSettings, frame: &ID3D11Texture2D) -> bool {
+    // Synchronous: nothing it could fail to announce.
+    let Some(events) = transform.events.as_ref() else { return true };
+    let duration = 10_000_000 / settings.fps.max(1) as i64;
+    let job = Job {
+        texture: SendPtr(frame.clone()),
+        pts_100ns: 0,
+    };
+    let Ok(sample) = transform.prepare(&job, duration) else { return false };
+    let deadline = Instant::now() + TRIAL_WAIT;
+    let mut fed = false;
+    while Instant::now() < deadline {
+        let event = match unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+            Ok(event) => event,
+            Err(err) if err.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            Err(_) => return false,
+        };
+        let kind = unsafe { event.GetType() }.unwrap_or(0);
+        if kind == METransformNeedInput.0 as u32 && !fed {
+            if transform.submit_sample(&sample).is_err() {
+                return false;
+            }
+            fed = true;
+            let _ = unsafe { transform.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0) };
+        } else if kind == METransformHaveOutput.0 as u32 {
+            if let Ok(Taken::Packet(_)) = transform.take_output(duration) {
+                return true;
+            }
+        } else if kind == METransformDrainComplete.0 as u32 || kind == MEError.0 as u32 {
+            return false;
+        }
+    }
+    false
+}
+
+/// An NV12 texture like the converter's slots, for the test frame.
+fn test_frame(gpu: &GpuDevice, settings: &EncoderSettings) -> Option<ID3D11Texture2D> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: settings.width,
+        Height: settings.height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut texture)) }.ok()?;
+    texture
+}
+
 fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, String> {
     startup()?;
     let adapter = if lists_every_card() {
@@ -999,9 +1161,16 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     // without a hardware encoder.
     //
     // `CLIPPIBOY_ENCODER_CANDIDATE=n` takes the n-th of the make instead of the
-    // first — for the probe, on a machine with more than one.
+    // first — for the probe, on a machine with more than one. Without it, a
+    // make with more than one is tried out first — see [`answering`].
     let ids: Vec<Option<EncoderId>> = candidates.iter().map(|c| c.id).collect();
-    let nth = env_opt_u32("CLIPPIBOY_ENCODER_CANDIDATE").map(|nth| nth as usize);
+    let forced = env_opt_u32("CLIPPIBOY_ENCODER_CANDIDATE").map(|nth| nth as usize);
+    let of_make = ids.iter().filter(|id| **id == Some(settings.requested)).count();
+    let nth = if needs_trial(of_make, forced) {
+        answering(gpu, settings, adapter, of_make)
+    } else {
+        forced
+    };
     let pick = pick_candidate(&ids, settings.requested, nth);
     let chosen = candidates[pick].id.unwrap_or(EncoderId::X264);
 
@@ -1011,7 +1180,7 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
 
     // From here on every way out has to give the hardware session back: a
     // half-built transform is shut down like a finished one.
-    match set_up(gpu, settings, &candidates, pick, chosen, &transform, &activate) {
+    match set_up(gpu, settings, &candidates, pick, chosen, &transform, &activate, true) {
         Ok(built) => Ok(built),
         Err(err) => {
             shut_down(&transform, &activate, settings.label);
@@ -1021,6 +1190,8 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
 }
 
 /// Everything after `ActivateObject`: types, rate control, streaming.
+/// `report`: write the encoder profile — not for one only being tried out.
+#[allow(clippy::too_many_arguments)]
 fn set_up(
     gpu: &GpuDevice,
     settings: &EncoderSettings,
@@ -1029,6 +1200,7 @@ fn set_up(
     chosen: EncoderId,
     transform: &IMFTransform,
     activate: &IMFActivate,
+    report: bool,
 ) -> Result<Transform, String> {
     let transform = transform.clone();
 
@@ -1114,7 +1286,7 @@ fn set_up(
             .map_err(|err| format!("input type: {err}"))?;
     }
 
-    let report = codec
+    let codec_report = codec
         .as_ref()
         .map(|codec| configure_codec(codec, settings, chosen));
 
@@ -1128,18 +1300,20 @@ fn set_up(
         None
     };
 
-    profile(
-        gpu,
-        settings,
-        candidates,
-        pick,
-        chosen,
-        is_async,
-        provides_samples,
-        rate_control,
-        report.as_ref(),
-        bframes,
-    );
+    if report {
+        profile(
+            gpu,
+            settings,
+            candidates,
+            pick,
+            chosen,
+            is_async,
+            provides_samples,
+            rate_control,
+            codec_report.as_ref(),
+            bframes,
+        );
+    }
 
     // Asked for here and asked for again later. At this point the transform has
     // been configured but never told to stream, and most hardware H.264 MFTs do
@@ -2034,6 +2208,38 @@ mod tests {
         let luid: i64 = (0x0000_0001_i64 << 32) | 0x0000_d3a7;
         assert_eq!(luid_from_blob(&luid_blob(luid)), Some(luid));
         assert_eq!(luid_from_blob(&[1, 2, 3]), None, "not a LUID");
+    }
+
+    #[test]
+    fn only_a_make_with_more_than_one_encoder_is_tried_out() {
+        assert!(needs_trial(3, None), "Matti's three AMD encoders");
+        assert!(!needs_trial(1, None), "one encoder: nothing to choose between");
+        assert!(!needs_trial(0, None));
+        assert!(!needs_trial(3, Some(1)), "the probe asks for one by number");
+    }
+
+    #[test]
+    fn the_first_encoder_that_answers_is_taken() {
+        let mut asked = Vec::new();
+        let found = first_answering(3, |nth| {
+            asked.push(nth);
+            nth >= 1
+        });
+        assert_eq!(found, Some(1));
+        assert_eq!(asked, [0, 1], "no further than the one that answered");
+        assert_eq!(first_answering(3, |_| false), None, "none answers");
+    }
+
+    #[test]
+    fn an_answering_encoder_is_remembered_per_make_and_card() {
+        let mut list = Vec::new();
+        remember(&mut list, (EncoderId::Amf, Some(0x167f4)), 1);
+        assert_eq!(recall(&list, (EncoderId::Amf, Some(0x167f4))), Some(1));
+        assert_eq!(recall(&list, (EncoderId::Amf, Some(0x1899a))), None, "another card");
+        assert_eq!(recall(&list, (EncoderId::Qsv, Some(0x167f4))), None, "another make");
+        remember(&mut list, (EncoderId::Amf, Some(0x167f4)), 2);
+        assert_eq!(recall(&list, (EncoderId::Amf, Some(0x167f4))), Some(2), "replaced, not added");
+        assert_eq!(list.len(), 1);
     }
 
     #[test]
