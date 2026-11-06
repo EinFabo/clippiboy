@@ -379,6 +379,13 @@ mod tests {
         };
         let reader = unsafe { Reader::new(base as *mut u8, TOTAL_BYTES) }.unwrap();
         let mut out = Vec::new();
+        // The writer's thread first has to start: on a busy machine all reads
+        // were over before its first frame, and the test saw none.
+        let started = std::time::Instant::now();
+        while !matches!(reader.read_latest(&mut out, 5), ReadResult::Frame { .. }) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "the writer never published");
+            std::thread::yield_now();
+        }
         let mut frames = 0;
         for _ in 0..20_000 {
             if let ReadResult::Frame { .. } = reader.read_latest(&mut out, 5) {
