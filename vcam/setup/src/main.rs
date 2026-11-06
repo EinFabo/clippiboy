@@ -3,7 +3,11 @@
 //! nothing is copied from the user-writable app folder into a place SYSTEM
 //! loads from.
 //!
-//!     clippiboy-vcam-setup install | uninstall | status
+//!     clippiboy-vcam-setup install | uninstall | status | unlist
+//!
+//! `unlist` runs as the user, not elevated: it takes the user's ClippiBoy
+//! Camera off Windows' camera list. The app lists it for good (System
+//! lifetime), so the uninstaller does this before the DLL goes.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -155,6 +159,31 @@ fn execute(steps: Vec<Step>) -> ExitCode {
     ExitCode::from(if locked { 3 } else { 0 })
 }
 
+/// The same parameters the app lists the camera with open that listing; then
+/// it is removed.
+fn unlist() -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Media::MediaFoundation::*;
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|err| format!("MFStartup: {err}"))?;
+        let name = HSTRING::from(vcam_protocol::FRIENDLY_NAME);
+        let clsid = HSTRING::from(vcam_protocol::CLSID);
+        let camera = MFCreateVirtualCamera(
+            MFVirtualCameraType_SoftwareCameraSource,
+            MFVirtualCameraLifetime_System,
+            MFVirtualCameraAccess_CurrentUser,
+            PCWSTR(name.as_ptr()),
+            PCWSTR(clsid.as_ptr()),
+            None,
+        )
+        .map_err(|err| format!("MFCreateVirtualCamera: {err}"))?;
+        let removed = camera.Remove().map_err(|err| format!("Remove: {err}"));
+        let _ = camera.Shutdown();
+        removed
+    }
+}
+
 fn main() -> ExitCode {
     let version = env!("CARGO_PKG_VERSION");
     match std::env::args().nth(1).as_deref() {
@@ -166,6 +195,13 @@ fn main() -> ExitCode {
             }
         },
         Some("uninstall") => execute(uninstall_plan(&program_files())),
+        Some("unlist") => match unlist() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(why) => {
+                eprintln!("not listed: {why}");
+                ExitCode::from(1)
+            }
+        },
         Some("status") => {
             let out = Command::new("reg").args(["query", &version_key(), "/v", "Version"]).output();
             match out {
@@ -182,7 +218,7 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: clippiboy-vcam-setup install | uninstall | status");
+            eprintln!("usage: clippiboy-vcam-setup install | uninstall | status | unlist");
             ExitCode::from(2)
         }
     }

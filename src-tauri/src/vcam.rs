@@ -72,9 +72,37 @@ pub fn status_for(installed: Option<&str>, bundled: &str, switched_on: bool, run
 }
 
 /// ClippiBoy Camera's producer: owned by `AppState` for the life of the app.
+/// What [`Vcam::apply`] does with the camera's listing in Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// List it (or open the listing a run before left) and feed it.
+    Start,
+    /// Let go of it and leave it listed: Discord keeps the same camera.
+    Close,
+    /// The switch went off: off the list.
+    Remove,
+    /// Off at the start, a listing from before is taken off once.
+    Unlist,
+    Nothing,
+}
+
+/// `usable` is on with the DLL installed and current; `leftover` that the
+/// switch is off, the DLL installed and no listing has been cleared yet.
+pub fn change(on: bool, usable: bool, running: bool, leftover: bool) -> Change {
+    match (on, usable, running) {
+        (_, true, false) => Change::Start,
+        (false, _, true) => Change::Remove,
+        (true, false, true) => Change::Close,
+        (false, _, false) if leftover => Change::Unlist,
+        _ => Change::Nothing,
+    }
+}
+
 pub struct Vcam {
     /// The installed DLL's version, read at start and after each setup run.
     installed: Mutex<Option<String>>,
+    /// A listing from a run before was looked for (`Change::Unlist`).
+    unlisted: AtomicBool,
     watching: Arc<AtomicBool>,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(windows)]
@@ -91,6 +119,7 @@ impl Vcam {
     pub fn new() -> Self {
         Self {
             installed: Mutex::new(Self::installed_version()),
+            unlisted: AtomicBool::new(false),
             watching: Arc::new(AtomicBool::new(false)),
             on_change: Mutex::new(None),
             #[cfg(windows)]
@@ -148,16 +177,19 @@ impl Vcam {
         )
     }
 
-    /// Brings the camera in line with the switch: created while it is on and
-    /// the DLL installed, gone when it is off. The shared memory is created
-    /// once and handed to the cam worker.
+    /// Brings the camera in line with the switch: listed and fed while it is
+    /// on and the DLL installed, off the list when it goes off. The listing
+    /// outlives the app (System lifetime), so a restart or an update does not
+    /// take the camera away from an app that uses it. The shared memory is
+    /// created once and handed to the cam worker.
     pub fn apply(&self, on: bool, shared: &crate::camtrack::CamShared) {
         #[cfg(windows)]
         {
             let usable = on && !needs_setup(self.installed().as_deref(), vcam_protocol::DLL_VERSION);
+            let leftover = !on && self.installed().is_some() && !self.unlisted.load(Ordering::SeqCst);
             let mut running = self.running.lock();
-            match (usable, running.is_some()) {
-                (true, false) => {
+            match change(on, usable, running.is_some(), leftover) {
+                Change::Start => {
                     let writer = {
                         let mut slot = shared.vcam.lock();
                         if slot.is_none() {
@@ -186,14 +218,25 @@ impl Vcam {
                         Err(err) => log::warn!("ClippiBoy Camera could not start: {err}"),
                     }
                 }
-                (false, true) => {
+                Change::Close | Change::Remove => {
                     if let Some(camera) = running.take() {
-                        camera.shutdown();
+                        if on {
+                            camera.shutdown();
+                        } else {
+                            camera.remove();
+                        }
                     }
                     shared.vcam_on.store(false, Ordering::SeqCst);
                     self.watching.store(false, Ordering::SeqCst);
+                    self.unlisted.store(!on, Ordering::SeqCst);
                 }
-                _ => {}
+                Change::Unlist => {
+                    self.unlisted.store(true, Ordering::SeqCst);
+                    if let Err(err) = win::unlist() {
+                        log::info!("ClippiBoy Camera: no listing to take off ({err})");
+                    }
+                }
+                Change::Nothing => {}
             }
         }
         #[cfg(not(windows))]
@@ -426,8 +469,37 @@ mod win {
         }
     }
 
-    /// The camera object, Session lifetime: it leaves Windows' camera list when
-    /// it is shut down or the app ends.
+    /// ClippiBoy Camera's listing for the current user, System lifetime: it
+    /// stays in Windows' camera list across restarts and reboots until it is
+    /// removed. The same parameters open the same listing again.
+    unsafe fn listing() -> Result<IMFVirtualCamera, String> {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        crate::mft::startup()?;
+        let name = HSTRING::from(vcam_protocol::FRIENDLY_NAME);
+        let clsid = HSTRING::from(vcam_protocol::CLSID);
+        MFCreateVirtualCamera(
+            MFVirtualCameraType_SoftwareCameraSource,
+            MFVirtualCameraLifetime_System,
+            MFVirtualCameraAccess_CurrentUser,
+            PCWSTR(name.as_ptr()),
+            PCWSTR(clsid.as_ptr()),
+            None,
+        )
+        .map_err(|err| format!("MFCreateVirtualCamera: {err}"))
+    }
+
+    /// Takes the listing off without starting it.
+    pub fn unlist() -> Result<(), String> {
+        unsafe {
+            let camera = listing()?;
+            camera.Remove().map_err(|err| format!("Remove: {err}"))?;
+            let _ = camera.Shutdown();
+        }
+        log::info!("ClippiBoy Camera taken off the list");
+        Ok(())
+    }
+
+    /// The listed camera while the app feeds it.
     pub struct Running {
         camera: SendPtr<IMFVirtualCamera>,
         monitor: Option<SendPtr<IMFSensorActivityMonitor>>,
@@ -437,19 +509,7 @@ mod win {
         pub fn start(on_active: impl Fn(bool) + Send + Sync + 'static) -> Result<Self, String> {
             let on_active: OnActive = std::sync::Arc::new(on_active);
             unsafe {
-                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-                crate::mft::startup()?;
-                let name = HSTRING::from(vcam_protocol::FRIENDLY_NAME);
-                let clsid = HSTRING::from(vcam_protocol::CLSID);
-                let camera = MFCreateVirtualCamera(
-                    MFVirtualCameraType_SoftwareCameraSource,
-                    MFVirtualCameraLifetime_Session,
-                    MFVirtualCameraAccess_CurrentUser,
-                    PCWSTR(name.as_ptr()),
-                    PCWSTR(clsid.as_ptr()),
-                    None,
-                )
-                .map_err(|err| format!("MFCreateVirtualCamera: {err}"))?;
+                let camera = listing()?;
                 let events: IMFAsyncCallback = Events { on_active: on_active.clone() }.into();
                 camera.Start(&events).map_err(|err| format!("Start: {err}"))?;
                 log::info!("ClippiBoy Camera is listed for other apps");
@@ -474,6 +534,7 @@ mod win {
             Some(SendPtr(monitor))
         }
 
+        /// Lets go of the camera; it stays listed and shows the placeholder.
         pub fn shutdown(self) {
             unsafe {
                 let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -482,7 +543,22 @@ mod win {
                 }
                 let _ = self.camera.Shutdown();
             }
-            log::info!("ClippiBoy Camera taken off the list");
+            log::info!("ClippiBoy Camera let go, still listed");
+        }
+
+        /// Takes the camera off the list for good.
+        pub fn remove(self) {
+            unsafe {
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                if let Some(monitor) = &self.monitor {
+                    let _ = monitor.Stop();
+                }
+                match self.camera.Remove() {
+                    Ok(()) => log::info!("ClippiBoy Camera taken off the list"),
+                    Err(err) => log::warn!("ClippiBoy Camera could not be taken off the list: {err}"),
+                }
+                let _ = self.camera.Shutdown();
+            }
         }
     }
 }
@@ -490,6 +566,29 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The camera stays listed in Windows between runs, so Discord keeps it:
+    /// only the switch going off takes it off the list.
+    #[test]
+    fn only_the_switch_takes_the_camera_off_the_list() {
+        assert_eq!(change(true, true, false, false), Change::Start);
+        assert_eq!(change(true, true, true, false), Change::Nothing);
+        assert_eq!(change(false, true, true, false), Change::Remove, "switched off");
+        assert_eq!(change(false, false, true, false), Change::Remove);
+        // On, but the DLL needs its setup first (an update brought a newer
+        // one): let go of it, without taking it off the list.
+        assert_eq!(change(true, false, true, false), Change::Close);
+        assert_eq!(change(true, false, false, false), Change::Nothing);
+    }
+
+    /// Off at the start with the DLL installed: a listing left from before
+    /// (the switch went off while the app could not reach Windows) goes, once.
+    #[test]
+    fn a_leftover_listing_goes_once_when_the_switch_is_off() {
+        assert_eq!(change(false, false, false, true), Change::Unlist);
+        assert_eq!(change(false, false, false, false), Change::Nothing);
+        assert_eq!(change(true, true, false, true), Change::Start);
+    }
 
     #[test]
     fn the_status_says_what_the_switch_can_do() {

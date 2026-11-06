@@ -565,6 +565,9 @@ pub fn remove_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle) 
     let mut next = state.config_snapshot();
     next.facecam.virtual_camera = false;
     let saved = state.replace_config(next);
+    // Off Windows' camera list before its DLL goes: the listing outlives the
+    // app, and one left behind would be a camera that never opens.
+    state.reconcile_vcam();
     run_vcam_setup(&state, &app, "uninstall")?;
     Ok(saved)
 }

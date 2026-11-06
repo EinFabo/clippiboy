@@ -59,6 +59,7 @@
 ; ClippiBoy Camera lives outside the install folder (Program Files, HKLM), put
 ; there by its own elevated setup. When it was installed, that setup takes it
 ; away again - one UAC prompt - while it still sits in the resources folder.
+; Before that, the same setup unelevated takes it off the user's camera list.
 ; Declining the prompt leaves the camera; the uninstall goes on either way.
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} $UpdateMode <> 1
@@ -69,6 +70,9 @@
     ReadRegStr $R8 HKLM "SOFTWARE\ClippiBoy\VirtualCamera" "Version"
     SetRegView lastused
     ${IfNot} ${Errors}
+      ; Off the user's camera list first, as the user: the app lists it for
+      ; good, and a listing without its DLL is a camera that never opens.
+      ExecWait '"$INSTDIR\resources\clippiboy-vcam-setup.exe" unlist'
       ExecShellWait "runas" "$INSTDIR\resources\clippiboy-vcam-setup.exe" "uninstall" SW_HIDE
     ${EndIf}
     Pop $R8
