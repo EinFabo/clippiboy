@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{select, Receiver, Sender};
 use windows::Win32::Foundation::{RECT, TRUE};
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 use windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
 
 use super::{CamPlan, CamShared, PlanSender};
@@ -675,15 +675,27 @@ impl Worker {
 }
 
 /// The camera's NV12 frame onto the cam track: uploaded through a staging
-/// texture, cover-cropped and scaled by the video processor into a pool of
-/// NV12 textures at the track's size, BT.601 in, BT.709 out.
+/// texture, turned into RGB at its own size, then cover-cropped and scaled by
+/// the video processor into a pool of NV12 textures at the track's size —
+/// BT.601 in, BT.709 out.
+///
+/// Two steps, because scaling YUV to YUV in one went wrong on an NVIDIA card:
+/// the driver pulled every level a third of the way to grey (16 came out 52,
+/// 235 came out 201) whatever colour space it was told — a grey veil on the
+/// cam. At the same size it is exact, and RGB scaled to NV12 is what the game
+/// picture has always taken.
 struct Scaler {
     context: ID3D11DeviceContext,
     video_context: ID3D11VideoContext,
+    /// NV12 to RGB, same size.
+    to_rgb: ID3D11VideoProcessor,
+    /// RGB to NV12, cropped and scaled.
     processor: ID3D11VideoProcessor,
     staging: ID3D11Texture2D,
     input: ID3D11Texture2D,
     input_view: ID3D11VideoProcessorInputView,
+    rgb_out: ID3D11VideoProcessorOutputView,
+    rgb_in: ID3D11VideoProcessorInputView,
     slots: Vec<(ID3D11Texture2D, ID3D11VideoProcessorOutputView)>,
     next: usize,
     black: ID3D11Texture2D,
@@ -717,37 +729,114 @@ fn texture(device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC, data: Option<&[u8
     out.ok_or_else(|| "NV12 texture: none was created".into())
 }
 
+/// A video processor from `src` to `dst` with its enumerator, the driver's
+/// own processing off.
+fn video_processor(
+    video_device: &ID3D11VideoDevice,
+    src: (u32, u32),
+    dst: (u32, u32),
+) -> Result<(ID3D11VideoProcessorEnumerator, ID3D11VideoProcessor), String> {
+    let rate = DXGI_RATIONAL { Numerator: 30, Denominator: 1 };
+    let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+        InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+        InputFrameRate: rate,
+        InputWidth: src.0,
+        InputHeight: src.1,
+        OutputFrameRate: rate,
+        OutputWidth: dst.0,
+        OutputHeight: dst.1,
+        Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    };
+    let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc) }
+        .map_err(|err| format!("video processor enumerator: {err}"))?;
+    let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0) }
+        .map_err(|err| format!("video processor: {err}"))?;
+    Ok((enumerator, processor))
+}
+
+fn make_input_view(
+    video_device: &ID3D11VideoDevice,
+    texture: &ID3D11Texture2D,
+    enumerator: &ID3D11VideoProcessorEnumerator,
+) -> Result<ID3D11VideoProcessorInputView, String> {
+    let desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+        FourCC: 0,
+        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
+    };
+    let mut view = None;
+    unsafe { video_device.CreateVideoProcessorInputView(texture, enumerator, &desc, Some(&mut view)) }
+        .map_err(|err| format!("video processor input view: {err}"))?;
+    view.ok_or_else(|| "video processor input view: none".to_string())
+}
+
+fn make_output_view(
+    video_device: &ID3D11VideoDevice,
+    texture: &ID3D11Texture2D,
+    enumerator: &ID3D11VideoProcessorEnumerator,
+) -> Result<ID3D11VideoProcessorOutputView, String> {
+    let desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+        ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+        Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
+    };
+    let mut view = None;
+    unsafe { video_device.CreateVideoProcessorOutputView(texture, enumerator, &desc, Some(&mut view)) }
+        .map_err(|err| format!("video processor output view: {err}"))?;
+    view.ok_or_else(|| "video processor output view: none".to_string())
+}
+
+/// One pass of `processor` from `input` into `output`.
+fn blt(
+    video_context: &ID3D11VideoContext,
+    processor: &ID3D11VideoProcessor,
+    input: &ID3D11VideoProcessorInputView,
+    output: &ID3D11VideoProcessorOutputView,
+) -> Result<(), String> {
+    let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+        Enable: TRUE,
+        OutputIndex: 0,
+        InputFrameOrField: 0,
+        PastFrames: 0,
+        FutureFrames: 0,
+        ppPastSurfaces: std::ptr::null_mut(),
+        pInputSurface: std::mem::ManuallyDrop::new(Some(input.clone())),
+        ppFutureSurfaces: std::ptr::null_mut(),
+        ppPastSurfacesRight: std::ptr::null_mut(),
+        pInputSurfaceRight: std::mem::ManuallyDrop::new(None),
+        ppFutureSurfacesRight: std::ptr::null_mut(),
+    };
+    let streams = [stream];
+    let result = unsafe { video_context.VideoProcessorBlt(processor, output, 0, &streams) };
+    // Hand the view's reference back, as `convert.rs` does.
+    let [stream] = streams;
+    drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
+    result.map_err(|err| format!("VideoProcessorBlt: {err}"))
+}
+
 impl Scaler {
     fn new(gpu: &GpuDevice, src: (u32, u32), dst: (u32, u32)) -> Result<Self, String> {
+        use crate::convert::{color_space, RANGE_FULL, RANGE_STUDIO};
         use windows::core::Interface;
         let device = gpu.device.clone();
         let video_device: ID3D11VideoDevice = device.cast().map_err(|err| format!("ID3D11VideoDevice: {err}"))?;
         let video_context: ID3D11VideoContext =
             gpu.context.cast().map_err(|err| format!("ID3D11VideoContext: {err}"))?;
-        let rate = DXGI_RATIONAL { Numerator: 30, Denominator: 1 };
-        let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: rate,
-            InputWidth: src.0,
-            InputHeight: src.1,
-            OutputFrameRate: rate,
-            OutputWidth: dst.0,
-            OutputHeight: dst.1,
-            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-        };
-        let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc) }
-            .map_err(|err| format!("video processor enumerator: {err}"))?;
-        let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0) }
-            .map_err(|err| format!("video processor: {err}"))?;
+        let (rgb_enum, to_rgb) = video_processor(&video_device, src, src)?;
+        let (enumerator, processor) = video_processor(&video_device, src, dst)?;
         let crop = cover_crop(src, dst);
         let (bt709, full) = colour_of(None, None);
-        let range = |full: bool| if full { crate::convert::RANGE_FULL } else { crate::convert::RANGE_STUDIO };
         unsafe {
-            video_context.VideoProcessorSetStreamColorSpace(&processor, 0, &crate::convert::color_space(bt709, range(full)));
-            video_context.VideoProcessorSetOutputColorSpace(
-                &processor,
-                &crate::convert::color_space(true, crate::convert::RANGE_STUDIO),
+            // The camera's YUV into full-range RGB, as the desktop arrives.
+            video_context.VideoProcessorSetStreamColorSpace(
+                &to_rgb,
+                0,
+                &color_space(bt709, if full { RANGE_FULL } else { RANGE_STUDIO }),
             );
+            video_context.VideoProcessorSetOutputColorSpace(&to_rgb, &color_space(false, 0));
+            video_context.VideoProcessorSetStreamAutoProcessingMode(&to_rgb, 0, false);
+            // Then on as the game picture goes: full-range RGB to studio BT.709.
+            video_context.VideoProcessorSetStreamColorSpace(&processor, 0, &color_space(true, RANGE_FULL));
+            video_context.VideoProcessorSetOutputColorSpace(&processor, &color_space(true, RANGE_STUDIO));
             // No edge enhancement or noise reduction the driver picks for itself.
             video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
             let source = RECT {
@@ -768,27 +857,21 @@ impl Scaler {
             None,
         )?;
         let input = texture(&device, &nv12_desc(src.0, src.1, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET.0 as u32, 0), None)?;
-        let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-            FourCC: 0,
-            ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
+        let input_view = make_input_view(&video_device, &input, &rgb_enum)?;
+        let rgb_desc = D3D11_TEXTURE2D_DESC {
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            ..nv12_desc(src.0, src.1, D3D11_USAGE_DEFAULT, 0, 0)
         };
-        let mut input_view = None;
-        unsafe { video_device.CreateVideoProcessorInputView(&input, &enumerator, &input_desc, Some(&mut input_view)) }
-            .map_err(|err| format!("video processor input view: {err}"))?;
-        let input_view = input_view.ok_or_else(|| "video processor input view: none".to_string())?;
+        let rgb = texture(&device, &rgb_desc, None)?;
+        let rgb_out = make_output_view(&video_device, &rgb, &rgb_enum)?;
+        let rgb_in = make_input_view(&video_device, &rgb, &enumerator)?;
 
-        let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
-            ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
-        };
         let mut slots = Vec::new();
         for _ in 0..crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX + 2 {
             let slot = texture(&device, &nv12_desc(dst.0, dst.1, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET.0 as u32, 0), None)?;
-            let mut view = None;
-            unsafe { video_device.CreateVideoProcessorOutputView(&slot, &enumerator, &output_desc, Some(&mut view)) }
-                .map_err(|err| format!("video processor output view: {err}"))?;
-            slots.push((slot, view.ok_or_else(|| "video processor output view: none".to_string())?));
+            let view = make_output_view(&video_device, &slot, &enumerator)?;
+            slots.push((slot, view));
         }
         let (w, h) = (dst.0 as usize, dst.1 as usize);
         let mut black = vec![16u8; w * h];
@@ -797,10 +880,13 @@ impl Scaler {
         Ok(Self {
             context: gpu.context.clone(),
             video_context,
+            to_rgb,
             processor,
             staging,
             input,
             input_view,
+            rgb_out,
+            rgb_in,
             slots,
             next: 0,
             black,
@@ -833,25 +919,70 @@ impl Scaler {
         }
         let slot = self.next;
         self.next = (self.next + 1) % self.slots.len();
-        let stream = D3D11_VIDEO_PROCESSOR_STREAM {
-            Enable: TRUE,
-            OutputIndex: 0,
-            InputFrameOrField: 0,
-            PastFrames: 0,
-            FutureFrames: 0,
-            ppPastSurfaces: std::ptr::null_mut(),
-            pInputSurface: std::mem::ManuallyDrop::new(Some(self.input_view.clone())),
-            ppFutureSurfaces: std::ptr::null_mut(),
-            ppPastSurfacesRight: std::ptr::null_mut(),
-            pInputSurfaceRight: std::mem::ManuallyDrop::new(None),
-            ppFutureSurfacesRight: std::ptr::null_mut(),
-        };
-        let streams = [stream];
-        let result = unsafe { self.video_context.VideoProcessorBlt(&self.processor, &self.slots[slot].1, 0, &streams) };
-        // Hand the view's reference back, as `convert.rs` does.
-        let [stream] = streams;
-        drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
-        result.map_err(|err| format!("VideoProcessorBlt: {err}"))?;
+        blt(&self.video_context, &self.to_rgb, &self.input_view, &self.rgb_out)?;
+        blt(&self.video_context, &self.processor, &self.rgb_in, &self.slots[slot].1)?;
         Ok(slot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::camera::ProbeFrame;
+
+    fn flat(width: u32, height: u32, y: u8) -> Frame {
+        let (w, h) = (width as usize, height as usize);
+        let mut nv12 = vec![y; w * h];
+        nv12.extend(std::iter::repeat(128u8).take(w * h / 2));
+        Frame {
+            probe: ProbeFrame {
+                qpc_100ns: 0,
+                clock: ClockKind::Device,
+                sample_time_100ns: None,
+                device_ts_100ns: None,
+                device_ref_ts_100ns: None,
+                arrival_100ns: 0,
+                subtype: *b"NV12",
+                width,
+                height,
+                bytes: nv12.len(),
+            },
+            nv12: nv12.into(),
+        }
+    }
+
+    /// The luma in the middle of a scaled slot, read back from the GPU.
+    fn scaled_luma(scaler: &mut Scaler, gpu: &GpuDevice, frame: &Frame, dst: (u32, u32)) -> u8 {
+        let slot = scaler.scale(frame).unwrap();
+        let staging = texture(&gpu.device, &nv12_desc(dst.0, dst.1, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32), None).unwrap();
+        unsafe {
+            gpu.context.CopyResource(&staging, &scaler.slots[slot].0);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            gpu.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).unwrap();
+            let pitch = mapped.RowPitch as usize;
+            let y = *(mapped.pData as *const u8).add(pitch * dst.1 as usize / 2 + dst.0 as usize / 2);
+            gpu.context.Unmap(&staging, 0);
+            y
+        }
+    }
+
+    /// Studio black stays black and studio white white through the scaler —
+    /// OBS Virtual Camera's dark room came out grey in clips and recordings
+    /// (16 became 52 when scaling YUV to YUV in one pass on an RTX 3070).
+    /// Needs a GPU: `cargo test --lib -- --ignored studio_levels`.
+    #[test]
+    #[ignore]
+    fn studio_levels_survive_the_scaler() {
+        let gpu = GpuDevice::new(None).unwrap();
+        for (src, dst) in [((1280, 720), (1280, 720)), ((1920, 1080), (1280, 720))] {
+            let mut scaler = Scaler::new(&gpu, src, dst).unwrap();
+            let outs: Vec<(u8, u8)> = [16u8, 22, 128, 235]
+                .into_iter()
+                .map(|y| (y, scaled_luma(&mut scaler, &gpu, &flat(src.0, src.1, y), dst)))
+                .collect();
+            for (y, out) in &outs {
+                assert!((*out as i32 - *y as i32).abs() <= 2, "{src:?}→{dst:?}: in → out {outs:?}");
+            }
+        }
     }
 }
