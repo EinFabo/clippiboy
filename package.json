@@ -2,7 +2,7 @@
   "name": "clippiboy",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
