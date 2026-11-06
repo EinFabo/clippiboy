@@ -310,9 +310,13 @@ mod tests {
 
     #[test]
     fn unavailable_request_falls_back() {
-        // With no matching encoder, one that is not there must never come back.
-        let resolved = resolve(EncoderId::Nvenc);
+        // Encoding never asks for an encoder that is not there. Storing may keep
+        // one through an empty hardware list (`stored_among`), so this checks
+        // `effective`, the call everything that encodes goes through.
+        let resolved = effective(EncoderId::Nvenc);
         let encoders = list_encoders();
         assert!(encoders.iter().any(|e| e.id == resolved && e.available));
+        // The same on a machine without any hardware encoder, such as CI.
+        assert_eq!(resolve_among(EncoderId::Nvenc, &[]), EncoderId::X264);
     }
 }
