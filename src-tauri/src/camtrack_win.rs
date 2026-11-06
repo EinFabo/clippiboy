@@ -966,6 +966,35 @@ mod tests {
         }
     }
 
+    /// A ramp from black to white keeps its steps when scaled down.
+    #[test]
+    #[ignore]
+    fn a_ramp_keeps_its_levels() {
+        let gpu = GpuDevice::new(Some(crate::model::EncoderId::Nvenc)).unwrap();
+        let (src, dst) = ((1920u32, 1080u32), (1280u32, 720u32));
+        let (w, h) = (src.0 as usize, src.1 as usize);
+        // Columns from 16 to 235, left to right.
+        let mut nv12: Vec<u8> = (0..h).flat_map(|_| (0..w).map(move |x| (16 + x * 219 / (w - 1)) as u8)).collect();
+        nv12.extend(std::iter::repeat(128u8).take(w * h / 2));
+        let mut frame = flat(src.0, src.1, 0);
+        frame.nv12 = nv12.into();
+        let mut scaler = Scaler::new(&gpu, src, dst).unwrap();
+        let slot = scaler.scale(&frame).unwrap();
+        let staging = texture(&gpu.device, &nv12_desc(dst.0, dst.1, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32), None).unwrap();
+        unsafe {
+            gpu.context.CopyResource(&staging, &scaler.slots[slot].0);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            gpu.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).unwrap();
+            let row = (mapped.pData as *const u8).add(mapped.RowPitch as usize * 360);
+            let picks: Vec<u8> = [2usize, 160, 320, 640, 960, 1277].iter().map(|x| *row.add(*x)).collect();
+            gpu.context.Unmap(&staging, 0);
+            let wanted = [16u8, 43, 71, 126, 180, 235];
+            for (got, want) in picks.iter().zip(wanted) {
+                assert!((*got as i32 - want as i32).abs() <= 2, "{picks:?} against {wanted:?}");
+            }
+        }
+    }
+
     /// Studio black stays black and studio white white through the scaler —
     /// OBS Virtual Camera's dark room came out grey in clips and recordings
     /// (16 became 52 when scaling YUV to YUV in one pass on an RTX 3070).
