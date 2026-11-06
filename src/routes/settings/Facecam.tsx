@@ -137,7 +137,7 @@ export function FacecamTab() {
               </Button>
             )}
             <Toggle
-              checked={cam.virtualCamera}
+              checked={!off && cam.virtualCamera}
               disabled={off || vcamBusy}
               onChange={(on) => void vcamDo(() => setVirtualCamera(on))}
             />

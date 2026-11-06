@@ -72,37 +72,34 @@ pub fn status_for(installed: Option<&str>, bundled: &str, switched_on: bool, run
 }
 
 /// ClippiBoy Camera's producer: owned by `AppState` for the life of the app.
-/// What [`Vcam::apply`] does with the camera's listing in Windows.
+/// What [`Vcam::apply`] does with the camera.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     /// List it (or open the listing a run before left) and feed it.
     Start,
-    /// Let go of it and leave it listed: Discord keeps the same camera.
+    /// Stop feeding and let go; it stays listed and shows the placeholder,
+    /// as OBS's does — Discord keeps the same camera.
     Close,
-    /// The switch went off: off the list.
-    Remove,
-    /// Off at the start, a listing from before is taken off once.
-    Unlist,
     Nothing,
 }
 
-/// `usable` is on with the DLL installed and current; `leftover` that the
-/// switch is off, the DLL installed and no listing has been cleared yet.
-pub fn change(on: bool, usable: bool, running: bool, leftover: bool) -> Change {
-    match (on, usable, running) {
-        (_, true, false) => Change::Start,
-        (false, _, true) => Change::Remove,
-        (true, false, true) => Change::Close,
-        (false, _, false) if leftover => Change::Unlist,
+/// `feeding`: the switches want frames to go out and the DLL is current.
+pub fn change(feeding: bool, running: bool) -> Change {
+    match (feeding, running) {
+        (true, false) => Change::Start,
+        (false, true) => Change::Close,
         _ => Change::Nothing,
     }
+}
+
+/// The virtual camera sends frames only while the camera is on as well.
+pub fn feeds(camera_on: bool, virtual_camera_on: bool) -> bool {
+    camera_on && virtual_camera_on
 }
 
 pub struct Vcam {
     /// The installed DLL's version, read at start and after each setup run.
     installed: Mutex<Option<String>>,
-    /// A listing from a run before was looked for (`Change::Unlist`).
-    unlisted: AtomicBool,
     watching: Arc<AtomicBool>,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(windows)]
@@ -119,7 +116,6 @@ impl Vcam {
     pub fn new() -> Self {
         Self {
             installed: Mutex::new(Self::installed_version()),
-            unlisted: AtomicBool::new(false),
             watching: Arc::new(AtomicBool::new(false)),
             on_change: Mutex::new(None),
             #[cfg(windows)]
@@ -177,18 +173,18 @@ impl Vcam {
         )
     }
 
-    /// Brings the camera in line with the switch: listed and fed while it is
-    /// on and the DLL installed, off the list when it goes off. The listing
-    /// outlives the app (System lifetime), so a restart or an update does not
-    /// take the camera away from an app that uses it. The shared memory is
-    /// created once and handed to the cam worker.
+    /// Brings the camera in line with the switches: listed and fed while
+    /// `on` (the camera and the virtual camera) and the DLL is current. Off,
+    /// it stays listed and shows the placeholder; only [`Self::remove`] takes
+    /// it off. The listing outlives the app (System lifetime), so a restart or
+    /// an update does not take the camera away from an app that uses it. The
+    /// shared memory is created once and handed to the cam worker.
     pub fn apply(&self, on: bool, shared: &crate::camtrack::CamShared) {
         #[cfg(windows)]
         {
-            let usable = on && !needs_setup(self.installed().as_deref(), vcam_protocol::DLL_VERSION);
-            let leftover = !on && self.installed().is_some() && !self.unlisted.load(Ordering::SeqCst);
+            let feeding = on && !needs_setup(self.installed().as_deref(), vcam_protocol::DLL_VERSION);
             let mut running = self.running.lock();
-            match change(on, usable, running.is_some(), leftover) {
+            match change(feeding, running.is_some()) {
                 Change::Start => {
                     let writer = {
                         let mut slot = shared.vcam.lock();
@@ -218,23 +214,12 @@ impl Vcam {
                         Err(err) => log::warn!("ClippiBoy Camera could not start: {err}"),
                     }
                 }
-                Change::Close | Change::Remove => {
+                Change::Close => {
                     if let Some(camera) = running.take() {
-                        if on {
-                            camera.shutdown();
-                        } else {
-                            camera.remove();
-                        }
+                        camera.shutdown();
                     }
-                    shared.vcam_on.store(false, Ordering::SeqCst);
+                    Self::to_placeholder(shared);
                     self.watching.store(false, Ordering::SeqCst);
-                    self.unlisted.store(!on, Ordering::SeqCst);
-                }
-                Change::Unlist => {
-                    self.unlisted.store(true, Ordering::SeqCst);
-                    if let Err(err) = win::unlist() {
-                        log::info!("ClippiBoy Camera: no listing to take off ({err})");
-                    }
                 }
                 Change::Nothing => {}
             }
@@ -242,6 +227,37 @@ impl Vcam {
         #[cfg(not(windows))]
         {
             let _ = (on, shared);
+        }
+    }
+
+    /// Frames stop going out and the media source is told so: without it the
+    /// last frame stood frozen instead of the placeholder.
+    fn to_placeholder(shared: &crate::camtrack::CamShared) {
+        shared.vcam_on.store(false, Ordering::SeqCst);
+        if let Some(writer) = shared.vcam.lock().as_ref() {
+            writer.set_state(vcam_protocol::State::Idle, vcam_protocol::IdleReason::CamOff, crate::audio::capture::now_100ns());
+        }
+    }
+
+    /// Takes ClippiBoy Camera off Windows' camera list ("Remove", before its
+    /// DLL goes).
+    pub fn remove(&self, shared: &crate::camtrack::CamShared) {
+        #[cfg(windows)]
+        {
+            match self.running.lock().take() {
+                Some(camera) => camera.remove(),
+                None => {
+                    if let Err(err) = win::unlist() {
+                        log::info!("ClippiBoy Camera: not listed ({err})");
+                    }
+                }
+            }
+            Self::to_placeholder(shared);
+            self.watching.store(false, Ordering::SeqCst);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = shared;
         }
     }
 
@@ -567,27 +583,23 @@ mod win {
 mod tests {
     use super::*;
 
-    /// The camera stays listed in Windows between runs, so Discord keeps it:
-    /// only the switch going off takes it off the list.
+    /// As with OBS: the camera stays listed in Windows when its switch goes
+    /// off — apps that use it show the placeholder — and only "Remove" takes
+    /// it off the list.
     #[test]
-    fn only_the_switch_takes_the_camera_off_the_list() {
-        assert_eq!(change(true, true, false, false), Change::Start);
-        assert_eq!(change(true, true, true, false), Change::Nothing);
-        assert_eq!(change(false, true, true, false), Change::Remove, "switched off");
-        assert_eq!(change(false, false, true, false), Change::Remove);
-        // On, but the DLL needs its setup first (an update brought a newer
-        // one): let go of it, without taking it off the list.
-        assert_eq!(change(true, false, true, false), Change::Close);
-        assert_eq!(change(true, false, false, false), Change::Nothing);
+    fn switching_off_leaves_the_camera_listed() {
+        assert_eq!(change(true, false), Change::Start);
+        assert_eq!(change(true, true), Change::Nothing);
+        assert_eq!(change(false, true), Change::Close);
+        assert_eq!(change(false, false), Change::Nothing);
     }
 
-    /// Off at the start with the DLL installed: a listing left from before
-    /// (the switch went off while the app could not reach Windows) goes, once.
+    /// The camera switched off in general takes the virtual camera with it.
     #[test]
-    fn a_leftover_listing_goes_once_when_the_switch_is_off() {
-        assert_eq!(change(false, false, false, true), Change::Unlist);
-        assert_eq!(change(false, false, false, false), Change::Nothing);
-        assert_eq!(change(true, true, false, true), Change::Start);
+    fn the_virtual_camera_feeds_only_with_the_camera_on() {
+        assert!(feeds(true, true));
+        assert!(!feeds(false, true), "camera off");
+        assert!(!feeds(true, false), "virtual camera off");
     }
 
     #[test]

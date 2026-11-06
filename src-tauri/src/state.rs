@@ -692,8 +692,8 @@ impl AppState {
 
     /// ClippiBoy Camera in line with its switch.
     pub fn reconcile_vcam(&self) {
-        let on = self.config_snapshot().facecam.virtual_camera;
-        self.vcam.apply(on, self.camera.shared());
+        let cam = self.config_snapshot().facecam;
+        self.vcam.apply(crate::vcam::feeds(cam.enabled, cam.virtual_camera), self.camera.shared());
     }
 
     /// The settings, the start-up trouble with them and the clip database, as
@@ -1336,7 +1336,8 @@ impl AppState {
     pub fn status_snapshot(&self) -> EngineStatus {
         let mut status = self.status.lock().clone();
         status.cam = self.camera.status();
-        status.vcam = Some(self.vcam.status(self.config_snapshot().facecam.virtual_camera));
+        let cam = self.config_snapshot().facecam;
+        status.vcam = Some(self.vcam.status(crate::vcam::feeds(cam.enabled, cam.virtual_camera)));
         if let Some(recorder) = self.recorder.lock().as_ref() {
             status.recording = true;
             let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);
