@@ -8,6 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 vcam-protocol = { path = "../protocol" }
+png = "0.17"
 windows-core = "0.58"
 windows = { version = "0.58", features = [
     "implement",

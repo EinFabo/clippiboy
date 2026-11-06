@@ -460,21 +460,69 @@ impl Feed {
 
 /// A dark picture with ClippiBoy's violet along the bottom: the camera is
 /// there, but ClippiBoy has no picture for it right now.
+/// ClippiBoy's logo on dark — what the camera shows while ClippiBoy sends
+/// nothing, as OBS's shows its own. Made from `assets/placeholder.html`, a
+/// headless Chrome screenshot at 1280×720.
+const PLACEHOLDER_PNG: &[u8] = include_bytes!("../assets/placeholder.png");
+
 fn placeholder(out: &mut Vec<u8>, w: usize, h: usize) {
     if out.len() == w * h * 3 / 2 {
         return;
     }
-    out.resize(w * h * 3 / 2, 0);
-    let (y, uv) = out.split_at_mut(w * h);
-    let bar = h - h / 24;
-    for row in 0..h {
-        y[row * w..(row + 1) * w].fill(if row >= bar { 70 } else { 22 });
+    match decode_png(PLACEHOLDER_PNG) {
+        Some((rgb, channels, pw, ph)) if pw == w && ph == h => rgb_to_nv12(&rgb, channels, w, h, out),
+        _ => {
+            // A picture that would not decode: plain dark.
+            out.clear();
+            out.resize(w * h, 16);
+            out.resize(w * h * 3 / 2, 128);
+        }
     }
-    for (i, pair) in uv.chunks_exact_mut(2).enumerate() {
-        let row = i / (w / 2) * 2;
-        let (u, v) = if row >= bar { (176, 160) } else { (128, 128) };
-        pair[0] = u;
-        pair[1] = v;
+}
+
+/// The pixels, their channels per pixel (3 or 4) and the size.
+fn decode_png(bytes: &[u8]) -> Option<(Vec<u8>, usize, usize, usize)> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let channels = match info.color_type {
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        _ => return None,
+    };
+    buf.truncate(info.buffer_size());
+    Some((buf, channels, info.width as usize, info.height as usize))
+}
+
+/// RGB (or RGBA, alpha ignored) to NV12, BT.601 studio range — the way the
+/// live frames come.
+fn rgb_to_nv12(rgb: &[u8], channels: usize, w: usize, h: usize, out: &mut Vec<u8>) {
+    out.clear();
+    out.resize(w * h * 3 / 2, 0);
+    let px = |x: usize, y: usize| {
+        let i = (y * w + x) * channels;
+        (rgb[i] as f32, rgb[i + 1] as f32, rgb[i + 2] as f32)
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let (r, g, b) = px(x, y);
+            out[y * w + x] = (16.0 + (65.481 * r + 128.553 * g + 24.966 * b) / 255.0).round() as u8;
+        }
+    }
+    for y in (0..h).step_by(2) {
+        for x in (0..w).step_by(2) {
+            let mut sum = (0.0, 0.0, 0.0);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let (r, g, b) = px((x + dx).min(w - 1), (y + dy).min(h - 1));
+                sum = (sum.0 + r / 4.0, sum.1 + g / 4.0, sum.2 + b / 4.0);
+            }
+            let (r, g, b) = sum;
+            let i = w * h + (y / 2) * w + x;
+            out[i] = (128.0 + (-37.797 * r - 74.203 * g + 112.0 * b) / 255.0).round().clamp(16.0, 240.0) as u8;
+            out[i + 1] = (128.0 + (112.0 * r - 93.786 * g - 18.214 * b) / 255.0).round().clamp(16.0, 240.0) as u8;
+        }
     }
 }
 
@@ -990,12 +1038,34 @@ mod tests {
     }
 
     #[test]
-    fn the_placeholder_is_dark_with_a_violet_bar() {
+    fn the_placeholder_shows_the_logo_on_dark() {
         let mut p = Vec::new();
-        placeholder(&mut p, 64, 48);
-        assert_eq!(p.len(), 64 * 48 * 3 / 2);
-        assert_eq!(p[0], 22);
-        assert_eq!(p[64 * 47], 70);
+        placeholder(&mut p, 1280, 720);
+        assert_eq!(p.len(), 1280 * 720 * 3 / 2);
+        let y = |x: usize, row: usize| p[row * 1280 + x];
+        let uv = |x: usize, row: usize| {
+            let i = 1280 * 720 + (row / 2) * 1280 + (x / 2) * 2;
+            (p[i], p[i + 1])
+        };
+        assert!(y(20, 20) <= 28, "dark corner (#0b0a10 is Y 25): {}", y(20, 20));
+        let (u, v) = uv(20, 20);
+        assert!((124..=134).contains(&u) && (124..=134).contains(&v), "near neutral corner: ({u}, {v})");
+        // The C's violet stroke, left of the centre.
+        let (u, v) = uv(605, 318);
+        assert!(u > 160 && v > 130, "violet (#8b5cf6 is about 188, 138): ({u}, {v})");
+        // The wordmark's light letters.
+        assert!((560..720).any(|x| y(x, 462) > 180), "wordmark");
+    }
+
+    #[test]
+    fn rgb_turns_into_studio_nv12() {
+        let mut out = Vec::new();
+        rgb_to_nv12(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 3, 2, 2, &mut out);
+        assert_eq!(&out[..4], &[16, 16, 16, 16]);
+        assert_eq!(&out[4..], &[128, 128]);
+        rgb_to_nv12(&[255; 12], 3, 2, 2, &mut out);
+        assert_eq!(&out[..4], &[235, 235, 235, 235]);
+        assert_eq!(&out[4..], &[128, 128]);
     }
 
     #[test]
