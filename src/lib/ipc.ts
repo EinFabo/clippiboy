@@ -41,7 +41,7 @@ export const api = {
   listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
   listCameras: () => invoke<CameraDevice[]>("list_cameras"),
   /** The newest small cam frame after `after`; an empty buffer means none yet. */
-  camPreviewFrame: (after: number) => invoke<ArrayBuffer>("cam_preview_frame", { after }),
+  camPreviewFrame: (after: number) => invoke<ArrayBuffer | number[]>("cam_preview_frame", { after }),
   /** The facecam's master switch alone; answers with the saved settings. */
   setFacecamEnabled: (enabled: boolean) => invoke<AppConfig>("set_facecam_enabled", { enabled }),
   openCameraPrivacy: () => invoke<void>("open_camera_privacy"),

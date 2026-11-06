@@ -1,6 +1,7 @@
 // The facecam's shared helpers for the settings tab and the console.
 import { api } from "./ipc";
 import type { CamLayout, CamState, OverlayCorner } from "./types";
+import { previewBytes } from "./previewBytes";
 export { camBox } from "./camGeometry";
 
 /** The corner a layout sits in, or `null` when it sits anywhere else. */
@@ -76,7 +77,7 @@ export function startCamPreview(canvas: HTMLCanvasElement, opts: { onlyWhileVisi
       }
       let buffer: ArrayBuffer;
       try {
-        buffer = await api.camPreviewFrame(after);
+        buffer = previewBytes(await api.camPreviewFrame(after));
       } catch {
         return;
       }
