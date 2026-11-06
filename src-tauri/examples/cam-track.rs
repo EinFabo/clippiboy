@@ -21,6 +21,7 @@ fn main() {
         device_id: None,
         device_name: name.clone(),
         resolution: CamResolution::P720,
+        capture: (1280, 720),
         fps: 30,
         ring_seconds: 60,
         encoder: clippiboy_lib::encode::for_recording(EncoderId::Nvenc),
