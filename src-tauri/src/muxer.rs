@@ -61,8 +61,35 @@ pub fn command(name: &str) -> Command {
     command
 }
 
+/// A tool at below-normal priority, for work that runs next to a game.
+pub fn background(name: &str) -> Command {
+    let mut command = Command::new(tool(name));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    }
+    command
+}
+
 pub fn ffmpeg() -> Command {
     command("ffmpeg")
+}
+
+/// A tool that carries a live picture, above normal priority. It does little
+/// work, but late: below normal, a busy PC (a game, a build) held a camera's
+/// frames back for seconds and let them out in a burst — a frozen face in the
+/// clip, and seconds of delay in ClippiBoy Camera.
+pub fn live(name: &str) -> Command {
+    let mut command = Command::new(tool(name));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+        command.creation_flags(CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+    command
 }
 
 pub fn run(command: &mut Command, what: &str) -> Result<(), String> {
@@ -711,6 +738,46 @@ fn probe_duration_by(mut program: Command, path: &Path) -> Result<Option<u64>, S
         .map(|seconds| (seconds * 1000.0) as u64))
 }
 
+/// Where a file's video really starts, in µs: a clip's first frame sits a
+/// little after 0 (SAVE-7), and the cam has to follow it.
+pub fn probe_video_start_us(path: &Path) -> Option<i64> {
+    let output = command("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=start_time",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    parse_start_us(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A file's first video stream's size.
+pub fn probe_video_size(path: &Path) -> Option<(u32, u32)> {
+    let output = command("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .ok()?;
+    parse_size(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn parse_size(text: &str) -> Option<(u32, u32)> {
+    let (w, h) = text.trim().split_once(',')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?)).filter(|&(w, h)| w > 0 && h > 0)
+}
+
+pub fn parse_start_us(text: &str) -> Option<i64> {
+    let seconds = text.trim().parse::<f64>().ok()?;
+    seconds.is_finite().then(|| (seconds * 1e6).round() as i64)
+}
+
 pub fn probe_duration_ms(path: &Path) -> Option<u64> {
     probe_duration(path).ok().flatten()
 }
@@ -719,6 +786,13 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::buffer::jump_limit_us;
+
+    #[test]
+    fn a_probed_size_is_read() {
+        assert_eq!(parse_size("1280,720\r\n"), Some((1280, 720)));
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("0,0"), None);
+    }
 
     fn raw(path: &str, rate: &str) -> VideoInput {
         VideoInput::Raw {

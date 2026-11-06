@@ -1242,3 +1242,38 @@ body,
     transition-duration: 1ms;
   }
 }
+
+/* The facecam's tile: where the cam will sit in a clip saved now. No
+   backdrop-filter — the console runs without GPU. */
+.cb-cam-tile {
+  position: absolute;
+  z-index: 1;
+  border-radius: 12px;
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 0.18);
+}
+.cb-cam-hint {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  border-radius: 12px;
+  background: rgb(10 10 14 / 0.86);
+  color: rgb(255 255 255 / 0.75);
+}
+.cb-cam-off {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  border-radius: 9999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgb(10 10 14 / 0.86);
+  color: white;
+}
+.cb-cam-off:hover {
+  background: rgb(40 40 48 / 0.95);
+}

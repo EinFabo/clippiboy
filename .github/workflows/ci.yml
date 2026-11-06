@@ -34,7 +34,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            vcam
       # Type check and bundle; tauri-build also wants `dist` to exist.
       - run: npm ci
       - run: npm run build
@@ -42,6 +44,9 @@ jobs:
       - name: Unit tests
         working-directory: src-tauri
         run: cargo test --locked --lib
+      - name: ClippiBoy Camera tests
+        working-directory: vcam
+        run: cargo test --locked
 
   server:
     runs-on: ubuntu-latest

@@ -7,6 +7,17 @@ fn main() {
     // here and granted to its window, or calling it is refused.
     let commands = &[
         "list_audio_devices",
+        "list_cameras",
+        "cam_preview_frame",
+        "set_facecam_enabled",
+        "open_camera_privacy",
+        "set_virtual_camera",
+        "remove_virtual_camera",
+        "bake_clip_cam",
+        "clip_facecam_view",
+        "set_clip_portrait",
+        "retry_recording_cam",
+        "bake_all_cams",
         "list_audio_processes",
         "list_capture_targets",
         "list_encoders",

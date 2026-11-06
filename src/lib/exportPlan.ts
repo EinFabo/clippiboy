@@ -25,6 +25,14 @@ function widthFor(clip: { width: number; height: number }, height: number): numb
   return Math.max(2, width) & ~1;
 }
 
+/** Mirrors `export::size_for`: the size whose short side is `short`. */
+function sizeFor(clip: { width: number; height: number }, short: number): { width: number; height: number } {
+  if (clip.width < clip.height) {
+    return { width: short, height: Math.max(2, Math.floor((clip.height * short) / Math.max(1, clip.width))) & ~1 };
+  }
+  return { width: widthFor(clip, short), height: short };
+}
+
 function videoBudget(targetBytes: number, durationMs: number, audioKbps: number): number {
   const usableBits = Math.floor((Math.floor(targetBytes) * 8 * (100 - CONTAINER_OVERHEAD)) / 100);
   const videoBits = Math.max(0, usableBits - audioKbps * durationMs);
@@ -55,10 +63,12 @@ export function planExport(
     budget = videoBudget(targetBytes, clip.durationMs, audioKbps);
   }
 
-  let height = clip.height;
-  for (const step of [clip.height, ...HEIGHTS.filter((h) => h < clip.height)]) {
-    height = step;
-    const wants = bitrateFor(widthFor(clip, step), step, 30);
+  // Steps on the short side, as `export::recipe` does.
+  const short = Math.min(clip.width, clip.height);
+  let size = { width: clip.width, height: clip.height };
+  for (const step of [short, ...HEIGHTS.filter((h) => h < short)]) {
+    size = sizeFor(clip, step);
+    const wants = bitrateFor(size.width, size.height, 30);
     if (budget >= Math.floor(wants / STARVED)) break;
   }
   const videoKbps = Math.max(VIDEO_FLOOR_KBPS, budget);
@@ -66,8 +76,8 @@ export function planExport(
   return {
     videoKbps,
     audioKbps,
-    width: widthFor(clip, height),
-    height,
+    width: size.width,
+    height: size.height,
     seconds: Math.round(clip.durationMs / 100) / 10,
     tooLong: budget < VIDEO_FLOOR_KBPS,
     expectedMb: roundMb(expectedBytes / (1024 * 1024)),

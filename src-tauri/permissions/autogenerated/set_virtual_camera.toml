@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-virtual-camera"
+description = "Enables the set_virtual_camera command without any pre-configured scope."
+commands.allow = ["set_virtual_camera"]
+
+[[permission]]
+identifier = "deny-set-virtual-camera"
+description = "Denies the set_virtual_camera command without any pre-configured scope."
+commands.deny = ["set_virtual_camera"]

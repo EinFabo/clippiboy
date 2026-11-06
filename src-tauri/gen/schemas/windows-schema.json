@@ -363,6 +363,24 @@
           "markdownDescription": "Enables the apply_clip_edit command without any pre-configured scope."
         },
         {
+          "description": "Enables the bake_all_cams command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bake-all-cams",
+          "markdownDescription": "Enables the bake_all_cams command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bake_clip_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bake-clip-cam",
+          "markdownDescription": "Enables the bake_clip_cam command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the cam_preview_frame command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cam-preview-frame",
+          "markdownDescription": "Enables the cam_preview_frame command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_update command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-update",
@@ -373,6 +391,12 @@
           "type": "string",
           "const": "allow-clear-game",
           "markdownDescription": "Enables the clear_game command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clip_facecam_view command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clip-facecam-view",
+          "markdownDescription": "Enables the clip_facecam_view command without any pre-configured scope."
         },
         {
           "description": "Enables the clip_tracks command without any pre-configured scope.",
@@ -591,6 +615,12 @@
           "markdownDescription": "Enables the list_audio_processes command without any pre-configured scope."
         },
         {
+          "description": "Enables the list_cameras command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-cameras",
+          "markdownDescription": "Enables the list_cameras command without any pre-configured scope."
+        },
+        {
           "description": "Enables the list_capture_targets command without any pre-configured scope.",
           "type": "string",
           "const": "allow-list-capture-targets",
@@ -607,6 +637,12 @@
           "type": "string",
           "const": "allow-list-encoders",
           "markdownDescription": "Enables the list_encoders command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_camera_privacy command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-camera-privacy",
+          "markdownDescription": "Enables the open_camera_privacy command without any pre-configured scope."
         },
         {
           "description": "Enables the open_clip command without any pre-configured scope.",
@@ -639,6 +675,12 @@
           "markdownDescription": "Enables the remove_audio_source command without any pre-configured scope."
         },
         {
+          "description": "Enables the remove_virtual_camera command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-remove-virtual-camera",
+          "markdownDescription": "Enables the remove_virtual_camera command without any pre-configured scope."
+        },
+        {
           "description": "Enables the restore_clip_original command without any pre-configured scope.",
           "type": "string",
           "const": "allow-restore-clip-original",
@@ -655,6 +697,12 @@
           "type": "string",
           "const": "allow-retry-ffmpeg",
           "markdownDescription": "Enables the retry_ffmpeg command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the retry_recording_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-retry-recording-cam",
+          "markdownDescription": "Enables the retry_recording_cam command without any pre-configured scope."
         },
         {
           "description": "Enables the reveal_clip command without any pre-configured scope.",
@@ -693,6 +741,12 @@
           "markdownDescription": "Enables the set_clip_favorite command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_clip_portrait command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-clip-portrait",
+          "markdownDescription": "Enables the set_clip_portrait command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_clip_tags command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-clip-tags",
@@ -705,6 +759,12 @@
           "markdownDescription": "Enables the set_config command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_facecam_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-facecam-enabled",
+          "markdownDescription": "Enables the set_facecam_enabled command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_hotkeys command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-hotkeys",
@@ -715,6 +775,12 @@
           "type": "string",
           "const": "allow-set-logo-icon",
           "markdownDescription": "Enables the set_logo_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_virtual_camera command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-virtual-camera",
+          "markdownDescription": "Enables the set_virtual_camera command without any pre-configured scope."
         },
         {
           "description": "Enables the share_accept command without any pre-configured scope.",
@@ -861,6 +927,24 @@
           "markdownDescription": "Denies the apply_clip_edit command without any pre-configured scope."
         },
         {
+          "description": "Denies the bake_all_cams command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bake-all-cams",
+          "markdownDescription": "Denies the bake_all_cams command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bake_clip_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bake-clip-cam",
+          "markdownDescription": "Denies the bake_clip_cam command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cam_preview_frame command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cam-preview-frame",
+          "markdownDescription": "Denies the cam_preview_frame command without any pre-configured scope."
+        },
+        {
           "description": "Denies the check_update command without any pre-configured scope.",
           "type": "string",
           "const": "deny-check-update",
@@ -871,6 +955,12 @@
           "type": "string",
           "const": "deny-clear-game",
           "markdownDescription": "Denies the clear_game command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clip_facecam_view command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clip-facecam-view",
+          "markdownDescription": "Denies the clip_facecam_view command without any pre-configured scope."
         },
         {
           "description": "Denies the clip_tracks command without any pre-configured scope.",
@@ -1089,6 +1179,12 @@
           "markdownDescription": "Denies the list_audio_processes command without any pre-configured scope."
         },
         {
+          "description": "Denies the list_cameras command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-cameras",
+          "markdownDescription": "Denies the list_cameras command without any pre-configured scope."
+        },
+        {
           "description": "Denies the list_capture_targets command without any pre-configured scope.",
           "type": "string",
           "const": "deny-list-capture-targets",
@@ -1105,6 +1201,12 @@
           "type": "string",
           "const": "deny-list-encoders",
           "markdownDescription": "Denies the list_encoders command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_camera_privacy command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-camera-privacy",
+          "markdownDescription": "Denies the open_camera_privacy command without any pre-configured scope."
         },
         {
           "description": "Denies the open_clip command without any pre-configured scope.",
@@ -1137,6 +1239,12 @@
           "markdownDescription": "Denies the remove_audio_source command without any pre-configured scope."
         },
         {
+          "description": "Denies the remove_virtual_camera command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-remove-virtual-camera",
+          "markdownDescription": "Denies the remove_virtual_camera command without any pre-configured scope."
+        },
+        {
           "description": "Denies the restore_clip_original command without any pre-configured scope.",
           "type": "string",
           "const": "deny-restore-clip-original",
@@ -1153,6 +1261,12 @@
           "type": "string",
           "const": "deny-retry-ffmpeg",
           "markdownDescription": "Denies the retry_ffmpeg command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the retry_recording_cam command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-retry-recording-cam",
+          "markdownDescription": "Denies the retry_recording_cam command without any pre-configured scope."
         },
         {
           "description": "Denies the reveal_clip command without any pre-configured scope.",
@@ -1191,6 +1305,12 @@
           "markdownDescription": "Denies the set_clip_favorite command without any pre-configured scope."
         },
         {
+          "description": "Denies the set_clip_portrait command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-clip-portrait",
+          "markdownDescription": "Denies the set_clip_portrait command without any pre-configured scope."
+        },
+        {
           "description": "Denies the set_clip_tags command without any pre-configured scope.",
           "type": "string",
           "const": "deny-set-clip-tags",
@@ -1203,6 +1323,12 @@
           "markdownDescription": "Denies the set_config command without any pre-configured scope."
         },
         {
+          "description": "Denies the set_facecam_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-facecam-enabled",
+          "markdownDescription": "Denies the set_facecam_enabled command without any pre-configured scope."
+        },
+        {
           "description": "Denies the set_hotkeys command without any pre-configured scope.",
           "type": "string",
           "const": "deny-set-hotkeys",
@@ -1213,6 +1339,12 @@
           "type": "string",
           "const": "deny-set-logo-icon",
           "markdownDescription": "Denies the set_logo_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_virtual_camera command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-virtual-camera",
+          "markdownDescription": "Denies the set_virtual_camera command without any pre-configured scope."
         },
         {
           "description": "Denies the share_accept command without any pre-configured scope.",

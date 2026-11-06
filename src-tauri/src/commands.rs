@@ -24,6 +24,13 @@ pub fn list_audio_devices() -> Vec<AudioDevice> {
     devices::list_devices()
 }
 
+/// The cameras for the Facecam tab. Async: listing takes a moment and runs on
+/// a worker, which joins the multithreaded apartment itself.
+#[tauri::command(async)]
+pub fn list_cameras() -> Vec<crate::model::CameraDevice> {
+    crate::camera::list()
+}
+
 #[tauri::command(async)]
 pub fn list_audio_processes() -> Vec<AudioProcess> {
     devices::list_processes()
@@ -450,6 +457,137 @@ pub fn default_clip_dir() -> String {
 /// unmuted there, and that copy is what the mixer's own rows are built from.
 /// Only to `main`, and only for changes it did not start: an echo of its own
 /// write would land on its newer, not yet answered edits.
+/// Who may pull the cam preview: the main window while the facecam is on, the
+/// console only while it is on screen, its preview is on and it is kept out of
+/// recordings.
+pub fn preview_allowed(
+    label: &str,
+    console_shown: bool,
+    cam_enabled: bool,
+    console_preview: bool,
+    in_capture: bool,
+) -> std::result::Result<(), &'static str> {
+    match label {
+        "main" if cam_enabled => Ok(()),
+        "main" => Err("The facecam is off."),
+        "console" if console_shown && cam_enabled && console_preview && !in_capture => Ok(()),
+        "console" => Err("No cam preview in the console right now."),
+        _ => Err("Not for this window."),
+    }
+}
+
+/// The newest small cam frame as raw bytes (`camtrack::encode_preview`), newer
+/// than `after`; empty when none came within half a second. From the main
+/// window it renews the preview's lease, which keeps the camera open.
+#[tauri::command]
+pub async fn cam_preview_frame(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    after: u64,
+) -> Result<tauri::ipc::Response> {
+    use std::sync::atomic::Ordering;
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let config = state.config_snapshot();
+    preview_allowed(
+        webview.label(),
+        crate::console::CONSOLE_SHOWN.load(Ordering::SeqCst),
+        config.facecam.enabled,
+        config.facecam.console_preview,
+        config.console_in_capture,
+    )
+    .map_err(String::from)?;
+    if webview.label() == "main" {
+        let now = crate::audio::capture::now_100ns();
+        let before = state.cam_preview_until.swap(now + 30_000_000, Ordering::SeqCst);
+        if before <= now {
+            // The lease starts: the camera opens without waiting for the tick.
+            state.reconcile_cam();
+        }
+    }
+    let handle = app.clone();
+    let frame = tauri::async_runtime::spawn_blocking(move || {
+        handle.state::<AppState>().camera.preview().wait_after(after, std::time::Duration::from_millis(500))
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    Ok(tauri::ipc::Response::new(frame.map(|f| crate::camtrack::encode_preview(&f)).unwrap_or_default()))
+}
+
+/// The facecam's master switch on its own — the console has no `set_config`.
+/// `async`: it writes the config, and a plain command runs on the main thread.
+#[tauri::command(async)]
+pub fn set_facecam_enabled(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    enabled: bool,
+) -> AppConfig {
+    let mut next = state.config_snapshot();
+    next.facecam.enabled = enabled;
+    let saved = state.replace_config(next);
+    if webview.label() != "main" {
+        tell_main(&app, &saved);
+    }
+    saved
+}
+
+/// Windows' camera privacy page, for "Blocked by Windows privacy".
+#[tauri::command]
+pub fn open_camera_privacy(app: tauri::AppHandle) -> Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url("ms-settings:privacy-webcam", None::<&str>)
+        .map_err(|err| err.to_string())
+}
+
+/// ClippiBoy Camera's switch. On runs the elevated setup first when the DLL is
+/// missing or older (one UAC prompt), then lists the camera; off takes it off
+/// the list and leaves the DLL. `async`: the setup waits for the prompt.
+#[tauri::command(async)]
+pub fn set_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle, on: bool) -> Result<AppConfig> {
+    if on && crate::vcam::needs_setup(state.vcam.installed().as_deref(), vcam_protocol::DLL_VERSION) {
+        run_vcam_setup(&state, &app, "install")?;
+    }
+    let mut next = state.config_snapshot();
+    next.facecam.virtual_camera = on;
+    let saved = state.replace_config(next);
+    // An update leaves the switch as it was, so the config change alone would
+    // not list the camera again.
+    state.reconcile_vcam();
+    Ok(saved)
+}
+
+/// Takes ClippiBoy Camera off the machine: switch off, then the elevated
+/// uninstall.
+#[tauri::command(async)]
+pub fn remove_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<AppConfig> {
+    let mut next = state.config_snapshot();
+    next.facecam.virtual_camera = false;
+    let saved = state.replace_config(next);
+    run_vcam_setup(&state, &app, "uninstall")?;
+    Ok(saved)
+}
+
+fn run_vcam_setup(state: &AppState, app: &tauri::AppHandle, verb: &str) -> Result<()> {
+    use tauri::Manager;
+    let exe = crate::vcam::setup_exe(app.path().resource_dir().ok())
+        .ok_or_else(|| "The virtual camera's setup is missing".to_string())?;
+    #[cfg(windows)]
+    let owner = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize);
+    #[cfg(not(windows))]
+    let owner = None;
+    let outcome = crate::vcam::run_setup(&exe, verb, owner);
+    state.vcam.refresh_installed();
+    match outcome? {
+        crate::vcam::SetupDone::Done => Ok(()),
+        crate::vcam::SetupDone::AfterRestart => {
+            log::info!("virtual camera {verb}: finishes after a restart");
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn tell_main(app: &tauri::AppHandle, config: &AppConfig) {
     use tauri::Emitter;
     let _ = app.emit_to("main", "config-changed", config);
@@ -909,6 +1047,10 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
             own.lock()
         }
     };
+    // A cam still waiting to be added goes with the clip; a clip's being
+    // added has finished by now, the lock above waited for it. A recording's
+    // burn-in runs without that lock and is stopped here instead.
+    crate::composite::cancel(&id);
     // The clip first, and the stores by its stored id. The stores are named
     // after a sanitised id, so an id that is empty or spelled differently
     // named the whole store — every clip's tracks and originals went with it.
@@ -934,7 +1076,7 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // The individual tracks and the original belong to the clip and serve no
     // purpose without it.
     stems::remove(&clip.id);
-    edit::remove(&clip.id);
+    edit::remove_everything(&clip.id);
     // The thumbnail too, even when none is recorded in the database.
     crate::thumbs::remove(&clip.id);
 
@@ -1085,9 +1227,14 @@ pub fn reveal_clip(
 /// Put a clip's video file on the clipboard.
 ///
 /// Not the path, the **file**: in Discord or WhatsApp, Ctrl+V then attaches the
-/// clip; in Explorer it drops a copy.
-#[tauri::command]
+/// clip; in Explorer it drops a copy. A clip whose camera is still being added
+/// is waited for: copied a second after saving, it went out without one.
+/// `async`: the wait must not hold the main thread.
+#[tauri::command(async)]
 pub fn copy_clip_file(state: State<'_, AppState>, id: String) -> Result<()> {
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     let path = std::path::PathBuf::from(&clip.path);
@@ -1159,6 +1306,11 @@ pub fn export_for_discord(
     id: String,
     megabytes: u64,
 ) -> Result<String> {
+    // Before the clip's lock: a cam still being added to this clip finishes
+    // first, and its job needs that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
@@ -1190,16 +1342,21 @@ pub fn export_for_discord(
     if !ready {
         // Straight to the work: the target is the core's own, in its data
         // folder — `export_target` would rightly refuse it for the dialog.
-        export_to(&state, &app, &id, target_bytes, &output)?;
+        export_to(&state, &app, &id, target_bytes, &output, crate::export::Orientation::Landscape)?;
     }
     crate::clipboard::copy_files(&[output.clone()])?;
     Ok(output.to_string_lossy().to_string())
 }
 
-/// Open the clip in whichever player Windows has chosen for it.
-#[tauri::command]
+/// Open the clip in whichever player Windows has chosen for it — once its
+/// camera is in: that player would show it without, and hold the file the
+/// camera has to go into.
+#[tauri::command(async)]
 pub fn open_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri_plugin_opener::OpenerExt;
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
 
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
@@ -1315,7 +1472,13 @@ pub fn apply_clip_edit(
     start_ms: u64,
     end_ms: u64,
     tracks: Vec<TrackMix>,
+    facecam: Option<crate::model::FacecamEdit>,
 ) -> Result<Clip> {
+    // Before the clip's lock: a cam still being added to this clip finishes
+    // first, and its job needs that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     // From before the row is read until the new state is stored: a delete or
     // a move in between would leave the row describing a file that is gone or
     // elsewhere. `edit::run` takes the same lock again (it is reentrant) and
@@ -1332,6 +1495,7 @@ pub fn apply_clip_edit(
         load_editable(&state, &id, &loaded),
         trim,
         &tracks,
+        facecam.as_ref(),
         encoder,
         quality,
         progress(&app, &id),
@@ -1353,6 +1517,11 @@ pub fn restore_clip_original(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Clip> {
+    // Before the clip's lock: a cam still being added to this clip finishes
+    // first, and its job needs that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     // As in `apply_clip_edit`: held across the run and `store`, the settings
     // read before it.
     let (encoder, quality) = encoder_for(&state);
@@ -1403,22 +1572,26 @@ fn load_editable<'a>(
 /// original sat in the app data directory for good, so a trimmed clip occupied
 /// *more* than an untrimmed one. Undo is gone afterwards — the trim is not.
 ///
-/// Not `async`: this deletes two files, it does not run ffmpeg.
-#[tauri::command]
+/// Async: a cam still being added to the clip is waited for first.
+#[tauri::command(async)]
 pub fn discard_clip_original(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Clip> {
-    // On the main thread, so never waiting: a save of this clip still needs
-    // the original it would throw away.
+    // Before the clip's lock: the composite it waits for takes that lock.
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err("The cam is still being added to this clip — try again in a moment.".into());
+    }
     let own = edit::clip_lock(&id);
     let Some(_clip) = own.try_lock() else {
         return Err("This clip is being saved — try again in a moment.".into());
     };
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
-    edit::discard_original(&clip.id)?;
+    if edit::discard_original(&clip.id)? == edit::Discarded::Baked {
+        note_baked(&state, &clip)?;
+    }
     // The record on the clip stays: it carries the offset the individual tracks
     // sit at, and a remix without it would run against the picture. What changed
     // is `original_available`, which the library reads off the disk.
@@ -1429,6 +1602,114 @@ pub fn discard_clip_original(
     })?;
     announce_change(&app);
     Ok(clip)
+}
+
+/// A clip whose store was baked: `baked` when its file shows the cam, no
+/// facecam at all when it never did.
+fn note_baked(state: &State<'_, AppState>, clip: &Clip) -> Result<()> {
+    let composited = clip.facecam.as_ref().is_some_and(|cam| {
+        cam.state == crate::model::FacecamState::Ready && cam.layout.visible
+    });
+    let next = clip
+        .facecam
+        .clone()
+        .filter(|_| composited)
+        .map(|cam| crate::model::ClipFacecam { state: crate::model::FacecamState::Baked, ..cam });
+    with_library(state, |lib| lib.set_facecam(&clip.id, next.as_ref()).map_err(|e| e.to_string()))
+}
+
+/// Where a clip's 9:16 export cuts its band and its game window. Rewrites no
+/// file — the portrait is only made on export — so it is stored at once.
+#[tauri::command(async)]
+pub fn set_clip_portrait(state: State<'_, AppState>, id: String, portrait: crate::model::PortraitLayout) -> Result<Clip> {
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    let mut cam = clip.facecam.ok_or_else(|| "This clip has no camera.".to_string())?;
+    cam.portrait = crate::model::PortraitLayout {
+        split: portrait.split.clamp(0.25, 0.5),
+        game_x: portrait.game_x.clamp(0.0, 1.0),
+    };
+    with_library(&state, |lib| {
+        lib.set_facecam(&id, Some(&cam)).map_err(|e| e.to_string())?;
+        lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+    })
+}
+
+/// Burns a recording's camera in once more after it failed.
+#[tauri::command(async)]
+pub fn retry_recording_cam(state: State<'_, AppState>, id: String) -> Result<Clip> {
+    let clip = {
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        let stored = crate::reccam::read_stored(&id).is_some();
+        let cam = clip.facecam.clone().filter(|cam| crate::reccam::retryable(clip.recording, Some(cam.state), stored));
+        let cam = cam.ok_or_else(|| "The camera of this recording is no longer there.".to_string())?;
+        let next = crate::model::ClipFacecam { state: crate::model::FacecamState::Pending, ..cam };
+        with_library(&state, |lib| {
+            lib.set_facecam(&id, Some(&next)).map_err(|e| e.to_string())?;
+            lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+        })?
+    };
+    crate::composite::enqueue_recording(&id);
+    Ok(clip)
+}
+
+/// What the player needs to show a clip's camera movable; `None` for a clip
+/// whose camera cannot move (none, baked, store gone).
+#[tauri::command(async)]
+pub fn clip_facecam_view(state: State<'_, AppState>, id: String) -> Result<Option<crate::facecam::FacecamView>> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?;
+    Ok(clip.as_ref().and_then(crate::facecam::view_of))
+}
+
+/// Bakes one clip's cam in for good: its clean picture and cam are freed, the
+/// cam can no longer be moved.
+#[tauri::command(async)]
+pub fn bake_clip_cam(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
+    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+        return Err("The cam is still being added to this clip — try again in a moment.".into());
+    }
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    edit::bake(&clip.id)?;
+    note_baked(&state, &clip)?;
+    let clip = with_library(&state, |lib| {
+        lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+    })?;
+    announce_change(&app);
+    Ok(clip)
+}
+
+/// Bakes every clip's cam, one clip lock at a time. Returns what was freed.
+#[tauri::command(async)]
+pub fn bake_all_cams(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<TrimOriginals> {
+    let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))?;
+    let mut freed = TrimOriginals::default();
+    for clip in clips.into_iter().filter(|c| edit::bakeable(c) && crate::facecam::has_store(&c.id)) {
+        // A cam job still running gets a moment; past it the clip waits for
+        // the next time instead of holding every other one up.
+        if !crate::composite::wait_settled(&clip.id, std::time::Duration::from_secs(5)) {
+            continue;
+        }
+        let own = edit::clip_lock(&clip.id);
+        let _held = own.lock();
+        match edit::bake(&clip.id) {
+            Ok(bytes) => {
+                freed.count += 1;
+                freed.bytes += bytes;
+                let _ = note_baked(&state, &clip);
+            }
+            Err(err) => log::info!("cam of {} kept: {err}", clip.id),
+        }
+    }
+    announce_change(&app);
+    Ok(freed)
 }
 
 /// What [`shrink`] wrote.
@@ -1453,7 +1734,11 @@ pub(crate) fn shrink(
     target_bytes: u64,
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
+    orientation: crate::export::Orientation,
 ) -> Result<Shrunk> {
+    if !crate::composite::wait_settled(id, std::time::Duration::from_secs(300)) {
+        return Err(CAM_ON_ITS_WAY.into());
+    }
     // The settings before any lock: nothing takes one before `AppState.config`.
     let (encoder, _) = encoder_for(state);
     // Held for the whole ffmpeg run, which reads the clip file throughout: a
@@ -1480,13 +1765,15 @@ pub(crate) fn shrink(
     // it, and a row that drifted from its file would put the export over the
     // limit it exists to stay under.
     let duration_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(clip.duration_ms);
-    let recipe = crate::export::recipe(&crate::export::Target {
-        bytes: target_bytes,
-        duration_ms,
-        width: clip.width,
-        height: clip.height,
-    });
-    let args = crate::export::arguments(&source, &part, &recipe, clip.height, encoder);
+    let portrait = orientation == crate::export::Orientation::Portrait;
+    let (width, height) = if portrait { crate::export::PORTRAIT } else { (clip.width, clip.height) };
+    let recipe = crate::export::recipe(&crate::export::Target { bytes: target_bytes, duration_ms, width, height });
+    let job = portrait.then(|| portrait_job(&clip, duration_ms, (recipe.width, recipe.height)));
+    let build = |encoder| match &job {
+        Some(job) => crate::export::portrait_arguments(&job.inputs(), &job.graph, &part, &recipe, duration_ms, encoder),
+        None => crate::export::arguments(&source, &part, &recipe, clip.height, encoder),
+    };
+    let args = build(encoder);
 
     match edit::run_with_progress(&args, duration_ms, on_progress) {
         Ok(()) => {}
@@ -1495,13 +1782,7 @@ pub(crate) fn shrink(
         Err(err) if encoder != crate::model::EncoderId::X264 => {
             log::warn!("export with {encoder:?} failed ({err}) — retrying with x264");
             let _ = std::fs::remove_file(&part);
-            let args = crate::export::arguments(
-                &source,
-                &part,
-                &recipe,
-                clip.height,
-                crate::model::EncoderId::X264,
-            );
+            let args = build(crate::model::EncoderId::X264);
             edit::run_with_progress(&args, duration_ms, on_progress).inspect_err(
                 |_| {
                     let _ = std::fs::remove_file(&part);
@@ -1527,6 +1808,88 @@ pub(crate) fn shrink(
     Ok(Shrunk { bytes: written, too_long: recipe.too_long })
 }
 
+/// What a 9:16 export reads and the graph that puts it together.
+pub struct PortraitJob {
+    game: std::path::PathBuf,
+    game_seek_ms: u64,
+    cam: Option<(std::path::PathBuf, Option<f64>)>,
+    audio: std::path::PathBuf,
+    mark: Option<std::path::PathBuf>,
+    pub graph: String,
+}
+
+impl PortraitJob {
+    pub fn inputs(&self) -> crate::export::PortraitInputs<'_> {
+        crate::export::PortraitInputs {
+            game: &self.game,
+            game_seek_ms: self.game_seek_ms,
+            cam: self.cam.as_ref().map(|(path, seek)| (path.as_path(), *seek)),
+            audio: Path::new(&self.audio),
+            mark: self.mark.as_deref(),
+        }
+    }
+}
+
+/// The 9:16 export of `clip`: from the clean picture and the camera when it
+/// has them (a portrait never rewrites the clip), the game alone otherwise.
+pub fn portrait_job(clip: &Clip, length_ms: u64, out: (u32, u32)) -> PortraitJob {
+    use crate::composite::{cam_timing, mark_redrawn, portrait_filter, portrait_geometry, MarkInput, PortraitCam};
+    let view = crate::facecam::view_of(clip);
+    let facts = view.as_ref().and_then(|_| crate::facecam::read_facts(&clip.id));
+    let (game, game_seek_ms) = match &view {
+        Some(view) => (std::path::PathBuf::from(&view.clean_path), view.clean_lead_ms.max(0) as u64),
+        None => (std::path::PathBuf::from(&clip.path), 0),
+    };
+    let cam = match (&view, &facts, clip.facecam.as_ref()) {
+        (Some(view), Some(facts), Some(row)) if row.layout.visible => {
+            let video_start_us = crate::muxer::probe_video_start_us(&game).unwrap_or(0);
+            let timing = cam_timing(facts.cam_offset_us, row.delay_ms, video_start_us, game_seek_ms, length_ms);
+            // The gaps were noted in the clean picture's time; this cut starts later.
+            let end = game_seek_ms + length_ms;
+            let gaps_ms = facts
+                .gaps_ms
+                .iter()
+                .filter(|(a, b)| *b > game_seek_ms && *a < end)
+                .map(|(a, b)| (a.saturating_sub(game_seek_ms), (*b).min(end) - game_seek_ms))
+                .collect();
+            Some((
+                std::path::PathBuf::from(&view.cam_path),
+                PortraitCam { input: 1, size: (facts.width, facts.height), timing, gaps_ms, video_start_us, mirror: row.layout.mirror },
+            ))
+        }
+        _ => None,
+    };
+    let layout = clip.facecam.as_ref().map(|row| row.portrait).unwrap_or_default();
+    let geometry = portrait_geometry((clip.width, clip.height), cam.as_ref().map(|(_, c)| c.size), &layout, out);
+    // As large as on a landscape frame of the same width, bottom left.
+    let mark = mark_redrawn(crate::watermark::enabled(), &geometry)
+        .then(|| {
+            let (pw, ph, _) = crate::watermark::picture();
+            let at = crate::watermark::rect(out.0, out.0 * 9 / 16, *pw, *ph)?;
+            let png = crate::config::data_dir().join("temp").join("watermark.png");
+            std::fs::create_dir_all(png.parent()?).ok()?;
+            std::fs::write(&png, crate::watermark::png()).ok()?;
+            let below = (out.0 * 9 / 16) - at.y;
+            let rect = crate::camera::Rect { x: at.x, y: out.1 - below, w: at.width, h: at.height };
+            Some((png, rect))
+        })
+        .flatten();
+    let mark_input = 2 + usize::from(cam.is_some());
+    let graph = portrait_filter(
+        &geometry,
+        cam.as_ref().map(|(_, c)| c),
+        mark.as_ref().map(|(_, rect)| MarkInput { input: mark_input, rect: *rect }).as_ref(),
+    );
+    PortraitJob {
+        game,
+        game_seek_ms,
+        cam: cam.map(|(path, c)| (path, c.timing.seek_s)),
+        audio: std::path::PathBuf::from(&clip.path),
+        mark: mark.map(|(png, _)| png),
+        graph,
+    }
+}
+
 /// Write a copy of a clip that comes in under a size.
 ///
 /// The counterpart to everything else here: recording and trimming aim at a
@@ -1547,8 +1910,10 @@ pub fn export_clip(
     id: String,
     target_bytes: u64,
     suggested_name: String,
+    orientation: Option<crate::export::Orientation>,
 ) -> Result<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
+    let orientation = orientation.unwrap_or_default();
 
     let chosen = (|| -> Result<Option<std::path::PathBuf>> {
         let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
@@ -1590,7 +1955,7 @@ pub fn export_clip(
     let Some(output) = chosen else {
         return Ok(None);
     };
-    export_to(&state, &app, &id, target_bytes, &output)?;
+    export_to(&state, &app, &id, target_bytes, &output, orientation)?;
     Ok(Some(output.to_string_lossy().to_string()))
 }
 
@@ -1603,10 +1968,11 @@ fn export_to(
     id: &str,
     target_bytes: u64,
     output: &Path,
+    orientation: crate::export::Orientation,
 ) -> Result<()> {
     // The target is settled: the window can show the copy being written.
     progress(app, id)(0.0);
-    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id))
+    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id), orientation)
         .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
     let written = shrunk.bytes;
     progress(app, id)(1.0);
@@ -1666,10 +2032,12 @@ pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     // trims" speak of.
     let store_bytes = dir_bytes(&edit::root());
     let originals_bytes = edit::trim_originals(&Default::default()).bytes;
+    let facecam_bytes = facecam_store_bytes();
     Ok(StorageUsage {
         clips_bytes,
         originals_bytes,
-        shot_edits_bytes: store_bytes.saturating_sub(originals_bytes),
+        facecam_bytes,
+        shot_edits_bytes: store_bytes.saturating_sub(originals_bytes).saturating_sub(facecam_bytes),
         tracks_bytes: dir_bytes(&crate::stems::root()),
         thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
         cache_bytes,
@@ -1714,6 +2082,20 @@ fn originals_still_needed(state: &State<'_, AppState>) -> Result<std::collection
 /// dependency. Recursive to any depth — the web views' cache runs to thousands
 /// of files, which is why the storage page does not wait on this to show the
 /// rest.
+/// The clean pictures and cams of facecam clips.
+fn facecam_store_bytes() -> u64 {
+    std::fs::read_dir(edit::root())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|dir| dir.join("facecam.json").exists())
+                .map(|dir| dir_bytes(&dir))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 fn dir_bytes(root: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;
@@ -1755,6 +2137,9 @@ fn progress<'a>(app: &'a tauri::AppHandle, id: &'a str) -> impl Fn(f32) + 'a {
 
 /// Write a run's result into the database and read the clip back. `undo`:
 /// the run was "Undo trim", which put the untouched recording back.
+/// Said when an edit, export or share waited five minutes for a clip's cam.
+const CAM_ON_ITS_WAY: &str = "The cam is still being added to this clip — try again in a moment.";
+
 fn store(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
@@ -1776,6 +2161,16 @@ fn store(
         }
     };
     let clip = &clip;
+
+    // A save that asked for a camera: the row follows the file.
+    if let Some(cam) = &applied.facecam {
+        let _ = with_library(state, |lib| lib.set_facecam(&clip.id, Some(cam)).map_err(|e| e.to_string()));
+    } else if applied.composited {
+        if let Some(cam) = clip.facecam.clone() {
+            let ready = crate::model::ClipFacecam { state: crate::model::FacecamState::Ready, ..cam };
+            let _ = with_library(state, |lib| lib.set_facecam(&clip.id, Some(&ready)).map_err(|e| e.to_string()));
+        }
+    }
 
     // Baked into the file, the levels start over from there.
     let tracks = if applied.mix_baked {
@@ -1964,6 +2359,20 @@ pub fn retry_ffmpeg() {
 mod tests {
     use super::*;
 
+    /// The console is never throttled while hidden, so the core refuses as well
+    /// as the page stopping.
+    #[test]
+    fn the_console_sees_the_cam_only_while_it_is_shown_and_out_of_recordings() {
+        assert!(preview_allowed("console", true, true, true, false).is_ok());
+        assert!(preview_allowed("console", false, true, true, false).is_err());
+        assert!(preview_allowed("console", true, false, true, false).is_err());
+        assert!(preview_allowed("console", true, true, false, false).is_err());
+        assert!(preview_allowed("console", true, true, true, true).is_err());
+        assert!(preview_allowed("main", false, true, false, true).is_ok());
+        assert!(preview_allowed("main", true, false, true, false).is_err());
+        assert!(preview_allowed("overlay", true, true, true, false).is_err());
+    }
+
     /// "Undo trim" renders the file again from the untouched recording, so a
     /// mix baked into the trimmed file is no longer in it. Left set, the clip
     /// counted as changed for good and a friend send kept its tracks home.
@@ -1995,6 +2404,7 @@ mod tests {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             favorite: false,
             screenshot: false,
             recording: false,

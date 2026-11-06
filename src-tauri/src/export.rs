@@ -72,6 +72,11 @@ impl Recipe {
     pub fn scales(&self, source_height: u32) -> bool {
         self.height < source_height
     }
+
+    /// The same for a frame of either orientation.
+    pub fn scales_frame(&self, frame: (u32, u32)) -> bool {
+        self.width < frame.0 || self.height < frame.1
+    }
 }
 
 /// Video bitrate left over for a target, in kbit/s. The clip's real length in
@@ -102,11 +107,14 @@ pub fn recipe(target: &Target) -> Recipe {
         budget = video_budget(target.bytes, target.duration_ms, audio_kbps);
     }
 
-    // Never upscale: the source height is the ceiling and the first try.
-    let mut height = target.height;
-    for step in std::iter::once(target.height).chain(HEIGHTS.into_iter().filter(|h| *h < target.height)) {
-        height = step;
-        let wants = crate::encode::bitrate_for(width_for(target, step), step, 30);
+    // Steps on the short side — the height of a landscape frame, the width of
+    // a 9:16 one. Never upscale: the source's short side is the ceiling and
+    // the first try.
+    let short = target.width.min(target.height);
+    let mut size = (target.width, target.height);
+    for step in std::iter::once(short).chain(HEIGHTS.into_iter().filter(|h| *h < short)) {
+        size = size_for(target, step);
+        let wants = crate::encode::bitrate_for(size.0, size.1, 30);
         if budget >= wants / STARVED {
             break;
         }
@@ -116,8 +124,8 @@ pub fn recipe(target: &Target) -> Recipe {
         // A floor, or ffmpeg is handed a bitrate it cannot encode at all.
         video_kbps: budget.max(VIDEO_FLOOR_KBPS),
         audio_kbps,
-        width: width_for(target, height),
-        height,
+        width: size.0,
+        height: size.1,
         too_long: budget < VIDEO_FLOOR_KBPS,
     }
 }
@@ -130,6 +138,17 @@ pub fn megabytes(bytes: u64) -> String {
         format!("{}", tenths / 10)
     } else {
         format!("{}.{}", tenths / 10, tenths % 10)
+    }
+}
+
+/// The size whose short side is `short`, keeping the source's shape, the long
+/// side rounded down even — H.264 will not take an odd one.
+fn size_for(target: &Target, short: u32) -> (u32, u32) {
+    if target.width < target.height {
+        let height = (target.height as u64 * short as u64 / target.width.max(1) as u64).max(2) as u32 & !1;
+        (short, height)
+    } else {
+        (width_for(target, short), short)
     }
 }
 
@@ -170,9 +189,14 @@ pub fn arguments(
     args.extend(["-map", "0:v:0", "-map", "0:a:0?"].map(String::from));
 
     if recipe.scales(source_height) {
-        // `-2` keeps the aspect ratio and lands on an even width by itself.
+        // `-2` keeps the aspect ratio and lands on an even side by itself;
+        // a 9:16 frame is scaled by its width, its short side.
         args.push("-vf".into());
-        args.push(format!("scale=-2:{}", recipe.height));
+        args.push(if recipe.width < recipe.height {
+            format!("scale={}:-2", recipe.width)
+        } else {
+            format!("scale=-2:{}", recipe.height)
+        });
     }
 
     args.extend(video_args(encoder, recipe.video_kbps));
@@ -182,6 +206,73 @@ pub fn arguments(
     // second pass over a file that is small by construction, and buys playback
     // that starts before the download has finished.
     args.extend(["-movflags", "+faststart"].map(String::from));
+    args.push(output.to_string_lossy().to_string());
+    args
+}
+
+/// Which way up the export is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Orientation {
+    #[default]
+    Landscape,
+    /// 9:16: the camera on top, the game below.
+    Portrait,
+}
+
+/// The 9:16 frame a portrait export starts from.
+pub const PORTRAIT: (u32, u32) = (1080, 1920);
+
+/// The files a 9:16 export reads: the game picture (the clean one when there
+/// is one), the camera with its seek, the clip file for the sound, and the
+/// watermark when it is drawn again.
+#[derive(Clone, Copy)]
+pub struct PortraitInputs<'a> {
+    pub game: &'a Path,
+    pub game_seek_ms: u64,
+    pub cam: Option<(&'a Path, Option<f64>)>,
+    pub audio: &'a Path,
+    pub mark: Option<&'a Path>,
+}
+
+/// The ffmpeg line of a 9:16 export. Input 0 is the game, 1 the camera (when
+/// there is one), then the clip file for the sound, then the mark — the order
+/// `composite::portrait_filter` counts in.
+pub fn portrait_arguments(
+    inputs: &PortraitInputs,
+    graph: &str,
+    output: &Path,
+    recipe: &Recipe,
+    length_ms: u64,
+    encoder: EncoderId,
+) -> Vec<String> {
+    let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"]
+        .map(String::from)
+        .to_vec();
+    if inputs.game_seek_ms > 0 {
+        args.extend(["-ss".into(), seconds(inputs.game_seek_ms)]);
+    }
+    args.extend(["-i".into(), inputs.game.to_string_lossy().to_string()]);
+    if let Some((cam, seek)) = inputs.cam {
+        if let Some(seek) = seek {
+            args.extend(["-ss".into(), format!("{seek:.6}")]);
+        }
+        args.extend(["-i".into(), cam.to_string_lossy().to_string()]);
+    }
+    let audio_input = 1 + usize::from(inputs.cam.is_some());
+    args.extend(["-i".into(), inputs.audio.to_string_lossy().to_string()]);
+    if let Some(mark) = inputs.mark {
+        args.extend(["-loop".into(), "1".into(), "-i".into(), mark.to_string_lossy().to_string()]);
+    }
+    args.extend(["-filter_complex".into(), graph.to_string(), "-map".into(), "[v]".into()]);
+    args.extend(["-map".into(), format!("{audio_input}:a:0?")]);
+    args.extend(video_args(encoder, recipe.video_kbps));
+    args.extend(["-c:a", "aac", "-b:a"].map(String::from));
+    args.push(format!("{}k", recipe.audio_kbps));
+    args.extend(["-movflags", "+faststart"].map(String::from));
+    // Last before the output: the looped mark and the cam would run on.
+    args.extend(["-t".into(), seconds(length_ms)]);
     args.push(output.to_string_lossy().to_string());
     args
 }
@@ -239,6 +330,43 @@ mod tests {
 
     /// The common case: a short highlight at the Nitro limit has room to spare,
     /// so the picture is left alone.
+    /// A 9:16 export steps on its short side, the width: 1080×1920, then
+    /// 720×1280, then 480×852 — never 608×1080 from stepping on the height.
+    #[test]
+    fn portrait_audio_comes_from_the_clip_file() {
+        let plan = recipe(&Target { bytes: 50 * MB, duration_ms: 20_000, width: PORTRAIT.0, height: PORTRAIT.1 });
+        let inputs = PortraitInputs {
+            game: Path::new("clean.mp4"),
+            game_seek_ms: 5_000,
+            cam: Some((Path::new("cam.mp4"), Some(1.25))),
+            audio: Path::new("clip.mp4"),
+            mark: Some(Path::new("mark.png")),
+        };
+        let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264);
+        let joined = args.join(" ");
+        assert!(joined.contains("-ss 5.000 -i clean.mp4 -ss 1.250000 -i cam.mp4 -i clip.mp4 -loop 1 -i mark.png"), "{joined}");
+        assert!(args.windows(2).any(|w| w == ["-map", "[v]"]), "{joined}");
+        assert!(args.windows(2).any(|w| w == ["-map", "2:a:0?"]), "the clip file is input 2: {joined}");
+        assert!(args.windows(2).any(|w| w == ["-t", "20.000"]), "{joined}");
+        assert!(!args.iter().any(|a| a == "-vf"), "-vf and -filter_complex never meet: {joined}");
+        // Without a cam the clip file is input 1.
+        let bare = PortraitInputs { cam: None, mark: None, ..inputs };
+        let args = portrait_arguments(&bare, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264);
+        assert!(args.windows(2).any(|w| w == ["-map", "1:a:0?"]), "{args:?}");
+    }
+
+    #[test]
+    fn a_portrait_export_is_never_squashed() {
+        let at = |mb: u64| recipe(&Target { bytes: mb * 1024 * 1024, duration_ms: 30_000, width: 1080, height: 1920 });
+        let roomy = at(100);
+        assert_eq!((roomy.width, roomy.height), (1080, 1920));
+        let tighter = at(8);
+        assert_eq!((tighter.width, tighter.height), (720, 1280));
+        let starved = at(3);
+        assert_eq!((starved.width, starved.height), (480, 852));
+        assert!(starved.scales(1920) && starved.scales_frame((1080, 1920)));
+    }
+
     #[test]
     fn a_short_clip_at_25_mb_stays_at_its_size() {
         let plan = recipe(&target(25 * MB, 30_000, 1920, 1080));
@@ -418,8 +546,17 @@ mod tests {
     }
 
     #[test]
-    fn a_portrait_clip_on_a_thin_budget_goes_to_480() {
+    fn a_portrait_export_is_scaled_by_its_width() {
         let plan = recipe(&target((6.1 * MB as f64) as u64, 60_000, 1080, 1920));
-        assert_eq!((plan.width, plan.height), (270, 480));
+        let args = arguments(Path::new("in.mp4"), Path::new("out.mp4"), &plan, 1920, EncoderId::X264);
+        assert!(args.windows(2).any(|w| w == ["-vf", "scale=480:-2"]), "{args:?}");
+    }
+
+    /// The short side steps (spec 3.5): 480 wide, not 480 high — 270×480
+    /// was the squashed size this used to give.
+    #[test]
+    fn a_portrait_clip_on_a_thin_budget_goes_to_480_wide() {
+        let plan = recipe(&target((6.1 * MB as f64) as u64, 60_000, 1080, 1920));
+        assert_eq!((plan.width, plan.height), (480, 852));
     }
 }

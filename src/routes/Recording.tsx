@@ -9,7 +9,7 @@ import { Select, Slider } from "@/components/ui/Controls";
 import { formatBufferSeconds } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { autoFit, fit, fpsChoices } from "@/lib/fit";
-import type { BufferConfig, CaptureTarget, EncoderId } from "@/lib/types";
+import type { AppConfig, BufferConfig, CaptureTarget, EncoderId } from "@/lib/types";
 
 /** The usual steps; only what the source supports is offered. */
 const HEIGHTS = [720, 1080, 1440, 2160];
@@ -461,6 +461,11 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
               ceiling: run into it in a busy scene and the buffer holds less than
               its full length rather than taking the machine down with it.
             </p>
+            {config.facecam.enabled && config.facecam.inClips && (
+              <p className="mt-2 text-xs text-ink-muted">
+                Camera: {camMemoryMb(config)} MB on top
+              </p>
+            )}
           </div>
         </Card>
       </section>
@@ -539,4 +544,12 @@ export function TargetCard({
       </p>
     </Card>
   );
+}
+
+/** The cam ring's memory — `config::effective_cam_memory_bytes`, in MB. */
+function camMemoryMb(config: AppConfig): number {
+  const seconds = config.buffer.seconds + config.recording.keyframeSeconds + 12;
+  const kbps = config.facecam.resolution === "p1080" ? 6000 : 3000;
+  const bytes = Math.max(((kbps * 1000) / 8) * seconds * 1.5, 16 * 1024 * 1024);
+  return Math.round(bytes / (1024 * 1024));
 }

@@ -29,3 +29,6 @@ ram-probe.ps1
 # Local secrets (API tokens and the like). Never in the repo.
 .env
 .env.*
+
+# The virtual camera workspace builds on its own.
+vcam/target/

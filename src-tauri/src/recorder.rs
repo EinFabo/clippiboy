@@ -1200,6 +1200,8 @@ pub fn finalize(
             return Err(err);
         }
     };
+    // The camera's segments into the store before the folder goes.
+    crate::reccam::secure(dir, &meta.id, &meta.video_gaps, result.size_bytes, meta.fps);
     if let Err(err) = std::fs::remove_dir_all(dir) {
         log::warn!("recording folder '{}' not cleared: {err}", dir.display());
     }

@@ -80,10 +80,14 @@ export function CornerPad({
   value,
   onChange,
   disabled,
+  mark = "banner",
 }: {
-  value: OverlayCorner;
+  /** `null` when the thing sits in no corner. */
+  value: OverlayCorner | null;
   onChange: (corner: OverlayCorner) => void;
   disabled?: boolean;
+  /** The banner's flat bar, or the cam's 16:9 box. */
+  mark?: "banner" | "cam";
 }) {
   return (
     <div
@@ -92,7 +96,7 @@ export function CornerPad({
         disabled && "pointer-events-none opacity-40",
       )}
     >
-      {corners.map(([corner, label, mark]) => (
+      {corners.map(([corner, label, spot]) => (
         <button
           key={corner}
           type="button"
@@ -108,9 +112,10 @@ export function CornerPad({
           {/* Roughly the banner's proportions — 416 × 128 in `overlay.rs`. */}
           <span
             className={cn(
-              "absolute h-1 w-3.5 rounded-[2px]",
+              "absolute rounded-[2px]",
+              mark === "cam" ? "h-2 w-3.5" : "h-1 w-3.5",
               "transition-colors duration-150 ease-[var(--ease-out-soft)]",
-              mark,
+              spot,
               value === corner ? "bg-accent-bright" : "bg-ink-faint",
             )}
           />

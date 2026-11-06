@@ -8,6 +8,14 @@ pub enum DeviceKind {
     Input,
 }
 
+/// A camera Windows lists. `id` is its symbolic link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraDevice {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioDevice {
@@ -446,6 +454,162 @@ pub struct Accent {
     pub speed: RgbSpeed,
 }
 
+/// The webcam laid over clips. With `enabled` off nothing of it exists: no
+/// thread, no device, no encoder, no ring.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FacecamConfig {
+    /// The master switch. Off by default, so an update changes nothing.
+    pub enabled: bool,
+    /// The camera's symbolic link; `None` for "the first camera".
+    pub device_id: Option<String>,
+    /// Its name, to find it again after it was plugged into another port.
+    pub device_name: Option<String>,
+    /// The size of the cam track the picture is scaled to.
+    pub resolution: CamResolution,
+    /// Always 30; the field is there so a later version can offer more.
+    pub fps: u32,
+    /// Where new clips get the cam.
+    pub layout: CamLayout,
+    /// The split of a 9:16 export.
+    pub portrait: PortraitLayout,
+    /// Shifts the cam against the game, −300…300 ms in steps of 10.
+    pub delay_ms: i32,
+    pub in_clips: bool,
+    pub in_recordings: bool,
+    pub in_screenshots: bool,
+    pub console_preview: bool,
+    pub virtual_camera: bool,
+}
+
+impl Default for FacecamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device_id: None,
+            device_name: None,
+            resolution: CamResolution::P720,
+            fps: 30,
+            layout: CamLayout::default(),
+            portrait: PortraitLayout::default(),
+            delay_ms: -40,
+            in_clips: true,
+            in_recordings: true,
+            in_screenshots: true,
+            console_preview: true,
+            virtual_camera: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CamResolution {
+    #[default]
+    P720,
+    P1080,
+}
+
+impl CamResolution {
+    pub fn size(self) -> (u32, u32) {
+        match self {
+            Self::P720 => (1280, 720),
+            Self::P1080 => (1920, 1080),
+        }
+    }
+}
+
+/// Where the cam sits, as fractions of the free room: `x` 0 is flush left
+/// inside the margin, 1 flush right; `size` is its height over the frame's.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CamLayout {
+    pub visible: bool,
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+    pub shape: CamShape,
+    pub mirror: bool,
+}
+
+impl Default for CamLayout {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            x: 1.0,
+            y: 1.0,
+            size: 0.25,
+            shape: CamShape::Rounded,
+            mirror: false,
+        }
+    }
+}
+
+/// A shape this version does not know reads as a rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CamShape {
+    #[default]
+    Rounded,
+    Circle,
+    #[serde(other)]
+    Rect,
+}
+
+/// A 9:16 export: the cam's share of the height, and where the game window sits.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PortraitLayout {
+    pub split: f32,
+    pub game_x: f32,
+}
+
+impl Default for PortraitLayout {
+    fn default() -> Self {
+        Self { split: 0.35, game_x: 0.5 }
+    }
+}
+
+/// Reads the facecam block without ever failing the whole config: `load`
+/// throws everything away when a config does not parse, so a cam block it
+/// cannot read costs only the cam. What it can read is clamped on the way in.
+pub fn lenient_facecam<'de, D: serde::Deserializer<'de>>(d: D) -> Result<FacecamConfig, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    let mut cam = serde_json::from_value::<FacecamConfig>(value).unwrap_or_else(|err| {
+        log::warn!("facecam settings unreadable ({err}) — the cam starts over from its defaults");
+        FacecamConfig::default()
+    });
+    clean_facecam(&mut cam);
+    Ok(cam)
+}
+
+/// Every number of the cam inside its range before it can reach a filter
+/// graph: positions 0…1, size 12–50 % of the frame, the delay on its 10 ms
+/// steps, and anything not a number back to its default.
+pub fn clean_facecam(cam: &mut FacecamConfig) {
+    fn within(value: f32, low: f32, high: f32, default: f32) -> f32 {
+        if value.is_finite() {
+            value.clamp(low, high)
+        } else {
+            default
+        }
+    }
+    let layout = CamLayout::default();
+    let portrait = PortraitLayout::default();
+    cam.layout.x = within(cam.layout.x, 0.0, 1.0, layout.x);
+    cam.layout.y = within(cam.layout.y, 0.0, 1.0, layout.y);
+    cam.layout.size = within(cam.layout.size, 0.12, 0.5, layout.size);
+    cam.portrait.split = within(cam.portrait.split, 0.25, 0.5, portrait.split);
+    cam.portrait.game_x = within(cam.portrait.game_x, 0.0, 1.0, portrait.game_x);
+    cam.delay_ms = ((cam.delay_ms as f64 / 10.0).round() as i32 * 10).clamp(-300, 300);
+    cam.fps = 30;
+    for field in [&mut cam.device_id, &mut cam.device_name] {
+        if field.as_deref().is_some_and(|text| text.trim().is_empty()) {
+            *field = None;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -546,6 +710,9 @@ pub struct AppConfig {
     /// The notification sounds — see [`SoundConfig`].
     #[serde(default)]
     pub sounds: SoundConfig,
+    /// The webcam — see [`FacecamConfig`].
+    #[serde(default, deserialize_with = "lenient_facecam")]
+    pub facecam: FacecamConfig,
     /// Counts up with every change the core takes in. A window sends back the
     /// one it was given, so a write built on an older copy can be told apart
     /// and merged onto what changed since (`config::accept`) instead of
@@ -658,6 +825,40 @@ pub fn clean_accent(color: Option<&str>) -> Option<String> {
         .then(|| format!("#{}", hex.to_ascii_lowercase()))
 }
 
+/// A clip's cam: where it sits, its delay, and whether the file shows it yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipFacecam {
+    #[serde(default)]
+    pub layout: CamLayout,
+    #[serde(default)]
+    pub portrait: PortraitLayout,
+    pub delay_ms: i32,
+    #[serde(default)]
+    pub state: FacecamState,
+}
+
+/// The camera a save in the editor asks for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FacecamEdit {
+    pub layout: CamLayout,
+    pub delay_ms: i32,
+}
+
+/// `pending` while the cam is being added, `ready` once the file shows what the
+/// layout says, `failed` when adding it failed (the file is the clean clip),
+/// `baked` when the clean picture is gone and the cam can no longer move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FacecamState {
+    #[default]
+    Pending,
+    Ready,
+    Failed,
+    Baked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
@@ -702,6 +903,9 @@ pub struct Clip {
     /// was no longer there.
     #[serde(default)]
     pub original_available: bool,
+    /// The cam laid over the clip — its own column, not part of `edit`.
+    #[serde(default)]
+    pub facecam: Option<ClipFacecam>,
     /// A still instead of a recording. Everything to do with time — trimming,
     /// the tracks, the waveform — does not apply to it.
     #[serde(default)]
@@ -827,6 +1031,9 @@ pub struct StorageUsage {
     pub clips_bytes: u64,
     /// The untouched recordings of trimmed clips — what "Clear all trims" frees.
     pub originals_bytes: u64,
+    /// The clean pictures and cams of facecam clips — what "Bake all" frees.
+    #[serde(default)]
+    pub facecam_bytes: u64,
     /// Everything else in the same store: an edited screenshot's untouched
     /// picture and marks, and what lies under every screenshot's watermark.
     pub shot_edits_bytes: u64,
@@ -892,11 +1099,75 @@ pub struct EngineStatus {
     /// instead — its name. `None` while it runs where it was told to.
     #[serde(default)]
     pub screen_fallback: Option<String>,
+    /// The webcam, while it runs; `None` when it is off.
+    #[serde(default)]
+    pub cam: Option<CamStatus>,
+    /// ClippiBoy Camera, the virtual camera.
+    #[serde(default)]
+    pub vcam: Option<crate::vcam::VcamStatus>,
+}
+
+/// What the cam track is doing, for the Facecam tab and the health log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CamStatus {
+    pub state: CamState,
+    /// The camera's name.
+    pub camera: Option<String>,
+    pub fps_in: f32,
+    pub fps_out: f32,
+    pub duplicates: u64,
+    pub fillers: u64,
+    pub gaps: u32,
+    pub clock: Option<crate::camera::ClockKind>,
+    pub encoder: Option<EncoderId>,
+    pub ring_seconds: f32,
+    pub ring_bytes: u64,
+    /// The longest a frame waited for the worker in the last stretch.
+    #[serde(default)]
+    pub worker_lag_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CamState {
+    Starting,
+    /// Running. ClippiBoy controls the camera, so other apps cannot use it meanwhile.
+    Live,
+    /// Another app holds the camera.
+    Taken { by: Option<String> },
+    /// Windows' camera privacy blocks desktop apps.
+    Blocked,
+    NoCamera,
+    Failed { message: String },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every cam number is clamped in Rust before it can reach a filter graph.
+    #[test]
+    fn facecam_numbers_are_clamped_before_they_reach_ffmpeg() {
+        let clean = |edit: &dyn Fn(&mut FacecamConfig)| {
+            let mut cam = FacecamConfig::default();
+            edit(&mut cam);
+            clean_facecam(&mut cam);
+            cam
+        };
+        assert_eq!(clean(&|c| c.layout.size = 0.9).layout.size, 0.5);
+        assert_eq!(clean(&|c| c.layout.size = 0.01).layout.size, 0.12);
+        assert_eq!(clean(&|c| c.layout.size = f32::NAN).layout.size, 0.25);
+        assert_eq!(clean(&|c| c.layout.x = -1.0).layout.x, 0.0);
+        assert_eq!(clean(&|c| c.layout.y = 2.0).layout.y, 1.0);
+        assert_eq!(clean(&|c| c.delay_ms = 1234).delay_ms, 300);
+        assert_eq!(clean(&|c| c.delay_ms = -47).delay_ms, -50);
+        assert_eq!(clean(&|c| c.delay_ms = 44).delay_ms, 40);
+        assert_eq!(clean(&|c| c.fps = 60).fps, 30);
+        assert_eq!(clean(&|c| c.portrait.split = 0.9).portrait.split, 0.5);
+        assert!((clean(&|c| c.portrait.game_x = f32::NAN).portrait.game_x - 0.5).abs() < 1e-6);
+        assert_eq!(clean(&|c| c.device_id = Some(String::new())).device_id, None);
+    }
 
     /// Only `#rrggbb` gets into the CSS of three windows — the rest is violet.
     #[test]

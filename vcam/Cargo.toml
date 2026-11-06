@@ -1,0 +1,9 @@
+# The virtual camera's own workspace: the media source DLL must unwind on a
+# panic (and catch it at the COM boundary), and the app's release profile aborts.
+[workspace]
+members = ["protocol", "source", "setup"]
+resolver = "2"
+
+[profile.release]
+panic = "unwind"
+lto = true

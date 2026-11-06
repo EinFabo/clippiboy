@@ -9,6 +9,8 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-get-config",
+    "allow-cam-preview-frame",
+    "allow-set-facecam-enabled",
     "allow-ui-error",
     "allow-engine-status",
     "allow-close-console",

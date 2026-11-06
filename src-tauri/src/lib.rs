@@ -1,9 +1,12 @@
 pub mod audio;
 pub mod buffer;
+pub mod camera;
+pub mod camtrack;
 pub mod capture;
 pub mod clipboard;
 pub mod clips;
 pub mod commands;
+pub mod composite;
 pub mod config;
 pub mod console;
 pub mod control;
@@ -12,6 +15,7 @@ pub mod disk;
 pub mod edit;
 pub mod encode;
 pub mod export;
+pub mod facecam;
 pub mod filing;
 pub mod friends;
 pub mod game;
@@ -39,7 +43,9 @@ pub mod telemetry;
 pub mod tools;
 pub mod tray;
 pub mod ts;
+pub mod reccam;
 pub mod updater;
+pub mod vcam;
 pub mod watermark;
 pub mod wgc;
 
@@ -106,6 +112,46 @@ fn store_tags(state: &AppState, clip: &mut model::Clip, names: Vec<String>) {
 ///
 /// `seconds` is `None` for the configured clip length; a Stream Deck key can
 /// carry a length of its own.
+/// Phase one of the facecam: the cam cut by the clip's window into the clip's
+/// store. A cam that cannot be written costs the cam, never the clip.
+fn save_cam(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip, cam: state::CamSave) {
+    let Some(out) = state.camera.cut(&cam.window, std::time::Duration::from_millis(500)) else {
+        log::info!("no cam for clip {}: the cam had no picture in its window", clip.id);
+        return;
+    };
+    match facecam::write_phase_one(&clip.id, &out, cam.window.length_us, cam.game_gop) {
+        Ok(facts) => {
+            let config = state.config_snapshot();
+            let layout = config.facecam.layout;
+            let facecam = model::ClipFacecam {
+                layout,
+                portrait: config.facecam.portrait,
+                delay_ms: facecam::saved_delay_ms(config.facecam.delay_ms, facts.clock),
+                state: if layout.visible { model::FacecamState::Pending } else { model::FacecamState::Ready },
+            };
+            log::info!(
+                "cam for clip {}: {} frames, offset {} µs, clock {:?}",
+                clip.id,
+                facts.frames,
+                facts.cam_offset_us,
+                facts.clock
+            );
+            if let Some(library) = state.library.lock().as_ref() {
+                if let Err(err) = library.set_facecam(&clip.id, Some(&facecam)) {
+                    log::error!("could not note the clip's cam: {err}");
+                }
+            }
+            let pending = facecam.state == model::FacecamState::Pending;
+            clip.facecam = Some(facecam);
+            let _ = app.emit("clips-changed", ());
+            if pending {
+                composite::enqueue(&clip.id);
+            }
+        }
+        Err(err) => log::warn!("cam for clip {} not written: {err}", clip.id),
+    }
+}
+
 pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
 
@@ -127,7 +173,7 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
     overlay::show(app, BannerKind::Clip, "Saving clip…", None);
 
     match state.save_clip(seconds) {
-        Ok(mut clip) => {
+        Ok((mut clip, cam)) => {
             let seconds = clip.duration_ms / 1000;
             if let Some(library) = state.library.lock().as_ref() {
                 if let Err(err) = library.insert(&clip) {
@@ -146,6 +192,11 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
                 Some(format!("Clip saved · {seconds} s")),
                 clip.thumb_path.clone(),
             );
+            // The cam after everything the user waits for: the banner came as
+            // fast as without it. Still inside `begin_save`.
+            if let Some(cam) = cam {
+                save_cam(app, &state, &mut clip, cam);
+            }
             Ok(clip)
         }
         Err(err) => {
@@ -335,6 +386,9 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
                 }
             }
             tag_friends(app, &state, &mut clip);
+            if clip.facecam.is_some() {
+                composite::enqueue_recording(&clip.id);
+            }
             let _ = app.emit("clip-saved", clip.clone());
             let length = format::duration(clip.duration_ms);
             notify(app, "ok", format!("Recording saved · {length}"));
@@ -377,6 +431,9 @@ pub fn recover_recordings(app: &tauri::AppHandle) {
             // Only who was there at the start: who plays that game now has
             // nothing to do with a recording from last time.
             store_tags(&state, &mut clip, Vec::new());
+            if clip.facecam.is_some() {
+                composite::enqueue_recording(&clip.id);
+            }
             let _ = app.emit("clip-saved", clip.clone());
             notify(&app, "ok", "A recording from last time was finished");
         }
@@ -1373,6 +1430,13 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     sounds::play(&handle, SoundKind::Error);
                     overlay::show(&handle, BannerKind::Error, "Recording disrupted", Some(err));
                 }
+                // The cam follows the buffer and the lock screen from here,
+                // once a second; a settings write reconciles it at once.
+                state.reconcile_cam();
+                if let Some(err) = state.camera.take_unseen_error() {
+                    notify(&handle, "error", err.clone());
+                    overlay::show(&handle, BannerKind::Error, "Camera stopped", Some(err));
+                }
                 // The recording cannot write any more — a full disk, most
                 // likely. Stop it while what is there is still whole. Once:
                 // the failure stays set until the stop has closed the
@@ -1409,6 +1473,10 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 if let Some(line) = line {
                     log::info!("{line}");
                 }
+                if let Some(line) = state.camera.health_line() {
+                    log::info!("{line}");
+                }
+                state.vcam.heartbeat(state.camera.shared());
             }
             if tick % 20 == 0 {
                 // Erst messen, dann lesen: die Bildrate ist eine Rate, und das
@@ -1553,6 +1621,11 @@ fn maintain_library(app: &tauri::AppHandle) {
                 }
             };
             announce(edit::repair(&state.library));
+            // A cam that was on its way when the app last stopped: put the
+            // clean clip back, finish a swap, or composite again.
+            announce(composite::recover(&state.library));
+            // A recording whose camera was being burned in.
+            announce(reccam::recover(&state.library));
             // Pictures from older versions still sit next to the videos.
             announce(thumbs::migrate(&state.library));
             // Game names first, folders second: a name that differs only in
@@ -1704,6 +1777,20 @@ pub fn run() {
             // The passes over the library touch every clip's file — on a thread
             // of its own, so a clip folder on a sleeping disk holds no window.
             maintain_library(handle);
+            // The background composites: idle until a save or the recovery
+            // in `maintain_library` hands it a clip.
+            composite::start(handle);
+            // ClippiBoy Camera: an app starting or stopping to watch it opens
+            // or closes the real camera at once, not on the next tick.
+            {
+                let app = handle.clone();
+                handle.state::<AppState>().vcam.set_on_change(move || {
+                    let app = app.clone();
+                    std::thread::spawn(move || app.state::<AppState>().reconcile_cam());
+                });
+                let app = handle.clone();
+                std::thread::spawn(move || app.state::<AppState>().reconcile_vcam());
+            }
             // What saves, edits and exports cut short left in the clip folder
             // and the data folder — on a thread of its own.
             sweep::run(handle);
@@ -1786,6 +1873,17 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_audio_devices,
+            commands::list_cameras,
+            commands::cam_preview_frame,
+            commands::set_facecam_enabled,
+            commands::open_camera_privacy,
+            commands::set_virtual_camera,
+            commands::remove_virtual_camera,
+            commands::bake_clip_cam,
+            commands::clip_facecam_view,
+            commands::set_clip_portrait,
+            commands::retry_recording_cam,
+            commands::bake_all_cams,
             commands::list_audio_processes,
             commands::list_capture_targets,
             commands::list_encoders,
@@ -1878,6 +1976,8 @@ pub fn run() {
             // After the saves were waited for (`quit`); the plugin must not find
             // a token for a port nobody serves any more.
             control::stop();
+            // Off Windows' camera list before the process is gone.
+            handle.state::<AppState>().vcam.shutdown();
         }
         // A hidden window must not take the process with it — quitting only
         // happens via "Quit" in the tray.

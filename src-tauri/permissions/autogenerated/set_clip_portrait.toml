@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-clip-portrait"
+description = "Enables the set_clip_portrait command without any pre-configured scope."
+commands.allow = ["set_clip_portrait"]
+
+[[permission]]
+identifier = "deny-set-clip-portrait"
+description = "Denies the set_clip_portrait command without any pre-configured scope."
+commands.deny = ["set_clip_portrait"]

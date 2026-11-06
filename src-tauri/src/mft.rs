@@ -73,27 +73,6 @@ fn queue_depth_from(raw: Option<u32>) -> usize {
 /// lie. The rotation must not come round again before the encoder has let go.
 pub const ENCODER_HOLD_MAX: usize = 16;
 
-/// A knob the environment may turn.
-///
-/// These exist for one reason: the machines where the encoder misbehaves are
-/// not the machines we can build on. Someone else can set a variable and run
-/// the probe again; we cannot ship them a compiler. Every default is what
-/// ClippiBoy does without them.
-fn env_u32(name: &str, default: u32) -> u32 {
-    let Ok(raw) = std::env::var(name) else {
-        return default;
-    };
-    match raw.trim().parse::<u32>() {
-        Ok(value) => {
-            log::info!("{name}={value} instead of the usual {default}");
-            value
-        }
-        Err(_) => {
-            log::warn!("{name}=\"{raw}\" is not a number — staying at {default}");
-            default
-        }
-    }
-}
 
 /// A knob with no default of our own — absent means the property is not touched
 /// at all, and the driver keeps whatever it would have done.
@@ -108,14 +87,6 @@ fn env_opt_u32(name: &str) -> Option<u32> {
     }
 }
 
-fn env_bool(name: &str, default: bool) -> bool {
-    let Ok(raw) = std::env::var(name) else {
-        return default;
-    };
-    let value = matches!(raw.trim(), "1" | "true" | "yes" | "on");
-    log::info!("{name}={value} instead of the usual {default}");
-    value
-}
 
 /// What the encoder costs, measured rather than assumed.
 ///
@@ -247,6 +218,45 @@ pub struct EncoderSettings {
     /// How deep the job channel is, from [`queue_depth`]. The caller reads it
     /// because it sizes the converter's slots from the same figure.
     pub queue_depth: usize,
+    /// B-frames to ask for; `None` leaves it to the driver (or
+    /// `CLIPPIBOY_BFRAMES`). The cam asks for none: its cut starts on any
+    /// keyframe and its packets go out in order.
+    pub bframes: Option<u32>,
+    pub rate: RateMode,
+    /// Quality against speed, 0–100; `None` keeps the usual 70. The cam asks
+    /// for the fastest: a small stream next to the game's.
+    pub quality_vs_speed: Option<u32>,
+    /// Low latency (no lookahead); `None` keeps the vendor's default.
+    pub low_latency: Option<bool>,
+}
+
+/// How the encoder spends bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateMode {
+    /// Constant quality first, a capped bitrate if the encoder cannot (the game).
+    Quality,
+    /// A capped bitrate straight away: a ring budgeted for its bitrate (the cam)
+    /// would be ignored by constant quality.
+    PeakVbr,
+}
+
+fn tries_constant_quality(rate: RateMode) -> bool {
+    rate == RateMode::Quality
+}
+
+/// Quality against speed: the caller's, else the environment's, else `default`.
+fn speed_choice(requested: Option<u32>, env: Option<u32>, default: u32) -> u32 {
+    requested.or(env).unwrap_or(default).min(100)
+}
+
+/// Low latency: the caller's, else the environment's, else `default`.
+fn latency_choice(requested: Option<bool>, env: Option<bool>, default: bool) -> bool {
+    requested.or(env).unwrap_or(default)
+}
+
+/// The B-frame count asked for: the caller's, else the environment's.
+fn bframe_count(requested: Option<u32>, env: Option<u32>) -> Option<u32> {
+    requested.or(env)
 }
 
 /// Bring Media Foundation up once per process.
@@ -488,7 +498,7 @@ fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> Rate
     // its budget whether the picture needs it or not, so a menu screen cost as
     // much as a firefight. Certified hardware encoders are required to support
     // it, but a driver is still a driver.
-    if set_rate_control(codec, eAVEncCommonRateControlMode_Quality) {
+    if tries_constant_quality(settings.rate) && set_rate_control(codec, eAVEncCommonRateControlMode_Quality) {
         if set_codec_property(
             codec,
             "quality",
@@ -551,8 +561,8 @@ fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> Rate
 ///
 /// Set **before** `SetOutputType`: MSDN puts it in the same class as
 /// `AVEncCommonQuality`, which is accepted and then ignored afterwards.
-fn configure_bframes(codec: &ICodecAPI) -> Option<(u32, bool)> {
-    let count = env_opt_u32("CLIPPIBOY_BFRAMES")?;
+fn configure_bframes(codec: &ICodecAPI, requested: Option<u32>) -> Option<(u32, bool)> {
+    let count = bframe_count(requested, env_opt_u32("CLIPPIBOY_BFRAMES"))?;
     let taken = set_codec_property(
         codec,
         "B-frames",
@@ -621,8 +631,11 @@ fn configure_codec(
     // 0 = as fast as possible, 100 = best quality. A replay buffer runs in the
     // background but is not in real-time distress — 70 is the point where NVENC
     // and AMF get noticeably better without losing frames.
-    let quality_vs_speed = env_u32("CLIPPIBOY_QUALITY_VS_SPEED", 70).min(100);
-    let low_latency = env_bool("CLIPPIBOY_LOW_LATENCY", low_latency_default(chosen));
+    let env_flag = |name: &str| std::env::var(name).ok().map(|raw| matches!(raw.trim(), "1" | "true" | "yes" | "on"));
+    let quality_vs_speed = speed_choice(settings.quality_vs_speed, env_opt_u32("CLIPPIBOY_QUALITY_VS_SPEED"), 70);
+    log::info!("encoder ({}): quality/speed {quality_vs_speed}", settings.label);
+    let low_latency =
+        latency_choice(settings.low_latency, env_flag("CLIPPIBOY_LOW_LATENCY"), low_latency_default(chosen));
 
     let wanted: Vec<(&'static str, &GUID, VARIANT)> = vec![
         ("Keyframe-Abstand", &CODECAPI_AVEncMPVGOPSize, VARIANT::from(gop)),
@@ -965,7 +978,7 @@ fn set_up(
             RateControl::UnconstrainedVbr
         }
     };
-    let bframes = codec.as_ref().and_then(configure_bframes);
+    let bframes = codec.as_ref().and_then(|codec| configure_bframes(codec, settings.bframes));
 
     // The order is prescribed: output type before input type.
     let output = media_type_video(MFVideoFormat_H264, settings)?;
@@ -1862,6 +1875,33 @@ fn run<F, H>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cam's ring is budgeted for its bitrate; constant quality would ignore it.
+    #[test]
+    fn a_cam_encoder_never_tries_constant_quality() {
+        assert!(tries_constant_quality(RateMode::Quality));
+        assert!(!tries_constant_quality(RateMode::PeakVbr));
+    }
+
+    /// The cam is a small second stream: it takes the fastest preset and no
+    /// lookahead, which cost the webcam 30 % of the video-encode engine for
+    /// nothing anyone could see. The game keeps its own choice.
+    #[test]
+    fn the_cam_encodes_fast_and_the_game_as_before() {
+        assert_eq!(speed_choice(Some(0), None, 70), 0);
+        assert_eq!(speed_choice(None, None, 70), 70);
+        assert_eq!(speed_choice(None, Some(40), 70), 40);
+        assert!(latency_choice(Some(true), None, false));
+        assert!(!latency_choice(None, None, false));
+        assert!(latency_choice(None, Some(true), false));
+    }
+
+    #[test]
+    fn the_cam_asks_for_no_b_frames_whatever_the_environment() {
+        assert_eq!(bframe_count(Some(0), Some(2)), Some(0));
+        assert_eq!(bframe_count(None, Some(2)), Some(2));
+        assert_eq!(bframe_count(None, None), None);
+    }
 
     #[test]
     fn an_adapter_luid_goes_into_the_attribute_unchanged() {

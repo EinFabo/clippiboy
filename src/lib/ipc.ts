@@ -1,6 +1,10 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  CameraDevice,
+  FacecamEdit,
+  FacecamView,
+  PortraitLayout,
   AppConfig,
   AudioDevice,
   AudioProcess,
@@ -35,6 +39,15 @@ export function fileUrl(path: string | null): string | undefined {
 
 export const api = {
   listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
+  listCameras: () => invoke<CameraDevice[]>("list_cameras"),
+  /** The newest small cam frame after `after`; an empty buffer means none yet. */
+  camPreviewFrame: (after: number) => invoke<ArrayBuffer>("cam_preview_frame", { after }),
+  /** The facecam's master switch alone; answers with the saved settings. */
+  setFacecamEnabled: (enabled: boolean) => invoke<AppConfig>("set_facecam_enabled", { enabled }),
+  openCameraPrivacy: () => invoke<void>("open_camera_privacy"),
+  /** ClippiBoy Camera's switch; turning it on may ask Windows for admin rights once. */
+  setVirtualCamera: (on: boolean) => invoke<AppConfig>("set_virtual_camera", { on }),
+  removeVirtualCamera: () => invoke<AppConfig>("remove_virtual_camera"),
   /** Whether a clip has a live share link (deleting the clip takes it down). */
   linkExists: (id: string) => invoke<boolean>("link_exists", { id }),
   listAudioProcesses: () => invoke<AudioProcess[]>("list_audio_processes"),
@@ -183,7 +196,9 @@ export const api = {
     startMs: number,
     endMs: number,
     tracks: TrackMix[],
-  ) => invoke<Clip>("apply_clip_edit", { id, startMs, endMs, tracks }),
+    /** The camera the editor asks for; `null` leaves it as it is. */
+    facecam: FacecamEdit | null = null,
+  ) => invoke<Clip>("apply_clip_edit", { id, startMs, endMs, tracks, facecam }),
   /** Undo the trim: the whole recording back, keep the mix. */
   restoreClipOriginal: (id: string) =>
     invoke<Clip>("restore_clip_original", { id }),
@@ -193,6 +208,15 @@ export const api = {
    */
   discardClipOriginal: (id: string) =>
     invoke<Clip>("discard_clip_original", { id }),
+  /** Bakes a clip's cam in for good; the cam can no longer be moved. */
+  bakeClipCam: (id: string) => invoke<Clip>("bake_clip_cam", { id }),
+  /** What the player needs to show the clip's camera movable; null when it cannot move. */
+  clipFacecamView: (id: string) => invoke<FacecamView | null>("clip_facecam_view", { id }),
+  /** Where the 9:16 export cuts; stored at once, no file is rewritten. */
+  setClipPortrait: (id: string, portrait: PortraitLayout) => invoke<Clip>("set_clip_portrait", { id, portrait }),
+  retryRecordingCam: (id: string) => invoke<Clip>("retry_recording_cam", { id }),
+  /** Bakes every clip's cam; returns what was freed. */
+  bakeAllCams: () => invoke<TrimOriginals>("bake_all_cams"),
   /** What the originals, tracks and thumbnails occupy in the app data folder. */
   storageUsage: () => invoke<StorageUsage>("storage_usage"),
   /** How many trimmed clips keep their untouched recording, and their size. */
@@ -205,11 +229,17 @@ export const api = {
    * save dialog the core opens, with `suggestedName` offered. Resolves to the
    * path written, `null` when the user cancelled.
    */
-  exportClip: (id: string, targetBytes: number, suggestedName: string) =>
+  exportClip: (
+    id: string,
+    targetBytes: number,
+    suggestedName: string,
+    orientation: "landscape" | "portrait" = "landscape",
+  ) =>
     invoke<string | null>("export_clip", {
       id,
       targetBytes: Math.floor(targetBytes),
       suggestedName,
+      orientation,
     }),
 };
 

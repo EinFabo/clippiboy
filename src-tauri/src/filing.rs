@@ -382,6 +382,7 @@ mod tests {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             favorite: false,
             screenshot: false,
             recording: false,

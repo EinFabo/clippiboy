@@ -132,8 +132,26 @@ pub fn settings_step(
     }
 }
 
+/// What a save hands on for the facecam's cut.
+#[derive(Debug, Clone, Copy)]
+pub struct CamSave {
+    pub window: crate::facecam::CamWindow,
+    pub game_gop: u32,
+}
+
 pub struct AppState {
     pub config: Mutex<AppConfig>,
+    /// The webcam's own track, next to the pipeline — see [`crate::camtrack`].
+    pub camera: crate::camtrack::CamTrack,
+    /// The running recording's camera, while it has one.
+    recording_cam: Mutex<Option<Arc<crate::reccam::RecordingCam>>>,
+    /// ClippiBoy Camera, the virtual camera other apps can pick.
+    pub vcam: crate::vcam::Vcam,
+    /// Until when (QPC, 100 ns) the settings' preview counts as open; each
+    /// frame the page asks for renews it.
+    pub cam_preview_until: std::sync::atomic::AtomicI64,
+    /// The wants the last cam plan was made from, for `stop_delay`.
+    cam_wants: Mutex<Option<crate::camtrack::CamWants>>,
     /// The last configs handed out, by revision, for merging a write built on
     /// an older one (`config::accept`). Only ever locked inside `config`,
     /// never the other way round.
@@ -460,6 +478,12 @@ impl AutoBuffer {
         }
     }
 
+    /// Has the secure desktop been up for the buffer's ten seconds? Also while
+    /// no buffer runs: the cam stops behind a lock screen during a recording.
+    pub fn screen_locked(&self) -> bool {
+        self.locked.load(std::sync::atomic::Ordering::SeqCst) >= LOCK_POLLS
+    }
+
     /// One round for running without "only in game": the buffer should run as
     /// long as nobody has switched it off by hand.
     ///
@@ -593,6 +617,8 @@ impl AppState {
             recording_seconds: 0.0,
             recording_bytes: 0,
             screen_fallback: None,
+            cam: None,
+            vcam: None,
         };
         let audio = Arc::new(AudioEngine::new());
         let mut history = std::collections::VecDeque::new();
@@ -628,7 +654,46 @@ impl AppState {
             drift_seen: std::sync::atomic::AtomicU8::new(0),
             restarts: RestartQueue::default(),
             settings_waiting: std::sync::atomic::AtomicBool::new(false),
+            camera: crate::camtrack::CamTrack::new(),
+            recording_cam: Mutex::new(None),
+            vcam: crate::vcam::Vcam::new(),
+            cam_preview_until: std::sync::atomic::AtomicI64::new(0),
+            cam_wants: Mutex::new(None),
         }
+    }
+
+    /// The cam's plan from the settings and what the app is doing, compared
+    /// with the last one so a buffer restart does not close the camera.
+    pub fn cam_plan(&self) -> crate::camtrack::CamPlan {
+        let config = self.config_snapshot();
+        let inputs = crate::camtrack::PlanInputs {
+            buffer_seconds: config.buffer.seconds,
+            keyframe_seconds: config.recording.keyframe_seconds,
+            encoder: crate::encode::for_recording(config.recording.encoder),
+            buffer_wanted: self.buffer_wanted(),
+            preview_open: self.cam_preview_until.load(std::sync::atomic::Ordering::SeqCst)
+                > crate::audio::capture::now_100ns(),
+            locked: self.auto.screen_locked(),
+            vcam_consumer: self.vcam.watching(),
+            recording: self.recorder.lock().is_some(),
+        };
+        let mut last = self.cam_wants.lock();
+        let (plan, wants) = crate::camtrack::plan_for(&config.facecam, &inputs, last.as_ref());
+        *last = Some(wants);
+        plan
+    }
+
+    /// Brings the cam in line with the settings and the buffer. Cheap and
+    /// never blocking: called after every settings write and once a second.
+    pub fn reconcile_cam(&self) {
+        let plan = self.cam_plan();
+        self.camera.apply(plan);
+    }
+
+    /// ClippiBoy Camera in line with its switch.
+    pub fn reconcile_vcam(&self) {
+        let on = self.config_snapshot().facecam.virtual_camera;
+        self.vcam.apply(on, self.camera.shared());
     }
 
     /// The settings, the start-up trouble with them and the clip database, as
@@ -706,6 +771,9 @@ impl AppState {
         settle: impl FnOnce(&mut AppConfig, &AppConfig),
     ) -> AppConfig {
         incoming.recording.encoder = crate::encode::resolve(incoming.recording.encoder);
+        // Every write path — the settings, the console, the Stream Deck —
+        // reaches ffmpeg's numbers only through here.
+        crate::model::clean_facecam(&mut incoming.facecam);
         let (previous, next) = {
             let mut guard = self.config.lock();
             let mut history = self.config_history.lock();
@@ -725,6 +793,10 @@ impl AppState {
         // Takes effect with the next frame, no restart.
         crate::watermark::set_enabled(next.watermark);
         crate::telemetry::on_config(&next);
+        if next.facecam.virtual_camera != previous.facecam.virtual_camera {
+            self.reconcile_vcam();
+        }
+        self.reconcile_cam();
         // Only a changed source list needs the streams brought in line: a gain
         // step is one, a clip-length or sound change is not.
         let sources_changed = previous.sources != next.sources;
@@ -1263,6 +1335,8 @@ impl AppState {
     /// Carry the running recording's current metrics into the status.
     pub fn status_snapshot(&self) -> EngineStatus {
         let mut status = self.status.lock().clone();
+        status.cam = self.camera.status();
+        status.vcam = Some(self.vcam.status(self.config_snapshot().facecam.virtual_camera));
         if let Some(recorder) = self.recorder.lock().as_ref() {
             status.recording = true;
             let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);
@@ -1362,7 +1436,9 @@ impl AppState {
 
     /// Writes the last `seconds` seconds as an MP4. `None` takes the clip length
     /// from the settings, which is what the hotkey, the tray and the button do.
-    pub fn save_clip(&self, seconds: Option<u32>) -> Result<Clip, String> {
+    /// The clip, and when the facecam is on for clips, the game's window the
+    /// cam is cut by afterwards with the game's keyframe interval in frames.
+    pub fn save_clip(&self, seconds: Option<u32>) -> Result<(Clip, Option<CamSave>), String> {
         let config = self.config_snapshot();
         // A length asked for from outside (a Stream Deck key set to 2:30) can
         // outlast a buffer shortened since; the buffer is all there is.
@@ -1412,13 +1488,24 @@ impl AppState {
         // packets: read afterwards, a restart in between gave the row the next
         // pipeline's size (BUF-8).
         let (width, height) = (snapshot.width, snapshot.height);
+        // Copied out before the snapshot moves into the request.
+        let cam = (config.facecam.enabled && config.facecam.in_clips).then(|| {
+            let fitted = self.active_recording.lock().clone().unwrap_or_else(|| config.recording.clone());
+            CamSave {
+                window: crate::facecam::CamWindow {
+                    g0_100ns: snapshot.start_100ns,
+                    length_us: ((snapshot.end_100ns() - snapshot.start_100ns) / 10).max(0) as u64,
+                },
+                game_gop: fitted.fps * fitted.keyframe_seconds,
+            }
+        });
         let result = crate::muxer::build(crate::muxer::ClipRequest {
             snapshot,
             clip_id: id.clone(),
             output,
         })?;
 
-        Ok(Clip {
+        Ok((Clip {
             id,
             path: result.path.to_string_lossy().to_string(),
             created_at: std::time::SystemTime::now()
@@ -1437,10 +1524,11 @@ impl AppState {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             screenshot: false,
             recording: false,
             tags: Vec::new(),
-        })
+        }, cam))
     }
 
     /// One picture from the recording source.
@@ -1466,6 +1554,18 @@ impl AppState {
             recording.target_id.as_deref(),
             recording.target_stable_id.as_deref(),
         )?;
+
+        // The camera, burned in where new clips get it — from the frame it
+        // already has: a screenshot never starts the webcam, and a frame older
+        // than half a second (a stalled camera) stays out.
+        let cam = &config.facecam;
+        if cam.enabled && cam.in_screenshots && cam.layout.visible {
+            if let Some(frame) = self.camera.latest_frame() {
+                if crate::composite::fresh_for_shot(frame.probe.qpc_100ns, crate::audio::capture::now_100ns()) {
+                    crate::composite::lay_cam_still(&mut shot, &frame, &cam.layout);
+                }
+            }
+        }
 
         // Ein Bild ist ein Augenblick: es gehört zu dem Spiel, das jetzt läuft.
         let game = self.current_game.lock().clone();
@@ -1524,6 +1624,7 @@ impl AppState {
             edit: None,
             original: None,
             original_available: false,
+            facecam: None,
             screenshot: true,
             recording: false,
             tags: Vec::new(),
@@ -1572,6 +1673,8 @@ impl AppState {
         let recorder = outcome?;
         *self.recorder.lock() = Some(recorder);
         self.status.lock().recording = true;
+        // "In recordings" may want the camera now, not at the next tick.
+        self.reconcile_cam();
         Ok(())
     }
 
@@ -1628,10 +1731,21 @@ impl AppState {
             None => Err((prepared, "The capture is not running.".to_string())),
         };
         // Cleared away with no lock held: it joins the writer and deletes.
-        outcome.map_err(|(prepared, why)| {
+        let recorder = outcome.map_err(|(prepared, why)| {
             prepared.discard();
             why
-        })
+        })?;
+        // The camera beside it, from its keyframe at or before the picture's
+        // first frame — outside the game ring's lock. A camera that starts
+        // later begins its first segment then.
+        let cam = &config.facecam;
+        if cam.enabled && cam.in_recordings && cam.layout.visible {
+            let tap = crate::reccam::RecordingCam::start(&recorder.dir, recorder.start_100ns);
+            let backlog = self.camera.attach_tap(tap.clone(), recorder.start_100ns);
+            log::info!("recording camera: attached, {backlog} packets of backlog");
+            *self.recording_cam.lock() = Some(tap);
+        }
+        Ok(recorder)
     }
 
     /// Stop writing and settle the folder, without muxing it. Fast — what
@@ -1641,6 +1755,12 @@ impl AppState {
     /// Returns the folder and its description, for a caller that does mux.
     fn close_recording(&self) -> Option<(Arc<Recorder>, recorder::Meta)> {
         let recorder = self.recorder.lock().take()?;
+        // The camera first: off the ring, its writer finished, `cam.json` final.
+        if let Some(cam) = self.recording_cam.lock().take() {
+            self.camera.detach_tap();
+            let file = cam.close();
+            log::info!("recording camera: {} segment(s) written", file.segments.len());
+        }
         if let Some(pipeline) = self.pipeline.lock().as_ref() {
             pipeline.take_recording();
         }
@@ -1660,6 +1780,7 @@ impl AppState {
             self.halt_pipeline();
         }
         self.status.lock().recording = false;
+        self.reconcile_cam();
         Some((recorder, meta))
     }
 
@@ -1768,6 +1889,13 @@ impl AppState {
             edit: None,
             original: None,
             original_available: false,
+            // Burned in once the row is stored (`reccam::job`).
+            facecam: crate::reccam::read_stored(&meta.id).map(|_| crate::model::ClipFacecam {
+                layout: config.facecam.layout,
+                portrait: config.facecam.portrait,
+                delay_ms: config.facecam.delay_ms,
+                state: crate::model::FacecamState::Pending,
+            }),
             screenshot: false,
             recording: true,
             // Not in the library yet — the caller stores them with the clip.
@@ -2251,6 +2379,19 @@ mod tests {
     /// machine was still on the lock screen. WGC never delivers a frame there
     /// and never says so, the clock keeps repeating the one it had, and every
     /// clip afterwards was ninety seconds of lock screen.
+    #[test]
+    fn the_cam_lock_follows_the_buffers_ten_seconds() {
+        let auto = AutoBuffer::default();
+        for _ in 0..4 {
+            auto.poll_lock(true, false);
+            assert!(!auto.screen_locked());
+        }
+        auto.poll_lock(true, false);
+        assert!(auto.screen_locked());
+        auto.poll_lock(false, false);
+        assert!(!auto.screen_locked());
+    }
+
     #[test]
     fn a_locked_screen_stops_the_buffer() {
         let auto = AutoBuffer::default();

@@ -460,7 +460,7 @@ async fn upload(
             tokio::task::spawn_blocking(move || {
                 let state = report.app.state::<AppState>();
                 let progress = |value: f32| report.emit("shrinking", value, None);
-                crate::commands::shrink(&state, &report.clip_id, TARGET_BYTES, &temp, &progress)
+                crate::commands::shrink(&state, &report.clip_id, TARGET_BYTES, &temp, &progress, crate::export::Orientation::Landscape)
             })
         };
         let written = shrinking.await.map_err(|err| err.to_string())??.bytes;

@@ -46,6 +46,7 @@ jiff = "0.2"
 # Screenshots. Small, pure Rust — the picture does not have to take a detour
 # through ffmpeg and a raw file of thirty megabytes.
 png = "0.17"
+vcam-protocol = { path = "../vcam/protocol" }
 # Fetching ffmpeg on first start (see `tools.rs`). All four already come in
 # with the updater plugin; the versions and TLS setup follow it, so nothing
 # new is built — reqwest gets its rustls from there as well.
@@ -71,6 +72,12 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_Devices_FunctionDiscovery",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Media_KernelStreaming",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Registry",
+    "Win32_Security_Authorization",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Threading",
     "Win32_System_StationsAndDesktops",

@@ -885,6 +885,10 @@ mod win {
                     requested: wanted,
                     label: "game",
                     queue_depth,
+                    bframes: None,
+                    rate: crate::mft::RateMode::Quality,
+                    quality_vs_speed: None,
+                    low_latency: None,
                 },
                 move |packet| {
                     let mut ring = for_packets.packets.lock();

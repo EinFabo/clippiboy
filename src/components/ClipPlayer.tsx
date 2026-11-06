@@ -5,6 +5,10 @@ import { Pill } from "@/components/ui/Card";
 import { ClipEditor, type Trim } from "@/components/ClipEditor";
 import { SaveVeil, type SaveVeilHandle } from "@/components/ui/BusyVeil";
 import { ExportDialog } from "@/components/ExportDialog";
+import { CamStage } from "@/components/CamStage";
+import { usePictureBox, useStageSize } from "@/lib/pictureBox";
+import { RectLayer } from "@/components/ui/RectLayer";
+import { camBox, layoutFromRect, sameFacecam, snapLayout, type FacecamDraft } from "@/lib/camGeometry";
 import { useClipMenu } from "@/components/clipMenu";
 import { useLinks } from "@/lib/links";
 import { IconTrash } from "@/components/icons";
@@ -27,7 +31,7 @@ import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
 import { useGrants } from "@/lib/useGrants";
-import type { Clip, ClipEdit } from "@/lib/types";
+import type { Clip, ClipEdit, FacecamView, PortraitLayout } from "@/lib/types";
 
 interface Props {
   clips: Clip[];
@@ -101,6 +105,7 @@ export function ClipPlayer({
   const ghost = useRef<HTMLImageElement>(null);
   const frame = useRef<HTMLDivElement>(null);
   const applyClipEdit = useEngine((state) => state.applyClipEdit);
+  const bakeClipCam = useEngine((state) => state.bakeClipCam);
   const setFavorite = useEngine((state) => state.setFavorite);
   const clipMenu = useClipMenu();
   const restoreClipOriginal = useEngine((state) => state.restoreClipOriginal);
@@ -116,6 +121,8 @@ export function ClipPlayer({
   const [waveform, setWaveform] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [baking, setBaking] = useState(false);
+  const stageElements = useRef<{ clean: HTMLVideoElement | null; cam: HTMLVideoElement | null }>({ clean: null, cam: null });
   /**
    * A save or an undo is writing this clip. Paging, closing and deleting wait
    * for it: the result used to land on whichever clip was shown by then — a
@@ -153,6 +160,45 @@ export function ClipPlayer({
   // player gets a fresh element rather than one whose source we pulled out from
   // under it. The audio tracks re-attach to it as well.
   const [reload, setReload] = useState(0);
+  // The movable camera's sources, asked for when a clip opens and after every
+  // write; `null` shows the clip file as it is.
+  const [camView, setCamView] = useState<FacecamView | null>(null);
+  const camId = clip?.facecam ? clip.id : null;
+  const camState = clip?.facecam?.state;
+  useEffect(() => {
+    setCamView(null);
+    if (!inTauri || !camId) return;
+    let gone = false;
+    void api
+      .clipFacecamView(camId)
+      .then((view) => !gone && setCamView(view))
+      .catch(() => undefined);
+    return () => {
+      gone = true;
+    };
+  }, [camId, camState, reload]);
+  const picture = usePictureBox(frame, clip?.width ?? 1, clip?.height ?? 1);
+  // Where the camera stands in the editor: the saved one until it is moved.
+  const savedCam: FacecamDraft | null = clip?.facecam
+    ? { layout: clip.facecam.layout, delayMs: clip.facecam.delayMs }
+    : null;
+  const [camDraft, setCamDraft] = useState<FacecamDraft | null>(savedCam);
+  const savedCamKey = savedCam ? JSON.stringify(savedCam) : "";
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => setCamDraft(savedCam), [clip?.id, savedCamKey]);
+  const camChanged = !!(camView && camDraft && savedCam && !sameFacecam(camDraft, savedCam));
+  const defaultCam = useEngine((s) => s.config.facecam);
+  // The 9:16 preview: what the portrait export will cut, dragged in place and
+  // stored as soon as it is let go — it rewrites no file.
+  const [portraitOn, setPortraitOn] = useState(false);
+  const savedPortrait = clip?.facecam?.portrait ?? null;
+  const [portraitDraft, setPortraitDraft] = useState<PortraitLayout | null>(savedPortrait);
+  const savedPortraitKey = savedPortrait ? `${savedPortrait.split}:${savedPortrait.gameX}` : "";
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => setPortraitDraft(savedPortrait), [clip?.id, savedPortraitKey]);
+  useEffect(() => setPortraitOn(false), [clip?.id]);
+  const setClipPortrait = useEngine((s) => s.setClipPortrait);
+  const stageSize = useStageSize(frame);
   /**
    * The write is through, but the fresh element has not reported a picture yet.
    * The veil stays up for that stretch — letting it go the moment the core is
@@ -622,13 +668,19 @@ export function ClipPlayer({
   // saving would send no levels and reset the stored mix, so nothing counts as
   // changed until it can be read.
   const saved = savedEdit(clip?.edit ?? null, duration, current.tracks);
+  // A cam that failed to go in counts as a change: Save is the "try again
+  // from the editor" its notice promises.
+  // A recording's camera is tried again from the gallery's menu instead.
+  const camMissing = clip?.facecam?.state === "failed" && !clip.recording;
   const dirty =
     duration > 0 &&
     !mix.loading &&
     !mix.failed &&
-    (mix.tracks.length > 0
-      ? !sameEdit(current, saved, duration)
-      : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration));
+    (camMissing ||
+      camChanged ||
+      (mix.tracks.length > 0
+        ? !sameEdit(current, saved, duration)
+        : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration)));
   dirtyRef.current = dirty;
   /** Where "Discard changes" leads: the mixer, a clip to either side, or out (0). */
   const leaveTo = (where: number | "mixer") => {
@@ -680,13 +732,36 @@ export function ClipPlayer({
     setWriteProgress(0);
     setJustSaved(false);
     // Take the picture first — a moment later there is nothing left to take.
-    veil.current?.freeze(element);
+    // With a movable camera: the clean picture with the camera where it is
+    // going, not the file's old one.
+    const stage = stageElements.current;
+    if (camView && camDraft && stage.clean && clip.facecam) {
+      const box = camBox(camDraft.layout, clip.width, clip.height);
+      const shape = camDraft.layout.shape;
+      veil.current?.freeze(
+        stage.clean,
+        camDraft.layout.visible && stage.cam
+          ? {
+              video: stage.cam,
+              x: box.left,
+              y: box.top,
+              width: box.width,
+              height: box.height,
+              radius: shape === "circle" ? box.height / 2 : shape === "rounded" ? 0.12 * box.height : 0,
+              mirror: camDraft.layout.mirror,
+            }
+          : null,
+      );
+    } else {
+      veil.current?.freeze(element);
+    }
     // Let go of the file: Windows will not replace a file that is still open.
     element?.pause();
     element?.removeAttribute("src");
     element?.load();
     try {
-      const written = await applyClipEdit(clip.id, current.startMs, current.endMs, current.tracks);
+      const facecam = camView && camDraft ? camDraft : null;
+      const written = await applyClipEdit(clip.id, current.startMs, current.endMs, current.tracks, facecam);
       // A mix baked into the file (a single track without its untouched copy)
       // is stored as level zero: the sliders follow, or the next save would
       // apply the same −6 dB a second time.
@@ -756,6 +831,21 @@ export function ClipPlayer({
    * changes — only what lies beside it in the app data folder — so unlike
    * [save] and [restoreOriginal] the video element can stay where it is.
    */
+  /** Bakes the camera in. The stage lets go of the clean picture and the cam
+   *  first: Windows will not delete a file that is still open. */
+  async function bakeCam() {
+    if (!clip || saving || restoring || baking) return;
+    setBaking(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      await bakeClipCam(clip.id);
+    } catch {
+      // The notice is already in the store.
+    } finally {
+      setBaking(false);
+    }
+  }
+
   async function discardOriginal() {
     if (!clip || saving || restoring) return;
     try {
@@ -882,7 +972,9 @@ export function ClipPlayer({
               ref={video}
               src={source}
               autoPlay
-              className="h-full w-full bg-black object-contain"
+              // With a movable camera the stage below shows the picture; this
+              // element stays the clock and the sound.
+              className={cn("h-full w-full bg-black object-contain", camView && "opacity-0")}
               // With the bar gone, a click is someone reaching for it — the mouse
               // rested on a button, or the bar was still fading out. It brings
               // the bar back instead of pausing behind it.
@@ -958,6 +1050,50 @@ export function ClipPlayer({
                 setBroken(true);
                 setSettling(false);
               }}
+            />
+          )}
+          {camView && clip?.facecam && camDraft && source && !broken && (
+            <CamStage
+              // A changed delay moves the camera against the game at once.
+              view={{ ...camView, camLeadMs: camView.camLeadMs - (camDraft.delayMs - clip.facecam.delayMs) }}
+              layout={camDraft.layout}
+              master={video}
+              bindKey={reload}
+              box={picture}
+              frame={{ width: clip.width, height: clip.height }}
+              released={saving || restoring || baking}
+              elements={stageElements}
+              stageSize={stageSize}
+              portrait={
+                portraitOn && portraitDraft
+                  ? {
+                      layout: portraitDraft,
+                      onChange: setPortraitDraft,
+                      onCommit: (layout) => void setClipPortrait(clip.id, layout),
+                    }
+                  : null
+              }
+            />
+          )}
+          {camView && clip && camDraft?.layout.visible && !portraitOn && source && !broken && !saving && !restoring && (
+            <RectLayer
+              mode="box"
+              stage={frame}
+              width={clip.width}
+              height={clip.height}
+              ratio={camDraft.layout.shape === "circle" ? 1 : 16 / 9}
+              rect={(() => {
+                const b = camBox(camDraft.layout, clip.width, clip.height);
+                return { x: b.left, y: b.top, width: b.width, height: b.height };
+              })()}
+              onRect={(rect) =>
+                setCamDraft((draft) =>
+                  draft && {
+                    ...draft,
+                    layout: snapLayout({ ...draft.layout, ...layoutFromRect(rect, clip, draft.layout.shape) }),
+                  },
+                )
+              }
             />
           )}
 
@@ -1051,6 +1187,28 @@ export function ClipPlayer({
           }}
           onCancelTrim={() => setAskingTrim(false)}
           onOpenMixer={requestMixer}
+          cam={
+            clip.facecam?.state === "baked"
+              ? { baked: true }
+              : camView && camDraft
+                ? {
+                    baked: false,
+                    draft: camDraft,
+                    changed: camChanged,
+                    atDefault: sameFacecam(camDraft, {
+                      layout: { ...defaultCam.layout, visible: true },
+                      delayMs: defaultCam.delayMs,
+                    }),
+                    canBake: clip.facecam?.state === "ready" && !clip.original,
+                    onChange: (patch) => setCamDraft((draft) => draft && { ...draft, ...patch }),
+                    onReset: () =>
+                      setCamDraft({ layout: { ...defaultCam.layout, visible: true }, delayMs: defaultCam.delayMs }),
+                    onBake: () => void bakeCam(),
+                    portrait: portraitOn,
+                    onPortrait: setPortraitOn,
+                  }
+                : null
+          }
         />
       </div>
 

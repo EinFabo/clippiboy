@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-camera-privacy"
+description = "Enables the open_camera_privacy command without any pre-configured scope."
+commands.allow = ["open_camera_privacy"]
+
+[[permission]]
+identifier = "deny-open-camera-privacy"
+description = "Denies the open_camera_privacy command without any pre-configured scope."
+commands.deny = ["open_camera_privacy"]

@@ -2,6 +2,12 @@
 
 export type DeviceKind = "output" | "input";
 
+/** A camera Windows lists; `id` is its symbolic link. */
+export interface CameraDevice {
+  id: string;
+  name: string;
+}
+
 export interface AudioDevice {
   id: string;
   name: string;
@@ -236,11 +242,102 @@ export interface AppConfig {
   rgbSpeed: RgbSpeed;
   friends: FriendsConfig;
   sounds: SoundConfig;
+  facecam: FacecamConfig;
   /**
    * Counts up with every change the core takes in. Sent back as it came: a
    * write from an older copy is merged onto what changed since, not over it.
    */
   revision: number;
+}
+
+/** The webcam laid over clips (`model::FacecamConfig`). Off by default. */
+export interface FacecamConfig {
+  enabled: boolean;
+  /** The camera's symbolic link; `null` for the first camera. */
+  deviceId: string | null;
+  deviceName: string | null;
+  resolution: CamResolution;
+  fps: number;
+  layout: CamLayout;
+  portrait: PortraitLayout;
+  /** −300…300 in steps of 10. */
+  delayMs: number;
+  inClips: boolean;
+  inRecordings: boolean;
+  inScreenshots: boolean;
+  consolePreview: boolean;
+  virtualCamera: boolean;
+}
+
+export type CamResolution = "p720" | "p1080";
+export type CamShape = "rect" | "rounded" | "circle";
+
+/** Where the cam sits: `x`/`y` 0–1 across the free room, `size` its height over the frame's. */
+export interface CamLayout {
+  visible: boolean;
+  x: number;
+  y: number;
+  size: number;
+  shape: CamShape;
+  mirror: boolean;
+}
+
+export interface PortraitLayout {
+  split: number;
+  gameX: number;
+}
+
+export type ClockKind = "device" | "deviceReference" | "sampleTime" | "arrival";
+
+export type CamState =
+  | { kind: "starting" }
+  | { kind: "live" }
+  | { kind: "taken"; by: string | null }
+  | { kind: "blocked" }
+  | { kind: "noCamera" }
+  | { kind: "failed"; message: string };
+
+/** The camera a save in the editor asks for (`model::FacecamEdit`). */
+export interface FacecamEdit {
+  layout: CamLayout;
+  delayMs: number;
+}
+
+/** What the player needs to show a clip's camera movable (`facecam::FacecamView`).
+    Element time = clip time + lead. */
+export interface FacecamView {
+  cleanPath: string;
+  camPath: string;
+  camWidth: number;
+  camHeight: number;
+  cleanLeadMs: number;
+  camLeadMs: number;
+  gapsMs: [number, number][];
+  /** The clip file has the camera in it. */
+  showsCam: boolean;
+}
+
+/** ClippiBoy Camera, the virtual camera (`vcam::VcamStatus`). */
+export type VcamStatus =
+  | { kind: "notInstalled" }
+  | { kind: "needsUpdate"; installed: string; bundled: string }
+  | { kind: "off" }
+  | { kind: "ready" }
+  | { kind: "live" };
+
+/** What the cam track is doing (`model::CamStatus`). */
+export interface CamStatus {
+  state: CamState;
+  camera: string | null;
+  fpsIn: number;
+  fpsOut: number;
+  duplicates: number;
+  fillers: number;
+  gaps: number;
+  clock: ClockKind | null;
+  encoder: EncoderId | null;
+  ringSeconds: number;
+  ringBytes: number;
 }
 
 /** One notification's sound. `volume` is 0–1, on top of `SoundConfig.volume`. */
@@ -352,6 +449,17 @@ export interface Transfer {
   recording: boolean;
 }
 
+/** `pending` while the cam is being added, `ready` once the file shows it, `failed`, or `baked` in for good. */
+export type FacecamState = "pending" | "ready" | "failed" | "baked";
+
+/** A clip's cam (`model::ClipFacecam`). */
+export interface ClipFacecam {
+  layout: CamLayout;
+  portrait: PortraitLayout;
+  delayMs: number;
+  state: FacecamState;
+}
+
 export interface Clip {
   id: string;
   path: string;
@@ -384,6 +492,8 @@ export interface Clip {
    * because the individual tracks are stored in its coordinates.
    */
   originalAvailable: boolean;
+  /** The cam over the clip; `null` for a clip without one. */
+  facecam: ClipFacecam | null;
   /**
    * A still instead of a recording. Everything to do with time — the duration,
    * the trim, the individual tracks, the waveform — does not apply to it, and
@@ -472,6 +582,8 @@ export interface StorageUsage {
   /** The clips, screenshots and recordings themselves. */
   clipsBytes: number;
   originalsBytes: number;
+  /** Clean pictures and cams of facecam clips — what "Bake all" frees. */
+  facecamBytes: number;
   shotEditsBytes: number;
   tracksBytes: number;
   thumbsBytes: number;
@@ -516,6 +628,9 @@ export interface EngineStatus {
   /** The chosen screen is not connected and capture runs on this one instead —
       its name. `null` while it runs where it was told to. */
   screenFallback: string | null;
+  /** The webcam while it runs; `null` when it is off. */
+  cam: CamStatus | null;
+  vcam: VcamStatus | null;
 }
 
 /** A rectangle in pixels of a screenshot's original. */

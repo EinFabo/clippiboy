@@ -4,6 +4,7 @@ import type {
   AppConfig,
   AudioDevice,
   AudioProcess,
+  CameraDevice,
   CaptureTarget,
   Clip,
   ClipTrack,
@@ -15,6 +16,11 @@ export const mockDevices: AudioDevice[] = [
   { id: "out-2", name: "LG HDR 4K (NVIDIA High Definition Audio)", kind: "output", isDefault: false },
   { id: "in-1", name: "Mikrofon (Elgato Wave XLR)", kind: "input", isDefault: true },
   { id: "in-2", name: "Line In (Focusrite Scarlett)", kind: "input", isDefault: false },
+];
+
+export const mockCameras: CameraDevice[] = [
+  { id: "\\\\?\\usb#vid_046d&pid_08e5#c920", name: "HD Pro Webcam C920" },
+  { id: "\\\\?\\usb#vid_328f&pid_006d#c960", name: "EMEET SmartCam C960" },
 ];
 
 export const mockProcesses: AudioProcess[] = [
@@ -151,6 +157,21 @@ export const mockConfig: AppConfig = {
     clipReceived: { on: true, volume: 1 },
     error: { on: true, volume: 1 },
   },
+  facecam: {
+    enabled: true,
+    deviceId: null,
+    deviceName: null,
+    resolution: "p720",
+    fps: 30,
+    layout: { visible: true, x: 1, y: 1, size: 0.25, shape: "rounded", mirror: false },
+    portrait: { split: 0.35, gameX: 0.5 },
+    delayMs: -40,
+    inClips: true,
+    inRecordings: true,
+    inScreenshots: true,
+    consolePreview: true,
+    virtualCamera: false,
+  },
   revision: 0,
 };
 
@@ -171,6 +192,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: { layout: { visible: true, x: 1, y: 1, size: 0.25, shape: "rounded", mirror: false }, portrait: { split: 0.35, gameX: 0.5 }, delayMs: -40, state: "pending" },
     screenshot: false,
     recording: false,
     tags: ["ace", "clutch"],
@@ -191,6 +214,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: { layout: { visible: true, x: 0, y: 1, size: 0.25, shape: "circle", mirror: false }, portrait: { split: 0.35, gameX: 0.5 }, delayMs: -40, state: "ready" },
     screenshot: false,
     recording: false,
     tags: ["clutch"],
@@ -211,6 +236,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: false,
     recording: false,
     tags: [],
@@ -235,6 +262,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: false,
     recording: false,
     tags: [],
@@ -259,6 +288,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: false,
     recording: false,
     tags: [],
@@ -280,6 +311,8 @@ export const mockClips: Clip[] = [
     edit: null,
     original: null,
     originalAvailable: false,
+
+    facecam: null,
     screenshot: true,
     recording: false,
     tags: [],

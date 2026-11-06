@@ -80,6 +80,7 @@ export function Clips({
   // `useShallow`, siehe `SourceTrouble`: ohne Selektor rendert die ganze
   // Galerie — über hundert Kacheln — zwanzigmal die Sekunde neu, weil die
   // Audiopegel durch denselben Store laufen. Das war der teuerste Posten.
+  const bakeClipCam = useEngine((s) => s.bakeClipCam);
   const { clips, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
     useEngine(
       useShallow((s) => ({
@@ -511,6 +512,9 @@ export function Clips({
                       {/* Only on a real trim: you cannot see a changed mix on a
                           clip, but you can see its length — and that the original
                           still sits beside it is the fact that counts here. */}
+                      {clip.facecam?.state === "pending" && (
+                        <Pill title="The cam is being added to this clip">Adding cam</Pill>
+                      )}
                       {clip.original && (
                         <Pill title="Trimmed — the original sits beside it">
                           <IconScissors className="h-3 w-3" />
@@ -587,12 +591,14 @@ export function Clips({
                   ) : discarding === clip.id ? (
                     <ConfirmDelete
                       origin="right"
-                      question="Throw the recording away?"
-                      confirmLabel="Throw away"
-                      confirmTitle="The trim stays, undo goes"
+                      question={
+                        clip.originalAvailable ? "Throw the recording away?" : "Bake the cam into the clip?"
+                      }
+                      confirmLabel={clip.originalAvailable ? "Throw away" : "Bake"}
+                      confirmTitle={freeSpaceTitle(clip)}
                       onConfirm={() => {
                         setDiscarding(null);
-                        void discardClipOriginal(clip.id);
+                        void (clip.originalAvailable ? discardClipOriginal(clip.id) : bakeClipCam(clip.id));
                       }}
                       onCancel={() => setDiscarding(null)}
                     />
@@ -1191,4 +1197,13 @@ function IconAction({
       {children}
     </button>
   );
+}
+
+/** What "Free up space" costs on this clip, said before it happens. */
+function freeSpaceTitle(clip: Clip): string {
+  const cam = clip.facecam?.state === "ready";
+  if (!clip.originalAvailable) return "The cam can no longer be moved in this clip.";
+  return cam
+    ? "The trim stays, undo goes. The cam can no longer be moved in this clip."
+    : "The trim stays, undo goes";
 }

@@ -80,6 +80,7 @@ pub fn default_config() -> AppConfig {
         rgb_speed: crate::model::RgbSpeed::default(),
         friends: crate::model::FriendsConfig::default(),
         sounds: crate::model::SoundConfig::default(),
+        facecam: crate::model::FacecamConfig::default(),
         revision: 0,
     }
 }
@@ -114,6 +115,28 @@ pub fn effective_memory_bytes(recording: &RecordingConfig, buffer: &BufferConfig
     // A floor, so a tiny buffer at a low bitrate still has room to hold the
     // group of pictures it must never drop.
     (plain * 3 / 2).max(64 * 1024 * 1024)
+}
+
+/// How long the cam ring holds: the buffer, a game keyframe interval, and 12 s
+/// more — 1 s for the cut's keyframe before the clip, 0.3 s either side for the
+/// delay, and 10 s for the save itself — so a clip's cam is always still there.
+pub fn cam_ring_seconds(buffer_seconds: u32, keyframe_seconds: u32) -> u32 {
+    buffer_seconds + keyframe_seconds + 12
+}
+
+/// The cam track's bitrate: 3 Mbit/s at 720p, 6 at 1080p.
+pub fn cam_bitrate_kbps(resolution: crate::model::CamResolution) -> u32 {
+    match resolution {
+        crate::model::CamResolution::P720 => 3000,
+        crate::model::CamResolution::P1080 => 6000,
+    }
+}
+
+/// The cam ring's memory: half again on top of the bitrate for the peaks of a
+/// variable bitrate, at least 16 MiB. On top of the game's budget.
+pub fn effective_cam_memory_bytes(ring_seconds: u32, bitrate_kbps: u32) -> u64 {
+    let plain = bitrate_kbps as u64 * 1000 / 8 * ring_seconds as u64;
+    (plain * 3 / 2).max(16 * 1024 * 1024)
 }
 
 /// The derived and bounded parts of the recording settings, put right on every
@@ -729,6 +752,95 @@ mod tests {
         assert_eq!(parsed.control.port, crate::model::DEFAULT_CONTROL_PORT);
         // Nothing saved yet — `control::start` replaces it at every start.
         assert!(parsed.control.token.is_empty());
+    }
+
+    #[test]
+    fn the_cam_ring_costs_about_72_mib_for_the_default_buffer() {
+        assert_eq!(cam_ring_seconds(120, 2), 134);
+        assert_eq!(cam_bitrate_kbps(crate::model::CamResolution::P720), 3000);
+        assert_eq!(cam_bitrate_kbps(crate::model::CamResolution::P1080), 6000);
+        assert_eq!(effective_cam_memory_bytes(134, 3000), 75_375_000);
+    }
+
+    #[test]
+    fn a_tiny_cam_ring_keeps_its_floor() {
+        assert_eq!(effective_cam_memory_bytes(10, 3000), 16 * 1024 * 1024);
+    }
+
+    /// The facecam block came with 0.9. A config from before it has none, and a
+    /// missing block must cost nothing: the cam is simply off.
+    #[test]
+    fn a_configuration_written_before_the_facecam_still_loads() {
+        let mut written =
+            serde_json::to_value(with(vec![source("mic", endpoint("dev-1"), true)])).unwrap();
+        written.as_object_mut().unwrap().remove("facecam").expect("called 'facecam' in JSON");
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert!(!parsed.facecam.enabled);
+        assert_eq!(parsed.facecam.layout.size, 0.25);
+    }
+
+    /// `load` throws everything away when a config does not parse, so a cam block
+    /// it cannot read is replaced by the cam's defaults instead.
+    #[test]
+    fn a_broken_facecam_block_costs_only_the_facecam() {
+        let mut written =
+            serde_json::to_value(with(vec![source("mic", endpoint("dev-1"), true)])).unwrap();
+        written["facecam"] = serde_json::json!({ "enabled": "yes", "layout": 5 });
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(parsed.sources.len(), 1);
+        assert_eq!(parsed.facecam, crate::model::FacecamConfig::default());
+    }
+
+    #[test]
+    fn a_facecam_block_missing_a_field_keeps_the_rest() {
+        let mut written = serde_json::to_value(with(vec![])).unwrap();
+        written["facecam"] = serde_json::json!({ "enabled": true });
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert!(parsed.facecam.enabled);
+        assert_eq!(parsed.facecam.delay_ms, -40);
+        assert!(parsed.facecam.in_clips);
+    }
+
+    #[test]
+    fn an_unknown_shape_loads_as_a_rectangle() {
+        use crate::model::CamShape;
+        for (raw, shape) in [
+            ("hexagon", CamShape::Rect),
+            ("rect", CamShape::Rect),
+            ("rounded", CamShape::Rounded),
+            ("circle", CamShape::Circle),
+        ] {
+            let mut written = serde_json::to_value(with(vec![])).unwrap();
+            written["facecam"] = serde_json::json!({ "layout": { "shape": raw } });
+            let parsed: AppConfig = serde_json::from_value(written).unwrap();
+            assert_eq!(parsed.facecam.layout.shape, shape, "{raw}");
+        }
+    }
+
+    /// A hand-edited file never reaches the filter graph with a cam three times
+    /// the frame or left of it.
+    #[test]
+    fn a_facecam_block_out_of_range_is_clamped_on_load() {
+        let mut written = serde_json::to_value(with(vec![])).unwrap();
+        written["facecam"] = serde_json::json!({ "layout": { "size": 3, "x": -2 } });
+        let parsed: AppConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(parsed.facecam.layout.size, 0.5);
+        assert_eq!(parsed.facecam.layout.x, 0.0);
+    }
+
+    /// "Cam off" in the console, then a slider let go in the main window that
+    /// still holds the copy from before: the camera stays off.
+    #[test]
+    fn cam_off_from_the_console_survives_a_stale_write() {
+        let mut base = with(vec![]);
+        base.facecam.enabled = true;
+        let mut current = base.clone();
+        current.facecam.enabled = false;
+        let mut incoming = base.clone();
+        incoming.facecam.layout.size = 0.3;
+        let merged = merge_stale(&base, &incoming, &current);
+        assert!(!merged.facecam.enabled);
+        assert_eq!(merged.facecam.layout.size, 0.3);
     }
 
     /// What the intermediate version left behind: one source turned into a kind
