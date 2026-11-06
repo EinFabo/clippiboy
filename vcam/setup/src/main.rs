@@ -30,6 +30,10 @@ enum Step {
     RegistryDelete { key: String },
     RemoveFolder { path: PathBuf },
     RemoveOldVersions { root: PathBuf, keep: String },
+    /// Frame Server loads the DLL once and keeps it while any camera is held;
+    /// restarted, it loads the one just registered. Apps using a camera lose
+    /// its picture for a moment.
+    RestartFrameServer,
 }
 
 fn clsid_key() -> String {
@@ -69,6 +73,7 @@ fn install_plan(program_files: &Path, version: &str) -> Result<Vec<Step>, String
         Step::RegistryValue { key: version_key(), name: "Path".into(), value: dll.to_string_lossy().into_owned() },
         Step::Grant { path: log_folder(), account: LOCAL_SERVICE.into(), rights: "(OI)(CI)M".into() },
         Step::Grant { path: log_folder(), account: USERS.into(), rights: "(OI)(CI)M".into() },
+        Step::RestartFrameServer,
         Step::RemoveOldVersions { root, keep: version.into() },
     ])
 }
@@ -125,6 +130,18 @@ fn run(step: &Step) -> Result<(), Failure> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(Failure::Locked(format!("{}: {e}", path.display()))),
         },
+        Step::RestartFrameServer => {
+            // Only a running one; it starts again on demand. A failure leaves
+            // the old DLL until the next reboot, which is no reason to fail.
+            let script = "$s = Get-Service FrameServer -ErrorAction SilentlyContinue; \
+                          if ($s -and $s.Status -eq 'Running') { Restart-Service FrameServer -Force }";
+            if let Err(Failure::Refused(why) | Failure::Locked(why)) =
+                run_tool("powershell", &["-NoProfile", "-NonInteractive", "-Command", script])
+            {
+                eprintln!("Frame Server not restarted: {why}");
+            }
+            Ok(())
+        }
         Step::RemoveOldVersions { root, keep } => {
             for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
                 if entry.file_name().to_string_lossy() != *keep {
@@ -231,6 +248,20 @@ mod tests {
 
     fn pf() -> &'static Path {
         Path::new(r"C:\Program Files")
+    }
+
+    /// Frame Server keeps the DLL it loaded for as long as anything holds a
+    /// camera — ClippiBoy itself does while its virtual camera is on — so an
+    /// update showed the old placeholder until a reboot. It is restarted once
+    /// the new DLL is registered, and the old versions go after that, unlocked.
+    #[test]
+    fn an_update_restarts_frame_server_before_the_old_versions_go() {
+        let install = install_plan(pf(), "1.0.2").unwrap();
+        let at = |want: fn(&Step) -> bool| install.iter().position(want).unwrap();
+        let registered = at(|s| matches!(s, Step::RegistryDefault { .. }));
+        let restart = at(|s| matches!(s, Step::RestartFrameServer));
+        let old = at(|s| matches!(s, Step::RemoveOldVersions { .. }));
+        assert!(registered < restart && restart < old, "{install:?}");
     }
 
     #[test]
