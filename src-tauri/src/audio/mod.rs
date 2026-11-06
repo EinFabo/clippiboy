@@ -326,13 +326,26 @@ pub fn resolve(
     tree: &HashMap<u32, (u32, String)>,
     ledger: &Leftovers,
 ) -> Vec<Stream> {
+    resolve_for(std::process::id(), sources, game_pid, playing, tree, ledger)
+}
+
+/// [`resolve`] with ClippiBoy's own process given, so a test's made-up pids
+/// can never be taken for it.
+fn resolve_for(
+    own: u32,
+    sources: &[AudioSource],
+    game_pid: Option<u32>,
+    playing: &HashMap<String, Vec<(u32, bool)>>,
+    tree: &HashMap<u32, (u32, String)>,
+    ledger: &Leftovers,
+) -> Vec<Stream> {
     let enabled = || sources.iter().filter(|s| s.enabled);
 
     // Everything another source already records, plus ClippiBoy itself: playing a
     // clip back while the buffer runs must not end up in the next one. The
     // leftovers add to this as they go, which is what keeps several of them from
     // taking the same application.
-    let mut taken: Vec<u32> = vec![std::process::id()];
+    let mut taken: Vec<u32> = vec![own];
     for source in enabled() {
         match &source.kind {
             // The application, not the one process: a game that runs as
@@ -787,6 +800,20 @@ mod tests {
     }
 
     /// No previous assignment, and the named device is the catch-all.
+    /// What the tests take for ClippiBoy's own process: not a multiple of 4,
+    /// so Windows never hands it out and no made-up pid can be it.
+    const NOT_US: u32 = u32::MAX - 2;
+
+    fn resolve(
+        sources: &[AudioSource],
+        game_pid: Option<u32>,
+        playing: &HashMap<String, Vec<(u32, bool)>>,
+        tree: &HashMap<u32, (u32, String)>,
+        ledger: &Leftovers,
+    ) -> Vec<Stream> {
+        resolve_for(NOT_US, sources, game_pid, playing, tree, ledger)
+    }
+
     fn ledger(default_device: &str) -> Leftovers {
         Leftovers {
             default_device: default_device.into(),
@@ -1103,13 +1130,32 @@ mod tests {
         assert_eq!(pids_of(&streams, "rest"), vec![12604]);
     }
 
+    /// The tests' own process is never one of their made-up applications: on a
+    /// fresh CI machine the test binary ran as pid 5000 — the game of
+    /// `a_rebound_application_is_not_recorded_twice` — and was left out as
+    /// ClippiBoy itself.
+    #[test]
+    fn only_the_process_named_as_ours_is_left_out() {
+        let sources = vec![recording_by_app(), of_kind("rest", leftovers("spk"))];
+        let streams = resolve_for(
+            5000,
+            &sources,
+            None,
+            &playing(&[("spk", &idle(&[5000, 5004]))]),
+            &loose(),
+            &ledger("spk"),
+        );
+        assert_eq!(pids_of(&streams, "rest"), vec![5004]);
+        assert_eq!(pids_of(&resolve(&sources, None, &playing(&[("spk", &idle(&[5000, 5004]))]), &loose(), &ledger("spk")), "rest"), vec![5000, 5004]);
+    }
+
     /// Playing a clip back while the buffer runs must not end up in the next
     /// one.
     #[test]
     fn the_leftovers_never_record_clippiboy_itself() {
         let sources = vec![recording_by_app(), of_kind("rest", leftovers("spk"))];
         let own = std::process::id();
-        let streams = resolve(
+        let streams = super::resolve(
             &sources,
             None,
             &playing(&[("spk", &idle(&[own, own + 1]))]),
