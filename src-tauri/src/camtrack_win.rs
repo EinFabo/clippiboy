@@ -29,7 +29,7 @@ const SILENT: Duration = Duration::from_secs(5);
 const BLOCKED_RETRY: Duration = Duration::from_secs(30);
 
 enum Ask {
-    Open { id: Option<String>, name: Option<String>, track: (u32, u32), generation: u64, events: Sender<(u64, Event)> },
+    Open { id: Option<String>, name: Option<String>, capture: (u32, u32), generation: u64, events: Sender<(u64, Event)> },
     Close(Box<dyn Source>),
     Holder(CameraDevice),
     StartEncoder { session: u64, gpu: Arc<GpuDevice>, settings: EncoderSettings },
@@ -76,7 +76,7 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
     // Ends when the worker has gone and every job it left is done.
     while let Ok(ask) = asks.recv() {
         match ask {
-            Ask::Open { id, name, track, generation, events } => {
+            Ask::Open { id, name, capture, generation, events } => {
                 let result = match camera::find(id.as_deref(), name.as_deref()) {
                     None => Err((Error::NoCamera, None)),
                     Some(device) => {
@@ -90,7 +90,7 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
                             }
                             let _ = events.send((generation, event));
                         });
-                        let mode = OpenMode::Controlling { width: track.0, height: track.1 };
+                        let mode = OpenMode::Controlling { width: capture.0, height: capture.1 };
                         let cancelled = || shared.open_generation.load(std::sync::atomic::Ordering::SeqCst) != generation;
                         match camera::open(&device, mode, sink, &cancelled) {
                             Ok(source) => Ok((source, device)),
@@ -307,7 +307,9 @@ impl Worker {
                 let other = self.device.as_ref().is_some_and(|d| {
                     plan.device_id.as_deref().is_some_and(|id| !id.eq_ignore_ascii_case(&d.id))
                 });
-                if other {
+                // Or the virtual camera went on or off: another size to open at.
+                let resized = self.plan.as_ref().is_some_and(|p| p.capture != plan.capture);
+                if other || resized {
                     self.close_camera();
                     self.retry_at = None;
                 }
@@ -360,7 +362,7 @@ impl Worker {
         let _ = self.ask.send(Ask::Open {
             id: plan.device_id.clone(),
             name: plan.device_name.clone(),
-            track: self.track,
+            capture: plan.capture,
             generation: self.generation,
             events: self.events_tx.clone(),
         });

@@ -63,6 +63,9 @@ pub struct CamPlan {
     pub device_id: Option<String>,
     pub device_name: Option<String>,
     pub resolution: crate::model::CamResolution,
+    /// The size the camera is opened at: the track's, or 1080p while
+    /// ClippiBoy Camera sends ([`capture_size`]).
+    pub capture: (u32, u32),
     pub fps: u32,
     pub ring_seconds: u32,
     pub encoder: crate::model::EncoderId,
@@ -81,6 +84,18 @@ pub struct PlanInputs {
     pub locked: bool,
     pub vcam_consumer: bool,
     pub recording: bool,
+    /// ClippiBoy Camera is switched on and sends frames.
+    pub vcam_feeding: bool,
+}
+
+/// The size the camera is opened at. ClippiBoy Camera is a 1080p camera; a
+/// smaller picture had to be scaled up for it, on the CPU, for every frame.
+pub fn capture_size(resolution: crate::model::CamResolution, vcam_feeding: bool) -> (u32, u32) {
+    if vcam_feeding {
+        (1920, 1080)
+    } else {
+        resolution.size()
+    }
 }
 
 /// The plan for the cam, and the wants it was made from, to compare the next
@@ -109,6 +124,7 @@ pub fn plan_for(cam: &crate::model::FacecamConfig, inputs: &PlanInputs, before: 
         device_id: cam.device_id.clone(),
         device_name: cam.device_name.clone(),
         resolution: cam.resolution,
+        capture: capture_size(cam.resolution, inputs.vcam_feeding),
         fps: cam.fps,
         ring_seconds: crate::config::cam_ring_seconds(inputs.buffer_seconds, inputs.keyframe_seconds),
         encoder: inputs.encoder,
@@ -558,7 +574,23 @@ mod tests {
             locked: false,
             vcam_consumer: false,
             recording: false,
+            vcam_feeding: false,
         }
+    }
+
+    /// While ClippiBoy Camera sends, the camera opens at 1080p: the virtual
+    /// camera is a 1080p one, and a 720p picture had to be scaled up on the
+    /// CPU for it. The clips keep their own size, scaled on the GPU.
+    #[test]
+    fn the_camera_opens_at_1080p_for_the_virtual_camera() {
+        let cam = crate::model::FacecamConfig { enabled: true, ..Default::default() };
+        assert_eq!(cam.resolution, crate::model::CamResolution::P720);
+        let (plan, _) = plan_for(&cam, &inputs(true, false), None);
+        assert_eq!(plan.capture, (1280, 720));
+        let vcam = PlanInputs { vcam_feeding: true, ..inputs(true, false) };
+        let (plan, _) = plan_for(&cam, &vcam, None);
+        assert_eq!(plan.capture, (1920, 1080));
+        assert_eq!(plan.resolution, crate::model::CamResolution::P720, "the clips' size stays");
     }
 
     /// The buffer off, "In clips" off: a recording with "In recordings" on

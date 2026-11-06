@@ -676,6 +676,7 @@ impl AppState {
             locked: self.auto.screen_locked(),
             vcam_consumer: self.vcam.watching(),
             recording: self.recorder.lock().is_some(),
+            vcam_feeding: crate::vcam::feeds(config.facecam.enabled, config.facecam.virtual_camera),
         };
         let mut last = self.cam_wants.lock();
         let (plan, wants) = crate::camtrack::plan_for(&config.facecam, &inputs, last.as_ref());
