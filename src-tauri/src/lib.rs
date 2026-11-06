@@ -390,15 +390,15 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
                 composite::enqueue_recording(&clip.id);
             }
             let _ = app.emit("clip-saved", clip.clone());
-            let length = format::duration(clip.duration_ms);
-            notify(app, "ok", format!("Recording saved · {length}"));
+            let saved = format::recording_saved(clip.duration_ms, clip.facecam.is_some());
+            notify(app, "ok", saved.clone());
             sounds::play(app, SoundKind::RecordingSaved);
             telemetry::recording();
             overlay::show_with_thumb(
                 app,
                 BannerKind::Recording,
                 clip.game.clone().unwrap_or_else(|| "Recording saved".into()),
-                Some(format!("Recording saved · {length}")),
+                Some(saved),
                 clip.thumb_path.clone(),
             );
             Ok(clip)
@@ -456,6 +456,16 @@ pub(crate) mod format {
             format!("{:.1} GB", bytes / GB)
         } else {
             format!("{:.0} MB", bytes / MB)
+        }
+    }
+
+    /// What a stopped recording says, and that its camera is still on its way.
+    pub fn recording_saved(ms: u64, adding_camera: bool) -> String {
+        let line = format!("Recording saved · {}", duration(ms));
+        if adding_camera {
+            format!("{line} · adding the camera")
+        } else {
+            line
         }
     }
 
@@ -2002,6 +2012,14 @@ pub fn levels_event(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stop says the camera is still on its way: the recording came out
+    /// without it for a few seconds and nothing said why.
+    #[test]
+    fn a_recording_stop_says_the_camera_is_coming() {
+        assert_eq!(format::recording_saved(83_000, false), "Recording saved · 1:23");
+        assert_eq!(format::recording_saved(83_000, true), "Recording saved · 1:23 · adding the camera");
+    }
 
     #[test]
     fn each_window_has_its_own_level_event() {

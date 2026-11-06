@@ -492,6 +492,7 @@ fn finish(app: &tauri::AppHandle, id: &str, path: &std::path::Path, cam: &crate:
     }
     log::info!("camera burned into recording {id}");
     set_row(app, id, Some(&crate::model::ClipFacecam { state, ..cam.clone() }));
+    crate::notify(app, "ok", "Camera added to the recording");
 }
 
 fn fail(app: &tauri::AppHandle, id: &str, cam: &crate::model::ClipFacecam, why: &str) {
