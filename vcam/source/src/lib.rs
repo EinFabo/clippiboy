@@ -34,7 +34,7 @@ const LOG: &str = r"C:\ProgramData\ClippiBoy\vcam.log";
 const LOG_LIMIT: u64 = 1024 * 1024;
 const FRAME: Duration = Duration::from_nanos(33_333_333);
 
-/// What the camera offers. The first one is the default.
+/// The sizes the camera always offers, after the real camera's own.
 const FORMATS: [(GUID, u32, u32); 6] = [
     (MFVideoFormat_NV12, 1280, 720),
     (MFVideoFormat_YUY2, 1280, 720),
@@ -43,6 +43,25 @@ const FORMATS: [(GUID, u32, u32); 6] = [
     (MFVideoFormat_NV12, 640, 360),
     (MFVideoFormat_YUY2, 640, 360),
 ];
+
+/// What the camera offers, the first one the default: the real camera's own
+/// size when ClippiBoy sends one that fits, then the usual 16:9 ones. Apps
+/// take the first as it is — a 4:3 camera came out stretched to 16:9, a
+/// 1080p one scaled down to 720p.
+fn formats(native: Option<(u32, u32)>) -> Vec<(GUID, u32, u32)> {
+    let fits = |(w, h): (u32, u32)| w % 2 == 0 && h % 2 == 0 && (160..=1920).contains(&w) && (90..=1080).contains(&h);
+    let mut out = Vec::new();
+    if let Some((w, h)) = native.filter(|&size| fits(size)) {
+        out.push((MFVideoFormat_NV12, w, h));
+        out.push((MFVideoFormat_YUY2, w, h));
+    }
+    for format in FORMATS {
+        if !out.contains(&format) {
+            out.push(format);
+        }
+    }
+    out
+}
 
 // ---------------------------------------------------------------- plumbing
 
@@ -286,6 +305,16 @@ impl Drop for Mapping {
 
 /// Opens ClippiBoy's section. Frame Server lives in session 0, ClippiBoy in
 /// the user's, so the name carries the session.
+/// The size of the frames ClippiBoy sends right now, if it sends any.
+unsafe fn live_size() -> Option<(u32, u32)> {
+    let map = open_mapping()?;
+    let mut buf = Vec::new();
+    match map.reader.read_latest(&mut buf, MFGetSystemTime()) {
+        vcam_protocol::ReadResult::Frame { width, height, .. } => Some((width, height)),
+        _ => None,
+    }
+}
+
 unsafe fn open_mapping() -> Option<Mapping> {
     let mut sessions = vec![WTSGetActiveConsoleSessionId()];
     sessions.extend(1..=8);
@@ -338,6 +367,8 @@ struct Feed {
     dims: Option<(usize, usize)>,
     scratch: Vec<u8>,
     placeholder: Vec<u8>,
+    /// A frame fitted to another size on its way to YUY2.
+    fitted: Vec<u8>,
     out: Vec<u8>,
     was_live: Option<bool>,
     sent: u64,
@@ -446,9 +477,9 @@ impl Feed {
         let yuy2 = sub == MFVideoFormat_YUY2;
         self.out.resize(if yuy2 { w * h * 2 } else { w * h * 3 / 2 }, 0);
         if yuy2 {
-            nv12_to_yuy2(src, sw, sh, &mut self.out, w, h);
+            nv12_to_yuy2(src, sw, sh, &mut self.fitted, &mut self.out, w, h);
         } else {
-            nv12_scaled(src, sw, sh, &mut self.out, w, h);
+            nv12_fitted(src, sw, sh, &mut self.out, w, h);
         }
         self.sent += 1;
         if self.sent == 1 || self.sent % 9000 == 0 {
@@ -526,8 +557,55 @@ fn rgb_to_nv12(rgb: &[u8], channels: usize, w: usize, h: usize, out: &mut Vec<u8
     }
 }
 
-/// NV12 to NV12, nearest-neighbour scaled.
-fn nv12_scaled(src: &[u8], sw: usize, sh: usize, out: &mut [u8], w: usize, h: usize) {
+/// Where a `sw`×`sh` picture sits in a `w`×`h` frame, its shape kept: as
+/// large as fits, centred, on even pixels. `(x, y, width, height)`.
+fn fit_rect(sw: usize, sh: usize, w: usize, h: usize) -> (usize, usize, usize, usize) {
+    let (fw, fh) = if sw * h > sh * w { (w, sh * w / sw) } else { (sw * h / sh, h) };
+    let (fw, fh) = (fw.max(2) & !1, fh.max(2) & !1);
+    (((w - fw) / 2) & !1, ((h - fh) / 2) & !1, fw, fh)
+}
+
+/// One channel of an interleaved plane (`step` bytes a sample, `ch` the
+/// channel), `sw`×`sh` samples, scaled bilinearly into the rectangle
+/// `(rx, ry, rw, rh)` of `dst`, whose rows are `dstride` bytes.
+#[allow(clippy::too_many_arguments)]
+fn scale_channel(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    step: usize,
+    ch: usize,
+    dst: &mut [u8],
+    dstride: usize,
+    (rx, ry, rw, rh): (usize, usize, usize, usize),
+) {
+    if rw == 0 || rh == 0 || sw == 0 || sh == 0 {
+        return;
+    }
+    let taps = |out: usize, from: usize| {
+        (0..out)
+            .map(|o| {
+                let f = ((o as f32 + 0.5) * from as f32 / out as f32 - 0.5).clamp(0.0, (from - 1) as f32);
+                let i = f as usize;
+                (i, (i + 1).min(from - 1), f - i as f32)
+            })
+            .collect::<Vec<_>>()
+    };
+    let xs = taps(rw, sw);
+    for (oy, (y0, y1, ty)) in taps(rh, sh).into_iter().enumerate() {
+        let (row0, row1) = (&src[y0 * sw * step..], &src[y1 * sw * step..]);
+        let out = &mut dst[(ry + oy) * dstride..];
+        for (ox, &(x0, x1, tx)) in xs.iter().enumerate() {
+            let at = |row: &[u8], x: usize| row[x * step + ch] as f32;
+            let top = at(row0, x0) + (at(row0, x1) - at(row0, x0)) * tx;
+            let bottom = at(row1, x0) + (at(row1, x1) - at(row1, x0)) * tx;
+            out[(rx + ox) * step + ch] = (top + (bottom - top) * ty + 0.5) as u8;
+        }
+    }
+}
+
+/// NV12 to NV12 at another size: fitted with black bars, scaled bilinearly.
+fn nv12_fitted(src: &[u8], sw: usize, sh: usize, out: &mut [u8], w: usize, h: usize) {
     if sw == w && sh == h {
         let n = w * h * 3 / 2;
         out[..n].copy_from_slice(&src[..n]);
@@ -535,42 +613,35 @@ fn nv12_scaled(src: &[u8], sw: usize, sh: usize, out: &mut [u8], w: usize, h: us
     }
     let (ys, uvs) = src.split_at(sw * sh);
     let (yo, uvo) = out.split_at_mut(w * h);
-    for y in 0..h {
-        let sy = y * sh / h;
-        let srow = &ys[sy * sw..(sy + 1) * sw];
-        for (x, o) in yo[y * w..(y + 1) * w].iter_mut().enumerate() {
-            *o = srow[x * sw / w];
-        }
-    }
-    for r in 0..h / 2 {
-        let sr = r * sh / h;
-        let srow = &uvs[sr * sw..(sr + 1) * sw];
-        let orow = &mut uvo[r * w..(r + 1) * w];
-        for c in 0..w / 2 {
-            let sc = c * sw / w;
-            orow[2 * c] = srow[2 * sc];
-            orow[2 * c + 1] = srow[2 * sc + 1];
-        }
+    yo.fill(16);
+    uvo[..w * h / 2].fill(128);
+    let (x, y, fw, fh) = fit_rect(sw, sh, w, h);
+    scale_channel(ys, sw, sh, 1, 0, yo, w, (x, y, fw, fh));
+    for ch in 0..2 {
+        scale_channel(uvs, sw / 2, sh / 2, 2, ch, uvo, w, (x / 2, y / 2, fw / 2, fh / 2));
     }
 }
 
-/// NV12 to YUY2, nearest-neighbour scaled. DirectShow clients such as
-/// libwebrtc (Discord) do not take NV12.
-fn nv12_to_yuy2(src: &[u8], sw: usize, sh: usize, out: &mut [u8], w: usize, h: usize) {
-    let (ys, uvs) = src.split_at(sw * sh);
+/// NV12 to YUY2 at another size, through `fitted` when it is another size.
+/// DirectShow clients such as libwebrtc (Discord) do not take NV12.
+fn nv12_to_yuy2(src: &[u8], sw: usize, sh: usize, fitted: &mut Vec<u8>, out: &mut [u8], w: usize, h: usize) {
+    let nv12 = if sw == w && sh == h {
+        src
+    } else {
+        fitted.resize(w * h * 3 / 2, 0);
+        nv12_fitted(src, sw, sh, fitted, w, h);
+        &fitted[..]
+    };
+    let (ys, uvs) = nv12.split_at(w * h);
     for y in 0..h {
-        let sy = y * sh / h;
-        let yrow = &ys[sy * sw..(sy + 1) * sw];
-        let uvrow = &uvs[(sy / 2) * sw..(sy / 2 + 1) * sw];
+        let yrow = &ys[y * w..(y + 1) * w];
+        let uvrow = &uvs[(y / 2) * w..(y / 2 + 1) * w];
         let orow = &mut out[y * w * 2..(y + 1) * w * 2];
         for c in 0..w / 2 {
-            let sx0 = 2 * c * sw / w;
-            let sx1 = (2 * c + 1) * sw / w;
-            let sc = sx0 / 2;
-            orow[4 * c] = yrow[sx0];
-            orow[4 * c + 1] = uvrow[2 * sc];
-            orow[4 * c + 2] = yrow[sx1];
-            orow[4 * c + 3] = uvrow[2 * sc + 1];
+            orow[4 * c] = yrow[2 * c];
+            orow[4 * c + 1] = uvrow[2 * c];
+            orow[4 * c + 2] = yrow[2 * c + 1];
+            orow[4 * c + 3] = uvrow[2 * c + 1];
         }
     }
 }
@@ -616,8 +687,9 @@ impl MediaStream {
         attrs.SetUINT32(&MF_DEVICESTREAM_STREAM_ID, 0)?;
         attrs.SetUINT32(&MF_DEVICESTREAM_FRAMESERVER_SHARED, 1)?;
         attrs.SetUINT32(&MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES, MFFrameSourceTypes_Color.0 as u32)?;
+        let offered = formats(live_size());
         let mut types = Vec::new();
-        for (sub, w, h) in FORMATS {
+        for &(sub, w, h) in &offered {
             types.push(Some(video_type(sub, w, h)?));
         }
         let descriptor = MFCreateStreamDescriptor(0, &types)?;
@@ -632,9 +704,9 @@ impl MediaStream {
                 descriptor: Some(descriptor),
                 source: None,
                 state: MF_STREAM_STATE_STOPPED,
-                subtype: FORMATS[0].0,
-                width: FORMATS[0].1 as usize,
-                height: FORMATS[0].2 as usize,
+                subtype: offered[0].0,
+                width: offered[0].1 as usize,
+                height: offered[0].2 as usize,
                 next_due: None,
                 feed: Feed::default(),
             }),
@@ -1072,19 +1144,56 @@ mod tests {
     fn same_size_nv12_is_copied() {
         let src = gradient(64, 32);
         let mut out = vec![0u8; src.len()];
-        nv12_scaled(&src, 64, 32, &mut out, 64, 32);
+        nv12_fitted(&src, 64, 32, &mut out, 64, 32);
         assert_eq!(src, out);
     }
 
     #[test]
     fn scaling_stays_in_bounds_both_ways() {
         let src = gradient(1280, 720);
-        for (w, h) in [(1920, 1080), (640, 360), (1280, 720)] {
+        let mut fitted = Vec::new();
+        for (w, h) in [(1920, 1080), (640, 360), (1280, 720), (640, 480), (1920, 1080)] {
             let mut out = vec![0u8; w * h * 3 / 2];
-            nv12_scaled(&src, 1280, 720, &mut out, w, h);
+            nv12_fitted(&src, 1280, 720, &mut out, w, h);
             let mut yuy2 = vec![0u8; w * h * 2];
-            nv12_to_yuy2(&src, 1280, 720, &mut yuy2, w, h);
+            nv12_to_yuy2(&src, 1280, 720, &mut fitted, &mut yuy2, w, h);
         }
+    }
+
+    /// The real camera's own size comes first: OBS and Discord take the
+    /// first type as it is, and a 4:3 camera came out stretched to 16:9.
+    #[test]
+    fn the_camera_s_own_size_is_offered_first() {
+        let list = formats(Some((640, 480)));
+        assert_eq!(&list[..2], &[(MFVideoFormat_NV12, 640, 480), (MFVideoFormat_YUY2, 640, 480)]);
+        assert_eq!(list.len(), 8, "the usual ones follow");
+        let same = formats(Some((1920, 1080)));
+        assert_eq!(same[0], (MFVideoFormat_NV12, 1920, 1080));
+        assert_eq!(same.len(), 6, "no size twice");
+        assert_eq!(formats(None)[0], (MFVideoFormat_NV12, 1280, 720), "without ClippiBoy: the placeholder's");
+        assert_eq!(formats(Some((2560, 1440)))[0], (MFVideoFormat_NV12, 1280, 720), "too large: left out");
+        assert_eq!(formats(Some((641, 480)))[0], (MFVideoFormat_NV12, 1280, 720), "odd: left out");
+    }
+
+    #[test]
+    fn another_shape_is_fitted_with_bars_not_stretched() {
+        assert_eq!(fit_rect(640, 480, 1280, 720), (160, 0, 960, 720), "4:3 in 16:9: bars left and right");
+        assert_eq!(fit_rect(1280, 720, 640, 480), (0, 60, 640, 360), "16:9 in 4:3: bars above and below");
+        assert_eq!(fit_rect(1920, 1080, 1280, 720), (0, 0, 1280, 720));
+    }
+
+    #[test]
+    fn the_bars_are_black_and_the_picture_keeps_its_level() {
+        // A flat grey 4:3 picture into 16:9.
+        let (sw, sh, w, h) = (64, 48, 128, 72);
+        let mut src = vec![120u8; sw * sh];
+        src.extend(std::iter::repeat(128u8).take(sw * sh / 2));
+        let mut out = vec![0u8; w * h * 3 / 2];
+        nv12_fitted(&src, sw, sh, &mut out, w, h);
+        assert_eq!(out[10 * w + 2], 16, "left bar black");
+        assert_eq!(out[10 * w + w - 3], 16, "right bar black");
+        assert_eq!(out[36 * w + 64], 120, "grey stays grey");
+        assert!(out[w * h..].iter().all(|&c| c == 128), "neutral chroma");
     }
 
     #[test]
@@ -1092,7 +1201,7 @@ mod tests {
         // 2x2 NV12: Y = 10 20 / 30 40, UV = 100 200
         let src = vec![10, 20, 30, 40, 100, 200];
         let mut out = vec![0u8; 8];
-        nv12_to_yuy2(&src, 2, 2, &mut out, 2, 2);
+        nv12_to_yuy2(&src, 2, 2, &mut Vec::new(), &mut out, 2, 2);
         assert_eq!(out, vec![10, 100, 20, 200, 30, 100, 40, 200]);
     }
 }
