@@ -34,30 +34,30 @@ const LOG: &str = r"C:\ProgramData\ClippiBoy\vcam.log";
 const LOG_LIMIT: u64 = 1024 * 1024;
 const FRAME: Duration = Duration::from_nanos(33_333_333);
 
-/// The sizes the camera always offers, after the real camera's own.
+/// The sizes the camera always offers; the first is the default.
 const FORMATS: [(GUID, u32, u32); 6] = [
-    (MFVideoFormat_NV12, 1280, 720),
-    (MFVideoFormat_YUY2, 1280, 720),
     (MFVideoFormat_NV12, 1920, 1080),
     (MFVideoFormat_YUY2, 1920, 1080),
+    (MFVideoFormat_NV12, 1280, 720),
+    (MFVideoFormat_YUY2, 1280, 720),
     (MFVideoFormat_NV12, 640, 360),
     (MFVideoFormat_YUY2, 640, 360),
 ];
 
-/// What the camera offers, the first one the default: the real camera's own
-/// size when ClippiBoy sends one that fits, then the usual 16:9 ones. Apps
-/// take the first as it is — a 4:3 camera came out stretched to 16:9, a
-/// 1080p one scaled down to 720p.
+/// What the camera offers: a 1080p camera by default, as the webcams OBS
+/// scenes are built around, then the smaller 16:9 sizes, then the size
+/// ClippiBoy's camera sends when that is already known and not among them
+/// (a 4:3 webcam). The source is made when ClippiBoy starts, before its
+/// camera sends anything, so that size cannot be the default. Every size
+/// gets the picture fitted, never stretched.
 fn formats(native: Option<(u32, u32)>) -> Vec<(GUID, u32, u32)> {
     let fits = |(w, h): (u32, u32)| w % 2 == 0 && h % 2 == 0 && (160..=1920).contains(&w) && (90..=1080).contains(&h);
-    let mut out = Vec::new();
+    let mut out = FORMATS.to_vec();
     if let Some((w, h)) = native.filter(|&size| fits(size)) {
-        out.push((MFVideoFormat_NV12, w, h));
-        out.push((MFVideoFormat_YUY2, w, h));
-    }
-    for format in FORMATS {
-        if !out.contains(&format) {
-            out.push(format);
+        for format in [(MFVideoFormat_NV12, w, h), (MFVideoFormat_YUY2, w, h)] {
+            if !out.contains(&format) {
+                out.push(format);
+            }
         }
     }
     out
@@ -582,24 +582,26 @@ fn scale_channel(
     if rw == 0 || rh == 0 || sw == 0 || sh == 0 {
         return;
     }
+    // Fixed point: weights out of 256, so a frame costs a few milliseconds
+    // rather than the 9 floating point took for 720p to 1080p.
     let taps = |out: usize, from: usize| {
         (0..out)
             .map(|o| {
                 let f = ((o as f32 + 0.5) * from as f32 / out as f32 - 0.5).clamp(0.0, (from - 1) as f32);
                 let i = f as usize;
-                (i, (i + 1).min(from - 1), f - i as f32)
+                (i, (i + 1).min(from - 1), ((f - i as f32) * 256.0) as u32)
             })
             .collect::<Vec<_>>()
     };
-    let xs = taps(rw, sw);
-    for (oy, (y0, y1, ty)) in taps(rh, sh).into_iter().enumerate() {
+    let xs: Vec<(usize, usize, u32)> =
+        taps(rw, sw).into_iter().map(|(x0, x1, w)| (x0 * step + ch, x1 * step + ch, w)).collect();
+    for (oy, (y0, y1, wy)) in taps(rh, sh).into_iter().enumerate() {
         let (row0, row1) = (&src[y0 * sw * step..], &src[y1 * sw * step..]);
-        let out = &mut dst[(ry + oy) * dstride..];
-        for (ox, &(x0, x1, tx)) in xs.iter().enumerate() {
-            let at = |row: &[u8], x: usize| row[x * step + ch] as f32;
-            let top = at(row0, x0) + (at(row0, x1) - at(row0, x0)) * tx;
-            let bottom = at(row1, x0) + (at(row1, x1) - at(row1, x0)) * tx;
-            out[(rx + ox) * step + ch] = (top + (bottom - top) * ty + 0.5) as u8;
+        let out = &mut dst[(ry + oy) * dstride + rx * step + ch..];
+        for (ox, &(i0, i1, wx)) in xs.iter().enumerate() {
+            let top = row0[i0] as u32 * (256 - wx) + row0[i1] as u32 * wx;
+            let bottom = row1[i0] as u32 * (256 - wx) + row1[i1] as u32 * wx;
+            out[ox * step] = ((top * (256 - wy) + bottom * wy + 32768) >> 16) as u8;
         }
     }
 }
@@ -1160,19 +1162,37 @@ mod tests {
         }
     }
 
-    /// The real camera's own size comes first: OBS and Discord take the
-    /// first type as it is, and a 4:3 camera came out stretched to 16:9.
+    /// The default is 1080p, whatever ClippiBoy's camera runs at: the source
+    /// is made when ClippiBoy starts, before its camera sends a frame, so a
+    /// size from the camera came too late — OBS took 720p, a third smaller
+    /// than the scene built around a 1080p webcam. The camera's own size, when
+    /// known, is offered last.
     #[test]
-    fn the_camera_s_own_size_is_offered_first() {
-        let list = formats(Some((640, 480)));
-        assert_eq!(&list[..2], &[(MFVideoFormat_NV12, 640, 480), (MFVideoFormat_YUY2, 640, 480)]);
-        assert_eq!(list.len(), 8, "the usual ones follow");
-        let same = formats(Some((1920, 1080)));
-        assert_eq!(same[0], (MFVideoFormat_NV12, 1920, 1080));
-        assert_eq!(same.len(), 6, "no size twice");
-        assert_eq!(formats(None)[0], (MFVideoFormat_NV12, 1280, 720), "without ClippiBoy: the placeholder's");
-        assert_eq!(formats(Some((2560, 1440)))[0], (MFVideoFormat_NV12, 1280, 720), "too large: left out");
-        assert_eq!(formats(Some((641, 480)))[0], (MFVideoFormat_NV12, 1280, 720), "odd: left out");
+    fn the_camera_is_a_1080p_camera_first() {
+        let list = formats(None);
+        assert_eq!(&list[..2], &[(MFVideoFormat_NV12, 1920, 1080), (MFVideoFormat_YUY2, 1920, 1080)]);
+        assert_eq!(list.len(), 6);
+        let four_three = formats(Some((640, 480)));
+        assert_eq!(four_three[0], (MFVideoFormat_NV12, 1920, 1080));
+        assert_eq!(&four_three[6..], &[(MFVideoFormat_NV12, 640, 480), (MFVideoFormat_YUY2, 640, 480)]);
+        assert_eq!(formats(Some((1280, 720))).len(), 6, "no size twice");
+        assert_eq!(formats(Some((2560, 1440))).len(), 6, "too large: left out");
+        assert_eq!(formats(Some((641, 480))).len(), 6, "odd: left out");
+    }
+
+    /// `cargo test --release -p clippiboy-vcam -- --ignored --nocapture cost`
+    #[test]
+    #[ignore]
+    fn cost_of_fitting() {
+        let src = gradient(1280, 720);
+        for (w, h) in [(1920, 1080), (1280, 720), (640, 360)] {
+            let mut out = vec![0u8; w * h * 3 / 2];
+            let started = Instant::now();
+            for _ in 0..30 {
+                nv12_fitted(&src, 1280, 720, &mut out, w, h);
+            }
+            println!("COST 720p to {w}x{h}: {:.1} ms a frame", started.elapsed().as_secs_f64() * 1000.0 / 30.0);
+        }
     }
 
     #[test]
