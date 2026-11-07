@@ -110,6 +110,15 @@ windows = { version = "0.58", features = [
 ] }
 windows-core = "0.58"
 
+# Debug info is most of what a dev build leaves in `target`: the `windows`
+# crates, Tauri and iroh write huge PDBs, and the folder had grown past 140 GB.
+# Our own code keeps line numbers for backtraces, the dependencies none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 codegen-units = 1
 lto = true
