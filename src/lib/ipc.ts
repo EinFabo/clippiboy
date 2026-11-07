@@ -115,6 +115,10 @@ export const api = {
       result is the path of that second file, which lies beside the clip. */
   exportForDiscord: (id: string, megabytes: number) =>
     invoke<string>("export_for_discord", { id, megabytes }),
+  /** A screenshot under `megabytes` — the PNG if it fits, else a JPEG — as a
+      file on the clipboard. */
+  exportShotForDiscord: (id: string, megabytes: number) =>
+    invoke<string>("export_shot_for_discord", { id, megabytes }),
   status: () => invoke<EngineStatus>("engine_status"),
 
   appVersion: () => invoke<string>("app_version"),

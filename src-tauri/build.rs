@@ -48,6 +48,7 @@ fn main() {
         "close_console",
         "show_clip_in_app",
         "export_for_discord",
+        "export_shot_for_discord",
         "take_screenshot",
         "copy_clip_image",
         "write_screenshot",

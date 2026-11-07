@@ -46,6 +46,8 @@ jiff = "0.2"
 # Screenshots. Small, pure Rust — the picture does not have to take a detour
 # through ffmpeg and a raw file of thirty megabytes.
 png = "0.17"
+# "Copy for Discord" on a screenshot too big as a PNG (`shotfit.rs`). Pure Rust.
+jpeg-encoder = "0.7"
 vcam-protocol = { path = "../vcam/protocol" }
 # Fetching ffmpeg on first start (see `tools.rs`). All four already come in
 # with the updater plugin; the versions and TLS setup follow it, so nothing

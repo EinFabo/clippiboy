@@ -1353,6 +1353,67 @@ pub fn export_for_discord(
     Ok(output.to_string_lossy().to_string())
 }
 
+/// "Copy for Discord" on a screenshot: the picture under `megabytes`, as a file
+/// on the clipboard. The PNG itself when it fits, otherwise a JPEG
+/// (`shotfit.rs`). Like a clip's Discord copy it lands in ClippiBoy's own
+/// folder of copies — a gallery file put on the clipboard could be moved into
+/// the favorites before it is pasted.
+#[tauri::command(async)]
+pub fn export_shot_for_discord(state: State<'_, AppState>, id: String, megabytes: u64) -> Result<String> {
+    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+        .ok_or_else(|| "clip not found".to_string())?;
+    if !clip.screenshot {
+        return Err("Only a screenshot is copied for Discord this way.".into());
+    }
+    let limit = megabytes * 1024 * 1024;
+    let source = std::path::PathBuf::from(&clip.path);
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "screenshot".into());
+    let folder = discord_dir(&discord_root(), &id);
+    let named = |ext: &str| folder.join(format!("{stem} ({megabytes} MB).{ext}"));
+
+    // Under the clip's lock: a save of the marks in progress finishes first,
+    // and its picture is the one that goes.
+    let output = {
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        // Made before and still newer than the picture: no need to encode again.
+        let ready = ["png", "jpg"].into_iter().map(named).find(|path| {
+            std::fs::metadata(path).map(|m| m.len() > 0 && m.len() <= limit).unwrap_or(false)
+                && stems::is_newer(path, &source)
+        });
+        match ready {
+            Some(path) => path,
+            None => {
+                let png_len = std::fs::metadata(&source)
+                    .map_err(|err| format!("could not read the screenshot: {err}"))?
+                    .len();
+                let shot = crate::shot::read_png(&source)?;
+                std::fs::create_dir_all(&folder)
+                    .map_err(|err| format!("Could not make a folder for the Discord copy: {err}"))?;
+                match crate::shotfit::fit(&shot, png_len, limit)? {
+                    crate::shotfit::Fitted::Png => {
+                        let path = named("png");
+                        std::fs::copy(&source, &path)
+                            .map_err(|err| format!("Could not write the Discord copy: {err}"))?;
+                        path
+                    }
+                    crate::shotfit::Fitted::Jpeg { bytes, .. } => {
+                        let path = named("jpg");
+                        std::fs::write(&path, bytes)
+                            .map_err(|err| format!("Could not write the Discord copy: {err}"))?;
+                        path
+                    }
+                }
+            }
+        }
+    };
+    crate::clipboard::copy_files(&[output.clone()])?;
+    Ok(output.to_string_lossy().to_string())
+}
+
 /// Open the clip in whichever player Windows has chosen for it — once its
 /// camera is in: that player would show it without, and hold the file the
 /// camera has to go into.

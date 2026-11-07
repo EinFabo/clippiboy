@@ -17,6 +17,7 @@
     "allow-copy-clip-file",
     "allow-delete-clip",
     "allow-export-for-discord",
+    "allow-export-shot-for-discord",
     "allow-file-clip",
     "allow-list-clips",
     "allow-save-clip",

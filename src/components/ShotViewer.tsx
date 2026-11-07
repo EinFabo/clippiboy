@@ -34,13 +34,16 @@ import {
   type Style,
   type Tool,
 } from "@/components/ShotAnnotate";
-import { useClipMenu } from "@/components/clipMenu";
+import { DISCORD_MB, useClipMenu } from "@/components/clipMenu";
 import { IconTrash } from "@/components/icons";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
 import { EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
 import { sliderOwns, typesText } from "@/lib/viewer";
+import { ShotHistory } from "@/lib/shotHistory";
+import { keyOf, shortcut } from "@/lib/shotKeys";
+import { toast } from "@/lib/toastBus";
 import { useGrants } from "@/lib/useGrants";
 import {
   PictureViewContext,
@@ -179,6 +182,8 @@ export function ShotViewer({
   const [ratio, setRatio] = useState<string>("Free");
   const [sel, setSel] = useState<Rect | null>(null);
   const [busy, setBusy] = useState(false);
+  /** "Copy" or "Copy for Discord" is under way. */
+  const [sharing, setSharing] = useState<"copy" | "discord" | null>(null);
   /** Why the stored edit could not be read — the tools stay off until it is. */
   const [loadError, setLoadError] = useState<string | null>(null);
   const [askingRemoveAll, setAskingRemoveAll] = useState(false);
@@ -264,16 +269,14 @@ export function ShotViewer({
   }, [clip, clips.length, index, close, onDelete, onIndexChange]);
 
   /**
-   * The marks as they stood before each change, newest last — what Undo walks
-   * back through. Empty means: as loaded or last saved.
+   * Undo and redo over the marks (`shotHistory.ts`). Nothing to undo means: as
+   * loaded or last saved.
    *
    * Undo used to take the *last mark of the list* away, whatever had happened.
    * After deleting a mark it deleted a second one; after moving or recolouring
    * one it deleted the newest instead of putting the change back.
    */
-  const history = useRef<Shape[][]>([]);
-  /** The gesture the newest entry belongs to — see `editShapes`. */
-  const lastGesture = useRef<string | null>(null);
+  const history = useRef(new ShotHistory<Shape[]>());
   /**
    * The marks right now, readable outside a render. `editShapes` needs the value
    * it replaces to keep it, and a state updater is no place for that: React runs
@@ -284,8 +287,7 @@ export function ShotViewer({
   /** Marks from outside — loaded, saved, thrown away. Nothing to undo there. */
   const resetShapes = useCallback((next: Shape[]) => {
     current.current = next;
-    history.current = [];
-    lastGesture.current = null;
+    history.current.clear();
     setShapes(next);
   }, []);
 
@@ -300,10 +302,7 @@ export function ShotViewer({
     (next: Shape[] | ((drawn: Shape[]) => Shape[]), gesture?: string) => {
       const before = current.current;
       const after = typeof next === "function" ? next(before) : next;
-      if (gesture === undefined || gesture !== lastGesture.current) {
-        history.current.push(before);
-      }
-      lastGesture.current = gesture ?? null;
+      history.current.record(before, gesture);
       current.current = after;
       setShapes(after);
       setUnsaved(true);
@@ -311,18 +310,22 @@ export function ShotViewer({
     [],
   );
 
-  /** One step back. Back at the start, nothing is unsaved any more. */
-  const undo = useCallback(() => {
-    const previous = history.current.pop();
-    if (!previous) return;
-    lastGesture.current = null;
-    current.current = previous;
-    setShapes(previous);
-    setUnsaved(history.current.length > 0);
+  /** One step back or forward. Back at the start, nothing is unsaved any more. */
+  const walk = useCallback((direction: "undo" | "redo") => {
+    const marks =
+      direction === "undo"
+        ? history.current.undo(current.current)
+        : history.current.redo(current.current);
+    if (marks === null) return;
+    current.current = marks;
+    setShapes(marks);
+    setUnsaved(!history.current.atStart);
     // Or the panel keeps offering the options of a mark that may be gone, and
     // its handles stay lying over the picture.
     setSelected(null);
   }, []);
+  const undo = useCallback(() => walk("undo"), [walk]);
+  const redo = useCallback(() => walk("redo"), [walk]);
 
   const step = useCallback(
     (delta: number) => {
@@ -394,6 +397,18 @@ export function ShotViewer({
   // nothing about where to look in the next.
   useEffect(() => setView(WHOLE), [mode, id, edit]);
 
+  /**
+   * What the keys below reach that is made later in the render — the tool
+   * buttons' conditions, saving, copying. Read through a ref, so the handler
+   * always acts on this render's picture and marks.
+   */
+  const keyActions = useRef<{
+    canDraw: boolean;
+    pick: (tool: Tool) => void;
+    save: () => void;
+    copy: () => void;
+  } | null>(null);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // An open menu took this key.
@@ -419,21 +434,32 @@ export function ShotViewer({
       ) {
         event.preventDefault();
         dropSelected();
-      } else if (
-        mode === "draw" &&
-        (event.ctrlKey || event.metaKey) &&
-        !event.shiftKey &&
-        // With Caps Lock on the key reads "Z".
-        event.key.toLowerCase() === "z"
-      ) {
-        // One step back, whatever it was. Nothing to redo: whoever wants it
-        // again does it again — that is quicker than finding the button.
-        event.preventDefault();
-        undo();
       } else if (mode === "view" && event.key === "ArrowLeft") {
         step(-1);
       } else if (mode === "view" && event.key === "ArrowRight") {
         step(1);
+      } else if (!askingDelete && !askingDiscard) {
+        const action = shortcut(event);
+        const keys = keyActions.current;
+        if (action === null || keys === null) return;
+        if (action === "undo" || action === "redo") {
+          if (mode !== "draw") return;
+          event.preventDefault();
+          if (action === "undo") undo();
+          else redo();
+        } else if (action === "save") {
+          if (mode !== "draw") return;
+          event.preventDefault();
+          keys.save();
+        } else if (action === "copy") {
+          // Selected text — the name, the description — is what Ctrl+C means.
+          if (mode === "crop" || window.getSelection()?.toString()) return;
+          event.preventDefault();
+          keys.copy();
+        } else if (mode !== "crop" && keys.canDraw) {
+          event.preventDefault();
+          keys.pick(action.tool);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -444,7 +470,7 @@ export function ShotViewer({
   // them through `tryLeaveEditing`. Without them Escape would keep asking a
   // closure from an earlier render whether anything is unsaved, and act on its
   // stale answer — which is the very loss this is meant to prevent.
-  }, [askingDelete, askingDiscard, busy, close, edit, mode, selected, step, undo, unsaved]);
+  }, [askingDelete, askingDiscard, busy, close, edit, mode, redo, selected, step, undo, unsaved]);
 
   if (!clip) return null;
 
@@ -642,9 +668,9 @@ export function ShotViewer({
    * The marks travel as layers rendered at the **original's** size: they are
    * kept in its coordinates, so a changed crop leaves them where they were.
    */
-  const write = async (crop: Rect | null, marks: Shape[]) => {
+  const write = async (crop: Rect | null, marks: Shape[]): Promise<boolean> => {
     // Without the stored edit the origin and the edges are guesses.
-    if (inTauri && !edit) return;
+    if (inTauri && !edit) return false;
     const savedId = clip.id;
     setBusy(true);
     try {
@@ -676,17 +702,44 @@ export function ShotViewer({
       const loaded = await api.screenshotEdit(clip.id);
       // Another picture by now: its own load has run, this one's marks are
       // not for it.
-      if (shownId.current !== savedId) return;
+      if (shownId.current !== savedId) return false;
       setEdit(loaded);
       resetShapes(readMarks(loaded));
       setUnsaved(false);
       setSelected(null);
       setSel(null);
       setMode("view");
+      return true;
     } catch {
       // The notice is already in the store.
+      return false;
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * The picture onto the clipboard — as it is, or under Discord's limit as a
+   * file. Marks not saved yet are saved first: what goes out is the file, and a
+   * copy without the marks just drawn would be the wrong picture.
+   */
+  const share = async (how: "copy" | "discord") => {
+    if (!inTauri || busy || sharing !== null || mode === "crop") return;
+    const id = clip.id;
+    setSharing(how);
+    try {
+      if (mode === "draw" && unsaved && !(await write(edit?.crop ?? null, shapes))) return;
+      if (how === "copy") {
+        await api.copyClipImage(id);
+        toast("ok", "Picture copied");
+      } else {
+        await api.exportShotForDiscord(id, DISCORD_MB);
+        toast("ok", "Copied · Ctrl+V in Discord");
+      }
+    } catch (err) {
+      toast("error", String(err));
+    } finally {
+      setSharing(null);
     }
   };
 
@@ -739,6 +792,16 @@ export function ShotViewer({
   const editing = mode !== "view";
   /** The stored edit is in — before that, tools would draw on the wrong ground. */
   const ready = !inTauri || edit !== null;
+
+  keyActions.current = {
+    // The same as the tool buttons' own condition.
+    canDraw: inTauri && !broken && ready,
+    pick: pickTool,
+    save: () => {
+      if (!busy && shapes.length > 0) void write(edit?.crop ?? null, shapes);
+    },
+    copy: () => void share("copy"),
+  };
 
   const dropSelected = () => {
     if (selected === null) return;
@@ -1025,6 +1088,7 @@ export function ShotViewer({
                 {TOOLS.map(([key, label]) => (
                   <PanelButton
                     key={key}
+                    title={`${label} (${keyOf(key)})`}
                     active={mode === "draw" && tool === key}
                     disabled={!inTauri || broken || !ready}
                     onClick={() => pickTool(key)}
@@ -1136,6 +1200,7 @@ export function ShotViewer({
                       size="sm"
                       variant="primary"
                       disabled={busy || shapes.length === 0}
+                      title="Save marks (Ctrl+S)"
                       onClick={() => write(edit?.crop ?? null, shapes)}
                     >
                       {busy ? "Saving …" : "Save marks"}
@@ -1143,10 +1208,20 @@ export function ShotViewer({
                     <Button
                       size="sm"
                       variant="ghost"
-                      disabled={!unsaved}
+                      disabled={!history.current.canUndo}
+                      title="Undo (Ctrl+Z)"
                       onClick={undo}
                     >
                       Undo
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={!history.current.canRedo}
+                      title="Redo (Ctrl+Y)"
+                      onClick={redo}
+                    >
+                      Redo
                     </Button>
                     {askingDiscard ? (
                       <ConfirmDelete
@@ -1299,6 +1374,24 @@ export function ShotViewer({
             onClick={() => inTauri && api.revealClip(clip.id)}
           >
             Show in folder
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!inTauri || broken || busy || sharing !== null || mode === "crop"}
+            title={editing && unsaved ? "Saves the marks, then copies (Ctrl+C)" : "Copy (Ctrl+C)"}
+            onClick={() => void share("copy")}
+          >
+            {sharing === "copy" ? "Copying …" : "Copy"}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!inTauri || broken || busy || sharing !== null || mode === "crop"}
+            title={`Under ${DISCORD_MB} MB, as a file to paste`}
+            onClick={() => void share("discord")}
+          >
+            {sharing === "discord" ? "Copying …" : "Copy for Discord"}
           </Button>
           {askingDelete ? (
             <ConfirmDelete
@@ -1470,10 +1563,12 @@ function PanelButton({
   disabled,
   onClick,
   className,
+  title,
   children,
 }: {
   active: boolean;
   disabled?: boolean;
+  title?: string;
   onClick: () => void;
   className?: string;
   children: React.ReactNode;
@@ -1483,6 +1578,7 @@ function PanelButton({
       type="button"
       disabled={disabled}
       aria-pressed={active}
+      title={title}
       onClick={onClick}
       className={cn(
         "h-8 rounded-inner border text-[13px] font-medium tabular-nums",

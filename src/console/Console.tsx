@@ -791,6 +791,20 @@ export function Console() {
                       >
                         <IconCopy className="h-4 w-4" />
                       </Tool>
+                      {clip.screenshot && (
+                        <Tool
+                          label="Under 10 MB and copy"
+                          busy={busy === `discord-${clip.id}-10`}
+                          onClick={() =>
+                            run(`discord-${clip.id}-10`, async () => {
+                              await api.exportShotForDiscord(clip.id, 10);
+                              say("10 MB · copied");
+                            })
+                          }
+                        >
+                          <span className="text-[11px] font-bold">10</span>
+                        </Tool>
+                      )}
                       {!clip.screenshot &&
                         DISCORD.map((mb) => (
                           <Tool

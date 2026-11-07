@@ -33,6 +33,7 @@ pub mod pipeline;
 pub mod recorder;
 pub mod preview;
 pub mod shot;
+pub mod shotfit;
 pub mod sounds;
 pub mod state;
 pub mod stems;
@@ -1924,6 +1925,7 @@ pub fn run() {
             commands::close_console,
             commands::show_clip_in_app,
             commands::export_for_discord,
+            commands::export_shot_for_discord,
             commands::take_screenshot,
             commands::copy_clip_image,
             commands::write_screenshot,
