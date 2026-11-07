@@ -326,8 +326,14 @@ pub fn list_monitors() -> Vec<CaptureTarget> {
 /// it had (see `convert::pace`), and the ring quietly fills with a still. After
 /// a reboot that still was the lock screen, and every clip saved afterwards was
 /// ninety seconds of it.
-#[cfg(windows)]
 pub fn secure_desktop() -> bool {
+    input_desktop().is_err()
+}
+
+/// The check behind [`secure_desktop`], with the reason when the desktop is
+/// not ours — for the log.
+#[cfg(windows)]
+pub fn input_desktop() -> Result<(), String> {
     use windows::Win32::System::StationsAndDesktops::{
         CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
     };
@@ -335,18 +341,71 @@ pub fn secure_desktop() -> bool {
         match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
             Ok(desktop) => {
                 let _ = CloseDesktop(desktop);
-                false
+                Ok(())
             }
             // Anything but success counts as "not ours": whatever is in front,
             // it is not a desktop this process can record.
-            Err(_) => true,
+            Err(err) => Err(err.to_string()),
         }
     }
 }
 
 #[cfg(not(windows))]
-pub fn secure_desktop() -> bool {
-    false
+pub fn input_desktop() -> Result<(), String> {
+    Ok(())
+}
+
+/// Is this session locked, as Windows itself keeps it? `None` when it will not
+/// say.
+///
+/// The secure desktop alone missed it on at least one machine: after a boot
+/// the lock screen stood for over a minute while `OpenInputDesktop` went on
+/// succeeding, and the capture that had seen it never delivered again. The
+/// session's own flag knows nothing of UAC prompts, so it needs no grace.
+#[cfg(windows)]
+pub fn session_locked() -> Option<bool> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::RemoteDesktop::{
+        WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
+        WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK,
+        WTS_SESSIONSTATE_UNLOCK,
+    };
+    let mut buffer = PWSTR::null();
+    let mut bytes = 0u32;
+    // SAFETY: Windows allocates the buffer and says how big it is; it is read
+    // only as the structure it is documented to be, and freed once.
+    unsafe {
+        WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut bytes,
+        )
+        .ok()?;
+        let flags = if buffer.is_null() || (bytes as usize) < std::mem::size_of::<WTSINFOEXW>() {
+            None
+        } else {
+            let info = &*(buffer.0 as *const WTSINFOEXW);
+            (info.Level == 1).then(|| info.Data.WTSInfoExLevel1.SessionFlags as u32)
+        };
+        WTSFreeMemory(buffer.0 as *mut core::ffi::c_void);
+        match flags? {
+            WTS_SESSIONSTATE_LOCK => Some(true),
+            WTS_SESSIONSTATE_UNLOCK => Some(false),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn session_locked() -> Option<bool> {
+    Some(false)
+}
+
+/// Anything in front that cannot be recorded, by either sign.
+pub fn screen_unrecordable() -> bool {
+    session_locked() == Some(true) || secure_desktop()
 }
 
 // The foreground window is evaluated in `game.rs` — what matters there is not

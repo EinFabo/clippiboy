@@ -378,6 +378,8 @@ pub struct AutoBuffer {
     missing: std::sync::atomic::AtomicU32,
     /// How many checks in a row have seen the secure desktop.
     locked: std::sync::atomic::AtomicU32,
+    /// Windows said at the last check that the session is locked.
+    session_locked: std::sync::atomic::AtomicBool,
     /// Was the buffer stopped because the screen locked? Then it comes back on
     /// unlock — whoever had started it.
     for_lock: std::sync::atomic::AtomicBool,
@@ -397,6 +399,36 @@ pub enum AutoAction {
     Nothing,
     Start,
     Stop,
+    /// Stop and start again: the capture running now cannot be trusted.
+    Restart,
+}
+
+/// What one check knows about the lock screen.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LockSignals {
+    /// Windows reports the session locked (`capture::session_locked`). Sure:
+    /// that is the lock screen.
+    pub session: bool,
+    /// The input desktop is not ours (`capture::secure_desktop`): the lock
+    /// screen, or a UAC prompt, which it cannot tell apart.
+    pub secure_desktop: bool,
+    /// The machine slept since the last check.
+    pub woke: bool,
+}
+
+impl LockSignals {
+    pub fn desktop(secure_desktop: bool) -> Self {
+        Self { secure_desktop, ..Self::default() }
+    }
+
+    pub fn session(session: bool) -> Self {
+        Self { session, ..Self::default() }
+    }
+
+    /// Is anything in front that cannot be recorded?
+    pub fn any(&self) -> bool {
+        self.session || self.secure_desktop
+    }
 }
 
 /// This many checks without a detected game counts as "game ended". A check
@@ -453,10 +485,19 @@ impl AutoBuffer {
     ///
     /// Coming back is deliberately not gated on `suppressed`: the user did not
     /// switch this off, the lock screen did.
-    pub fn poll_lock(&self, secure_desktop: bool, buffer_active: bool) -> AutoAction {
+    ///
+    /// A locked session stops it at once; the secure desktop alone only after
+    /// [`LOCK_POLLS`], since it may be a UAC prompt. Either way a capture that
+    /// has seen the lock screen delivers nothing afterwards, so whatever the
+    /// lock stopped comes back fresh at the unlock — however short the lock
+    /// was. Waking from sleep restarts a running buffer for the same reason:
+    /// the lock may have come and gone between two checks.
+    pub fn poll_lock(&self, signals: LockSignals, buffer_active: bool) -> AutoAction {
         use std::sync::atomic::Ordering::SeqCst;
-        if secure_desktop {
-            if self.locked.fetch_add(1, SeqCst) + 1 < LOCK_POLLS {
+        self.session_locked.store(signals.session, SeqCst);
+        if signals.any() {
+            let seen = self.locked.fetch_add(1, SeqCst) + 1;
+            if !signals.session && seen < LOCK_POLLS {
                 return AutoAction::Nothing;
             }
             if buffer_active {
@@ -467,21 +508,24 @@ impl AutoBuffer {
         }
 
         self.locked.store(0, SeqCst);
-        if !self.for_lock.load(SeqCst) || (!buffer_active && !self.may_try()) {
+        if self.for_lock.load(SeqCst) && (buffer_active || self.may_try()) {
+            self.for_lock.store(false, SeqCst);
+            if !buffer_active {
+                return AutoAction::Start;
+            }
             return AutoAction::Nothing;
         }
-        self.for_lock.store(false, SeqCst);
-        if !buffer_active {
-            AutoAction::Start
-        } else {
-            AutoAction::Nothing
+        if signals.woke && buffer_active {
+            return AutoAction::Restart;
         }
+        AutoAction::Nothing
     }
 
     /// Has the secure desktop been up for the buffer's ten seconds? Also while
     /// no buffer runs: the cam stops behind a lock screen during a recording.
     pub fn screen_locked(&self) -> bool {
-        self.locked.load(std::sync::atomic::Ordering::SeqCst) >= LOCK_POLLS
+        use std::sync::atomic::Ordering::SeqCst;
+        self.session_locked.load(SeqCst) || self.locked.load(SeqCst) >= LOCK_POLLS
     }
 
     /// One round for running without "only in game": the buffer should run as
@@ -2368,11 +2412,50 @@ mod tests {
         assert_eq!(assigned_game(Some("Valorant".into()), None, Some(secs(1)), secs(0)), None);
     }
 
+    /// What Windows says about the session is no guess: a locked session is
+    /// the lock screen, never a UAC prompt, so there is nothing to wait out.
+    #[test]
+    fn a_locked_session_stops_the_buffer_at_once() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_lock(LockSignals::session(true), true), AutoAction::Stop);
+        assert!(auto.screen_locked(), "the cam stops too");
+    }
+
+    /// Mika's case after a wake: Windows Hello unlocked in under ten seconds,
+    /// the secure desktop never stood long enough, and the capture that had
+    /// seen the lock screen delivered nothing for hours.
+    #[test]
+    fn a_short_session_lock_still_brings_a_fresh_buffer() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_lock(LockSignals::session(true), true), AutoAction::Stop);
+        assert_eq!(auto.poll_lock(LockSignals::default(), false), AutoAction::Start);
+        assert!(!auto.screen_locked());
+    }
+
+    /// Asleep, the checks stop; awake, the lock may already be over. A capture
+    /// across a sleep cannot be trusted, so a running buffer starts afresh.
+    #[test]
+    fn waking_up_restarts_a_running_buffer() {
+        let auto = AutoBuffer::default();
+        let woke = LockSignals { woke: true, ..LockSignals::default() };
+        assert_eq!(auto.poll_lock(woke, true), AutoAction::Restart);
+        assert_eq!(auto.poll_lock(woke, false), AutoAction::Nothing, "nothing to restart");
+    }
+
+    /// Waking onto the lock screen: the lock decides, the unlock brings it back.
+    #[test]
+    fn waking_onto_the_lock_screen_waits_for_the_unlock() {
+        let auto = AutoBuffer::default();
+        let woke_locked = LockSignals { session: true, woke: true, ..LockSignals::default() };
+        assert_eq!(auto.poll_lock(woke_locked, true), AutoAction::Stop);
+        assert_eq!(auto.poll_lock(LockSignals::default(), false), AutoAction::Start);
+    }
+
     /// Hold the secure desktop up for a whole lock's worth of checks.
     fn hold_locked(auto: &AutoBuffer, active: bool) -> AutoAction {
         let mut last = AutoAction::Nothing;
         for _ in 0..LOCK_POLLS {
-            last = auto.poll_lock(true, active);
+            last = auto.poll_lock(LockSignals::desktop(true), active);
         }
         last
     }
@@ -2385,12 +2468,12 @@ mod tests {
     fn the_cam_lock_follows_the_buffers_ten_seconds() {
         let auto = AutoBuffer::default();
         for _ in 0..4 {
-            auto.poll_lock(true, false);
+            auto.poll_lock(LockSignals::desktop(true), false);
             assert!(!auto.screen_locked());
         }
-        auto.poll_lock(true, false);
+        auto.poll_lock(LockSignals::desktop(true), false);
         assert!(auto.screen_locked());
-        auto.poll_lock(false, false);
+        auto.poll_lock(LockSignals::desktop(false), false);
         assert!(!auto.screen_locked());
     }
 
@@ -2407,13 +2490,13 @@ mod tests {
     fn a_brief_secure_desktop_leaves_the_buffer_alone() {
         let auto = AutoBuffer::default();
         for _ in 0..LOCK_POLLS - 1 {
-            assert_eq!(auto.poll_lock(true, true), AutoAction::Nothing);
+            assert_eq!(auto.poll_lock(LockSignals::desktop(true), true), AutoAction::Nothing);
         }
         // Prompt answered: the count starts over, so the next one gets the full
         // grace again rather than tipping over on its first check.
-        assert_eq!(auto.poll_lock(false, true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), true), AutoAction::Nothing);
         for _ in 0..LOCK_POLLS - 1 {
-            assert_eq!(auto.poll_lock(true, true), AutoAction::Nothing);
+            assert_eq!(auto.poll_lock(LockSignals::desktop(true), true), AutoAction::Nothing);
         }
     }
 
@@ -2425,7 +2508,7 @@ mod tests {
         auto.manual_stop(); // even a buffer the user had switched off before
         auto.manual_start(); // …and started again by hand
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(false, false), AutoAction::Start);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
     }
 
     /// Only what the lock stopped comes back. A buffer that was off before the
@@ -2434,7 +2517,7 @@ mod tests {
     fn an_unlock_starts_nothing_it_did_not_stop() {
         let auto = AutoBuffer::default();
         assert_eq!(hold_locked(&auto, false), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(false, false), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Nothing);
     }
 
     /// And it comes back exactly once — a second check must not restart a buffer
@@ -2443,8 +2526,8 @@ mod tests {
     fn the_buffer_comes_back_only_once() {
         let auto = AutoBuffer::default();
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(false, false), AutoAction::Start);
-        assert_eq!(auto.poll_lock(false, false), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Nothing);
     }
 
     #[test]
@@ -2488,9 +2571,9 @@ mod tests {
     fn two_locks_in_a_row_each_stand_on_their_own() {
         let auto = AutoBuffer::default();
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(false, false), AutoAction::Start);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(false, false), AutoAction::Start);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
     }
 
     #[test]

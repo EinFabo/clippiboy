@@ -702,7 +702,7 @@ fn start_buffer_if_configured(app: &tauri::AppHandle) {
     // started against the lock screen never recovers on its own — see
     // `capture::secure_desktop`. `apply_auto_buffer` starts it on the next tick
     // after the sign-in.
-    if capture::secure_desktop() {
+    if capture::screen_unrecordable() {
         log::info!("the screen is still locked — the buffer waits for the sign-in");
         return;
     }
@@ -780,7 +780,7 @@ fn watch_monitors(app: &tauri::AppHandle) {
 
     // Behind the lock screen the list is whatever Winlogon's desktop shows;
     // the change is caught against the one from before, once signed in.
-    if capture::secure_desktop() {
+    if capture::screen_unrecordable() {
         return;
     }
     let mut now: Landscape = capture::list_monitors()
@@ -821,7 +821,7 @@ fn watch_screen(app: &tauri::AppHandle) {
 
     // Behind the lock screen nothing can be captured at all, and the buffer
     // automation deals with that on its own.
-    if capture::secure_desktop() {
+    if capture::screen_unrecordable() {
         return;
     }
     let state = app.state::<AppState>();
@@ -893,7 +893,7 @@ fn watch_encoder(app: &tauri::AppHandle) {
     static GAVE_UP: AtomicBool = AtomicBool::new(false);
 
     // Behind the lock screen the buffer automation decides about the pipeline.
-    if capture::secure_desktop() {
+    if capture::screen_unrecordable() {
         return;
     }
     let state = app.state::<AppState>();
@@ -1017,8 +1017,9 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     // buffer that cannot see anything is not worth keeping alive, and one the
     // user started by hand is no exception. Only when the screen is ours does
     // the question of *when* recording is wanted arise at all.
-    let locked = capture::secure_desktop();
-    let action = match state.auto.poll_lock(locked, active) {
+    let signals = lock_signals();
+    let locked = signals.any();
+    let action = match state.auto.poll_lock(signals, active) {
         state::AutoAction::Nothing if locked => return,
         state::AutoAction::Nothing => {
             if !config.buffer.auto_start {
@@ -1047,8 +1048,68 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
             auto_start_buffer(&app);
         }
         state::AutoAction::Stop => stop_buffer_and_notify(&app),
+        state::AutoAction::Restart => {
+            let state = app.state::<AppState>();
+            // A recording running across the sleep keeps its file whole; the
+            // buffer behind it starts over once it has stopped.
+            if state.is_buffering() && !state.is_recording() {
+                log::info!("awake again \u{2014} the capture starts over");
+                state.stop_pipeline();
+                if let Err(err) = state.start_pipeline() {
+                    notify(&app, "error", err.clone());
+                    overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
+                }
+            }
+        }
         state::AutoAction::Nothing => {}
     });
+}
+
+/// One check's worth of [`state::LockSignals`], logged whenever the answer
+/// changes — what the two signs said, and why the desktop was not ours, is the
+/// first thing to read in a log where clips show the lock screen.
+fn lock_signals() -> state::LockSignals {
+    use std::sync::Mutex;
+    use std::time::{Duration, SystemTime};
+    static LAST: Mutex<Option<(Option<bool>, Result<(), String>)>> = Mutex::new(None);
+    static LAST_CHECK: Mutex<Option<SystemTime>> = Mutex::new(None);
+
+    let session = capture::session_locked();
+    let desktop = capture::input_desktop();
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let now = (session, desktop.clone());
+        if last.as_ref() != Some(&now) {
+            log::info!(
+                "lock screen: session {}, input desktop {}",
+                match session {
+                    Some(true) => "locked",
+                    Some(false) => "unlocked",
+                    None => "unknown",
+                },
+                match &desktop {
+                    Ok(()) => "ours".to_string(),
+                    Err(err) => format!("not ours ({err})"),
+                },
+            );
+            *last = Some(now);
+        }
+    }
+    // The checks run every two seconds; a gap much longer than that is the
+    // machine asleep (or stopped in a debugger, which costs a restart).
+    let woke = {
+        let mut last = LAST_CHECK.lock().unwrap_or_else(|e| e.into_inner());
+        let now = SystemTime::now();
+        let gap = last
+            .and_then(|before| now.duration_since(before).ok())
+            .is_some_and(|gap| gap > Duration::from_secs(30));
+        *last = Some(now);
+        gap
+    };
+    if woke {
+        log::info!("the checks paused for over 30 s \u{2014} the machine slept");
+    }
+    state::LockSignals { session: session == Some(true), secure_desktop: desktop.is_err(), woke }
 }
 
 /// Clear away leftovers nobody needs any more.

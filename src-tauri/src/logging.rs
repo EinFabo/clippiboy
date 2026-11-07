@@ -120,7 +120,7 @@ fn attach(how: Open) {
     match open_for(&path, how) {
         Some(file) => {
             *FILE.lock() = Some(file);
-            log::info!("log file: {}", path.display());
+            log::info!("ClippiBoy {} · log file: {}", env!("CARGO_PKG_VERSION"), path.display());
         }
         None => log::warn!("no log file at {} — stderr only", path.display()),
     }
