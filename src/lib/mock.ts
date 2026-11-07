@@ -147,6 +147,8 @@ export const mockConfig: AppConfig = {
   sounds: {
     enabled: true,
     volume: 0.5,
+    device: null,
+    deviceName: null,
     clipSaved: { on: true, volume: 1 },
     screenshot: { on: true, volume: 1 },
     recordingStarted: { on: true, volume: 1 },

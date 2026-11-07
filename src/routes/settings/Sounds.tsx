@@ -1,9 +1,10 @@
+import { useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { api, inTauri } from "@/lib/ipc";
 import type { SoundConfig, SoundKind, SoundSetting } from "@/lib/types";
 import { Card, SectionTitle } from "@/components/ui/Card";
-import { Slider, Toggle } from "@/components/ui/Controls";
+import { Select, Slider, Toggle } from "@/components/ui/Controls";
 import { Row } from "./shared";
 
 /** In the order they come up while playing. */
@@ -21,10 +22,33 @@ const SOUNDS: Array<[SoundKind, string, string]> = [
 
 const percent = (value: number) => `${Math.round(value * 100)} %`;
 
+/** The select's value for Windows' default device. */
+const DEFAULT = "";
+
 export function SoundsTab() {
-  const { sounds, patchConfig } = useEngine(
-    useShallow((s) => ({ sounds: s.config.sounds, patchConfig: s.patchConfig })),
+  const { sounds, patchConfig, devices, refreshSources } = useEngine(
+    useShallow((s) => ({
+      sounds: s.config.sounds,
+      patchConfig: s.patchConfig,
+      devices: s.devices,
+      refreshSources: s.refreshSources,
+    })),
   );
+  // A headset plugged in since start shows up without a restart.
+  useEffect(() => {
+    void refreshSources();
+  }, [refreshSources]);
+  const outputs = devices.filter((d) => d.kind === "output");
+  const deviceOptions = [
+    { value: DEFAULT, label: "Windows default" },
+    ...outputs.map((d) => ({ value: d.id, label: d.name })),
+  ];
+  if (sounds.device !== null && !outputs.some((d) => d.id === sounds.device)) {
+    deviceOptions.push({
+      value: sounds.device,
+      label: `${sounds.deviceName ?? "Unknown device"} (not connected)`,
+    });
+  }
   const patch = (change: Partial<SoundConfig>) => patchConfig({ sounds: { ...sounds, ...change } });
   const patchSound = (kind: SoundKind, change: Partial<SoundSetting>) =>
     patch({ [kind]: { ...sounds[kind], ...change } });
@@ -40,6 +64,24 @@ export function SoundsTab() {
         <Card className="divide-y divide-line">
           <Row label="Play sounds" hint="A short tone for each notification below, also while the window is in the tray">
             <Toggle checked={sounds.enabled} onChange={(enabled) => patch({ enabled })} />
+          </Row>
+          <Row label="Output device">
+            <Select
+              label="Output device"
+              value={sounds.device ?? DEFAULT}
+              options={deviceOptions}
+              disabled={!sounds.enabled}
+              onChange={(id) =>
+                patch(
+                  id === DEFAULT
+                    ? { device: null, deviceName: null }
+                    : {
+                        device: id,
+                        deviceName: outputs.find((d) => d.id === id)?.name ?? sounds.deviceName,
+                      },
+                )
+              }
+            />
           </Row>
           <div className="flex items-center gap-6 p-5">
             <p className="w-40 shrink-0 text-sm font-medium">Volume</p>

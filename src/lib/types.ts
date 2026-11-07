@@ -350,6 +350,10 @@ export interface SoundSetting {
 export interface SoundConfig {
   enabled: boolean;
   volume: number;
+  /** Output endpoint id the sounds play on; `null` is Windows' default. */
+  device: string | null;
+  /** Its name, shown while it is unplugged. */
+  deviceName: string | null;
   clipSaved: SoundSetting;
   screenshot: SoundSetting;
   recordingStarted: SoundSetting;
@@ -361,7 +365,7 @@ export interface SoundConfig {
   error: SoundSetting;
 }
 
-export type SoundKind = Exclude<keyof SoundConfig, "enabled" | "volume">;
+export type SoundKind = Exclude<keyof SoundConfig, "enabled" | "volume" | "device" | "deviceName">;
 
 /** What friends see of you, and what you hear about them. */
 export interface FriendsConfig {

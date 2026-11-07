@@ -9,6 +9,11 @@
 //!
 //! The levels are applied to the samples before playing: `PlaySound` has no
 //! volume of its own.
+//!
+//! `PlaySound` only knows Windows' default device. A device of their own
+//! (`SoundConfig::device`) keeps the sounds out of a buffer recording the
+//! default one, so that one goes through WASAPI: a short shared-mode stream on
+//! a thread of its own. A device that is gone falls back to the default.
 
 use tauri::Manager;
 
@@ -54,7 +59,7 @@ pub fn level(config: &SoundConfig, kind: SoundKind) -> f32 {
 /// Play the sound for `kind`, as the settings say.
 pub fn play(app: &tauri::AppHandle, kind: SoundKind) {
     let config = app.state::<AppState>().config_snapshot().sounds;
-    play_at(kind, level(&config, kind));
+    play_at(kind, level(&config, kind), config.device);
 }
 
 /// The WAV for `kind` with every sample scaled by `gain`.
@@ -68,29 +73,157 @@ fn scaled(kind: SoundKind, gain: f32) -> Vec<u8> {
     out
 }
 
-/// Play `kind` at `gain` (0 to 1), whatever the settings say — the settings'
-/// own "listen" button comes through here with the level being set.
-pub fn play_at(kind: SoundKind, gain: f32) {
+/// Play `kind` at `gain` (0 to 1) on `device` (`None`: Windows' default),
+/// whatever the settings say — the settings' own "listen" button comes
+/// through here with the level being set.
+pub fn play_at(kind: SoundKind, gain: f32, device: Option<String>) {
     if gain <= 0.0 {
         return;
     }
     let data = scaled(kind, gain.min(1.0));
-    imp::play(data);
+    imp::play(data, device);
+}
+
+/// The format in a plain 44-byte WAV header: (channels, samples a second,
+/// bits a sample).
+fn header_format(wav: &[u8]) -> (u16, u32, u16) {
+    let u16_at = |at: usize| u16::from_le_bytes([wav[at], wav[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes([wav[at], wav[at + 1], wav[at + 2], wav[at + 3]]);
+    (u16_at(22), u32_at(24), u16_at(34))
 }
 
 #[cfg(windows)]
 mod imp {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
     use parking_lot::Mutex;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HMODULE;
-    use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+    use windows::Win32::Media::Audio::{
+        IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator, PlaySoundW,
+        AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, SND_ASYNC, SND_FLAGS, SND_MEMORY, SND_NODEFAULT,
+        WAVEFORMATEX, WAVE_FORMAT_PCM,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+
+    use super::{header_format, HEADER};
 
     /// The sound playing now. With `SND_ASYNC` Windows reads from this memory
     /// while it plays, so it has to outlive the call — until the next sound
     /// has taken over, which stops this one first.
     static PLAYING: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
-    pub fn play(data: Vec<u8>) {
+    /// Counts the sounds started. A stream on its own device stops as soon as a
+    /// newer sound has started, the same way `PlaySound` cuts the last one off.
+    static LATEST: AtomicU64 = AtomicU64::new(0);
+
+    pub fn play(data: Vec<u8>, device: Option<String>) {
+        let this = LATEST.fetch_add(1, Ordering::SeqCst) + 1;
+        match device {
+            None => play_default(data),
+            Some(id) => {
+                // A default-device sound still ringing gives way, too.
+                stop_default();
+                let spawned = std::thread::Builder::new()
+                    .name("sound".into())
+                    .spawn(move || {
+                        if let Err(err) = play_on(&id, &data, this) {
+                            log::warn!("sound on its own device failed ({err}), playing on the default one");
+                            if LATEST.load(Ordering::SeqCst) == this {
+                                play_default(data);
+                            }
+                        }
+                    });
+                if let Err(err) = spawned {
+                    log::warn!("no thread for a sound: {err}");
+                }
+            }
+        }
+    }
+
+    fn stop_default() {
+        let mut playing = PLAYING.lock();
+        // SAFETY: a null sound only stops what is playing.
+        unsafe {
+            let _ = PlaySoundW(PCWSTR::null(), HMODULE::default(), SND_FLAGS(0));
+        }
+        *playing = None;
+    }
+
+    /// One shared-mode stream on `id`, filled as it drains, stopped early when a
+    /// newer sound starts. WASAPI converts the WAV's rate and channels to the
+    /// device's own mix format (`AUTOCONVERTPCM`).
+    fn play_on(id: &str, data: &[u8], this: u64) -> windows::core::Result<()> {
+        let (channels, rate, bits) = header_format(data);
+        let block = channels * bits / 8;
+        let format = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_PCM as u16,
+            nChannels: channels,
+            nSamplesPerSec: rate,
+            nAvgBytesPerSec: rate * block as u32,
+            nBlockAlign: block,
+            wBitsPerSample: bits,
+            cbSize: 0,
+        };
+        let pcm = &data[HEADER..];
+        let total = (pcm.len() / block as usize) as u32;
+        let superseded = || LATEST.load(Ordering::SeqCst) != this;
+
+        // SAFETY: plain COM calls on objects owned by this thread; every buffer
+        // WASAPI hands out is written within its length before being released.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+            let device = enumerator.GetDevice(PCWSTR(wide.as_ptr()))?;
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                // 200 ms in 100-ns units.
+                2_000_000,
+                0,
+                &format,
+                None,
+            )?;
+            let size = client.GetBufferSize()?;
+            let render: IAudioRenderClient = client.GetService()?;
+
+            let mut written = 0u32;
+            let mut started = false;
+            while written < total {
+                if superseded() {
+                    let _ = client.Stop();
+                    return Ok(());
+                }
+                let free = size - client.GetCurrentPadding()?;
+                let frames = free.min(total - written);
+                if frames > 0 {
+                    let out = render.GetBuffer(frames)?;
+                    let from = written as usize * block as usize;
+                    let bytes = frames as usize * block as usize;
+                    std::ptr::copy_nonoverlapping(pcm[from..].as_ptr(), out, bytes);
+                    render.ReleaseBuffer(frames, 0)?;
+                    written += frames;
+                }
+                if !started {
+                    client.Start()?;
+                    started = true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Let the last of it play out before the stream goes.
+            while client.GetCurrentPadding()? > 0 && !superseded() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = client.Stop();
+        }
+        Ok(())
+    }
+
+    fn play_default(data: Vec<u8>) {
         let mut playing = PLAYING.lock();
         // SAFETY: `data` is a complete WAV image and stays alive in `PLAYING`
         // until a later call has started a new sound in its place.
@@ -110,7 +243,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn play(_data: Vec<u8>) {}
+    pub fn play(_data: Vec<u8>, _device: Option<String>) {}
 }
 
 #[cfg(test)]
@@ -140,6 +273,9 @@ mod tests {
             assert_eq!(u16::from_le_bytes([data[34], data[35]]), 16, "{kind:?}: not 16 bit");
             let length = u32::from_le_bytes([data[40], data[41], data[42], data[43]]) as usize;
             assert_eq!(length, data.len() - HEADER, "{kind:?}");
+            let (channels, rate, bits) = header_format(data);
+            assert_eq!((channels, bits), (2, 16), "{kind:?}");
+            assert!(rate >= 8_000, "{kind:?}: rate {rate}");
         }
     }
 

@@ -745,6 +745,12 @@ impl Default for SoundSetting {
 pub struct SoundConfig {
     pub enabled: bool,
     pub volume: f32,
+    /// The output device the sounds play on, as its endpoint id; `None` is
+    /// Windows' default. One apart from what the buffer records keeps them out
+    /// of the clips — a device source records everything played on it.
+    pub device: Option<String>,
+    /// That device's name, to show it while it is unplugged.
+    pub device_name: Option<String>,
     pub clip_saved: SoundSetting,
     pub screenshot: SoundSetting,
     pub recording_started: SoundSetting,
@@ -761,6 +767,8 @@ impl Default for SoundConfig {
         Self {
             enabled: true,
             volume: 0.5,
+            device: None,
+            device_name: None,
             clip_saved: SoundSetting::default(),
             screenshot: SoundSetting::default(),
             recording_started: SoundSetting::default(),

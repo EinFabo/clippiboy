@@ -66,8 +66,9 @@ pub fn ui_error(window: tauri::Window, message: String) {
 /// The settings' "listen" button: the sound at the level being set, whether or
 /// not it is switched on.
 #[tauri::command]
-pub fn preview_sound(kind: crate::model::SoundKind, volume: f32) {
-    crate::sounds::play_at(kind, volume);
+pub fn preview_sound(state: State<'_, AppState>, kind: crate::model::SoundKind, volume: f32) {
+    // On the device the sounds are set to — listening is how to check it.
+    crate::sounds::play_at(kind, volume, state.config_snapshot().sounds.device);
 }
 
 #[tauri::command]
