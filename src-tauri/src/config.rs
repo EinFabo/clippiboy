@@ -71,7 +71,7 @@ pub fn default_config() -> AppConfig {
         watermark: true,
         setup_done: false,
         usage_stats: true,
-        usage_stats_noticed: false,
+        usage_stats_asked: false,
         control: ControlConfig::default(),
         accent_color: None,
         colors_unlocked: false,
@@ -422,7 +422,7 @@ pub(crate) fn write_synced(path: &Path, text: &str) -> io::Result<()> {
 /// true. A settings page still holding the config it loaded at start sends the
 /// old false with its next change, and would bring the notice back.
 pub fn keep_once_flags(next: &mut AppConfig, previous: &AppConfig) {
-    next.usage_stats_noticed |= previous.usage_stats_noticed;
+    next.usage_stats_asked |= previous.usage_stats_asked;
     next.tray_hint_shown |= previous.tray_hint_shown;
 }
 
@@ -691,18 +691,18 @@ mod tests {
         // The app set both flags itself; the page still holds the config it
         // loaded at start and sends all of it with the next change.
         let mut previous = default_config();
-        previous.usage_stats_noticed = true;
+        previous.usage_stats_asked = true;
         previous.tray_hint_shown = true;
         let mut next = default_config();
         keep_once_flags(&mut next, &previous);
-        assert!(next.usage_stats_noticed);
+        assert!(next.usage_stats_asked);
         assert!(next.tray_hint_shown);
 
         // And a page that knows better still gets its way going forward.
         let mut next = default_config();
-        next.usage_stats_noticed = true;
+        next.usage_stats_asked = true;
         keep_once_flags(&mut next, &default_config());
-        assert!(next.usage_stats_noticed);
+        assert!(next.usage_stats_asked);
     }
 
     fn source(id: &str, kind: SourceKind, enabled: bool) -> AudioSource {

@@ -123,7 +123,7 @@ export const mockConfig: AppConfig = {
   watermark: true,
   setupDone: true,
   usageStats: true,
-  usageStatsNoticed: true,
+  usageStatsAsked: true,
   control: { enabled: true, port: 47653, token: "mock-token" },
   accentColor: null,
   colorsUnlocked: false,

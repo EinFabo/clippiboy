@@ -70,7 +70,7 @@ export default function App() {
           <div className="mx-auto w-full max-w-[1180px] px-8">
             <FfmpegNotice />
             <UpdateNotice />
-            <UsageNotice onNavigate={setRoute} />
+            <UsageNotice />
           </div>
           {/* Keyed on the route so the rise plays again on every change — the
               same trick the overlay uses to replay its card animation. The

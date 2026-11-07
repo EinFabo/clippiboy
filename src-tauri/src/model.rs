@@ -679,14 +679,16 @@ pub struct AppConfig {
     /// config from before it existed belongs to someone already set up.
     #[serde(default = "yes")]
     pub setup_done: bool,
-    /// The anonymous daily usage ping (`telemetry.rs`). On by default, also for
-    /// configs from before it existed — those get told once, see below.
+    /// The anonymous daily usage ping (`telemetry.rs`). Only a wish until
+    /// [`Self::usage_stats_asked`]: nothing goes out before someone said yes.
     #[serde(default = "yes")]
     pub usage_stats: bool,
-    /// Whether the switch above has been shown: in the setup, or once as a
-    /// notice after the update that brought it. No ping goes out before.
+    /// Whether someone has really chosen: ticked the switch in the setup or in
+    /// Behaviour, or answered the notice ("Allow" / "No thanks"). A notice that
+    /// only went by is no consent (GDPR, § 25 TDDDG), so the old
+    /// `usage_stats_noticed` of 0.8.x is not read — everyone is asked once anew.
     #[serde(default)]
-    pub usage_stats_noticed: bool,
+    pub usage_stats_asked: bool,
     /// The local port for the Stream Deck plugin — see [`ControlConfig`].
     #[serde(default)]
     pub control: ControlConfig,

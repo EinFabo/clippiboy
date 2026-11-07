@@ -5,7 +5,8 @@
 //! Counts live in memory and go to `usage.json` at most once a minute, so a
 //! crash costs a minute at most. A ping that does not get through leaves them
 //! where they are for the next try. Switching it off deletes the file; on again
-//! starts with a new id.
+//! starts with a new id. Until someone has said yes (`usage_stats_asked`)
+//! nothing is counted, kept or sent — the switch alone is only the default.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -164,8 +165,10 @@ impl Usage {
     }
 }
 
-fn due(file: &UsageFile, enabled: bool, noticed: bool, now: u64) -> bool {
-    enabled && noticed && now.saturating_sub(file.last_sent) >= EVERY_SECS
+/// `asked`: someone has said yes (or no) — before that, `enabled` is only the
+/// default and nothing goes out.
+fn due(file: &UsageFile, enabled: bool, asked: bool, now: u64) -> bool {
+    enabled && asked && now.saturating_sub(file.last_sent) >= EVERY_SECS
 }
 
 /// `ClippiBoy_0.8.3_x64-setup.tiktok1.exe` → `tiktok1`. Copes with Windows'
@@ -211,9 +214,14 @@ pub fn flush() {
     USAGE.lock().flush();
 }
 
+/// On only once someone said yes: the switch's default alone counts nothing.
+fn consented(config: &crate::model::AppConfig) -> bool {
+    config.usage_stats && config.usage_stats_asked
+}
+
 /// Called with every new config; switching off forgets everything at once.
 pub fn on_config(config: &crate::model::AppConfig) {
-    USAGE.lock().set_enabled(config.usage_stats);
+    USAGE.lock().set_enabled(consented(config));
 }
 
 fn read_source(dir: &Path) -> Option<String> {
@@ -237,14 +245,14 @@ fn client() -> &'static reqwest::Client {
 /// One ping if one is due. Deliberately without the friends sign-in: nothing
 /// ties it to an account.
 fn send_if_due(app: &tauri::AppHandle) {
-    let (enabled, noticed) = {
+    let (enabled, asked) = {
         let config = app.state::<crate::state::AppState>();
         let config = config.config.lock();
-        (config.usage_stats, config.usage_stats_noticed)
+        (config.usage_stats, config.usage_stats_asked)
     };
     let (id, counts, heard, dir) = {
         let mut usage = USAGE.lock();
-        if !due(&usage.file, enabled, noticed, now()) {
+        if !due(&usage.file, enabled, asked, now()) {
             return;
         }
         let (id, counts) = usage.snapshot();
@@ -286,7 +294,7 @@ fn send_if_due(app: &tauri::AppHandle) {
 /// Load the counts and keep them: flushed every minute, a ping looked at two
 /// minutes after start (not to compete with it) and then every hour.
 pub fn start(app: &tauri::AppHandle) {
-    let enabled = app.state::<crate::state::AppState>().config.lock().usage_stats;
+    let enabled = consented(&app.state::<crate::state::AppState>().config.lock());
     match app.path().app_local_data_dir() {
         Ok(dir) => USAGE.lock().open(&dir, enabled),
         Err(err) => {
@@ -415,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_goes_out_before_the_notice() {
+    fn nothing_goes_out_before_someone_said_yes() {
         let hour = 3600;
         let file = UsageFile { last_sent: 100 * hour, ..Default::default() };
         assert!(!due(&file, true, false, 200 * hour));

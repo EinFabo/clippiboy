@@ -46,8 +46,8 @@ export function BehaviourTab() {
         </Row>
         <Row label="Send anonymous usage stats" hint={USAGE_HINT}>
           <Toggle
-            checked={config.usageStats}
-            onChange={(usageStats) => patchConfig({ usageStats, usageStatsNoticed: true })}
+            checked={config.usageStats && config.usageStatsAsked}
+            onChange={(usageStats) => patchConfig({ usageStats, usageStatsAsked: true })}
           />
         </Row>
       </Card>

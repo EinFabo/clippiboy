@@ -227,10 +227,10 @@ export interface AppConfig {
   watermark: boolean;
   /** The setup on first start was gone through or skipped. */
   setupDone: boolean;
-  /** The anonymous daily usage ping. */
+  /** The anonymous daily usage ping — only a default until `usageStatsAsked`. */
   usageStats: boolean;
-  /** Its switch has been shown, in the setup or once as a notice. */
-  usageStatsNoticed: boolean;
+  /** Someone really chose: ticked the switch or answered the notice. */
+  usageStatsAsked: boolean;
   control: ControlConfig;
   /** An accent of one's own as `#rrggbb`; `null` is the violet. */
   accentColor: string | null;

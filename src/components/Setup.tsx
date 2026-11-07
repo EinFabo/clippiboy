@@ -85,7 +85,10 @@ export function Setup() {
   const [busy, setBusy] = useState(false);
   /** The clip length as it was on opening, to tell "left alone" from "changed". */
   const [keptLength, setKeptLength] = useState("");
-  const [usageStats, setUsageStats] = useState(true);
+  /** Starts off: a switch already on is no consent. */
+  const [usageStats, setUsageStats] = useState(false);
+  /** The answer to "Where did you hear…", sent only with a yes at the end. */
+  const [heardKey, setHeardKey] = useState<string | null>(null);
   /**
    * Only on the very first setup, and only when the download link did not
    * already say where someone came from.
@@ -110,7 +113,8 @@ export function Setup() {
     setKeptLength(current);
     setAutoStart(config.setupDone ? config.buffer.autoStart : true);
     setWithWindows(config.autoStartWithWindows);
-    setUsageStats(config.usageStats);
+    setUsageStats(config.usageStats && config.usageStatsAsked);
+    setHeardKey(null);
     setAskHeard(false);
     if (!config.setupDone && inTauri) {
       void api
@@ -134,13 +138,13 @@ export function Setup() {
   const last = step === steps.length - 1;
 
   const heard = (key: string) => {
-    if (inTauri) void api.usageSetHeard(key).catch(() => {});
+    setHeardKey(key);
     setStep(step + 1);
   };
 
   const skip = async () => {
     setSetupOpen(false);
-    // The switch was on the last step, unseen — so the notice still comes.
+    // The switch was on the last step, unseen — so the notice still asks.
     if (!config.setupDone) await patchConfig({ setupDone: true });
   };
 
@@ -165,8 +169,12 @@ export function Setup() {
         buffer,
         autoStartWithWindows: withWindows,
         usageStats,
-        usageStatsNoticed: true,
+        usageStatsAsked: true,
       });
+      // Kept only now that someone said yes — the core counted nothing before.
+      if (usageStats && heardKey !== null && inTauri) {
+        void api.usageSetHeard(heardKey).catch(() => {});
+      }
       if (!useEngine.getState().bufferActive) await toggleBuffer();
       setSetupOpen(false);
     } finally {
