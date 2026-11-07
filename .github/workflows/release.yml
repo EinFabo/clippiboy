@@ -1,8 +1,15 @@
 # Builds the installer and publishes it as a GitHub release.
 #
 # Triggered by a tag like `v0.2.0`. The tag has to match the `version` in
-# `src-tauri/tauri.conf.json` — that is what the app reads to tell whether an
-# update is newer than itself.
+# `src-tauri/tauri.conf.json` (checked below) — that is what the app reads to
+# tell whether an update is newer than itself.
+#
+# Started by hand it only builds: the installer comes out as a workflow
+# artifact, and no tag, release or `latest.json` is made — a release from a
+# branch would have been offered to every installation as an update.
+#
+# Every action is pinned to a commit, not a tag that can be moved: they run
+# next to the updater's signing key.
 #
 # One-time setup (repository → Settings → Secrets → Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of ~/.clippiboy/updater.key
@@ -12,7 +19,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # For a trial run without a tag.
+  # A trial build, published nowhere.
   workflow_dispatch:
 
 jobs:
@@ -23,17 +30,37 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The job's write token stays out of .git/config, out of reach of
+          # every later step; the steps that need it get it by name.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - name: The tag matches the version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $want = $env:TAG -replace '^v', ''
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $npm = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $cargo = ((Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value)
+          if ($conf -ne $want -or $npm -ne $want -or $cargo -ne $want) {
+            throw "tag says $want; tauri.conf.json $conf, package.json $npm, Cargo.toml $cargo"
+          }
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       # The Rust build is the long part; without a cache every run takes ~15 min.
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             src-tauri
@@ -61,13 +88,14 @@ jobs:
         shell: pwsh
         run: ./build.ps1
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
+          # Empty unless on a tag: the action then builds and releases nothing.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ClippiBoy ${{ github.ref_name }}
           releaseBody: |
             Installer below under *Assets*. Existing installations announce it themselves.
@@ -82,8 +110,7 @@ jobs:
           args: --config src-tauri/tauri.release.conf.json
 
       # The action above created the release; this hangs the plugin next to the
-      # installer. Only on a real tag — a `workflow_dispatch` trial run has no
-      # release to attach anything to.
+      # installer. Only on a real tag — a trial build made no release.
       - name: Attach the Stream Deck plugin
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -92,3 +119,14 @@ jobs:
           gh release upload ${{ github.ref_name }}
           streamdeck/dist/com.einfabo.clippiboy.streamDeckPlugin
           --clobber
+
+      # A trial build keeps what it made here instead, for a week.
+      - name: Keep the trial build
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: clippiboy-trial-${{ github.sha }}
+          retention-days: 7
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            streamdeck/dist/com.einfabo.clippiboy.streamDeckPlugin
