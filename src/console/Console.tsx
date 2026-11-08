@@ -972,13 +972,16 @@ export function Console() {
       }}
       className="fixed inset-0 select-none overflow-hidden text-ink"
     >
-      <CamTile opened={opened} closing={closing} inCapture={inCapture} />
       {/* Der Schein aus den unteren Ecken. Steht mit Absicht vor und außerhalb
           von `.cb-ui`: dahinter, weil er hinter allem Bedienbaren liegen soll,
           und außerhalb, weil `.cb-ui` die Größeneinstellung als `zoom` trägt —
           darin gerechnet wüchse der Verlauf bei Größe 1,6 aus dem Bild heraus,
           statt in den Ecken des Bildschirms zu sitzen, die er meint. */}
       {glow && <div className="cb-glow" data-leaving={closing} />}
+      {/* The cam above the glow, which would tint it, and below everything
+          that follows — the player, the dock and the panels cover it. No
+          z-index on any of them: the order here is the stacking order. */}
+      <CamTile opened={opened} closing={closing} inCapture={inCapture} />
       {/* Clips von Freunden, oben und außerhalb von `.cb-ui`: mit dem Dock hat
           die Frage nichts zu tun, und sie soll nicht mitzoomen. */}
       <Offers />
@@ -1660,9 +1663,14 @@ function CamTile({ opened, closing, inCapture }: { opened: number; closing: bool
   const box = camBox(cam.layout, window.innerWidth, window.innerHeight);
   const radius = cam.layout.shape === "circle" ? "9999px" : cam.layout.shape === "rounded" ? "12%" : "0";
   return (
-    <div className="cb-cam-tile" style={{ left: box.left, top: box.top, width: box.width, height: box.height }}>
+    // The frame takes the cam's own shape: a rounded square drawn around a
+    // circle or a square cam showed a box the clip does not have.
+    <div
+      className="cb-cam-tile"
+      style={{ left: box.left, top: box.top, width: box.width, height: box.height, borderRadius: radius }}
+    >
       {inCapture ? (
-        <p className="cb-cam-hint">The cam preview is hidden while the console shows in recordings.</p>
+        <p className="cb-cam-hint" style={{ borderRadius: radius }}>The cam preview is hidden while the console shows in recordings.</p>
       ) : (
         <canvas
           ref={canvas}

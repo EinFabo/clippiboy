@@ -1244,11 +1244,11 @@ body,
 }
 
 /* The facecam's tile: where the cam will sit in a clip saved now. No
-   backdrop-filter — the console runs without GPU. */
+   backdrop-filter — the console runs without GPU. No z-index either: it sits
+   behind the player and the dock by its place in the page. Its radius comes
+   from the cam's shape (`CamTile`). */
 .cb-cam-tile {
   position: absolute;
-  z-index: 1;
-  border-radius: 12px;
   box-shadow: 0 0 0 2px rgb(255 255 255 / 0.18);
 }
 .cb-cam-hint {
@@ -1259,7 +1259,6 @@ body,
   padding: 12px;
   text-align: center;
   font-size: 12px;
-  border-radius: 12px;
   background: rgb(10 10 14 / 0.86);
   color: rgb(255 255 255 / 0.75);
 }
