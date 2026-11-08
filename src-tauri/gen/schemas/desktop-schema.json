@@ -465,6 +465,12 @@
           "markdownDescription": "Enables the discard_clip_original command without any pre-configured scope."
         },
         {
+          "description": "Enables the empty_trash command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-empty-trash",
+          "markdownDescription": "Enables the empty_trash command without any pre-configured scope."
+        },
+        {
           "description": "Enables the engine_status command without any pre-configured scope.",
           "type": "string",
           "const": "allow-engine-status",
@@ -645,6 +651,12 @@
           "markdownDescription": "Enables the list_encoders command without any pre-configured scope."
         },
         {
+          "description": "Enables the list_trash command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-trash",
+          "markdownDescription": "Enables the list_trash command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_camera_privacy command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-camera-privacy",
@@ -669,6 +681,12 @@
           "markdownDescription": "Enables the preview_sound command without any pre-configured scope."
         },
         {
+          "description": "Enables the purge_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-purge-clip",
+          "markdownDescription": "Enables the purge_clip command without any pre-configured scope."
+        },
+        {
           "description": "Enables the regenerate_control_token command without any pre-configured scope.",
           "type": "string",
           "const": "allow-regenerate-control-token",
@@ -685,6 +703,12 @@
           "type": "string",
           "const": "allow-remove-virtual-camera",
           "markdownDescription": "Enables the remove_virtual_camera command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the restore_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-restore-clip",
+          "markdownDescription": "Enables the restore_clip command without any pre-configured scope."
         },
         {
           "description": "Enables the restore_clip_original command without any pre-configured scope.",
@@ -1035,6 +1059,12 @@
           "markdownDescription": "Denies the discard_clip_original command without any pre-configured scope."
         },
         {
+          "description": "Denies the empty_trash command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-empty-trash",
+          "markdownDescription": "Denies the empty_trash command without any pre-configured scope."
+        },
+        {
           "description": "Denies the engine_status command without any pre-configured scope.",
           "type": "string",
           "const": "deny-engine-status",
@@ -1215,6 +1245,12 @@
           "markdownDescription": "Denies the list_encoders command without any pre-configured scope."
         },
         {
+          "description": "Denies the list_trash command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-trash",
+          "markdownDescription": "Denies the list_trash command without any pre-configured scope."
+        },
+        {
           "description": "Denies the open_camera_privacy command without any pre-configured scope.",
           "type": "string",
           "const": "deny-open-camera-privacy",
@@ -1239,6 +1275,12 @@
           "markdownDescription": "Denies the preview_sound command without any pre-configured scope."
         },
         {
+          "description": "Denies the purge_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-purge-clip",
+          "markdownDescription": "Denies the purge_clip command without any pre-configured scope."
+        },
+        {
           "description": "Denies the regenerate_control_token command without any pre-configured scope.",
           "type": "string",
           "const": "deny-regenerate-control-token",
@@ -1255,6 +1297,12 @@
           "type": "string",
           "const": "deny-remove-virtual-camera",
           "markdownDescription": "Denies the remove_virtual_camera command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the restore_clip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-restore-clip",
+          "markdownDescription": "Denies the restore_clip command without any pre-configured scope."
         },
         {
           "description": "Denies the restore_clip_original command without any pre-configured scope.",

@@ -7,7 +7,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::config;
-use crate::model::{Clip, ClipEdit, ClipOriginal};
+use crate::model::{Clip, ClipEdit, ClipOriginal, Trashed};
 
 pub struct Library {
     conn: Connection,
@@ -78,6 +78,14 @@ impl Library {
                  clip_id TEXT NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
                  tag     TEXT NOT NULL,
                  PRIMARY KEY (clip_id, tag)
+             );
+             -- Recently deleted (`trash.rs`): the whole clip as JSON, tags
+             -- included, so it is out of every query on `clips`.
+             CREATE TABLE IF NOT EXISTS trash (
+                 id         TEXT PRIMARY KEY,
+                 clip       TEXT NOT NULL,
+                 deleted_at INTEGER NOT NULL,
+                 from_path  TEXT NOT NULL
              );",
         )?;
         // Added later on: an existing database should keep its clips, hence
@@ -128,32 +136,7 @@ impl Library {
             .prepare("SELECT tag FROM tags WHERE clip_id = ?1")?
             .query_map(params![clip.id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        tx.execute(
-            "INSERT OR REPLACE INTO clips
-             (id, path, created_at, duration_ms, game, width, height, size_bytes,
-              thumb_path, title, description, edit, original, favorite, screenshot,
-              recording, facecam)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            params![
-                clip.id,
-                clip.path,
-                clip.created_at,
-                clip.duration_ms as i64,
-                clip.game,
-                clip.width,
-                clip.height,
-                clip.size_bytes as i64,
-                clip.thumb_path,
-                clip.title,
-                clip.description,
-                encode_edit(clip.edit.as_ref()),
-                encode_original(clip.original.as_ref()),
-                clip.favorite,
-                clip.screenshot,
-                clip.recording,
-                encode_facecam(clip.facecam.as_ref()),
-            ],
-        )?;
+        put_row(&tx, "INSERT OR REPLACE", clip)?;
         for tag in kept {
             tx.execute(
                 "INSERT OR IGNORE INTO tags (clip_id, tag) VALUES (?1, ?2)",
@@ -164,9 +147,10 @@ impl Library {
     }
 
     /// Every clip's id, and nothing else — for telling a store that belongs
-    /// to a clip from one a save left behind (`sweep.rs`).
+    /// to a clip from one a save left behind (`sweep.rs`). The clips in
+    /// Recently deleted count too: their stores wait for a restore.
     pub fn ids(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM clips")?;
+        let mut stmt = self.conn.prepare("SELECT id FROM clips UNION SELECT id FROM trash")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect()
     }
@@ -375,6 +359,68 @@ impl Library {
             .execute("DELETE FROM tags WHERE clip_id = ?1", params![id])?;
         Ok(())
     }
+
+    /// Moves a clip into Recently deleted: the whole clip, tags and all, into
+    /// `trash`, and its row and tags out of `clips`. `clip.path` is where the
+    /// file lies now, `from_path` where it lay before.
+    pub fn trash(&self, clip: &Clip, from_path: &str, deleted_at: i64) -> rusqlite::Result<()> {
+        let json = serde_json::to_string(clip)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO trash (id, clip, deleted_at, from_path) VALUES (?1, ?2, ?3, ?4)",
+            params![clip.id, json, deleted_at, from_path],
+        )?;
+        tx.execute("DELETE FROM clips WHERE id = ?1", params![clip.id])?;
+        tx.execute("DELETE FROM tags WHERE clip_id = ?1", params![clip.id])?;
+        tx.commit()
+    }
+
+    /// Everything in Recently deleted, the latest deletion first.
+    pub fn trashed(&self) -> rusqlite::Result<Vec<Trashed>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT clip, deleted_at, from_path FROM trash ORDER BY deleted_at DESC")?;
+        let rows = stmt.query_map([], row_to_trashed)?;
+        rows.collect()
+    }
+
+    pub fn trashed_one(&self, id: &str) -> rusqlite::Result<Option<Trashed>> {
+        self.conn
+            .query_row(
+                "SELECT clip, deleted_at, from_path FROM trash WHERE id = ?1",
+                params![id],
+                row_to_trashed,
+            )
+            .optional()
+    }
+
+    /// Takes a clip out of Recently deleted and back into the library, tags
+    /// and all, its file now at `path`. `None` when it is not in there.
+    pub fn restore(&self, id: &str, path: &str) -> rusqlite::Result<Option<Clip>> {
+        let Some(trashed) = self.trashed_one(id)? else {
+            return Ok(None);
+        };
+        let mut clip = trashed.clip;
+        clip.path = path.to_owned();
+        let tx = self.conn.unchecked_transaction()?;
+        put_row(&tx, "INSERT", &clip)?;
+        for tag in &clip.tags {
+            tx.execute(
+                "INSERT OR IGNORE INTO tags (clip_id, tag) VALUES (?1, ?2)",
+                params![clip.id, tag],
+            )?;
+        }
+        tx.execute("DELETE FROM trash WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        self.get(id)
+    }
+
+    /// Drops a clip from Recently deleted. Its files are the caller's.
+    pub fn forget(&self, id: &str) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM trash WHERE id = ?1", params![id])?;
+        Ok(())
+    }
 }
 
 /// The longest a tag may be. It stands as a chip in the gallery's filter row,
@@ -499,6 +545,53 @@ const CLIP_COLUMNS: &str = "SELECT id, path, created_at, duration_ms, game, widt
 /// `get`, so the two cannot drift apart. It costs a file check per row
 /// (`original_available`): a new flag that has to ask the disk must not be
 /// added here for every row of `list` — look it up on demand instead.
+/// Writes a clip's row (not its tags). `verb` is `INSERT` or `INSERT OR
+/// REPLACE` — a restore must not replace anything that took the path meanwhile.
+fn put_row(conn: &Connection, verb: &str, clip: &Clip) -> rusqlite::Result<()> {
+    conn.execute(
+        &format!(
+            "{verb} INTO clips
+             (id, path, created_at, duration_ms, game, width, height, size_bytes,
+              thumb_path, title, description, edit, original, favorite, screenshot,
+              recording, facecam)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
+        ),
+        params![
+            clip.id,
+            clip.path,
+            clip.created_at,
+            clip.duration_ms as i64,
+            clip.game,
+            clip.width,
+            clip.height,
+            clip.size_bytes as i64,
+            clip.thumb_path,
+            clip.title,
+            clip.description,
+            encode_edit(clip.edit.as_ref()),
+            encode_original(clip.original.as_ref()),
+            clip.favorite,
+            clip.screenshot,
+            clip.recording,
+            encode_facecam(clip.facecam.as_ref()),
+        ],
+    )?;
+    Ok(())
+}
+
+fn row_to_trashed(row: &rusqlite::Row) -> rusqlite::Result<Trashed> {
+    let json: String = row.get(0)?;
+    let clip: Clip = serde_json::from_str(&json)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err)))?;
+    let deleted_at: i64 = row.get(1)?;
+    Ok(Trashed {
+        clip,
+        deleted_at,
+        expires_at: crate::trash::expires_at(deleted_at),
+        from_path: row.get(2)?,
+    })
+}
+
 fn row_to_clip(row: &rusqlite::Row) -> rusqlite::Result<Clip> {
     let id: String = row.get(0)?;
     Ok(Clip {
@@ -620,6 +713,63 @@ mod tests {
         assert!(remove_file_patiently(&blocked, 2).is_err());
         assert!(blocked.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_clip_comes_back_with_its_tags() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        lib.insert(&clip("b", 2)).unwrap();
+        lib.set_tags("a", &["ace".to_string(), "with Mika".to_string()]).unwrap();
+        lib.set_favorite("a", true).unwrap();
+        let mut gone = lib.get("a").unwrap().unwrap();
+        let from = gone.path.clone();
+        gone.path = "/clips/.deleted/a.mp4".into();
+        lib.trash(&gone, &from, 500).unwrap();
+
+        assert!(lib.get("a").unwrap().is_none(), "out of every lookup by id");
+        assert_eq!(lib.list().unwrap().len(), 1);
+        let trashed = lib.trashed().unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].from_path, from);
+        assert_eq!(trashed[0].deleted_at, 500);
+        assert_eq!(trashed[0].expires_at, crate::trash::expires_at(500));
+        let mut ids = lib.ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, ["a", "b"], "its stores still belong to a clip");
+
+        let back = lib.restore("a", &from).unwrap().unwrap();
+        assert_eq!(back.path, from);
+        assert_eq!(back.tags, ["ace", "with Mika"]);
+        assert!(back.favorite);
+        assert!(lib.trashed().unwrap().is_empty());
+        assert!(lib.restore("a", &from).unwrap().is_none(), "only once");
+    }
+
+    #[test]
+    fn a_restore_does_not_push_out_a_clip_on_the_same_path() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        let gone = lib.get("a").unwrap().unwrap();
+        lib.trash(&gone, &gone.path, 1).unwrap();
+        let mut newer = clip("n", 2);
+        newer.path = gone.path.clone();
+        lib.insert(&newer).unwrap();
+
+        assert!(lib.restore("a", &gone.path).is_err());
+        assert!(lib.get("n").unwrap().is_some());
+        assert_eq!(lib.trashed().unwrap().len(), 1, "still waiting in the trash");
+    }
+
+    #[test]
+    fn forgetting_empties_the_trash() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        let gone = lib.get("a").unwrap().unwrap();
+        lib.trash(&gone, &gone.path, 1).unwrap();
+        lib.forget("a").unwrap();
+        assert!(lib.trashed().unwrap().is_empty());
+        assert!(lib.ids().unwrap().is_empty());
     }
 
     #[test]

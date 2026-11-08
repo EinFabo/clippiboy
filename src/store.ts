@@ -17,6 +17,7 @@ import type {
   AudioSource,
   CaptureTarget,
   Clip,
+  Trashed,
   EncoderInfo,
   LevelMap,
   RateControl,
@@ -58,6 +59,8 @@ interface EngineState {
   targets: CaptureTarget[];
   encoders: EncoderInfo[];
   clips: Clip[];
+  /** Recently deleted, the latest deletion first. */
+  trash: Trashed[];
   levels: LevelMap;
   sourceErrors: Record<string, string>;
   /** The source runs, but doubled or on a fallback clock — not an error, but
@@ -131,6 +134,12 @@ interface EngineState {
   takeScreenshot: () => Promise<void>;
   toggleRecording: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
+  /** Back from Recently deleted into the gallery. */
+  restoreClip: (id: string) => Promise<void>;
+  /** One clip out of Recently deleted, for good. */
+  purgeClip: (id: string) => Promise<void>;
+  /** All of Recently deleted, for good. */
+  emptyTrash: () => Promise<void>;
   updateClip: (id: string, meta: ClipMeta) => Promise<void>;
   /** Set or take away the heart. */
   setFavorite: (id: string, favorite: boolean) => Promise<void>;
@@ -252,6 +261,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   targets: [],
   encoders: [],
   clips: [],
+  trash: [],
   levels: {},
   sourceErrors: {},
   sourceWarnings: {},
@@ -429,8 +439,16 @@ export const useEngine = create<EngineState>((set, get) => ({
       // One read at a time, one more after a burst: a run of changes would
       // otherwise stack up full-list reads.
       await events.onClipsChanged(
-        coalesce(async () => set({ clips: await api.listClips() })),
+        coalesce(async () => {
+          const [clips, trash] = await Promise.all([api.listClips(), api.listTrash()]);
+          set({ clips, trash });
+        }),
       );
+      // Not part of the start: the gallery shows without it.
+      api
+        .listTrash()
+        .then((trash) => set({ trash }))
+        .catch(() => {});
       await events.onAudioErrors((sourceErrors) => set({ sourceErrors }));
       await events.onAudioWarnings((sourceWarnings) => set({ sourceWarnings }));
       await events.onAudioTaps((taps) => set({ taps }));
@@ -671,6 +689,51 @@ export const useEngine = create<EngineState>((set, get) => ({
       } catch {
         // The error above already says it failed.
       }
+    }
+  },
+
+  async restoreClip(id) {
+    const before = get().trash;
+    set({ trash: before.filter((t) => t.clip.id !== id) });
+    if (!inTauri) return;
+    try {
+      const clip = await api.restoreClip(id);
+      set((st) => ({
+        clips: [clip, ...st.clips.filter((c) => c.id !== id)].sort((a, b) => b.createdAt - a.createdAt),
+      }));
+    } catch (err) {
+      set({ lastError: fail("Could not restore the clip", err), trash: before });
+    }
+  },
+
+  async purgeClip(id) {
+    const before = get().trash;
+    set({ trash: before.filter((t) => t.clip.id !== id) });
+    if (!inTauri) return;
+    try {
+      await api.purgeClip(id);
+    } catch (err) {
+      set({ lastError: fail("Could not delete the clip", err) });
+      try {
+        set({ trash: await api.listTrash() });
+      } catch {
+        /* the next change event reads again */
+      }
+    }
+  },
+
+  async emptyTrash() {
+    set({ trash: [] });
+    if (!inTauri) return;
+    try {
+      await api.emptyTrash();
+    } catch (err) {
+      set({ lastError: fail("Could not empty Recently deleted", err) });
+    }
+    try {
+      set({ trash: await api.listTrash() });
+    } catch {
+      /* the next change event reads again */
     }
   },
 

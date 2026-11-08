@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-purge-clip"
+description = "Enables the purge_clip command without any pre-configured scope."
+commands.allow = ["purge_clip"]
+
+[[permission]]
+identifier = "deny-purge-clip"
+description = "Denies the purge_clip command without any pre-configured scope."
+commands.deny = ["purge_clip"]

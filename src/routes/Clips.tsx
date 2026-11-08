@@ -32,7 +32,7 @@ import { HeartBurst } from "@/components/ui/HeartBurst";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
 import { ExportDialog } from "@/components/ExportDialog";
 import { animate, EASE_SPRING } from "@/lib/motion";
-import type { Clip, FocusClip } from "@/lib/types";
+import type { Clip, FocusClip, Trashed } from "@/lib/types";
 
 /**
  * What the gallery is filtering by right now.
@@ -51,7 +51,9 @@ type Filter =
   | { kind: "untagged" }
   | { kind: "game"; name: string }
   /** Everything carrying this tag — clips, stills and recordings alike. */
-  | { kind: "tag"; name: string };
+  | { kind: "tag"; name: string }
+  /** Recently deleted — not a filter over the gallery but a list of its own. */
+  | { kind: "deleted" };
 
 const ALL: Filter = { kind: "all" };
 
@@ -81,10 +83,11 @@ export function Clips({
   // Galerie — über hundert Kacheln — zwanzigmal die Sekunde neu, weil die
   // Audiopegel durch denselben Store laufen. Das war der teuerste Posten.
   const bakeClipCam = useEngine((s) => s.bakeClipCam);
-  const { clips, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
+  const { clips, trash, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
     useEngine(
       useShallow((s) => ({
         clips: s.clips,
+        trash: s.trash,
         deleteClip: s.deleteClip,
         discardClipOriginal: s.discardClipOriginal,
         clearGame: s.clearGame,
@@ -184,7 +187,9 @@ export function Clips({
   useEffect(() => {
     if (filter.kind === "all" || open !== null) return;
     const gone =
-      filter.kind === "untagged"
+      filter.kind === "deleted"
+        ? trash.length === 0
+        : filter.kind === "untagged"
         ? untagged === 0
         : filter.kind === "favorites"
           ? favorites === 0
@@ -196,7 +201,7 @@ export function Clips({
                 ? !tags.some((t) => t.name === filter.name)
                 : !games.some((g) => g.name === filter.name);
     if (gone) setFilter(ALL);
-  }, [filter, games, tags, untagged, favorites, shots, recordings, open]);
+  }, [filter, games, tags, untagged, favorites, shots, recordings, open, trash.length]);
 
   const visible = clips.filter((c) => {
     const haystack = [
@@ -210,7 +215,9 @@ export function Clips({
       .toLowerCase();
     const matchesQuery = !query || haystack.includes(query.toLowerCase());
     const matchesFilter =
-      filter.kind === "all"
+      filter.kind === "deleted"
+        ? false
+        : filter.kind === "all"
         ? !c.screenshot && !c.recording
         : filter.kind === "favorites"
           ? c.favorite
@@ -413,13 +420,16 @@ export function Clips({
           shots={shots}
           recordings={recordings}
           total={cut}
+          deleted={trash.length}
           active={filter}
           onSelect={setFilter}
           onRemove={clearGame}
         />
       </div>
 
-      {tiles.length === 0 ? (
+      {filter.kind === "deleted" ? (
+        <TrashList trash={trash} query={query} />
+      ) : tiles.length === 0 ? (
         <Card className="grid h-56 place-items-center text-sm text-ink-muted">
           No clips found.
         </Card>
@@ -831,6 +841,7 @@ function GameFilters({
   shots,
   recordings,
   total,
+  deleted,
   active,
   onSelect,
   onRemove,
@@ -842,6 +853,7 @@ function GameFilters({
   shots: number;
   recordings: number;
   total: number;
+  deleted: number;
   active: Filter;
   onSelect: (filter: Filter) => void;
   onRemove: (game: string) => void;
@@ -857,7 +869,7 @@ function GameFilters({
     setFade({ left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 });
   }, []);
 
-  useLayoutEffect(measure, [measure, games, tags, untagged, favorites, shots, recordings]);
+  useLayoutEffect(measure, [measure, games, tags, untagged, favorites, shots, recordings, deleted]);
 
   // Tip the mouse wheel over: there is nothing in the bar that could scroll
   // vertically, so the wheel should move it horizontally. Only when it really
@@ -901,6 +913,7 @@ function GameFilters({
       ...games.map(({ name }) => (confirming === name ? `${name}?` : name)),
       untagged > 0 && "untagged",
       ...tags.map(({ name }) => `#${name}`),
+      deleted > 0 && "deleted",
     ]
       .filter(Boolean)
       .join(),
@@ -1040,6 +1053,150 @@ function GameFilters({
           </Chip>
         );
       })}
+
+      {/* Last, and only while something is in it. */}
+      {deleted > 0 && (
+        <Chip
+          id="deleted"
+          active={active.kind === "deleted"}
+          count={deleted}
+          onClick={() => onSelect({ kind: "deleted" })}
+          icon={
+            <IconTrash
+              className={cn(
+                "h-3.5 w-3.5",
+                active.kind === "deleted" ? "text-black/70" : "text-ink-muted",
+              )}
+            />
+          }
+        >
+          Recently deleted
+        </Chip>
+      )}
+    </div>
+  );
+}
+
+/** Whole days until `expiresAt`, at least one while it is still there. */
+function daysLeft(expiresAt: number): number {
+  return Math.max(1, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
+}
+
+/**
+ * Recently deleted: each clip with the days it has left, Restore and Delete
+ * forever, and Empty all above them.
+ */
+function TrashList({ trash, query }: { trash: Trashed[]; query: string }) {
+  const { restoreClip, purgeClip, emptyTrash } = useEngine(
+    useShallow((s) => ({
+      restoreClip: s.restoreClip,
+      purgeClip: s.purgeClip,
+      emptyTrash: s.emptyTrash,
+    })),
+  );
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [emptying, setEmptying] = useState(false);
+  const needle = query.toLowerCase();
+  const shown = trash.filter(({ clip }) =>
+    !needle ||
+    [fileName(clip.path), clip.title ?? "", clip.game ?? "", ...clip.tags]
+      .join(" ")
+      .toLowerCase()
+      .includes(needle),
+  );
+  const bytes = trash.reduce((sum, t) => sum + t.clip.sizeBytes, 0);
+
+  return (
+    <div className="space-y-4 pb-10">
+      <div className="flex h-8 items-center gap-3">
+        <span className="text-sm text-ink-muted">
+          Kept for 30 days · {formatSize(bytes)}
+        </span>
+        <span className="ml-auto">
+          {emptying ? (
+            <ConfirmDelete
+              question={`Delete all ${trash.length} for good?`}
+              origin="right"
+              confirmLabel="Empty Recently deleted"
+              confirmTitle="Delete all of them for good"
+              cancelLabel="Keep them"
+              onConfirm={() => {
+                setEmptying(false);
+                void emptyTrash();
+              }}
+              onCancel={() => setEmptying(false)}
+            />
+          ) : (
+            <Button variant="danger" size="sm" icon={<IconTrash className="h-3.5 w-3.5" />} onClick={() => setEmptying(true)}>
+              Empty all
+            </Button>
+          )}
+        </span>
+      </div>
+
+      {shown.length === 0 ? (
+        <Card className="grid h-56 place-items-center text-sm text-ink-muted">No clips found.</Card>
+      ) : (
+        <div className="grid grid-cols-3 gap-4">
+          {shown.map(({ clip, expiresAt }) => {
+            const days = daysLeft(expiresAt);
+            return (
+              <Card key={clip.id} className="overflow-hidden">
+                <div className="relative aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black">
+                  {clip.thumbPath && (
+                    <img
+                      src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      className="h-full w-full object-cover opacity-60 grayscale"
+                    />
+                  )}
+                  <span className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
+                    <Pill className="min-w-0">
+                      <span className="min-w-0 truncate">{clip.game ?? "Unknown"}</span>
+                    </Pill>
+                    <Pill className={days <= 3 ? "text-live" : undefined}>
+                      {days === 1 ? "1 day left" : `${days} days left`}
+                    </Pill>
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 p-3">
+                  <span className="min-w-0 flex-1 truncate text-sm" title={clipName(clip)}>
+                    {clipName(clip)}
+                  </span>
+                  {confirming === clip.id ? (
+                    <ConfirmDelete
+                      question="For good?"
+                      origin="right"
+                      confirmTitle="Delete forever — it cannot be restored"
+                      onConfirm={() => {
+                        setConfirming(null);
+                        void purgeClip(clip.id);
+                      }}
+                      onCancel={() => setConfirming(null)}
+                    />
+                  ) : (
+                    <>
+                      <Button size="sm" onClick={() => void restoreClip(clip.id)}>
+                        Restore
+                      </Button>
+                      <button
+                        aria-label="Delete forever"
+                        title="Delete forever"
+                        onClick={() => setConfirming(clip.id)}
+                        className="grid h-8 w-8 shrink-0 place-items-center rounded-pill text-ink-muted hover:bg-live/15 hover:text-live"
+                      >
+                        <IconTrash className="h-4 w-4" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

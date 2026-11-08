@@ -7,8 +7,9 @@ import { IconCheck, IconClose } from "../icons";
  * that asked it.
  *
  * Same idea as the filter bar's confirmation: no dialog over the page, just the
- * button turning into a question. What is at stake here is larger, though — the
- * file is gone from the disk afterwards — so unlike that one it does **not**
+ * button turning into a question. What is at stake here is larger, though — a
+ * deleted clip leaves the gallery, and from Recently deleted it goes for
+ * good — so unlike that one it does **not**
  * focus its own confirm button. A stray Enter or Space must not be able to
  * finish what a stray click started.
  */
@@ -16,7 +17,7 @@ export function ConfirmDelete({
   question = "Delete?",
   origin = "left",
   confirmLabel = "Confirm deletion",
-  confirmTitle = "Delete for good",
+  confirmTitle = "Delete — it stays in Recently deleted for 30 days",
   cancelLabel = "Keep the clip",
   cancelTitle = "Keep it — Escape does the same",
   onConfirm,

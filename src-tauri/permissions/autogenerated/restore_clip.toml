@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-clip"
+description = "Enables the restore_clip command without any pre-configured scope."
+commands.allow = ["restore_clip"]
+
+[[permission]]
+identifier = "deny-restore-clip"
+description = "Denies the restore_clip command without any pre-configured scope."
+commands.deny = ["restore_clip"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-trash"
+description = "Enables the list_trash command without any pre-configured scope."
+commands.allow = ["list_trash"]
+
+[[permission]]
+identifier = "deny-list-trash"
+description = "Denies the list_trash command without any pre-configured scope."
+commands.deny = ["list_trash"]

@@ -932,6 +932,20 @@ pub struct Clip {
     pub tags: Vec<String>,
 }
 
+/// A clip in Recently deleted (`trash.rs`): the clip as it was, its `path`
+/// pointing into the `.deleted` folder, and where it came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trashed {
+    pub clip: Clip,
+    /// Unix milliseconds.
+    pub deleted_at: i64,
+    /// When it goes for good, Unix milliseconds.
+    pub expires_at: i64,
+    /// Where the file lay before; a restore puts it back there.
+    pub from_path: String,
+}
+
 /// What a library entry is — decides the bottom folder level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipKind {
@@ -1054,6 +1068,9 @@ pub struct StorageUsage {
     /// ffmpeg, downloaded on the first start. Beside the cache in the same
     /// folder, but nothing Windows ever trims.
     pub tools_bytes: u64,
+    /// The files in Recently deleted.
+    #[serde(default)]
+    pub trash_bytes: u64,
 }
 
 /// The untouched recordings kept for undoing trims: how many, and how much.

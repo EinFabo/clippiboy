@@ -71,6 +71,11 @@ function UsageCard({ usage }: { usage: StorageUsage }) {
       "Your clips, screenshots and recordings, wherever they were saved.",
     ],
     [
+      "Recently deleted",
+      usage.trashBytes ?? 0,
+      "Deleted clips, kept for 30 days. Empty them in the gallery.",
+    ],
+    [
       "Untouched recordings",
       usage.originalsBytes,
       "One per trimmed clip, so the trim can be undone. \u201cFree up space\u201d in the clip menu releases one, \u201cClear all trims\u201d below all of them.",

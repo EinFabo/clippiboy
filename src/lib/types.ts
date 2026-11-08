@@ -595,6 +595,18 @@ export interface StorageUsage {
   cacheBytes: number;
   /** ffmpeg, downloaded on the first start. */
   toolsBytes: number;
+  /** The files in Recently deleted. */
+  trashBytes: number;
+}
+
+/** A clip in Recently deleted (`model::Trashed`). */
+export interface Trashed {
+  clip: Clip;
+  /** Unix milliseconds. */
+  deletedAt: number;
+  /** When it goes for good, Unix milliseconds. */
+  expiresAt: number;
+  fromPath: string;
 }
 
 /** Untouched recordings kept to undo trims — what "Clear all trims" frees. */

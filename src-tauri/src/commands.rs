@@ -1,6 +1,6 @@
 //! Tauri commands — the UI's only interface to the core.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tauri::State;
 
@@ -1035,6 +1035,9 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
     with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))
 }
 
+/// Moves a clip into Recently deleted (`trash.rs`). Its file goes into the
+/// hidden `.deleted` folder, its stores stay for a restore; the share link
+/// and the Discord copies go now, they would show what was deleted.
 #[tauri::command(async)]
 pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri::Emitter;
@@ -1056,41 +1059,50 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     // added has finished by now, the lock above waited for it. A recording's
     // burn-in runs without that lock and is stopped here instead.
     crate::composite::cancel(&id);
-    // The clip first, and the stores by its stored id. The stores are named
-    // after a sanitised id, so an id that is empty or spelled differently
-    // named the whole store — every clip's tracks and originals went with it.
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?;
     // Already gone (deleted from another window): nothing left to clear.
     let Some(clip) = clip else {
         return Ok(());
     };
-    // The file first, without the library lock — a player that holds it keeps
-    // the clip, record and all, and the notice says why.
-    if let Err(err) = crate::clips::remove_file_patiently(Path::new(&clip.path), 10) {
-        let msg = format!(
-            "Could not delete the clip ({err}). Is it open somewhere right now?"
-        );
-        crate::notify(&app, "error", msg.clone());
-        return Err(msg);
+    let from = PathBuf::from(&clip.path);
+    if from.is_file() {
+        // The file first, without the library lock — a player that holds it
+        // keeps the clip, record and all, and the notice says why.
+        let folder = crate::trash::folder_for(&from, Path::new(&clip_dir));
+        let target = crate::trash::ensure_folder(&folder)
+            .map(|()| crate::filing::free_name(&folder, &from.file_name().unwrap_or_default().to_string_lossy()))
+            .and_then(|target| move_patiently(&from, &target, 10).map(|()| target));
+        let target = match target {
+            Ok(target) => target,
+            Err(err) => {
+                let msg = format!("Could not delete the clip ({err}). Is it open somewhere right now?");
+                crate::notify(&app, "error", msg.clone());
+                return Err(msg);
+            }
+        };
+        let mut gone = clip.clone();
+        gone.path = target.to_string_lossy().to_string();
+        let trashed = with_library(&state, |lib| {
+            lib.trash(&gone, &clip.path, crate::trash::now_ms()).map_err(|e| e.to_string())
+        });
+        if let Err(err) = trashed {
+            // The row stays, so the file goes back where the row says it is.
+            if let Err(back) = edit::move_across(&target, &from) {
+                log::warn!("clip '{id}' stays in '{}': {back}", target.display());
+            }
+            return Err(err);
+        }
+    } else {
+        // No file to keep: nothing a restore could bring back.
+        with_library(&state, |lib| lib.delete(&clip.id).map_err(|e| e.to_string()))?;
+        erase_stores(&clip);
     }
-    with_library(&state, |lib| lib.delete(&clip.id).map_err(|e| e.to_string()))?;
-    if let Some(thumb) = &clip.thumb_path {
-        let _ = std::fs::remove_file(thumb);
-    }
-    let folder = std::path::PathBuf::from(&clip.path).parent().map(Path::to_path_buf);
-    // The individual tracks and the original belong to the clip and serve no
-    // purpose without it.
-    stems::remove(&clip.id);
-    edit::remove_everything(&clip.id);
-    // The thumbnail too, even when none is recorded in the database.
-    crate::thumbs::remove(&clip.id);
-
     // Its Discord copies too — they would show what is gone.
     remove_discord_copies(&discord_root(), &clip.id);
     // If that was the last clip of its game, an empty folder would otherwise be
     // left standing.
-    if let Some(folder) = folder {
-        crate::filing::prune(&folder, Path::new(&clip_dir));
+    if let Some(folder) = from.parent() {
+        crate::filing::prune(folder, Path::new(&clip_dir));
     }
     // Every window keeps its own list. Without this, a clip deleted in the
     // console stays in the main window and opens as "File not found".
@@ -1098,6 +1110,177 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     crate::links::clip_deleted(&app, &id);
     announce_change(&app);
     Ok(())
+}
+
+/// Moves a file, trying again for a while when something holds it (a player,
+/// a scanner) — `clips::remove_file_patiently` for a move.
+fn move_patiently(from: &Path, to: &Path, attempts: u32) -> std::io::Result<()> {
+    let mut last = None;
+    for attempt in 0..attempts.max(1) {
+        match edit::move_across(from, to) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last = Some(err);
+                if attempt + 1 < attempts {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+                }
+            }
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
+}
+
+/// What belongs to a clip besides its file: thumbnail, tracks, original,
+/// cam. Serves no purpose without it.
+fn erase_stores(clip: &Clip) {
+    if let Some(thumb) = &clip.thumb_path {
+        let _ = std::fs::remove_file(thumb);
+    }
+    stems::remove(&clip.id);
+    edit::remove_everything(&clip.id);
+    // The thumbnail too, even when none is recorded in the database.
+    crate::thumbs::remove(&clip.id);
+}
+
+/// Recently deleted, the latest deletion first.
+#[tauri::command(async)]
+pub fn list_trash(state: State<'_, AppState>) -> Result<Vec<crate::model::Trashed>> {
+    with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))
+}
+
+/// Puts a deleted clip back where it was — under a new name when that one
+/// was taken meanwhile.
+#[tauri::command(async)]
+pub fn restore_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
+    let own = edit::clip_lock(&id);
+    let _clip = own.lock();
+    let Some(trashed) = with_library(&state, |lib| lib.trashed_one(&id).map_err(|e| e.to_string()))? else {
+        return Err("This clip is no longer in Recently deleted.".into());
+    };
+    let from = PathBuf::from(&trashed.clip.path);
+    let home = PathBuf::from(&trashed.from_path);
+    let folder = home.parent().map(Path::to_path_buf).unwrap_or_default();
+    let name = home.file_name().unwrap_or_default().to_string_lossy().to_string();
+    if let Err(err) = std::fs::create_dir_all(&folder) {
+        return Err(format!("Could not restore the clip: {err}"));
+    }
+    let target = crate::filing::free_name(&folder, &name);
+    if let Err(err) = move_patiently(&from, &target, 10) {
+        return Err(format!("Could not restore the clip: {err}"));
+    }
+    let target_text = target.to_string_lossy().to_string();
+    let restored = with_library(&state, |lib| lib.restore(&id, &target_text).map_err(|e| e.to_string()));
+    match restored {
+        Ok(Some(clip)) => {
+            // A folder the player was never granted (an old clip folder made
+            // anew) would leave the restored clip unplayable.
+            crate::allow_clip_dir(&app, &folder.to_string_lossy());
+            announce_change(&app);
+            Ok(clip)
+        }
+        other => {
+            // The row stays in the trash, so the file goes back with it.
+            if let Err(back) = edit::move_across(&target, &from) {
+                log::warn!("restored file of '{id}' left at '{}': {back}", target.display());
+            }
+            Err(match other {
+                Err(err) => format!("Could not restore the clip: {err}"),
+                Ok(_) => "This clip is no longer in Recently deleted.".into(),
+            })
+        }
+    }
+}
+
+/// Deletes one clip in Recently deleted for good.
+#[tauri::command(async)]
+pub fn purge_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
+    let result = purge(&state, &id);
+    announce_change(&app);
+    result
+}
+
+/// Empties Recently deleted. A file that will not go keeps its entry; the
+/// rest go anyway. Returns how many went.
+#[tauri::command(async)]
+pub fn empty_trash(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<u32> {
+    let all = with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))?;
+    let mut gone = 0;
+    let mut failed = None;
+    for trashed in all {
+        match purge(&state, &trashed.clip.id) {
+            Ok(()) => gone += 1,
+            Err(err) => failed = Some(err),
+        }
+    }
+    announce_change(&app);
+    match failed {
+        Some(err) if gone == 0 => Err(err),
+        Some(err) => {
+            crate::notify(&app, "error", err);
+            Ok(gone)
+        }
+        None => Ok(gone),
+    }
+}
+
+/// At start and every hour: what has been in Recently deleted for 30 days
+/// goes for good.
+pub fn purge_expired(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let now = crate::trash::now_ms();
+    let all = crate::clips::with_library(&state.library, |lib| lib.trashed())
+        .and_then(std::result::Result::ok)
+        .unwrap_or_default();
+    let mut gone = 0;
+    for trashed in all.iter().filter(|t| crate::trash::expired(t.deleted_at, now)) {
+        match purge_one(&state.library, &trashed.clip.id) {
+            Ok(()) => gone += 1,
+            Err(err) => log::warn!("deleted clip '{}' not cleared: {err}", trashed.clip.id),
+        }
+    }
+    if gone > 0 {
+        log::info!("{gone} clip(s) left Recently deleted after {} days", crate::trash::KEEP_DAYS);
+        announce_change(app);
+    }
+}
+
+fn purge(state: &State<'_, AppState>, id: &str) -> Result<()> {
+    purge_one(&state.library, id)
+}
+
+/// Deletes a clip in Recently deleted for good: its file, its entry and its
+/// stores. A file that will not go keeps the entry.
+fn purge_one(library: &parking_lot::Mutex<Option<Library>>, id: &str) -> Result<()> {
+    let own = edit::clip_lock(id);
+    let _clip = own.lock();
+    let trashed = crate::clips::with_library(library, |lib| lib.trashed_one(id))
+        .ok_or_else(|| "clip database is not available".to_string())?
+        .map_err(|e| e.to_string())?;
+    let Some(trashed) = trashed else {
+        return Ok(());
+    };
+    let path = PathBuf::from(&trashed.clip.path);
+    if let Err(err) = crate::clips::remove_file_patiently(&path, 10) {
+        return Err(format!("Could not delete '{}' ({err}). Is it open somewhere right now?", clip_display_name(&trashed.clip)));
+    }
+    crate::clips::with_library(library, |lib| lib.forget(id))
+        .ok_or_else(|| "clip database is not available".to_string())?
+        .map_err(|e| e.to_string())?;
+    erase_stores(&trashed.clip);
+    // The `.deleted` folder goes with its last file.
+    if let Some(folder) = path.parent() {
+        if folder.file_name().is_some_and(|name| name == crate::trash::DIR) {
+            let _ = std::fs::remove_dir(folder);
+        }
+    }
+    Ok(())
+}
+
+fn clip_display_name(clip: &Clip) -> String {
+    clip.title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| {
+        Path::new(&clip.path).file_name().unwrap_or_default().to_string_lossy().to_string()
+    })
 }
 
 /// Set or take away a clip's heart.
@@ -2099,6 +2282,12 @@ pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     let store_bytes = dir_bytes(&edit::root());
     let originals_bytes = edit::trim_originals(&Default::default()).bytes;
     let facecam_bytes = facecam_store_bytes();
+    let trash_bytes = with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|trashed| std::fs::metadata(&trashed.clip.path).ok())
+        .map(|meta| meta.len())
+        .sum();
     Ok(StorageUsage {
         clips_bytes,
         originals_bytes,
@@ -2108,6 +2297,7 @@ pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
         thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
         cache_bytes,
         tools_bytes,
+        trash_bytes,
     })
 }
 

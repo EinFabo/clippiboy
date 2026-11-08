@@ -42,6 +42,7 @@ pub mod thumbs;
 pub mod tint;
 pub mod telemetry;
 pub mod tools;
+pub mod trash;
 pub mod tray;
 pub mod ts;
 pub mod reccam;
@@ -1866,6 +1867,21 @@ pub fn run() {
             // What saves, edits and exports cut short left in the clip folder
             // and the data folder — on a thread of its own.
             sweep::run(handle);
+            // Recently deleted: what has waited 30 days goes, a minute after
+            // the start (the library passes come first) and then every hour.
+            {
+                let app = handle.clone();
+                let _ = std::thread::Builder::new().name("clippiboy-trash".into()).spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    loop {
+                        if clips::passes_stopped() {
+                            break;
+                        }
+                        commands::purge_expired(&app);
+                        std::thread::sleep(trash::CHECK_EVERY);
+                    }
+                });
+            }
             // ffmpeg/ffprobe: at once when they are there, otherwise fetched
             // in the background — the buffer does not wait for them.
             tools::setup(handle);
@@ -1993,6 +2009,10 @@ pub fn run() {
             commands::screenshot_edit,
             commands::list_clips,
             commands::delete_clip,
+            commands::list_trash,
+            commands::restore_clip,
+            commands::purge_clip,
+            commands::empty_trash,
             commands::reveal_clip,
             commands::update_clip,
             commands::set_clip_tags,

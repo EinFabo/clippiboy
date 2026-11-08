@@ -17,6 +17,7 @@ import type {
   EngineStatus,
   LevelMap,
   StorageUsage,
+  Trashed,
   TrimOriginals,
   TrackMix,
   UpdateInfo,
@@ -134,6 +135,10 @@ export const api = {
 
   listClips: () => invoke<Clip[]>("list_clips"),
   deleteClip: (id: string) => invoke<void>("delete_clip", { id }),
+  listTrash: () => invoke<Trashed[]>("list_trash"),
+  restoreClip: (id: string) => invoke<Clip>("restore_clip", { id }),
+  purgeClip: (id: string) => invoke<void>("purge_clip", { id }),
+  emptyTrash: () => invoke<number>("empty_trash"),
   revealClip: (id: string) => invoke<void>("reveal_clip", { id }),
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   updateClip: (
