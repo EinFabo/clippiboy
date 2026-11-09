@@ -393,6 +393,8 @@ export interface FriendsConfig {
   acceptClips: AcceptClips;
   /** Friends in the same game go onto a new clip as tags ("with Luca"). */
   tagFriends: boolean;
+  /** "Using ClippiBoy" in one's Discord status (`presence.rs`). */
+  discordStatus: boolean;
 }
 
 /** Whose clips may be offered at all. */

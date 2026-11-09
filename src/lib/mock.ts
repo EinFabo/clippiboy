@@ -143,6 +143,7 @@ export const mockConfig: AppConfig = {
     favorites: [],
     acceptClips: "all",
     tagFriends: true,
+    discordStatus: true,
   },
   sounds: {
     enabled: true,

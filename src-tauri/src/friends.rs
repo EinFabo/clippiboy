@@ -212,6 +212,8 @@ pub fn set_game(app: &AppHandle, game: Option<&str>) {
 /// The privacy settings changed — friends see the difference at once.
 pub fn config_changed(app: &AppHandle) {
     send_presence(app, "presence");
+    // The Discord status switch lives among these settings too.
+    crate::presence::nudge();
 }
 
 // --- Commands ------------------------------------------------------------------

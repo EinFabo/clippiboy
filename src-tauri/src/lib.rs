@@ -32,6 +32,7 @@ pub mod overlay;
 pub mod pipeline;
 pub mod recorder;
 pub mod preview;
+pub mod presence;
 pub mod shot;
 pub mod shotfit;
 pub mod sounds;
@@ -1882,6 +1883,9 @@ pub fn run() {
                     }
                 });
             }
+            // "Using ClippiBoy" in the Discord status, on a thread of its own;
+            // it reaches for Discord only once the status is wanted.
+            presence::start(handle);
             // ffmpeg/ffprobe: at once when they are there, otherwise fetched
             // in the background — the buffer does not wait for them.
             tools::setup(handle);
@@ -2073,6 +2077,8 @@ pub fn run() {
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
             telemetry::flush();
+            // Out of the Discord status before the pipe closes with the process.
+            presence::shutdown();
             // After the saves were waited for (`quit`); the plugin must not find
             // a token for a port nobody serves any more.
             control::stop();
