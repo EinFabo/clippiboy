@@ -6,8 +6,15 @@ import { IconClose } from "@/components/icons";
 import { Segmented } from "@/components/ui/Controls";
 import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
-import type { HotkeyField } from "@/lib/types";
-import { hotkeyKeys, isHold, isPad, triggerOf, withHold } from "@/lib/hotkeyText";
+import type { Controllers, HotkeyField } from "@/lib/types";
+import {
+  hotkeyKeys,
+  isHold,
+  isPad,
+  triggerOf,
+  withHold,
+  type PadFamily,
+} from "@/lib/hotkeyText";
 import { Row } from "./shared";
 import { StreamDeck } from "./StreamDeck";
 
@@ -130,6 +137,48 @@ const ROWS: Array<{ label: string; hint?: string; first: HotkeyField; second: Ho
   },
 ];
 
+/** Said once each, the first time such a binding is saved (the core sets the
+    flag along with it). */
+const PAD_BUTTON_NOTE = "The game gets this button press too.";
+const GUIDE_NOTE =
+  "Turn off \u201cOpen Xbox Game Bar using this button\u201d in Windows settings, or Game Bar opens too.";
+
+/** The controllers the core sees, kept current while the page shows them:
+    the core reads them only as long as someone keeps asking. */
+function useControllers(): Controllers | null {
+  const [controllers, setControllers] = useState<Controllers | null>(
+    inTauri ? null : { ready: true, unavailable: null, pads: [] },
+  );
+  useEffect(() => {
+    if (!inTauri) return;
+    let gone = false;
+    let unlisten: (() => void) | null = null;
+    void events
+      .onControllersChanged((next) => {
+        if (!gone) setControllers(next);
+      })
+      .then((off) => {
+        if (gone) off();
+        else unlisten = off;
+      });
+    const ask = () =>
+      api
+        .watchControllers()
+        .then((next) => {
+          if (!gone) setControllers(next);
+        })
+        .catch(() => {});
+    void ask();
+    const timer = window.setInterval(ask, 3000);
+    return () => {
+      gone = true;
+      unlisten?.();
+      window.clearInterval(timer);
+    };
+  }, []);
+  return controllers;
+}
+
 export function Hotkeys() {
   const { config, setHotkeys } = useEngine(
     useShallow((s) => ({ config: s.config, setHotkeys: s.setHotkeys })),
@@ -139,8 +188,26 @@ export function Hotkeys() {
   // One field records at a time — starting another ends the first.
   const [recording, setRecording] = useState<HotkeyField | null>(null);
   const warn = ROWS.some(({ first, second }) => risky(config[first]) || risky(config[second]));
+  const controllers = useControllers();
+  // Buttons named as on the pad plugged in — the first one, if several.
+  const family: PadFamily = controllers?.pads[0]?.family ?? "xbox";
+
+  // The once-notes: shown when a save from this page turns their flag on.
+  const [notes, setNotes] = useState<string[]>([]);
+  const applied = useRef(false);
+  const flags = useRef({ pad: config.padButtonHintShown, guide: config.guideHintShown });
+  useEffect(() => {
+    const said: string[] = [];
+    if (applied.current) {
+      if (config.padButtonHintShown && !flags.current.pad) said.push(PAD_BUTTON_NOTE);
+      if (config.guideHintShown && !flags.current.guide) said.push(GUIDE_NOTE);
+    }
+    flags.current = { pad: config.padButtonHintShown, guide: config.guideHintShown };
+    if (said.length) setNotes(said);
+  }, [config.padButtonHintShown, config.guideHintShown]);
 
   const apply = async (field: HotkeyField, value: string) => {
+    applied.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -158,11 +225,11 @@ export function Hotkeys() {
   const input = (field: HotkeyField, second: boolean) => (
     <HotkeyInput
       value={config[field]}
+      family={family}
       second={second}
       busy={saving}
       recording={recording === field}
       onRecording={(on) => setRecording((now) => (on ? field : now === field ? null : now))}
-      onError={setError}
       onChange={(value) => apply(field, value)}
     />
   );
@@ -178,11 +245,19 @@ export function Hotkeys() {
             </div>
           </Row>
         ))}
+        <Row label="Controllers">
+          <ControllerList controllers={controllers} />
+        </Row>
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
-        Click, then press a key, a mouse button (middle or side) or a controller
-        combo. Escape cancels, × unbinds.
+        Click, then press a key, a mouse button (middle or side) or controller
+        buttons. Escape cancels, × unbinds.
       </p>
+      {notes.map((note) => (
+        <p key={note} className="mt-2 text-xs text-ink-muted">
+          {note}
+        </p>
+      ))}
       {warn && (
         <p className="mt-2 text-xs text-ink-muted">
           A single key you can also type with applies everywhere: it fires in the
@@ -194,34 +269,55 @@ export function Hotkeys() {
   );
 }
 
+/** The controllers the core sees, by name — or why there are none. */
+function ControllerList({ controllers }: { controllers: Controllers | null }) {
+  if (!controllers?.ready) return <span className="text-[13px] text-ink-faint">…</span>;
+  if (controllers.unavailable) {
+    return (
+      <span className="text-[13px] text-ink-muted" title={controllers.unavailable}>
+        Controller support missing
+      </span>
+    );
+  }
+  if (controllers.pads.length === 0) {
+    return <span className="text-[13px] text-ink-muted">No controller found</span>;
+  }
+  return (
+    <div className="flex flex-col items-end gap-0.5 text-[13px] text-ink-muted">
+      {controllers.pads.map((pad, at) => (
+        <span key={`${at}-${pad.name}`}>{pad.name}</span>
+      ))}
+    </div>
+  );
+}
+
 /** Shows a combination and records a new one on click — a key, a mouse
-    button or a controller combo. Tap or hold sits beside it; the × unbinds:
+    button or controller buttons. Tap or hold sits beside it; the × unbinds:
     an empty value is an action without a hotkey. */
 function HotkeyInput({
   value,
+  family,
   second,
   busy,
   recording,
   onRecording,
   onChange,
-  onError,
 }: {
   value: string;
+  /** Whose names controller buttons are shown with. */
+  family: PadFamily;
   /** The second binding: smaller, and "Add" while empty. */
   second?: boolean;
   busy?: boolean;
   recording: boolean;
   onRecording: (on: boolean) => void;
   onChange: (value: string) => void;
-  onError: (message: string | null) => void;
 }) {
   const onRecordingRef = useRef(onRecording);
   onRecordingRef.current = onRecording;
   // Otherwise the handler would hold the value from when recording started.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
-  const onErrorRef = useRef(onError);
-  onErrorRef.current = onError;
   // A new binding keeps tap or hold as it was.
   const hold = isHold(value);
   const holdRef = useRef(hold);
@@ -252,11 +348,10 @@ function HotkeyInput({
     let gone = false;
     if (inTauri) {
       void events
-        .onInputCaptured(({ binding, error }) => {
+        .onInputCaptured(({ binding }) => {
           if (binding) commit(binding);
-          else if (error) onErrorRef.current(error);
-          // Neither: the core ended recording (timed out, focus gone) and
-          // has put the hotkeys back already.
+          // None: the core ended recording (timed out, focus gone) and has
+          // put the hotkeys back already.
           else {
             committed.current = true;
             stop();
@@ -338,7 +433,7 @@ function HotkeyInput({
         {recording ? (
           <span className="px-1.5 text-[13px] text-accent">Press a key or button …</span>
         ) : value ? (
-          <Hotkey value={value} small={second} />
+          <Hotkey value={value} family={family} small={second} />
         ) : second ? (
           <span className="px-1 text-xs text-ink-faint">+ Add</span>
         ) : (
@@ -365,12 +460,20 @@ function HotkeyInput({
   );
 }
 
-function Hotkey({ value, small }: { value: string; small?: boolean }) {
+function Hotkey({
+  value,
+  family,
+  small,
+}: {
+  value: string;
+  family: PadFamily;
+  small?: boolean;
+}) {
   const pad = isPad(value);
   return (
     <div className="flex items-center gap-1.5">
       {pad && <span className="text-[11px] uppercase tracking-wide text-ink-faint">Pad</span>}
-      {hotkeyKeys(value).map((key) => (
+      {hotkeyKeys(value, family).map((key) => (
         <kbd
           key={key}
           className={cn(

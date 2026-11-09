@@ -324,6 +324,14 @@ fn apply_hotkeys(
 
     let previous = state.config_snapshot();
     let mut config = previous.clone();
+    // The first lone game button and the first Guide binding come with a
+    // line in the settings, once: the page sees these go from false to true.
+    if keyed.iter().any(|(binding, _)| binding.is_lone_game_button()) {
+        config.pad_button_hint_shown = true;
+    }
+    if keyed.iter().any(|(binding, _)| binding.has_guide()) {
+        config.guide_hint_shown = true;
+    }
     config.save_clip_hotkey = save_clip;
     config.toggle_buffer_hotkey = toggle_buffer;
     config.screenshot_hotkey = screenshot;
@@ -385,6 +393,14 @@ pub fn resume_hotkeys(app: tauri::AppHandle) {
 #[tauri::command]
 pub fn capture_input(on: bool) {
     crate::inputpoll::capture(on);
+}
+
+/// The controllers ClippiBoy sees, for the settings — asked again every few
+/// seconds while the page shows them; changes in between come as
+/// `controllers-changed`.
+#[tauri::command]
+pub fn watch_controllers() -> crate::inputpoll::Controllers {
+    crate::inputpoll::watch_controllers()
 }
 
 /// Change the folder new clips land in.

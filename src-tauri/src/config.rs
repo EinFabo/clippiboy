@@ -73,6 +73,8 @@ pub fn default_config() -> AppConfig {
         only_buffer_in_game: true,
         overlay: OverlayConfig::default(),
         tray_hint_shown: false,
+        pad_button_hint_shown: false,
+        guide_hint_shown: false,
         watermark: true,
         setup_done: false,
         usage_stats: true,
@@ -434,6 +436,8 @@ pub(crate) fn write_synced(path: &Path, text: &str) -> io::Result<()> {
 pub fn keep_once_flags(next: &mut AppConfig, previous: &AppConfig) {
     next.usage_stats_asked |= previous.usage_stats_asked;
     next.tray_hint_shown |= previous.tray_hint_shown;
+    next.pad_button_hint_shown |= previous.pad_button_hint_shown;
+    next.guide_hint_shown |= previous.guide_hint_shown;
 }
 
 /// The clip folder and the control token change only through their own

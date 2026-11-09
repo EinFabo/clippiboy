@@ -125,6 +125,8 @@ export const mockConfig: AppConfig = {
     followActiveScreen: false,
   },
   trayHintShown: false,
+  padButtonHintShown: false,
+  guideHintShown: false,
   watermark: true,
   setupDone: true,
   usageStats: true,

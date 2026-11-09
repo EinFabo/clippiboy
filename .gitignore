@@ -11,6 +11,9 @@ tools/report/target/
 dist-ffmpeg/
 src-tauri/resources/
 
+# SDL3.dll for controllers, fetched by `npm run sdl` (scripts/fetch-sdl.mjs).
+dist-sdl/
+
 # Signierschlüssel für Updates. Gehört nie ins Repo, sondern in ein
 # GitHub-Secret (TAURI_SIGNING_PRIVATE_KEY).
 *.key

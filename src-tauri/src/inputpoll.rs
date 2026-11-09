@@ -1,31 +1,35 @@
 //! Reads the hotkeys that are not keyboard combinations: the mouse's middle
-//! and side buttons and Xbox controller combos — and times the holds of all
-//! of them, keyboard included. What a press means is in `bindings`.
+//! and side buttons and controller buttons — and times the holds of all of
+//! them, keyboard included. What a press means is in `bindings`.
 //!
 //! No hook: a thread of its own asks `GetAsyncKeyState` for the three mouse
 //! buttons about every [`TICK`], the way OBS reads its mouse hotkeys
-//! (`libobs/obs-windows.c`), and `XInputGetState` (`xinput1_4`) for the
-//! controllers in the same round — empty controller slots only every
-//! [`PROBE_MS`]. Nothing is injected, nothing swallowed, no `SendInput`: the
-//! game sees every press as before, and no anti-cheat has anything to object
-//! to. A hook would add a timeout Windows enforces silently and lag on every
-//! mouse move; Raw Input would fight tao's registration.
+//! (`libobs/obs-windows.c`), and SDL3's gamepad part (`sdl`) for the
+//! controllers in the same round — Xbox pads through XInput, PlayStation,
+//! Switch and 8BitDo pads through HID. Nothing is injected, nothing
+//! swallowed, no `SendInput`: the game sees every press as before, and no
+//! anti-cheat has anything to object to. A hook would add a timeout Windows
+//! enforces silently and lag on every mouse move; Raw Input would fight tao's
+//! registration.
 //!
 //! The thread sleeps while nothing needs it: no mouse or controller binding,
-//! no keyboard hold being timed, no binding being recorded in the settings.
+//! no keyboard hold being timed, no binding being recorded in the settings,
+//! no settings page showing the controllers. SDL is started on the first
+//! need of a controller and shut down again [`PAD_IDLE_MS`] after the last.
 //!
 //! The limit is the same as for every hook: a game running with elevated
 //! rights keeps its input from a program that runs without. Then
 //! [`warn_elevated`] says so once.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tauri::{AppHandle, Emitter};
 
-use crate::bindings::{Capture, Captured, Input, Table};
+use crate::bindings::{Capture, Family, Input, PadFrame, Table, MAX_PADS};
+use crate::sdl::{Gamepad, Sdl};
 
 /// What a hotkey does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,9 +43,21 @@ pub enum Action {
 
 /// How often the buttons are read. A physical click lasts longer than this.
 const TICK: Duration = Duration::from_millis(10);
-/// How often an empty controller slot is asked whether a pad came —
-/// Microsoft advises against asking every frame.
-const PROBE_MS: u64 = 2_500;
+/// How often the list of controllers is looked at for pads that came or went.
+/// SDL notices them itself; this only picks up what it found.
+const SCAN_MS: u64 = 500;
+/// SDL stays up this long after the last need of a controller — recording a
+/// binding and then the new hotkeys arriving should not start it twice.
+const PAD_IDLE_MS: u64 = 15_000;
+/// After SDL failed to start, try again no sooner than this.
+const PAD_RETRY_MS: u64 = 30_000;
+/// A settings page showing the controllers asks again within this; after it,
+/// the list is no longer needed.
+const WATCH_MS: u64 = 6_000;
+/// The console's navigation (phase 7b) wants controller frames while the
+/// console is open, even without a controller binding. Not built yet: until
+/// it is, frames reach [`console_nav`] only while the pads are read anyway.
+const CONSOLE_NAV_READS_PADS: bool = false;
 /// How often the foreground game is checked for running elevated.
 const ELEVATION_MS: u64 = 2_000;
 /// Recording a binding ends by itself after this long — a page that went
@@ -57,16 +73,51 @@ static CAPTURING: AtomicBool = AtomicBool::new(false);
 static WARNED: AtomicBool = AtomicBool::new(false);
 /// When recording began, on [`now_ms`].
 static CAPTURE_SINCE: AtomicU64 = AtomicU64::new(0);
+/// Until when a settings page wants the controller list, on [`now_ms`].
+static WATCH_UNTIL: AtomicU64 = AtomicU64::new(0);
+/// The controllers as last seen.
+static CONTROLLERS: Mutex<Controllers> = Mutex::new(Controllers::EMPTY);
+/// The [`Family`] of the first controller, for naming its buttons.
+static FAMILY: AtomicU8 = AtomicU8::new(0);
 static INBOX: OnceLock<Sender<()>> = OnceLock::new();
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
-/// What the settings get on `input-captured`. Neither a binding nor an error:
-/// recording was ended from here (timed out, or the window lost the focus).
+/// What the settings get on `input-captured`. No binding: recording was
+/// ended from here (timed out, or the window lost the focus).
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapturedEvent {
     binding: Option<String>,
-    error: Option<String>,
+}
+
+/// The controllers for the settings — `watch_controllers` and the
+/// `controllers-changed` event.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Controllers {
+    /// SDL is up and has looked (or cannot be started) — before that the
+    /// list says nothing.
+    pub ready: bool,
+    /// Why controllers cannot be read at all (`SDL3.dll` missing, SDL failing
+    /// to start) — `None` when they can.
+    pub unavailable: Option<String>,
+    pub pads: Vec<Controller>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Controller {
+    pub name: String,
+    /// `xbox`, `playstation` or `nintendo` — whose names its buttons carry.
+    pub family: &'static str,
+}
+
+impl Controllers {
+    const EMPTY: Controllers = Controllers {
+        ready: false,
+        unavailable: None,
+        pads: Vec::new(),
+    };
 }
 
 /// Milliseconds on one clock for the keyboard events and the poll.
@@ -125,19 +176,44 @@ pub fn capture(on: bool) {
     nudge();
 }
 
+/// The settings page shows the controllers: read them for the next
+/// [`WATCH_MS`], and here is the list as it stands. Changes come as
+/// `controllers-changed`.
+pub fn watch_controllers() -> Controllers {
+    WATCH_UNTIL.store(now_ms() + WATCH_MS, Ordering::SeqCst);
+    nudge();
+    controllers().clone()
+}
+
+fn controllers() -> std::sync::MutexGuard<'static, Controllers> {
+    CONTROLLERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whose names the controller's buttons carry — the first one connected, or
+/// Xbox's when none is.
+pub fn family() -> Family {
+    match FAMILY.load(Ordering::Relaxed) {
+        1 => Family::PlayStation,
+        2 => Family::Nintendo,
+        _ => Family::Xbox,
+    }
+}
+
+/// The console opened or closed (`console::CONSOLE_SHOWN`): wake the thread,
+/// whose reading may change with it.
+pub fn console_changed() {
+    nudge();
+}
+
 /// End a recording the page did not end itself: tell it, and put the hotkeys
 /// back — they were suspended for it. Nothing happens when none runs.
 pub fn end_capture(app: &AppHandle) {
     if !CAPTURING.swap(false, Ordering::SeqCst) {
         return;
     }
-    let _ = app.emit(
-        "input-captured",
-        CapturedEvent {
-            binding: None,
-            error: None,
-        },
-    );
+    let _ = app.emit("input-captured", CapturedEvent { binding: None });
     if let Err(err) = crate::register_hotkeys(app) {
         log::warn!("{err}");
     }
@@ -163,7 +239,9 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     let mut capture: Option<Capture> = None;
     let mut pads = Pads::default();
     let mut elevation = Elevation::default();
+    let mut nav_held = 0u32;
     loop {
+        let now = now_ms();
         let capturing = CAPTURING.load(Ordering::SeqCst);
         let suspended = SUSPENDED.load(Ordering::SeqCst);
         let (mouse, controllers, keys, key_holds) = match table().as_ref() {
@@ -178,31 +256,49 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
         if !capturing {
             capture = None;
         }
+        let watching = now < WATCH_UNTIL.load(Ordering::SeqCst);
+        let console = crate::console::CONSOLE_SHOWN.load(Ordering::SeqCst);
+        // Bound controllers want reading only where they can be read; the
+        // settings (recording, the list) want to hear why not, too.
+        let want_pads = (controllers && pads.possible(now))
+            || capturing
+            || watching
+            || (console && CONSOLE_NAV_READS_PADS);
         // A key bound to be held needs no reading until it is pressed — but
         // the look at the foreground game, every couple of seconds.
         let watch = (mouse || key_holds) && !capturing;
-        if !(mouse || controllers || keys || capturing) {
+        if !(mouse || want_pads || keys || capturing) {
             if watch {
-                elevation.check(app, now_ms());
+                elevation.check(app, now);
             }
-            // Nothing to read: wait for a change instead of spinning.
-            let wait = if watch {
+            // Nothing to read: wait for a change instead of spinning — or
+            // until SDL is due to be shut down.
+            let mut wait = if watch {
                 Duration::from_millis(ELEVATION_MS)
             } else {
                 Duration::from_secs(60)
             };
+            if let Some(left) = pads.idle(app, now) {
+                wait = wait.min(Duration::from_millis(left));
+            }
+            nav_held = 0;
             if let Err(RecvTimeoutError::Disconnected) = inbox.recv_timeout(wait) {
                 return;
             }
             continue;
         }
 
-        let now = now_ms();
         if capturing && now.saturating_sub(CAPTURE_SINCE.load(Ordering::SeqCst)) > CAPTURE_MS {
             log::info!("input poll: recording a binding timed out");
             end_capture(app);
             continue;
         }
+        let read = if want_pads {
+            pads.read(app, now, console)
+        } else {
+            let _ = pads.idle(app, now);
+            PadRead::default()
+        };
         let input = Input {
             mouse: if mouse || capturing {
                 read_mouse()
@@ -214,25 +310,23 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             } else {
                 Default::default()
             },
-            pads: if controllers || capturing {
-                pads.read(now)
-            } else {
-                [0; 4]
-            },
+            pads: read.masks,
         };
+        if console && want_pads {
+            let frame = PadFrame::after(nav_held, &read.masks, read.stick);
+            nav_held = frame.held;
+            console_nav(app, &frame, now);
+        } else {
+            nav_held = 0;
+        }
         if capturing {
-            if let Some(got) = capture.get_or_insert_with(Capture::default).poll(&input) {
-                let event = match got {
-                    Captured::Binding(binding) => CapturedEvent {
+            if let Some(binding) = capture.get_or_insert_with(Capture::default).poll(&input) {
+                let _ = app.emit(
+                    "input-captured",
+                    CapturedEvent {
                         binding: Some(binding),
-                        error: None,
                     },
-                    Captured::TooFew => CapturedEvent {
-                        binding: None,
-                        error: Some("A controller combination needs at least two buttons.".into()),
-                    },
-                };
-                let _ = app.emit("input-captured", event);
+                );
             }
         } else if !suspended {
             let fired = table()
@@ -264,10 +358,20 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     }
 }
 
+/// Where the console's controller navigation hooks in (phase 7b): called
+/// every round the controllers are read while the console is open, with what
+/// went down and up since the last round (`console::CONSOLE_SHOWN` says it is
+/// open). Navigation itself is not built yet — this is the place it goes:
+/// map [`PadFrame::pressed`] (D-pad, stick, South/East, LB/RB) to
+/// `console-nav` events for the console window, and decide which pad
+/// hotkeys to hold back while it is open. To have frames without a
+/// controller binding, set [`CONSOLE_NAV_READS_PADS`].
+fn console_nav(_app: &AppHandle, _frame: &PadFrame, _now: u64) {}
+
 /// Tell once per session that a game running elevated keeps the mouse
 /// buttons and key releases from ClippiBoy — otherwise the binding just seems
-/// broken. XInput reads the controller itself, not the window's input, so
-/// controllers are left out of it.
+/// broken. Controllers are read from the device (SDL), not from the window's
+/// input, so they are left out of it.
 fn warn_elevated(app: &AppHandle, game: &str) {
     if WARNED.swap(true, Ordering::SeqCst) {
         return;
@@ -323,34 +427,209 @@ impl Elevation {
     }
 }
 
-/// The controller slots and which of them hold a pad.
+/// What the controllers gave in one round.
+#[derive(Clone, Copy, Default)]
+struct PadRead {
+    /// One mask per slot, 0 for an empty one.
+    masks: [u32; MAX_PADS],
+    /// The left stick pushed furthest, read only while the console is open.
+    stick: (i16, i16),
+}
+
+/// One controller in use: SDL's id for it, and the slot it reads into.
+struct Open {
+    id: u32,
+    pad: Gamepad,
+    slot: usize,
+    name: String,
+    family: Family,
+}
+
+/// SDL and the controllers it has open. Lives on the poll thread.
 #[derive(Default)]
 struct Pads {
-    connected: [bool; 4],
-    next_probe: u64,
+    /// SDL is started.
+    up: bool,
+    open: Vec<Open>,
+    next_scan: u64,
+    /// When the pads were last needed — SDL goes down [`PAD_IDLE_MS`] later.
+    last_used: u64,
+    /// SDL failed to start; not again before this.
+    retry_at: u64,
 }
 
 impl Pads {
-    fn read(&mut self, now: u64) -> [u32; 4] {
-        let probe = now >= self.next_probe;
-        if probe {
-            self.next_probe = now + PROBE_MS;
+    /// Can the controllers be read — or tried again — right now?
+    fn possible(&self, now: u64) -> bool {
+        self.up || (Sdl::get().is_ok() && now >= self.retry_at)
+    }
+
+    /// SDL, started if it is not yet. `None` when it cannot be — and the
+    /// settings are told why.
+    fn sdl(&mut self, app: &AppHandle, now: u64) -> Option<&'static Sdl> {
+        let sdl = match Sdl::get() {
+            Ok(sdl) => sdl,
+            Err(err) => {
+                if publish(app, |list| {
+                    list.ready = true;
+                    list.unavailable = Some(err.clone());
+                    list.pads.clear();
+                }) {
+                    log::warn!("controllers: {err}");
+                }
+                return None;
+            }
+        };
+        if self.up {
+            return Some(sdl);
         }
-        let mut masks = [0; 4];
-        for slot in 0..4 {
-            if !self.connected[slot] && !probe {
+        if now < self.retry_at {
+            return None;
+        }
+        let started = Instant::now();
+        if let Err(err) = sdl.init() {
+            log::warn!("controllers: {err}");
+            self.retry_at = now + PAD_RETRY_MS;
+            publish(app, |list| {
+                list.ready = true;
+                list.unavailable = Some(err);
+                list.pads.clear();
+            });
+            return None;
+        }
+        log::info!(
+            "controllers: SDL started in {} ms",
+            started.elapsed().as_millis()
+        );
+        self.up = true;
+        self.next_scan = 0;
+        Some(sdl)
+    }
+
+    fn read(&mut self, app: &AppHandle, now: u64, console: bool) -> PadRead {
+        self.last_used = now;
+        let mut read = PadRead::default();
+        let Some(sdl) = self.sdl(app, now) else {
+            return read;
+        };
+        sdl.update();
+        if now >= self.next_scan {
+            self.next_scan = now + SCAN_MS;
+            self.scan(app, sdl);
+        }
+        let mut furthest = 0i32;
+        for open in &self.open {
+            read.masks[open.slot] = sdl.buttons(&open.pad);
+            if console {
+                let (x, y) = sdl.left_stick(&open.pad);
+                let reach = i32::from(x).abs().max(i32::from(y).abs());
+                if reach > furthest {
+                    furthest = reach;
+                    read.stick = (x, y);
+                }
+            }
+        }
+        read
+    }
+
+    /// Open the pads that came, close the ones that went, and tell the
+    /// settings when the list changed.
+    fn scan(&mut self, app: &AppHandle, sdl: &Sdl) {
+        let ids = sdl.gamepad_ids();
+        let mut index = 0;
+        while index < self.open.len() {
+            let open = &self.open[index];
+            if ids.contains(&open.id) && sdl.connected(&open.pad) {
+                index += 1;
+            } else {
+                let gone = self.open.remove(index);
+                log::info!("controllers: {} gone", gone.name);
+                sdl.close(gone.pad);
+            }
+        }
+        for id in ids {
+            if self.open.iter().any(|open| open.id == id) {
                 continue;
             }
-            match platform::pad(slot as u32) {
-                Some(mask) => {
-                    self.connected[slot] = true;
-                    masks[slot] = mask;
-                }
-                None => self.connected[slot] = false,
-            }
+            let Some(slot) = (0..MAX_PADS).find(|slot| self.open.iter().all(|o| o.slot != *slot))
+            else {
+                break;
+            };
+            let Some(pad) = sdl.open(id) else {
+                continue;
+            };
+            let name = sdl.name(&pad);
+            let family = sdl.family(&pad);
+            log::info!("controllers: {name} ({})", family.key());
+            self.open.push(Open {
+                id,
+                pad,
+                slot,
+                name,
+                family,
+            });
         }
-        masks
+        self.open.sort_by_key(|open| open.slot);
+        sdl.flush();
+        FAMILY.store(
+            match self.open.first().map(|open| open.family) {
+                Some(Family::PlayStation) => 1,
+                Some(Family::Nintendo) => 2,
+                _ => 0,
+            },
+            Ordering::Relaxed,
+        );
+        let pads: Vec<Controller> = self
+            .open
+            .iter()
+            .map(|open| Controller {
+                name: open.name.clone(),
+                family: open.family.key(),
+            })
+            .collect();
+        publish(app, |list| {
+            list.ready = true;
+            list.unavailable = None;
+            list.pads = pads;
+        });
     }
+
+    /// Not needed this round. Shuts SDL down once it has not been needed for
+    /// [`PAD_IDLE_MS`]; otherwise says how long until then.
+    fn idle(&mut self, app: &AppHandle, now: u64) -> Option<u64> {
+        if !self.up {
+            return None;
+        }
+        let due = self.last_used + PAD_IDLE_MS;
+        if now < due {
+            return Some(due - now);
+        }
+        if let Ok(sdl) = Sdl::get() {
+            for open in self.open.drain(..) {
+                sdl.close(open.pad);
+            }
+            sdl.quit();
+        }
+        self.up = false;
+        log::info!("controllers: SDL shut down, not needed");
+        publish(app, |list| *list = Controllers::EMPTY);
+        None
+    }
+}
+
+/// Change the controller list; tell the settings when that changed it.
+fn publish(app: &AppHandle, change: impl FnOnce(&mut Controllers)) -> bool {
+    let next = {
+        let mut list = controllers();
+        let before = list.clone();
+        change(&mut list);
+        if *list == before {
+            return false;
+        }
+        list.clone()
+    };
+    let _ = app.emit("controllers-changed", next);
+    true
 }
 
 fn read_mouse() -> [bool; 3] {
@@ -363,7 +642,7 @@ fn read_mods() -> crate::bindings::Mods {
 
 #[cfg(windows)]
 mod platform {
-    use crate::bindings::{pad, Mods};
+    use crate::bindings::Mods;
     use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, MAX_PATH};
     use windows::Win32::Security::{
         GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
@@ -376,7 +655,6 @@ mod platform {
         GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_MBUTTON, VK_MENU, VK_SHIFT, VK_XBUTTON1,
         VK_XBUTTON2,
     };
-    use windows::Win32::UI::Input::XboxController::{XInputGetState, XINPUT_STATE};
 
     fn down(key: VIRTUAL_KEY) -> bool {
         // The high bit: held right now. Only reads the state — the press
@@ -400,20 +678,6 @@ mod platform {
             mods = mods.with(Mods::SHIFT);
         }
         mods
-    }
-
-    /// One controller's buttons, or `None` for an empty slot.
-    pub fn pad(slot: u32) -> Option<u32> {
-        let mut state = XINPUT_STATE::default();
-        let result = unsafe { XInputGetState(slot, &mut state) };
-        (result == 0).then(|| {
-            let gamepad = state.Gamepad;
-            pad::mask(
-                gamepad.wButtons.0,
-                gamepad.bLeftTrigger,
-                gamepad.bRightTrigger,
-            )
-        })
     }
 
     /// Is the key with this virtual-key code held right now?
@@ -474,9 +738,6 @@ mod platform {
     }
     pub fn mods() -> Mods {
         Mods::NONE
-    }
-    pub fn pad(_slot: u32) -> Option<u32> {
-        None
     }
     pub fn key_down(_vk: u16) -> bool {
         false

@@ -1,9 +1,10 @@
 /**
  * How a hotkey binding reads. The core stores one string per action:
- * `Ctrl+Shift+S`, `Mouse4`, `Ctrl+Mouse5`, `Pad:View+A`, any of them behind
- * `Hold:` when the action fires on holding rather than tapping
+ * `Ctrl+Shift+S`, `Mouse4`, `Ctrl+Mouse5`, `Pad:Back+South`, `Pad:Guide`, any
+ * of them behind `Hold:` when the action fires on holding rather than tapping
  * (`src-tauri/src/bindings.rs`). Old bindings are plain keyboard combinations
- * and read as before.
+ * and read as before; controller bindings written before 0.10 in Xbox names
+ * (`Pad:View+A`) too.
  */
 
 /**
@@ -71,16 +72,98 @@ export function isPad(value: string): boolean {
   return PAD.test(triggerOf(value));
 }
 
-/** The keys or buttons, each as it is printed. */
-export function hotkeyKeys(value: string): string[] {
+/** Whose names a controller's buttons carry. */
+export type PadFamily = "xbox" | "playstation" | "nintendo";
+
+/** Other spellings the core reads, by the position they stand for — the Xbox
+    names older bindings were written in among them. Lower case. */
+const PAD_ALIASES: Record<string, string> = {
+  a: "South",
+  b: "East",
+  x: "West",
+  y: "North",
+  view: "Back",
+  select: "Back",
+  menu: "Start",
+  options: "Start",
+  xbox: "Guide",
+  home: "Guide",
+  ps: "Guide",
+  share: "Misc",
+  capture: "Misc",
+  mic: "Misc",
+  dpadup: "Up",
+  dpaddown: "Down",
+  dpadleft: "Left",
+  dpadright: "Right",
+};
+
+/** What the core calls a controller button: its position (`South` is the
+    bottom face button on every pad). */
+export function padButton(name: string): string {
+  return PAD_ALIASES[name.trim().toLowerCase()] ?? name.trim();
+}
+
+const PAD_LABELS: Record<PadFamily, Record<string, string>> = {
+  xbox: {
+    South: "A",
+    East: "B",
+    West: "X",
+    North: "Y",
+    Back: "View",
+    Start: "Menu",
+    Guide: "Xbox",
+    Misc: "Share",
+  },
+  playstation: {
+    South: "Cross",
+    East: "Circle",
+    West: "Square",
+    North: "Triangle",
+    Back: "Share",
+    Start: "Options",
+    Guide: "PS",
+    Misc: "Mic",
+    LB: "L1",
+    RB: "R1",
+    LT: "L2",
+    RT: "R2",
+    LS: "L3",
+    RS: "R3",
+  },
+  nintendo: {
+    South: "B",
+    East: "A",
+    West: "Y",
+    North: "X",
+    Back: "Minus",
+    Start: "Plus",
+    Guide: "Home",
+    Misc: "Capture",
+    LB: "L",
+    RB: "R",
+    LT: "ZL",
+    RT: "ZR",
+  },
+};
+
+/** What is printed on a controller button on a pad of `family`. */
+export function padLabel(name: string, family: PadFamily = "xbox"): string {
+  const button = padButton(name);
+  return PAD_LABELS[family][button] ?? PAD_LABELS.xbox[button] ?? button;
+}
+
+/** The keys or buttons, each as it is printed — a controller's as on a pad
+    of `family`. */
+export function hotkeyKeys(value: string, family: PadFamily = "xbox"): string[] {
   const trigger = triggerOf(value);
   if (!trigger) return [];
   const keys = trigger.replace(PAD, "").split("+");
-  return isPad(value) ? keys : keys.map(keyLabel);
+  return isPad(value) ? keys.map((key) => padLabel(key, family)) : keys.map(keyLabel);
 }
 
 /** The whole binding in one line: "Ctrl + Shift + S", "Hold Mouse 5". */
-export function hotkeyLabel(value: string): string {
-  const keys = hotkeyKeys(value).join(" + ");
+export function hotkeyLabel(value: string, family: PadFamily = "xbox"): string {
+  const keys = hotkeyKeys(value, family).join(" + ");
   return isHold(value) && keys ? `Hold ${keys}` : keys;
 }

@@ -98,6 +98,7 @@ pub fn create(app: &tauri::AppHandle) {
                 }
                 if matches!(event, tauri::WindowEvent::Focused(false)) {
                     CONSOLE_SHOWN.store(false, Ordering::SeqCst);
+                    crate::inputpoll::console_changed();
                     let _ = handle.hide();
                     // Whoever was in front before is no longer where the user
                     // is going — they just chose somewhere else themselves.
@@ -200,6 +201,7 @@ pub fn open(app: &tauri::AppHandle) {
     let mut layout = place(&window).unwrap_or_default();
     let _ = window.show();
     CONSOLE_SHOWN.store(true, Ordering::SeqCst);
+    crate::inputpoll::console_changed();
     let _ = window.set_always_on_top(true);
     let _ = window.set_focus();
     // Once more now that it is up: a hidden window is not always on the monitor
@@ -232,6 +234,7 @@ pub fn close(app: &tauri::AppHandle) {
     // prevent. Taking it first makes the order stop mattering.
     let previous = take_foreground();
     CONSOLE_SHOWN.store(false, Ordering::SeqCst);
+    crate::inputpoll::console_changed();
     let _ = window.hide();
     restore_foreground(previous);
 }
@@ -245,6 +248,7 @@ pub fn close(app: &tauri::AppHandle) {
 /// window would blink in the task bar and stay where it was.
 pub fn hide(app: &tauri::AppHandle) {
     CONSOLE_SHOWN.store(false, Ordering::SeqCst);
+    crate::inputpoll::console_changed();
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.hide();
     }

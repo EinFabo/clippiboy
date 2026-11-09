@@ -1,5 +1,5 @@
-//! Hotkeys beyond the keyboard: the mouse's middle and side buttons, Xbox
-//! controller combos, and tapping versus holding — the pure part.
+//! Hotkeys beyond the keyboard: the mouse's middle and side buttons,
+//! controller buttons and combos, and tapping versus holding — the pure part.
 //!
 //! A binding is still one string in the config, as before, so an old config
 //! loads unchanged; each action has a second one beside it (`…_hotkey_alt`),
@@ -8,9 +8,10 @@
 //!   spells it;
 //! - `Mouse3` (middle), `Mouse4`, `Mouse5`, optionally behind `Ctrl`, `Alt`,
 //!   `Shift` — `Ctrl+Mouse5`;
-//! - `Pad:View+A`, `Pad:LB+RB+A` — at least two buttons held together on an
-//!   Xbox controller (XInput). Guide and Share are not in `XInputGetState` and
-//!   not offered;
+//! - `Pad:Guide`, `Pad:Back+South`, `Pad:LB+RB+South` — one controller
+//!   button, or several held together on one controller, by position (see
+//!   [`pad`]); any pad SDL reads, Guide included. Bindings written before,
+//!   in Xbox names (`Pad:View+A`), read the same;
 //! - any of these behind `Hold:` — the action fires once the binding has been
 //!   held for a moment, so the same button can do one thing tapped and another
 //!   held (`Mouse5` saves a clip, `Hold:Mouse5` takes a screenshot).
@@ -22,14 +23,17 @@
 
 use std::fmt;
 
-/// Held this long, a mouse button or key counts as held rather than tapped.
+/// Held this long, a key, mouse button or controller binding counts as held
+/// rather than tapped. Short enough for Guide too — held for seconds, that
+/// one switches an Xbox pad off.
 pub const HOLD_MS: u64 = 400;
-/// A controller combo has to stand this long before it counts at all: buttons
-/// meet by accident in the middle of play, and a clip should not.
-pub const PAD_PRESS_MS: u64 = 300;
-/// Held this long, a controller combo counts as held. Above
-/// [`PAD_PRESS_MS`] by enough that a tap still has room between the two.
-pub const PAD_HOLD_MS: u64 = 800;
+/// A tap fires on the press — except on a controller binding that is part of
+/// a bigger bound combo (`South` beside `Back+South`): that one waits this
+/// long for the rest of the combo, as two buttons pressed "together" land a
+/// few milliseconds apart.
+pub const CHORD_MS: u64 = 50;
+/// Controllers read at once; more are left out.
+pub const MAX_PADS: usize = 8;
 
 /// Tapped or held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -101,75 +105,194 @@ impl Mods {
     }
 }
 
-/// Controller buttons as bits: XInput's own `wButtons` bits, plus the two
-/// triggers above them (XInput reports those as 0–255).
+/// Controller buttons as bits: SDL's standard gamepad buttons by position
+/// (`SDL_GamepadButton`: bit n is button n), plus the two triggers above them
+/// (SDL reports those as an axis).
+///
+/// Bindings are stored by position, not by what is printed on the pad: the
+/// bottom face button is `South` whether it reads A (Xbox), Cross
+/// (PlayStation) or B (Nintendo). [`Family::label`] gives the printed name.
 pub mod pad {
-    pub const UP: u32 = 0x0001;
-    pub const DOWN: u32 = 0x0002;
-    pub const LEFT: u32 = 0x0004;
-    pub const RIGHT: u32 = 0x0008;
-    pub const MENU: u32 = 0x0010;
-    pub const VIEW: u32 = 0x0020;
-    pub const LS: u32 = 0x0040;
-    pub const RS: u32 = 0x0080;
-    pub const LB: u32 = 0x0100;
-    pub const RB: u32 = 0x0200;
-    pub const A: u32 = 0x1000;
-    pub const B: u32 = 0x2000;
-    pub const X: u32 = 0x4000;
-    pub const Y: u32 = 0x8000;
-    pub const LT: u32 = 0x1_0000;
-    pub const RT: u32 = 0x2_0000;
+    pub const SOUTH: u32 = 1 << 0;
+    pub const EAST: u32 = 1 << 1;
+    pub const WEST: u32 = 1 << 2;
+    pub const NORTH: u32 = 1 << 3;
+    pub const BACK: u32 = 1 << 4;
+    /// Xbox, PS, Home.
+    pub const GUIDE: u32 = 1 << 5;
+    pub const START: u32 = 1 << 6;
+    pub const LS: u32 = 1 << 7;
+    pub const RS: u32 = 1 << 8;
+    pub const LB: u32 = 1 << 9;
+    pub const RB: u32 = 1 << 10;
+    pub const UP: u32 = 1 << 11;
+    pub const DOWN: u32 = 1 << 12;
+    pub const LEFT: u32 = 1 << 13;
+    pub const RIGHT: u32 = 1 << 14;
+    /// Xbox Series Share, DualSense mic, Switch Capture.
+    pub const MISC: u32 = 1 << 15;
+    /// The paddles, named as on the Xbox Elite pad: upper right, upper left,
+    /// lower right, lower left (SDL's right/left paddle 1/2).
+    pub const P1: u32 = 1 << 16;
+    pub const P3: u32 = 1 << 17;
+    pub const P2: u32 = 1 << 18;
+    pub const P4: u32 = 1 << 19;
+    /// PlayStation touchpad click.
+    pub const TOUCHPAD: u32 = 1 << 20;
+    pub const LT: u32 = 1 << 26;
+    pub const RT: u32 = 1 << 27;
 
-    /// The `wButtons` bits that are buttons one may bind (0x0400 and 0x0800
-    /// are not documented — Guide shows up there only through a hidden call).
-    pub const BUTTONS: u16 = 0xF3FF;
+    /// SDL's buttons that are read: `SOUTH` up to `TOUCHPAD`.
+    pub const BUTTON_COUNT: u32 = 21;
 
-    /// A trigger pulled past this counts as pressed —
-    /// `XINPUT_GAMEPAD_TRIGGER_THRESHOLD`.
-    pub const TRIGGER_THRESHOLD: u8 = 30;
+    /// A trigger pulled past this counts as pressed — XInput's
+    /// `XINPUT_GAMEPAD_TRIGGER_THRESHOLD` (30 of 255) on SDL's 0–32767.
+    pub const TRIGGER_THRESHOLD: i16 = 3855;
+
+    pub fn trigger(axis: i16) -> bool {
+        axis > TRIGGER_THRESHOLD
+    }
+
+    /// The buttons a game plays with. Bound alone, the game gets the same
+    /// press — the settings say so once.
+    pub const GAME_BUTTONS: u32 = SOUTH
+        | EAST
+        | WEST
+        | NORTH
+        | LB
+        | RB
+        | LT
+        | RT
+        | LS
+        | RS
+        | UP
+        | DOWN
+        | LEFT
+        | RIGHT;
 
     /// Names in the order they are written: shoulders and the small buttons
     /// first, the face buttons last, as one reads a combo.
-    pub const NAMES: [(u32, &str); 16] = [
+    pub const NAMES: [(u32, &str); 23] = [
         (LB, "LB"),
         (RB, "RB"),
         (LT, "LT"),
         (RT, "RT"),
-        (VIEW, "View"),
-        (MENU, "Menu"),
+        (BACK, "Back"),
+        (START, "Start"),
+        (GUIDE, "Guide"),
+        (MISC, "Misc"),
+        (TOUCHPAD, "Touchpad"),
+        (P1, "P1"),
+        (P2, "P2"),
+        (P3, "P3"),
+        (P4, "P4"),
         (LS, "LS"),
         (RS, "RS"),
         (UP, "Up"),
         (DOWN, "Down"),
         (LEFT, "Left"),
         (RIGHT, "Right"),
-        (A, "A"),
-        (B, "B"),
-        (X, "X"),
-        (Y, "Y"),
+        (SOUTH, "South"),
+        (EAST, "East"),
+        (WEST, "West"),
+        (NORTH, "North"),
     ];
 
-    /// The old names from the Xbox 360 pad and a few obvious spellings.
-    pub const ALIASES: [(u32, &str); 6] = [
-        (VIEW, "Back"),
-        (MENU, "Start"),
+    /// Xbox's names, which bindings were written in before SDL (`Pad:View+A`),
+    /// the Xbox 360 pad's, and a few obvious spellings.
+    pub const ALIASES: [(u32, &str); 18] = [
+        (SOUTH, "A"),
+        (EAST, "B"),
+        (WEST, "X"),
+        (NORTH, "Y"),
+        (BACK, "View"),
+        (START, "Menu"),
         (UP, "DpadUp"),
         (DOWN, "DpadDown"),
         (LEFT, "DpadLeft"),
         (RIGHT, "DpadRight"),
+        (GUIDE, "Xbox"),
+        (GUIDE, "Home"),
+        (GUIDE, "PS"),
+        (MISC, "Share"),
+        (MISC, "Capture"),
+        (MISC, "Mic"),
+        (BACK, "Select"),
+        (START, "Options"),
     ];
+}
 
-    /// One controller's state as bits.
-    pub fn mask(buttons: u16, left_trigger: u8, right_trigger: u8) -> u32 {
-        let mut mask = u32::from(buttons & BUTTONS);
-        if left_trigger > TRIGGER_THRESHOLD {
-            mask |= LT;
+/// What kind of controller — for the names printed on its buttons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Family {
+    /// Xbox pads, and every pad that is neither of the others.
+    #[default]
+    Xbox,
+    PlayStation,
+    Nintendo,
+}
+
+impl Family {
+    pub fn key(self) -> &'static str {
+        match self {
+            Family::Xbox => "xbox",
+            Family::PlayStation => "playstation",
+            Family::Nintendo => "nintendo",
         }
-        if right_trigger > TRIGGER_THRESHOLD {
-            mask |= RT;
+    }
+
+    /// What is printed on the button with this [`pad`] bit.
+    pub fn label(self, bit: u32) -> &'static str {
+        use pad::*;
+        let xbox = match bit {
+            SOUTH => "A",
+            EAST => "B",
+            WEST => "X",
+            NORTH => "Y",
+            BACK => "View",
+            START => "Menu",
+            GUIDE => "Xbox",
+            MISC => "Share",
+            _ => pad::NAMES
+                .iter()
+                .find(|(known, _)| *known == bit)
+                .map_or("?", |(_, name)| *name),
+        };
+        match self {
+            Family::Xbox => xbox,
+            Family::PlayStation => match bit {
+                SOUTH => "Cross",
+                EAST => "Circle",
+                WEST => "Square",
+                NORTH => "Triangle",
+                BACK => "Share",
+                START => "Options",
+                GUIDE => "PS",
+                MISC => "Mic",
+                LB => "L1",
+                RB => "R1",
+                LT => "L2",
+                RT => "R2",
+                LS => "L3",
+                RS => "R3",
+                _ => xbox,
+            },
+            Family::Nintendo => match bit {
+                SOUTH => "B",
+                EAST => "A",
+                WEST => "Y",
+                NORTH => "X",
+                BACK => "Minus",
+                START => "Plus",
+                GUIDE => "Home",
+                MISC => "Capture",
+                LB => "L",
+                RB => "R",
+                LT => "ZL",
+                RT => "ZR",
+                _ => xbox,
+            },
         }
-        mask
     }
 }
 
@@ -305,8 +428,8 @@ pub fn parse(text: &str) -> Result<Binding, String> {
             mask |= pad_button(name)
                 .ok_or_else(|| format!("\"{text}\" is not a valid controller combination."))?;
         }
-        if mask.count_ones() < 2 {
-            return Err("A controller combination needs at least two buttons.".into());
+        if mask == 0 {
+            return Err(format!("\"{text}\" is not a valid controller combination."));
         }
         return Ok(Binding {
             mode,
@@ -384,16 +507,27 @@ impl fmt::Display for Binding {
     }
 }
 
-/// A binding as a banner says it: "Alt+C", "Mouse 4", "Hold View+A". Text the
-/// parser does not know comes back as it is.
+/// A binding as a banner says it: "Alt+C", "Mouse 4", "Hold View+A" — the
+/// controller's buttons as printed on the pad in use (`inputpoll::family`).
+/// Text the parser does not know comes back as it is.
 pub fn spoken(text: &str) -> String {
+    spoken_for(text, crate::inputpoll::family())
+}
+
+/// [`spoken`], with the buttons named as on a pad of `family`.
+pub fn spoken_for(text: &str, family: Family) -> String {
     let Ok(binding) = parse(text) else {
         return text.trim().to_string();
     };
     let trigger = match &binding.trigger {
         Trigger::Key(combo) => combo.clone(),
         Trigger::Mouse(..) => binding.trigger.to_string().replace("Mouse", "Mouse "),
-        Trigger::Pad(_) => binding.trigger.to_string()["Pad:".len()..].to_string(),
+        Trigger::Pad(mask) => pad::NAMES
+            .iter()
+            .filter(|(bit, _)| mask & bit != 0)
+            .map(|(bit, _)| family.label(*bit))
+            .collect::<Vec<_>>()
+            .join("+"),
     };
     match binding.mode {
         Mode::Tap => trigger,
@@ -417,10 +551,25 @@ pub fn clashes(bindings: &[(Binding, Option<u32>)]) -> bool {
     })
 }
 
+impl Binding {
+    /// A single controller button a game plays with — the game gets the
+    /// press too.
+    pub fn is_lone_game_button(&self) -> bool {
+        matches!(self.trigger, Trigger::Pad(mask)
+            if mask.count_ones() == 1 && mask & pad::GAME_BUTTONS != 0)
+    }
+
+    /// Guide is part of it — Xbox Game Bar may open on the same press.
+    pub fn has_guide(&self) -> bool {
+        matches!(self.trigger, Trigger::Pad(mask) if mask & pad::GUIDE != 0)
+    }
+}
+
 /// One thing that can be pressed, with what it does tapped and held.
 ///
-/// - only a tap: fires on the press, or — for a controller combo — once the
-///   combo has stood [`PAD_PRESS_MS`];
+/// - only a tap: fires on the press — or, for a controller binding inside a
+///   bigger bound combo, after [`CHORD_MS`] or on letting go, whichever is
+///   first;
 /// - only a hold: fires once held for the hold time; let go earlier, nothing;
 /// - both: the tap fires on letting go before the hold time, the hold when
 ///   the hold time passes — and then no tap.
@@ -428,7 +577,8 @@ pub fn clashes(bindings: &[(Binding, Option<u32>)]) -> bool {
 pub struct Slot<A> {
     pub tap: Option<A>,
     pub hold: Option<A>,
-    press_ms: u64,
+    /// How long a lone tap waits for a bigger combo; 0 fires on the press.
+    wait_ms: u64,
     hold_ms: u64,
     down: Option<Down>,
 }
@@ -440,11 +590,11 @@ struct Down {
 }
 
 impl<A: Copy> Slot<A> {
-    pub fn new(press_ms: u64, hold_ms: u64) -> Self {
+    pub fn new(wait_ms: u64, hold_ms: u64) -> Self {
         Slot {
             tap: None,
             hold: None,
-            press_ms,
+            wait_ms,
             hold_ms,
             down: None,
         }
@@ -467,7 +617,7 @@ impl<A: Copy> Slot<A> {
         if self.down.is_some() {
             return None;
         }
-        let instant = self.hold.is_none() && self.press_ms == 0;
+        let instant = self.hold.is_none() && self.wait_ms == 0;
         self.down = Some(Down {
             since: now,
             fired: instant,
@@ -493,7 +643,7 @@ impl<A: Copy> Slot<A> {
             }
             return None;
         }
-        if held >= self.press_ms {
+        if held >= self.wait_ms {
             down.fired = true;
             return self.tap;
         }
@@ -511,10 +661,7 @@ impl<A: Copy> Slot<A> {
         if self.hold.is_some() && held >= self.hold_ms {
             return self.hold;
         }
-        if held >= self.press_ms {
-            return self.tap;
-        }
-        None
+        self.tap
     }
 
     /// Gone without counting — a bigger combo took over.
@@ -530,7 +677,33 @@ pub struct Input {
     pub mouse: [bool; 3],
     pub mods: Mods,
     /// One mask per controller slot, 0 for an empty one.
-    pub pads: [u32; 4],
+    pub pads: [u32; MAX_PADS],
+}
+
+/// What the controllers did in one round of the poll, all pads together —
+/// what the console's navigation works from (`inputpoll::console_nav`): the
+/// buttons that went down and up since the last round, and the left stick
+/// pushed furthest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PadFrame {
+    pub held: u32,
+    pub pressed: u32,
+    pub released: u32,
+    /// The left stick, -32768..32767 each way, down positive.
+    pub stick: (i16, i16),
+}
+
+impl PadFrame {
+    /// The round after one where `before` was held.
+    pub fn after(before: u32, pads: &[u32], stick: (i16, i16)) -> PadFrame {
+        let held = pads.iter().fold(0, |all, mask| all | mask);
+        PadFrame {
+            held,
+            pressed: held & !before,
+            released: before & !held,
+            stick,
+        }
+    }
 }
 
 /// Every binding, by what is pressed, and where each one stands.
@@ -600,12 +773,21 @@ impl<A: Copy> Table<A> {
         let at = match self.pads.iter().position(|(known, _)| *known == mask) {
             Some(at) => at,
             None => {
-                self.pads.push((mask, Slot::new(PAD_PRESS_MS, PAD_HOLD_MS)));
+                self.pads.push((mask, Slot::new(0, HOLD_MS)));
                 self.pad_blocked.push(false);
                 self.pads.len() - 1
             }
         };
         self.pads[at].1.set(mode, action);
+        // Part of a bigger combo now bound? Then its tap waits a moment for
+        // the rest of it.
+        let masks: Vec<u32> = self.pads.iter().map(|(mask, _)| *mask).collect();
+        for (mask, slot) in &mut self.pads {
+            let inside = masks
+                .iter()
+                .any(|bigger| bigger & *mask == *mask && *bigger != *mask);
+            slot.wait_ms = if inside { CHORD_MS } else { 0 };
+        }
     }
 
     pub fn wants_mouse(&self) -> bool {
@@ -749,32 +931,25 @@ impl<A: Copy> Table<A> {
     }
 }
 
-/// What the settings get while recording a binding.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Captured {
-    /// A trigger in config spelling, without `Hold:` — tap or hold stays as
-    /// the settings had it.
-    Binding(String),
-    /// A single controller button was pressed and let go.
-    TooFew,
-}
-
-/// Records the next mouse button or controller combo for the settings.
+/// Records the next mouse button or controller button or combo for the
+/// settings, as a trigger in config spelling, without `Hold:` — tap or hold
+/// stays as the settings had it.
 ///
-/// A mouse button counts on its press, with the modifiers held then. A
-/// controller combo is every button pressed until all are let go again —
-/// press View, then A, let go: `Pad:View+A`. What was already held when
-/// recording began is left out until it has been let go.
+/// A mouse button counts on its press, with the modifiers held then. On a
+/// controller it is every button pressed until all are let go again — press
+/// Back, then South, let go: `Pad:Back+South`; Guide alone: `Pad:Guide`. What
+/// was already held when recording began is left out until it has been let
+/// go.
 #[derive(Clone, Debug, Default)]
 pub struct Capture {
     mouse_was: [bool; 3],
-    pad_ignored: [u32; 4],
-    pad_combo: [u32; 4],
+    pad_ignored: [u32; MAX_PADS],
+    pad_combo: [u32; MAX_PADS],
     primed: bool,
 }
 
 impl Capture {
-    pub fn poll(&mut self, input: &Input) -> Option<Captured> {
+    pub fn poll(&mut self, input: &Input) -> Option<String> {
         if !self.primed {
             self.primed = true;
             self.mouse_was = input.mouse;
@@ -785,24 +960,18 @@ impl Capture {
         for button in MouseButton::ALL {
             let at = button.index();
             if input.mouse[at] && !self.mouse_was[at] && got.is_none() {
-                got = Some(Captured::Binding(
-                    Trigger::Mouse(button, input.mods).to_string(),
-                ));
+                got = Some(Trigger::Mouse(button, input.mods).to_string());
             }
         }
         self.mouse_was = input.mouse;
-        for slot in 0..4 {
+        for slot in 0..MAX_PADS {
             self.pad_ignored[slot] &= input.pads[slot];
             let live = input.pads[slot] & !self.pad_ignored[slot];
             self.pad_combo[slot] |= live;
             if live == 0 && self.pad_combo[slot] != 0 {
                 let combo = std::mem::take(&mut self.pad_combo[slot]);
                 if got.is_none() {
-                    got = Some(if combo.count_ones() >= 2 {
-                        Captured::Binding(Trigger::Pad(combo).to_string())
-                    } else {
-                        Captured::TooFew
-                    });
+                    got = Some(Trigger::Pad(combo).to_string());
                 }
             }
         }
@@ -843,19 +1012,64 @@ mod tests {
     }
 
     #[test]
-    fn controller_combos_need_two_known_buttons() {
+    fn controller_bindings_are_stored_by_position() {
         assert_eq!(
-            parse("Pad:View+A").unwrap().trigger,
-            Trigger::Pad(pad::VIEW | pad::A)
+            parse("Pad:Back+South").unwrap().trigger,
+            Trigger::Pad(pad::BACK | pad::SOUTH)
         );
         // Written in one order, whatever order they came in.
-        assert_eq!(round("pad:a+rb+LB"), "Pad:LB+RB+A");
-        assert_eq!(round("Pad:Back+Start"), "Pad:View+Menu");
+        assert_eq!(round("pad:south+rb+LB"), "Pad:LB+RB+South");
         assert_eq!(round("Pad:LT+RT+DpadDown"), "Pad:LT+RT+Down");
-        assert!(parse("Pad:A").is_err());
-        assert!(parse("Pad:A+A").is_err());
-        assert!(parse("Pad:Guide+A").is_err());
         assert!(parse("Pad:").is_err());
+        assert!(parse("Pad:South+Z").is_err());
+    }
+
+    #[test]
+    fn bindings_in_the_old_xbox_names_still_read() {
+        // As written by 0.9.x, before SDL.
+        assert_eq!(
+            parse("Pad:View+A").unwrap().trigger,
+            Trigger::Pad(pad::BACK | pad::SOUTH)
+        );
+        assert_eq!(round("Pad:View+A"), "Pad:Back+South");
+        assert_eq!(round("Hold:Pad:LB+RB+A"), "Hold:Pad:LB+RB+South");
+        assert_eq!(round("Pad:Menu+Y"), "Pad:Start+North");
+        assert_eq!(round("Pad:X+B"), "Pad:East+West");
+    }
+
+    #[test]
+    fn a_single_controller_button_is_a_binding() {
+        assert_eq!(parse("Pad:South").unwrap().trigger, Trigger::Pad(pad::SOUTH));
+        assert_eq!(round("Pad:A+A"), "Pad:South");
+        assert_eq!(round("Hold:Pad:Misc"), "Hold:Pad:Misc");
+        assert_eq!(round("Pad:Capture"), "Pad:Misc");
+    }
+
+    #[test]
+    fn guide_is_bindable_under_any_of_its_names() {
+        assert_eq!(parse("Pad:Guide").unwrap().trigger, Trigger::Pad(pad::GUIDE));
+        assert_eq!(round("Pad:Xbox"), "Pad:Guide");
+        assert_eq!(round("Pad:Home"), "Pad:Guide");
+        assert_eq!(round("Pad:PS+A"), "Pad:Guide+South");
+        assert!(parse("Pad:Guide").unwrap().has_guide());
+        assert!(parse("Hold:Pad:Back+Guide").unwrap().has_guide());
+        assert!(!parse("Pad:Back+South").unwrap().has_guide());
+        assert!(!parse("Mouse5").unwrap().has_guide());
+    }
+
+    #[test]
+    fn a_lone_button_the_game_uses_is_told_apart() {
+        let lone = |text: &str| parse(text).unwrap().is_lone_game_button();
+        assert!(lone("Pad:South"));
+        assert!(lone("Hold:Pad:LB"));
+        assert!(lone("Pad:RT"));
+        assert!(lone("Pad:Up"));
+        assert!(lone("Pad:LS"));
+        assert!(!lone("Pad:Guide"));
+        assert!(!lone("Pad:Misc"));
+        assert!(!lone("Pad:Back"));
+        assert!(!lone("Pad:Back+South"));
+        assert!(!lone("Mouse5"));
     }
 
     #[test]
@@ -863,7 +1077,7 @@ mod tests {
         let binding = parse("hold: Mouse5").unwrap();
         assert_eq!(binding.mode, Mode::Hold);
         assert_eq!(binding.to_string(), "Hold:Mouse5");
-        assert_eq!(round("HOLD:Pad:A+View"), "Hold:Pad:View+A");
+        assert_eq!(round("HOLD:Pad:A+View"), "Hold:Pad:Back+South");
         assert_eq!(round("Hold:Ctrl+Shift+S"), "Hold:Ctrl+Shift+S");
         assert!(parse("Hold:").is_err());
         assert!(parse("").is_err());
@@ -871,17 +1085,49 @@ mod tests {
 
     #[test]
     fn spoken_reads_like_a_person_would_say_it() {
-        assert_eq!(spoken("Alt+C"), "Alt+C");
-        assert_eq!(spoken("Ctrl+Mouse4"), "Ctrl+Mouse 4");
-        assert_eq!(spoken("Hold:Pad:View+A"), "Hold View+A");
+        assert_eq!(spoken_for("Alt+C", Family::Xbox), "Alt+C");
+        assert_eq!(spoken_for("Ctrl+Mouse4", Family::Xbox), "Ctrl+Mouse 4");
+        assert_eq!(spoken_for("Hold:Pad:View+A", Family::Xbox), "Hold View+A");
+        assert_eq!(spoken_for("Pad:Guide", Family::Xbox), "Xbox");
     }
 
     #[test]
-    fn the_trigger_mask_leaves_guide_out_and_counts_pulled_triggers() {
-        assert_eq!(pad::mask(0x1000, 0, 0), pad::A);
-        assert_eq!(pad::mask(0x0400 | 0x0020, 0, 0), pad::VIEW);
-        assert_eq!(pad::mask(0, 31, 30), pad::LT);
-        assert_eq!(pad::mask(0, 0, 255), pad::RT);
+    fn spoken_names_the_buttons_as_printed_on_the_pad() {
+        assert_eq!(
+            spoken_for("Pad:Back+South", Family::PlayStation),
+            "Share+Cross"
+        );
+        assert_eq!(spoken_for("Pad:Guide", Family::PlayStation), "PS");
+        assert_eq!(spoken_for("Pad:LB+RT", Family::PlayStation), "L1+R2");
+        // The bottom button is B on a Nintendo pad, the right one A.
+        assert_eq!(spoken_for("Pad:South", Family::Nintendo), "B");
+        assert_eq!(spoken_for("Pad:East", Family::Nintendo), "A");
+        assert_eq!(spoken_for("Hold:Pad:Misc", Family::Nintendo), "Hold Capture");
+        assert_eq!(spoken_for("Pad:Guide", Family::Nintendo), "Home");
+    }
+
+    #[test]
+    fn bits_follow_sdls_button_order() {
+        // SDL_GAMEPAD_BUTTON_SOUTH = 0, GUIDE = 5, DPAD_RIGHT = 14,
+        // MISC1 = 15, TOUCHPAD = 20.
+        assert_eq!(pad::SOUTH, 1 << 0);
+        assert_eq!(pad::GUIDE, 1 << 5);
+        assert_eq!(pad::RIGHT, 1 << 14);
+        assert_eq!(pad::MISC, 1 << 15);
+        assert_eq!(pad::TOUCHPAD, 1 << (pad::BUTTON_COUNT - 1));
+        // Every bit has one name to be written in.
+        for (bit, name) in pad::NAMES {
+            assert_eq!(bit.count_ones(), 1, "{name}");
+            assert_eq!(pad_button(name), Some(bit));
+        }
+    }
+
+    #[test]
+    fn a_trigger_counts_past_xinputs_threshold() {
+        assert!(!pad::trigger(0));
+        assert!(!pad::trigger(3855));
+        assert!(pad::trigger(3856));
+        assert!(pad::trigger(i16::MAX));
     }
 
     #[test]
@@ -893,11 +1139,12 @@ mod tests {
             one("F9", Some(1)),
             one("mouse5", None)
         ]));
-        assert!(clashes(&[one("Pad:A+View", None), one("Pad:View+A", None)]));
+        assert!(clashes(&[one("Pad:A+View", None), one("Pad:Back+South", None)]));
         assert!(!clashes(&[
             one("Pad:View+A", None),
             one("Pad:View+B", None)
         ]));
+        assert!(!clashes(&[one("Pad:Guide", None), one("Hold:Pad:Xbox", None)]));
         assert!(!clashes(&[one("Ctrl+Mouse5", None), one("Mouse5", None)]));
         // Keyboard combinations by the parser's id, whatever their spelling.
         assert!(clashes(&[one("ctrl+s", Some(4)), one("Ctrl+S", Some(4))]));
@@ -953,38 +1200,31 @@ mod tests {
     }
 
     #[test]
-    fn a_controller_tap_has_to_stand_a_moment() {
-        let mut slot = Slot::new(PAD_PRESS_MS, PAD_HOLD_MS);
+    fn a_tap_waiting_for_a_combo_fires_after_the_chord_time_or_on_release() {
+        let mut slot = Slot::new(CHORD_MS, HOLD_MS);
         slot.set(Mode::Tap, Act::Clip);
         assert_eq!(slot.press(0), None);
-        assert_eq!(slot.release(100), None);
+        assert_eq!(slot.tick(49), None);
+        assert_eq!(slot.tick(50), Some(Act::Clip));
+        assert_eq!(slot.release(400), None);
+        // A very quick tap is still a tap.
         assert_eq!(slot.press(1000), None);
-        assert_eq!(slot.tick(1299), None);
-        assert_eq!(slot.tick(1300), Some(Act::Clip));
-        assert_eq!(slot.release(1400), None);
-
-        slot.set(Mode::Hold, Act::Shot);
-        assert_eq!(slot.press(2000), None);
-        assert_eq!(slot.release(2100), None, "too short to be a tap");
-        assert_eq!(slot.press(3000), None);
-        assert_eq!(slot.release(3500), Some(Act::Clip));
-        assert_eq!(slot.press(4000), None);
-        assert_eq!(slot.tick(4800), Some(Act::Shot));
+        assert_eq!(slot.release(1020), Some(Act::Clip));
     }
 
     fn mouse(middle: bool, x1: bool, x2: bool, mods: Mods) -> Input {
         Input {
             mouse: [middle, x1, x2],
             mods,
-            pads: [0; 4],
+            pads: [0; MAX_PADS],
         }
     }
 
     fn pads(first: u32, second: u32) -> Input {
-        Input {
-            pads: [first, second, 0, 0],
-            ..Input::default()
-        }
+        let mut input = Input::default();
+        input.pads[0] = first;
+        input.pads[1] = second;
+        input
     }
 
     #[test]
@@ -1042,47 +1282,86 @@ mod tests {
     }
 
     #[test]
-    fn a_controller_combo_fires_after_standing_on_one_pad() {
+    fn a_controller_tap_fires_on_the_press() {
         let mut table = Table::default();
-        table.bind_pad(pad::VIEW | pad::A, Mode::Tap, Act::Clip);
+        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(pad::GUIDE, Mode::Tap, Act::Shot);
         table.poll(0, &pads(0, 0));
-        assert!(table
-            .poll(10, &pads(pad::VIEW | pad::A | pad::RT, 0))
-            .is_empty());
-        assert!(table
-            .poll(200, &pads(pad::VIEW | pad::A | pad::RT, 0))
-            .is_empty());
         assert_eq!(
-            table.poll(310, &pads(pad::VIEW | pad::A, 0)),
+            table.poll(10, &pads(pad::BACK | pad::SOUTH | pad::RT, 0)),
             vec![Act::Clip]
         );
-        assert!(table.poll(1000, &pads(pad::VIEW | pad::A, 0)).is_empty());
+        assert!(table.poll(1000, &pads(pad::BACK | pad::SOUTH, 0)).is_empty());
         assert!(table.poll(1100, &pads(0, 0)).is_empty());
-        // Brushed for a moment in play: nothing.
-        assert!(table.poll(2000, &pads(pad::VIEW | pad::A, 0)).is_empty());
-        assert!(table.poll(2100, &pads(0, 0)).is_empty());
+        // A single button too — Guide, on the second pad.
+        assert_eq!(table.poll(1200, &pads(0, pad::GUIDE)), vec![Act::Shot]);
+        assert!(table.poll(1210, &pads(0, 0)).is_empty());
         // Split across two controllers is no combo.
-        assert!(table.poll(3000, &pads(pad::VIEW, pad::A)).is_empty());
-        assert!(table.poll(4000, &pads(pad::VIEW, pad::A)).is_empty());
+        assert!(table.poll(3000, &pads(pad::BACK, pad::SOUTH)).is_empty());
+        assert!(table.poll(4000, &pads(pad::BACK, pad::SOUTH)).is_empty());
+    }
+
+    #[test]
+    fn a_controller_binding_waits_only_when_it_has_a_hold_too() {
+        let mut table = Table::default();
+        table.bind_pad(pad::MISC, Mode::Tap, Act::Clip);
+        table.bind_pad(pad::MISC, Mode::Hold, Act::Shot);
+        table.poll(0, &pads(0, 0));
+        assert!(table.poll(10, &pads(pad::MISC, 0)).is_empty());
+        assert_eq!(table.poll(150, &pads(0, 0)), vec![Act::Clip]);
+        assert!(table.poll(200, &pads(pad::MISC, 0)).is_empty());
+        assert!(table.poll(590, &pads(pad::MISC, 0)).is_empty());
+        assert_eq!(table.poll(600, &pads(pad::MISC, 0)), vec![Act::Shot]);
+        assert!(table.poll(700, &pads(0, 0)).is_empty());
+    }
+
+    #[test]
+    fn a_single_button_inside_a_bound_combo_gives_way_to_it() {
+        let mut table = Table::default();
+        table.bind_pad(pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Shot);
+        table.poll(0, &pads(0, 0));
+        // South a few ms before Back: the combo, not South on its own.
+        assert!(table.poll(10, &pads(pad::SOUTH, 0)).is_empty());
+        assert_eq!(
+            table.poll(30, &pads(pad::BACK | pad::SOUTH, 0)),
+            vec![Act::Shot]
+        );
+        assert!(table.poll(200, &pads(0, 0)).is_empty());
+        // South alone: after the chord time.
+        assert!(table.poll(1000, &pads(pad::SOUTH, 0)).is_empty());
+        assert_eq!(table.poll(1050, &pads(pad::SOUTH, 0)), vec![Act::Clip]);
+        assert!(table.poll(1100, &pads(0, 0)).is_empty());
+        // Back is not in the way of anything: Back alone does nothing here.
+        assert!(table.poll(2000, &pads(pad::BACK, 0)).is_empty());
     }
 
     #[test]
     fn a_bigger_combo_takes_over_from_the_smaller_one() {
         let mut table = Table::default();
-        table.bind_pad(pad::LB | pad::A, Mode::Tap, Act::Clip);
-        table.bind_pad(pad::LB | pad::RB | pad::A, Mode::Tap, Act::Shot);
+        table.bind_pad(pad::LB | pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(pad::LB | pad::RB | pad::SOUTH, Mode::Tap, Act::Shot);
         table.poll(0, &pads(0, 0));
-        assert!(table.poll(10, &pads(pad::LB | pad::A, 0)).is_empty());
-        assert!(table
-            .poll(100, &pads(pad::LB | pad::RB | pad::A, 0))
-            .is_empty());
+        assert!(table.poll(10, &pads(pad::LB | pad::SOUTH, 0)).is_empty());
         assert_eq!(
-            table.poll(400, &pads(pad::LB | pad::RB | pad::A, 0)),
+            table.poll(30, &pads(pad::LB | pad::RB | pad::SOUTH, 0)),
             vec![Act::Shot]
         );
-        // RB let go, LB+A still held: the small combo does not fire on top.
-        assert!(table.poll(500, &pads(pad::LB | pad::A, 0)).is_empty());
-        assert!(table.poll(1000, &pads(pad::LB | pad::A, 0)).is_empty());
+        // RB let go, LB+South still held: the small combo does not fire on top.
+        assert!(table.poll(500, &pads(pad::LB | pad::SOUTH, 0)).is_empty());
+        assert!(table.poll(1000, &pads(pad::LB | pad::SOUTH, 0)).is_empty());
+    }
+
+    #[test]
+    fn a_pad_frame_has_the_edges_of_all_pads_together() {
+        let frame = PadFrame::after(pad::SOUTH, &[pad::EAST, pad::UP, 0], (0, 100));
+        assert_eq!(frame.held, pad::EAST | pad::UP);
+        assert_eq!(frame.pressed, pad::EAST | pad::UP);
+        assert_eq!(frame.released, pad::SOUTH);
+        assert_eq!(frame.stick, (0, 100));
+        let still = PadFrame::after(frame.held, &[pad::EAST | pad::UP], (0, 0));
+        assert_eq!(still.pressed, 0);
+        assert_eq!(still.released, 0);
     }
 
     #[test]
@@ -1145,7 +1424,7 @@ mod tests {
         assert_eq!(capture.poll(&mouse(false, true, false, Mods::NONE)), None);
         assert_eq!(
             capture.poll(&mouse(false, true, true, Mods::CTRL)),
-            Some(Captured::Binding("Ctrl+Mouse5".into()))
+            Some("Ctrl+Mouse5".into())
         );
     }
 
@@ -1153,14 +1432,18 @@ mod tests {
     fn recording_a_combo_waits_until_all_buttons_are_let_go() {
         let mut capture = Capture::default();
         assert_eq!(capture.poll(&pads(pad::RT, 0)), None);
-        assert_eq!(capture.poll(&pads(pad::RT | pad::VIEW, 0)), None);
-        assert_eq!(capture.poll(&pads(pad::RT | pad::VIEW | pad::A, 0)), None);
-        assert_eq!(capture.poll(&pads(pad::RT | pad::A, 0)), None);
+        assert_eq!(capture.poll(&pads(pad::RT | pad::BACK, 0)), None);
+        assert_eq!(
+            capture.poll(&pads(pad::RT | pad::BACK | pad::SOUTH, 0)),
+            None
+        );
+        assert_eq!(capture.poll(&pads(pad::RT | pad::SOUTH, 0)), None);
         assert_eq!(
             capture.poll(&pads(pad::RT, 0)),
-            Some(Captured::Binding("Pad:View+A".into()))
+            Some("Pad:Back+South".into())
         );
-        assert_eq!(capture.poll(&pads(0, pad::B)), None);
-        assert_eq!(capture.poll(&pads(0, 0)), Some(Captured::TooFew));
+        // One button alone is a binding too — Guide, say.
+        assert_eq!(capture.poll(&pads(0, pad::GUIDE)), None);
+        assert_eq!(capture.poll(&pads(0, 0)), Some("Pad:Guide".into()));
     }
 }

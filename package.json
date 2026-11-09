@@ -12,6 +12,7 @@
     "tauri": "tauri",
     "app": "tauri dev",
     "ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "sdl": "node scripts/fetch-sdl.mjs",
     "probe": "node scripts/make-probe.mjs",
     "report": "cargo build --release --manifest-path tools/report/Cargo.toml",
     "app:build": "tauri build"

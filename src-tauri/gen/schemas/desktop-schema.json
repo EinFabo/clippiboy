@@ -939,6 +939,12 @@
           "markdownDescription": "Enables the usage_source command without any pre-configured scope."
         },
         {
+          "description": "Enables the watch_controllers command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-watch-controllers",
+          "markdownDescription": "Enables the watch_controllers command without any pre-configured scope."
+        },
+        {
           "description": "Enables the webhook_cancel command without any pre-configured scope.",
           "type": "string",
           "const": "allow-webhook-cancel",
@@ -1567,6 +1573,12 @@
           "type": "string",
           "const": "deny-usage-source",
           "markdownDescription": "Denies the usage_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the watch_controllers command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-watch-controllers",
+          "markdownDescription": "Denies the watch_controllers command without any pre-configured scope."
         },
         {
           "description": "Denies the webhook_cancel command without any pre-configured scope.",

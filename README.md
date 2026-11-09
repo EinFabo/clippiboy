@@ -724,6 +724,12 @@ of that name. For a new ffmpeg: raise the version in `scripts/fetch-ffmpeg.mjs`
 and `src-tauri/src/tools.rs`, push the tag, and write the new hashes the
 workflow prints into `tools.rs`.
 
+Controllers are read through SDL3 (its gamepad part only), loaded at run time
+from `SDL3.dll` beside the exe. `npm run sdl` fetches the pinned official
+build into `dist-sdl/`, where a dev build finds it; the release workflow puts it
+into the installer (`src-tauri/tauri.release.conf.json`). Without it the app
+runs as before, only without controllers, and `cargo test` does not need it.
+
 The UI alone runs anywhere, with mock data instead of a core:
 
 ```bash
@@ -836,6 +842,9 @@ src-tauri/src/
   commands.rs                 Tauri commands
   updater.rs                  update check and installation
   tools.rs                    fetch ffmpeg/ffprobe once, check and keep them
+  bindings.rs                 hotkey bindings: keys, mouse, controller, tap/hold (+ tests)
+  inputpoll.rs                the poll thread for mouse buttons and controllers
+  sdl.rs                      SDL3's gamepad part, loaded from SDL3.dll
 
 src-tauri/examples/
   record-probe.rs             measure every encoder on this machine, write a report
@@ -843,6 +852,7 @@ src-tauri/examples/
   trim-probe.rs               trim, measure, undo, measure
 
 scripts/fetch-ffmpeg.mjs      fetch the pinned ffmpeg/ffprobe for their release
+scripts/fetch-sdl.mjs         fetch the pinned SDL3.dll for the installer
 scripts/make-probe.mjs        pack the encoder test for somebody else's machine
 scripts/make-icons.py         every icon size from icons/icon.png,
                               and the Stream Deck plugin's key pictures
@@ -865,3 +875,6 @@ ClippiBoy is free to use, but it is not open source. The code is published to be
 read, not reused: copying, modifying or redistributing it needs permission.
 Download it only from the [Releases](../../releases) page. The full terms are in
 [LICENSE](LICENSE).
+
+Controllers are read with [SDL](https://libsdl.org) (zlib license), shipped as
+`SDL3.dll` with its license in `licenses/SDL3-LICENSE.txt`.

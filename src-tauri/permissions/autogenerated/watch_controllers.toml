@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-watch-controllers"
+description = "Enables the watch_controllers command without any pre-configured scope."
+commands.allow = ["watch_controllers"]
+
+[[permission]]
+identifier = "deny-watch-controllers"
+description = "Denies the watch_controllers command without any pre-configured scope."
+commands.deny = ["watch_controllers"]

@@ -71,6 +71,11 @@ jobs:
       # ffmpeg is not part of the package: the app fetches it once on first
       # start from its own release (see ffmpeg.yml).
 
+      # SDL3.dll, which reads the controllers, is part of it: beside the exe,
+      # through tauri.release.conf.json. Pinned version and checksum.
+      - name: Fetch SDL3
+        run: node scripts/fetch-sdl.mjs
+
       # Deliberately before the installer: if the plugin does not build, no
       # release has been created yet that would then be missing it.
       - name: Build the Stream Deck plugin

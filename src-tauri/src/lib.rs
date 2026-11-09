@@ -51,6 +51,7 @@ pub mod trash;
 pub mod tray;
 pub mod ts;
 pub mod reccam;
+pub mod sdl;
 pub mod updater;
 pub mod vcam;
 pub mod watermark;
@@ -2056,6 +2057,7 @@ pub fn run() {
             commands::suspend_hotkeys,
             commands::resume_hotkeys,
             commands::capture_input,
+            commands::watch_controllers,
             commands::set_clip_dir,
             commands::default_clip_dir,
             commands::add_audio_source,

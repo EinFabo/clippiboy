@@ -229,6 +229,10 @@ export interface AppConfig {
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;
   trayHintShown: boolean;
+  /** Said once: a lone controller button the game uses reaches the game too. */
+  padButtonHintShown: boolean;
+  /** Said once: Guide may open Xbox Game Bar as well. */
+  guideHintShown: boolean;
   /** The "ClippiBoy" mark in the bottom-left corner of clips and screenshots. */
   watermark: boolean;
   /** The setup on first start was gone through or skipped. */
@@ -768,6 +772,22 @@ export type HotkeyField =
   | "screenshotHotkeyAlt"
   | "recordHotkeyAlt"
   | "consoleHotkeyAlt";
+
+/** A controller ClippiBoy sees (`watch_controllers`). */
+export interface Controller {
+  name: string;
+  /** Whose names its buttons carry. */
+  family: "xbox" | "playstation" | "nintendo";
+}
+
+/** The controllers for the settings. */
+export interface Controllers {
+  /** Looked for since the page asked — before that, `pads` says nothing. */
+  ready: boolean;
+  /** Why controllers cannot be read at all (SDL3.dll missing …), else null. */
+  unavailable: string | null;
+  pads: Controller[];
+}
 
 /** Every binding at once, as `set_hotkeys` takes them. */
 export interface HotkeySet {

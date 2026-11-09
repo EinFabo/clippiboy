@@ -710,6 +710,15 @@ pub struct AppConfig {
     /// Has it already been explained that closing leaves the app in the tray?
     #[serde(default)]
     pub tray_hint_shown: bool,
+    /// Has it been said that a lone controller button the game uses (South,
+    /// a bumper, the D-pad …) reaches the game as well? Set by `set_hotkeys`
+    /// with the first such binding.
+    #[serde(default)]
+    pub pad_button_hint_shown: bool,
+    /// Has it been said that Guide may open Xbox Game Bar too? Set by
+    /// `set_hotkeys` with the first binding on Guide.
+    #[serde(default)]
+    pub guide_hint_shown: bool,
     /// The "ClippiBoy" mark in the bottom-left corner of clips and screenshots.
     /// On for configs written before it existed, too.
     #[serde(default = "yes")]
