@@ -174,6 +174,8 @@ export const mockConfig: AppConfig = {
     consolePreview: true,
     virtualCamera: false,
   },
+  discordLimit: "free",
+  muteDiscordOnShare: false,
   revision: 0,
 };
 

@@ -8,19 +8,25 @@ import { api, events, inTauri } from "@/lib/ipc";
 import { clipName } from "@/lib/format";
 import { planExport, roundMb } from "@/lib/exportPlan";
 import { cn } from "@/lib/cn";
-import type { Clip } from "@/lib/types";
+import { DISCORD_LIMITS, discordMb } from "@/lib/discord";
+import { useEngine } from "@/store";
+import type { Clip, DiscordLimit } from "@/lib/types";
 
 const MB = 1024 * 1024;
 
 /**
- * The limits worth having a button for. Discord's two are the reason this
- * feature exists at all; the third is for everywhere else that still has one.
+ * The limits worth having a button for. Discord's are the reason this feature
+ * exists at all — each a little under the account's limit, as "Copy for
+ * Discord" aims — and 100 MB is for everywhere else that still has one.
  */
 const PRESETS: Array<{ mb: number; label: string; hint: string }> = [
-  { mb: 10, label: "10 MB", hint: "Discord" },
-  { mb: 25, label: "25 MB", hint: "Discord Nitro" },
+  ...(Object.keys(DISCORD_LIMITS) as DiscordLimit[]).map((limit) => ({
+    mb: discordMb(limit),
+    label: `${discordMb(limit)} MB`,
+    hint: limit === "free" ? "Discord" : `Discord ${DISCORD_LIMITS[limit].label}`,
+  })),
   { mb: 100, label: "100 MB", hint: "Most other places" },
-];
+].sort((a, b) => a.mb - b.mb);
 
 /**
  * Ask for a size, then write a copy that fits it.
@@ -31,7 +37,7 @@ const PRESETS: Array<{ mb: number; label: string; hint: string }> = [
  * no use however good it looks.
  */
 export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => void }) {
-  const [targetMb, setTargetMb] = useState(25);
+  const [targetMb, setTargetMb] = useState(() => discordMb(useEngine.getState().config.discordLimit));
   const [custom, setCustom] = useState("");
   // "choosing" while the core's save dialog is open, "writing" from the
   // moment the core reports the copy under way.

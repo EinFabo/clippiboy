@@ -17,12 +17,15 @@ import { useMenu, type MenuEntry, type MenuTrigger } from "@/components/ui/Menu"
 import { useEngine } from "@/store";
 import { api, inTauri } from "@/lib/ipc";
 import { useShare } from "@/lib/share";
+import { discordMb } from "@/lib/discord";
 import { toast } from "@/lib/toastBus";
 import { freeOn, timeLeft, useLinks } from "@/lib/links";
 import type { Clip } from "@/lib/types";
 
-/** Discord's upload limit without Nitro. */
-export const DISCORD_MB = 10;
+/** What "Copy for Discord" aims at, from the setting "Discord upload limit". */
+export function discordTarget(): number {
+  return discordMb(useEngine.getState().config.discordLimit);
+}
 
 /** Awaits a menu action: its failure is toasted, its success says `done` if given. */
 async function run(call: Promise<unknown>, done?: string) {
@@ -200,7 +203,7 @@ export function useClipMenu() {
         icon: <IconCopy className={icon} />,
         disabled: !inTauri,
         onSelect: () =>
-          void run(api.exportShotForDiscord(clip.id, DISCORD_MB), "Copied · Ctrl+V in Discord"),
+          void run(api.exportShotForDiscord(clip.id, discordTarget()), "Copied · Ctrl+V in Discord"),
       });
     }
     entries.push({

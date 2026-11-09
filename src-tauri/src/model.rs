@@ -444,6 +444,18 @@ pub enum RgbSpeed {
     Medium,
 }
 
+/// The Discord account a "Copy for Discord" has to fit: free accounts take
+/// 20 MB a file, Nitro Basic 50, Nitro 500. The size a copy aims at is worked
+/// out in the window (`src/lib/discord.ts`), a little under the limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiscordLimit {
+    #[default]
+    Free,
+    NitroBasic,
+    Nitro,
+}
+
 /// Everything about the accent, as the windows are told it in `accent-changed`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -715,6 +727,13 @@ pub struct AppConfig {
     /// The webcam — see [`FacecamConfig`].
     #[serde(default, deserialize_with = "lenient_facecam")]
     pub facecam: FacecamConfig,
+    /// What "Copy for Discord" has to fit under — see [`DiscordLimit`].
+    #[serde(default)]
+    pub discord_limit: DiscordLimit,
+    /// Leave a separate Discord track out of share links and "Copy for
+    /// Discord": friends' voices stay home. The clip itself keeps them.
+    #[serde(default)]
+    pub mute_discord_on_share: bool,
     /// Counts up with every change the core takes in. A window sends back the
     /// one it was given, so a write built on an older copy can be told apart
     /// and merged onto what changed since (`config::accept`) instead of

@@ -424,6 +424,13 @@ async fn upload(
     let size = std::fs::metadata(&source)
         .map_err(|_| "The clip file is no longer there.".to_string())?
         .len();
+    // "Mute Discord voices when sharing": a separate Discord track stays home,
+    // the rest of the sound is mixed again from the clip's tracks.
+    let config = report.app.state::<AppState>().config_snapshot();
+    let mute_discord = config.mute_discord_on_share;
+    let remix = mute_discord
+        .then(|| crate::stems::without_discord(clip, &config.sources))
+        .flatten();
     let temp = crate::config::data_dir()
         .join("temp")
         .join(format!("link-{}.mp4", clip.id));
@@ -436,8 +443,19 @@ async fn upload(
     // big, the clip goes the shrink route instead — never as it is.
     let copied = if size <= MAX_BYTES {
         let moved = {
-            let (source, temp) = (source.clone(), temp.clone());
-            tokio::task::spawn_blocking(move || faststart(&source, &temp, "preparing a clip for its link")).await
+            let (source, temp, remix) = (source.clone(), temp.clone(), remix.clone());
+            tokio::task::spawn_blocking(move || match remix {
+                None => faststart(&source, &temp, "preparing a clip for its link"),
+                Some(remix) => {
+                    // The tracks cut to the file's own length, not the row's.
+                    let length_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(remix.length_ms);
+                    let remix = crate::stems::Remix { length_ms, ..remix };
+                    let mut command = crate::muxer::ffmpeg();
+                    command.args(remix_args(&source, &temp, &remix));
+                    crate::muxer::run(&mut command, "preparing a clip for its link")
+                }
+            })
+            .await
         };
         match moved {
             Ok(Ok(())) if std::fs::metadata(&temp).is_ok_and(|meta| meta.len() <= MAX_BYTES) => true,
@@ -460,7 +478,15 @@ async fn upload(
             tokio::task::spawn_blocking(move || {
                 let state = report.app.state::<AppState>();
                 let progress = |value: f32| report.emit("shrinking", value, None);
-                crate::commands::shrink(&state, &report.clip_id, TARGET_BYTES, &temp, &progress, crate::export::Orientation::Landscape)
+                crate::commands::shrink(
+                    &state,
+                    &report.clip_id,
+                    TARGET_BYTES,
+                    &temp,
+                    &progress,
+                    crate::export::Orientation::Landscape,
+                    mute_discord,
+                )
             })
         };
         let written = shrinking.await.map_err(|err| err.to_string())??.bytes;
@@ -523,6 +549,26 @@ fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std
         .map(std::ffi::OsString::from),
     );
     args.push(output.into());
+    args
+}
+
+/// The link copy without a track: the picture copied as it is, the sound
+/// mixed again from the tracks `remix` keeps (none: no sound), the index at
+/// the front.
+fn remix_args(source: &std::path::Path, output: &std::path::Path, remix: &crate::stems::Remix) -> Vec<String> {
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"].map(String::from).to_vec();
+    args.push(source.to_string_lossy().to_string());
+    args.extend(remix.inputs());
+    args.extend(["-map", "0:v:0"].map(String::from));
+    match remix.filter(1) {
+        Some(graph) => {
+            args.extend(["-filter_complex".into(), graph, "-map".into(), crate::stems::MIX_LABEL.into()]);
+            args.extend(["-c:a", "aac", "-b:a", "192k"].map(String::from));
+        }
+        None => args.push("-an".into()),
+    }
+    args.extend(["-map_metadata", "-1", "-map_chapters", "-1", "-c:v", "copy", "-movflags", "+faststart"].map(String::from));
+    args.push(output.to_string_lossy().to_string());
     args
 }
 
@@ -707,6 +753,26 @@ mod tests {
             assert!(args.windows(2).any(|w| w == pair), "{pair:?} missing in {args:?}");
         }
         assert!(!args.windows(2).any(|w| w == ["-map", "0"]), "{args:?}");
+    }
+
+    #[test]
+    fn a_link_copy_without_discord_mixes_the_kept_tracks() {
+        let remix = crate::stems::Remix {
+            tracks: vec![(Path::new("t/0.m4a").into(), 0.0)],
+            start_ms: 0,
+            length_ms: 30_000,
+        };
+        let args = remix_args(Path::new("in.mp4"), Path::new("out.mp4"), &remix);
+        let joined = args.join(" ");
+        assert!(joined.starts_with("-y -hide_banner -loglevel error -i in.mp4 -t 30.000 -i t/0.m4a -map 0:v:0"), "{joined}");
+        assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
+        assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]), "the picture is not encoded again: {joined}");
+        assert!(!joined.contains("0:a"), "the clip's own sound has Discord in it: {joined}");
+        assert_eq!(args.last().unwrap(), "out.mp4");
+
+        let silent = crate::stems::Remix { tracks: Vec::new(), ..remix };
+        let args = remix_args(Path::new("in.mp4"), Path::new("out.mp4"), &silent);
+        assert!(args.iter().any(|a| a == "-an") && !args.iter().any(|a| a == "-c:a"), "{args:?}");
     }
 
     #[test]

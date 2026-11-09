@@ -243,12 +243,19 @@ export interface AppConfig {
   friends: FriendsConfig;
   sounds: SoundConfig;
   facecam: FacecamConfig;
+  /** The Discord account "Copy for Discord" has to fit (`model::DiscordLimit`). */
+  discordLimit: DiscordLimit;
+  /** A separate Discord track stays out of share links and "Copy for Discord". */
+  muteDiscordOnShare: boolean;
   /**
    * Counts up with every change the core takes in. Sent back as it came: a
    * write from an older copy is merged onto what changed since, not over it.
    */
   revision: number;
 }
+
+/** Discord's upload limit by account: 20, 50 or 500 MB. */
+export type DiscordLimit = "free" | "nitroBasic" | "nitro";
 
 /** The webcam laid over clips (`model::FacecamConfig`). Off by default. */
 export interface FacecamConfig {

@@ -423,9 +423,14 @@ fn discord_dir(root: &Path, clip_id: &str) -> std::path::PathBuf {
 }
 
 /// A Discord copy of the clip: `"<stem> (<n> MB).mp4"` — the name the friend
-/// sees in Discord — in the clip's own folder of copies.
-fn discord_copy(root: &Path, clip_id: &str, clip_stem: &str, megabytes: u64) -> std::path::PathBuf {
-    discord_dir(root, clip_id).join(format!("{clip_stem} ({megabytes} MB).mp4"))
+/// sees in Discord — in the clip's own folder of copies. Copies without the
+/// Discord track ("Mute Discord voices when sharing") lie in a folder of their
+/// own inside it, under the same name: one made before the setting changed
+/// is never handed out for the other kind.
+fn discord_copy(root: &Path, clip_id: &str, clip_stem: &str, megabytes: u64, without_discord: bool) -> std::path::PathBuf {
+    let dir = discord_dir(root, clip_id);
+    let dir = if without_discord { dir.join("without-discord") } else { dir };
+    dir.join(format!("{clip_stem} ({megabytes} MB).mp4"))
 }
 
 /// Delete a clip's Discord copies. They are copies of what the clip was: once
@@ -1502,12 +1507,13 @@ pub fn export_for_discord(
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
+    let mute_discord = state.config_snapshot().mute_discord_on_share;
     let source = std::path::PathBuf::from(&clip.path);
     let stem = source
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "clip".into());
-    let output = discord_copy(&discord_root(), &id, &stem, megabytes);
+    let output = discord_copy(&discord_root(), &id, &stem, megabytes, mute_discord);
     if let Some(folder) = output.parent() {
         std::fs::create_dir_all(folder)
             .map_err(|err| format!("Could not make a folder for the Discord copy: {err}"))?;
@@ -1530,7 +1536,7 @@ pub fn export_for_discord(
     if !ready {
         // Straight to the work: the target is the core's own, in its data
         // folder — `export_target` would rightly refuse it for the dialog.
-        export_to(&state, &app, &id, target_bytes, &output, crate::export::Orientation::Landscape)?;
+        export_to(&state, &app, &id, target_bytes, &output, crate::export::Orientation::Landscape, mute_discord)?;
     }
     crate::clipboard::copy_files(&[output.clone()])?;
     Ok(output.to_string_lossy().to_string())
@@ -1973,6 +1979,9 @@ pub(crate) struct Shrunk {
 /// reporting 0 to 1 along the way. A share link shrinks through here too, and
 /// says what happened in its own words.
 ///
+/// `mute_discord`: a separate Discord track is left out of the copy
+/// (`stems::without_discord`) — for what is shared, never for an export.
+///
 /// ffmpeg writes beside `output` under a name of its own ([`export_part`]) and
 /// the result is renamed in only when whole: a run cut short leaves no file
 /// that looks finished, and a target the identity check below missed would be
@@ -1984,12 +1993,14 @@ pub(crate) fn shrink(
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
     orientation: crate::export::Orientation,
+    mute_discord: bool,
 ) -> Result<Shrunk> {
     if !crate::composite::wait_settled(id, std::time::Duration::from_secs(300)) {
         return Err(CAM_ON_ITS_WAY.into());
     }
     // The settings before any lock: nothing takes one before `AppState.config`.
     let (encoder, _) = encoder_for(state);
+    let sources = if mute_discord { state.config_snapshot().sources } else { Vec::new() };
     // Held for the whole ffmpeg run, which reads the clip file throughout: a
     // save, a move or a delete of this clip waits for it, and it for them.
     let own = edit::clip_lock(id);
@@ -2018,9 +2029,15 @@ pub(crate) fn shrink(
     let (width, height) = if portrait { crate::export::PORTRAIT } else { (clip.width, clip.height) };
     let recipe = crate::export::recipe(&crate::export::Target { bytes: target_bytes, duration_ms, width, height });
     let job = portrait.then(|| portrait_job(&clip, duration_ms, (recipe.width, recipe.height)));
+    // Read under the clip's lock, like the clip: a save in progress may still
+    // change its tracks and levels.
+    let remix = mute_discord
+        .then(|| stems::without_discord(&clip, &sources))
+        .flatten()
+        .map(|remix| stems::Remix { length_ms: duration_ms, ..remix });
     let build = |encoder| match &job {
-        Some(job) => crate::export::portrait_arguments(&job.inputs(), &job.graph, &part, &recipe, duration_ms, encoder),
-        None => crate::export::arguments(&source, &part, &recipe, clip.height, encoder),
+        Some(job) => crate::export::portrait_arguments(&job.inputs(), &job.graph, &part, &recipe, duration_ms, encoder, remix.as_ref()),
+        None => crate::export::arguments(&source, &part, &recipe, clip.height, encoder, remix.as_ref()),
     };
     let args = build(encoder);
 
@@ -2204,7 +2221,7 @@ pub fn export_clip(
     let Some(output) = chosen else {
         return Ok(None);
     };
-    export_to(&state, &app, &id, target_bytes, &output, orientation)?;
+    export_to(&state, &app, &id, target_bytes, &output, orientation, false)?;
     Ok(Some(output.to_string_lossy().to_string()))
 }
 
@@ -2218,10 +2235,11 @@ fn export_to(
     target_bytes: u64,
     output: &Path,
     orientation: crate::export::Orientation,
+    mute_discord: bool,
 ) -> Result<()> {
     // The target is settled: the window can show the copy being written.
     progress(app, id)(0.0);
-    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id), orientation)
+    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id), orientation, mute_discord)
         .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
     let written = shrunk.bytes;
     progress(app, id)(1.0);
@@ -2767,9 +2785,14 @@ mod tests {
         let folder = root.join("1b4e28ba_2fa1_11d2_883f_0016d3cca427");
         assert_eq!(discord_dir(&root, id), folder);
         assert_eq!(
-            discord_copy(&root, id, "Valorant_2026-10-22_12-00-00-123", 10),
+            discord_copy(&root, id, "Valorant_2026-10-22_12-00-00-123", 10, false),
             folder.join("Valorant_2026-10-22_12-00-00-123 (10 MB).mp4"),
             "the name the friend sees in Discord"
+        );
+        assert_eq!(
+            discord_copy(&root, id, "Valorant", 19, true),
+            folder.join("without-discord").join("Valorant (19 MB).mp4"),
+            "the same name, kept apart from the copies with the voices"
         );
         assert!(discord_dir(&root, "../../up").starts_with(&root));
         assert!(discord_root().starts_with(crate::config::data_dir()));
@@ -2782,8 +2805,8 @@ mod tests {
         let clips = dir.join("clips");
         std::fs::create_dir_all(&clips).unwrap();
         let (id, other) = ("clip-1", "clip-2");
-        let copy = discord_copy(&root, id, "Valorant", 10);
-        let kept = discord_copy(&root, other, "Valorant", 10);
+        let copy = discord_copy(&root, id, "Valorant", 10, false);
+        let kept = discord_copy(&root, other, "Valorant", 10, false);
         for file in [&copy, &kept] {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, b"x").unwrap();
@@ -2809,7 +2832,7 @@ mod tests {
         assert_eq!(name, "Valorant_2026-10-22_12-00-00-123 - 10 MB.mp4");
         assert_ne!(
             Some(name.as_str()),
-            discord_copy(Path::new("d"), "id", stem, 10).file_name().and_then(|n| n.to_str())
+            discord_copy(Path::new("d"), "id", stem, 10, false).file_name().and_then(|n| n.to_str())
         );
     }
 

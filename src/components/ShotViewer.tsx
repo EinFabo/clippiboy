@@ -34,7 +34,8 @@ import {
   type Style,
   type Tool,
 } from "@/components/ShotAnnotate";
-import { DISCORD_MB, useClipMenu } from "@/components/clipMenu";
+import { discordTarget, useClipMenu } from "@/components/clipMenu";
+import { discordMb } from "@/lib/discord";
 import { IconTrash } from "@/components/icons";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { formatAgo, formatSize } from "@/lib/format";
@@ -160,6 +161,7 @@ export function ShotViewer({
   const clip = clips[index];
   const setFavorite = useEngine((state) => state.setFavorite);
   const writeScreenshot = useEngine((state) => state.writeScreenshot);
+  const discordLimitMb = useEngine((state) => discordMb(state.config.discordLimit));
   const clipMenu = useClipMenu();
 
   const [leaving, setLeaving] = useState(false);
@@ -733,7 +735,7 @@ export function ShotViewer({
         await api.copyClipImage(id);
         toast("ok", "Picture copied");
       } else {
-        await api.exportShotForDiscord(id, DISCORD_MB);
+        await api.exportShotForDiscord(id, discordTarget());
         toast("ok", "Copied · Ctrl+V in Discord");
       }
     } catch (err) {
@@ -1388,7 +1390,7 @@ export function ShotViewer({
             size="sm"
             variant="secondary"
             disabled={!inTauri || broken || busy || sharing !== null || mode === "crop"}
-            title={`Under ${DISCORD_MB} MB, as a file to paste`}
+            title={`Under ${discordLimitMb} MB, as a file to paste`}
             onClick={() => void share("discord")}
           >
             {sharing === "discord" ? "Copying …" : "Copy for Discord"}

@@ -1,8 +1,9 @@
 //! A screenshot made small enough for Discord: "Copy for Discord".
 //!
-//! Discord takes 10 MB without Nitro, and a 4K PNG of a busy game is often
-//! more. The PNG goes as it is when it fits — nothing is lost. Otherwise a JPEG
-//! at falling quality, and only when even the lowest one is too big, a smaller
+//! Discord takes 20 MB without Nitro (the window passes the limit of the
+//! setting "Discord upload limit"), and an 8K or busy 4K PNG can be more. The
+//! PNG goes as it is when it fits — nothing is lost. Otherwise a JPEG at
+//! falling quality, and only when even the lowest one is too big, a smaller
 //! picture: a soft picture beats a blocky one at the same size.
 
 use crate::shot::Shot;

@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::config;
-use crate::model::{ClipTrack, TrackMix};
+use crate::model::{AudioSource, Clip, ClipTrack, SourceKind, TrackMix};
 use crate::muxer::{command, ffmpeg, run, sanitize};
 
 /// Output label of the mix chain from [`mix_filter`].
@@ -386,6 +386,109 @@ pub fn levels(tracks: &[ClipTrack], mix: &[TrackMix]) -> Vec<f32> {
         .collect()
 }
 
+/// Is this track the voices from Discord?
+///
+/// A track only knows its name. So: a name that says "Discord", or the name of
+/// a source in the settings that records Discord's own process — whatever it
+/// was renamed to. The main mix never counts: the game is in it too.
+pub fn is_discord(label: &str, sources: &[AudioSource]) -> bool {
+    let label = label.trim();
+    if label.eq_ignore_ascii_case("Main mix") {
+        return false;
+    }
+    if label.to_ascii_lowercase().contains("discord") {
+        return true;
+    }
+    sources.iter().any(|source| {
+        source.label.trim().eq_ignore_ascii_case(label)
+            && matches!(&source.kind, SourceKind::Process { exe: Some(exe), .. }
+                if exe.to_ascii_lowercase().starts_with("discord"))
+    })
+}
+
+/// A clip's sound mixed again from its own tracks, with some left out — for a
+/// copy that leaves the PC without them. The clip itself is not touched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Remix {
+    /// The tracks that stay, each with its level in dB. Empty when nothing
+    /// audible is left: the copy then goes without sound.
+    pub tracks: Vec<(PathBuf, f32)>,
+    /// Where the clip starts inside the tracks — they keep the untouched
+    /// recording's time, like everything in the store.
+    pub start_ms: u64,
+    pub length_ms: u64,
+}
+
+impl Remix {
+    /// `-ss`, `-t` and `-i` for every track, in order. Per input: an `-ss`
+    /// before the first `-i` would cut the picture, not the tracks.
+    pub fn inputs(&self) -> Vec<String> {
+        let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
+        let mut args = Vec::new();
+        for (path, _) in &self.tracks {
+            if self.start_ms > 0 {
+                args.extend(["-ss".into(), seconds(self.start_ms)]);
+            }
+            args.extend(["-t".into(), seconds(self.length_ms)]);
+            args.extend(["-i".into(), path.to_string_lossy().to_string()]);
+        }
+        args
+    }
+
+    /// The mix of those inputs under [`MIX_LABEL`], when ffmpeg counts the
+    /// first of them as `first_input`. `None`: nothing audible is left.
+    pub fn filter(&self, first_input: usize) -> Option<String> {
+        let inputs: Vec<(String, f32)> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(slot, (_, gain))| (format!("{}:a", first_input + slot), *gain))
+            .collect();
+        mix_filter(&inputs)
+    }
+}
+
+/// `tracks` at the levels of `mix`, without each track `drop` names. `None`
+/// when nothing is left out — the clip's own sound will do — or when a track
+/// has no file of its own to mix from.
+fn kept_tracks(
+    tracks: &[ClipTrack],
+    mix: &[TrackMix],
+    drop: impl Fn(&ClipTrack) -> bool,
+) -> Option<Vec<(PathBuf, f32)>> {
+    if !tracks.iter().any(&drop) {
+        return None;
+    }
+    let gains = levels(tracks, mix);
+    let mut kept = Vec::new();
+    for (track, gain) in tracks.iter().zip(gains) {
+        let path = PathBuf::from(track.preview_path.as_ref()?);
+        if !drop(track) && audible(gain) {
+            kept.push((path, gain));
+        }
+    }
+    Some(kept)
+}
+
+/// The clip's sound without its Discord track (setting "Mute Discord voices
+/// when sharing"). `None` when there is nothing to leave out: no separate
+/// Discord track — Discord in the main mix cannot be taken out of it — or a
+/// mix already saved into the file.
+pub fn without_discord(clip: &Clip, sources: &[AudioSource]) -> Option<Remix> {
+    let edit = clip.edit.as_ref();
+    if clip.screenshot || edit.is_some_and(|edit| edit.baked) {
+        return None;
+    }
+    let tracks = stored(&clip.id)?;
+    let mix = edit.map(|edit| edit.tracks.as_slice()).unwrap_or(&[]);
+    let tracks = kept_tracks(&tracks, mix, |track| is_discord(&track.label, sources))?;
+    Some(Remix {
+        tracks,
+        start_ms: clip.original.map(|original| original.start_ms).unwrap_or(0),
+        length_ms: clip.duration_ms,
+    })
+}
+
 /// Is `file` newer than `source` — and therefore still valid?
 pub fn is_newer(file: &Path, source: &Path) -> bool {
     let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
@@ -486,6 +589,79 @@ mod tests {
             TrackMix { index: 1, gain_db: 0.0, muted: true },
         ];
         assert_eq!(levels(&tracks, &mix), vec![-3.0, f32::NEG_INFINITY]);
+    }
+
+    fn process(label: &str, exe: Option<&str>) -> AudioSource {
+        AudioSource {
+            id: label.to_lowercase(),
+            label: label.into(),
+            kind: SourceKind::Process { pid: 1, exe: exe.map(String::from), mode: crate::model::ProcessMode::Include },
+            enabled: true,
+            gain_db: 0.0,
+            muted: false,
+            solo: false,
+            separate_track: true,
+        }
+    }
+
+    fn track(index: u32, label: &str) -> ClipTrack {
+        ClipTrack { index, label: label.into(), channels: 2, preview_path: Some(format!("t/{index}.m4a")) }
+    }
+
+    #[test]
+    fn discord_is_found_by_its_name_or_its_process() {
+        assert!(is_discord("Discord", &[]));
+        assert!(is_discord(" discord voice ", &[]));
+        assert!(!is_discord("Microphone", &[]));
+        assert!(!is_discord("Main mix", &[process("Main mix", Some("Discord.exe"))]));
+        // Renamed in the settings: the process still says what it is.
+        let sources = [process("Squad", Some("Discord.exe")), process("Music", Some("Spotify.exe"))];
+        assert!(is_discord("Squad", &sources));
+        assert!(is_discord("squad", &[process("Squad", Some("DiscordPTB.exe"))]));
+        assert!(!is_discord("Music", &sources));
+        assert!(!is_discord("Squad", &[process("Squad", None)]));
+    }
+
+    #[test]
+    fn the_discord_track_stays_home_and_the_rest_keeps_its_levels() {
+        let tracks = vec![track(0, "Main mix"), track(1, "Microphone"), track(2, "Discord")];
+        let mix = vec![
+            TrackMix { index: 0, gain_db: -3.0, muted: false },
+            TrackMix { index: 1, gain_db: 0.0, muted: true },
+        ];
+        let kept = kept_tracks(&tracks, &mix, |t| is_discord(&t.label, &[])).unwrap();
+        assert_eq!(kept, vec![(PathBuf::from("t/0.m4a"), -3.0)], "muted and Discord tracks both stay out");
+    }
+
+    #[test]
+    fn without_a_discord_track_nothing_changes() {
+        let tracks = vec![track(0, "Main mix"), track(1, "Microphone")];
+        assert!(kept_tracks(&tracks, &[], |t| is_discord(&t.label, &[])).is_none());
+        // A track only in the clip file cannot be mixed from.
+        let mut in_file = vec![track(0, "Main mix"), track(1, "Discord")];
+        in_file[0].preview_path = None;
+        assert!(kept_tracks(&in_file, &[], |t| is_discord(&t.label, &[])).is_none());
+    }
+
+    #[test]
+    fn a_remix_cuts_every_track_where_the_clip_starts() {
+        let remix = Remix {
+            tracks: vec![(PathBuf::from("a.m4a"), 0.0), (PathBuf::from("b.m4a"), -6.0)],
+            start_ms: 4_000,
+            length_ms: 12_500,
+        };
+        assert_eq!(
+            remix.inputs(),
+            ["-ss", "4.000", "-t", "12.500", "-i", "a.m4a", "-ss", "4.000", "-t", "12.500", "-i", "b.m4a"]
+                .map(String::from)
+                .to_vec()
+        );
+        let filter = remix.filter(1).unwrap();
+        assert!(filter.starts_with("[1:a]volume=1[m0];[2:a]volume="), "{filter}");
+        assert!(filter.ends_with(MIX_LABEL));
+        let silent = Remix { tracks: Vec::new(), start_ms: 0, length_ms: 1_000 };
+        assert!(silent.filter(1).is_none());
+        assert!(silent.inputs().is_empty());
     }
 
     /// Tracks with nothing stored for them stay at full — otherwise a newly

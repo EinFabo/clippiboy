@@ -81,6 +81,8 @@ pub fn default_config() -> AppConfig {
         friends: crate::model::FriendsConfig::default(),
         sounds: crate::model::SoundConfig::default(),
         facecam: crate::model::FacecamConfig::default(),
+        discord_limit: crate::model::DiscordLimit::default(),
+        mute_discord_on_share: false,
         revision: 0,
     }
 }

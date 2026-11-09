@@ -2,9 +2,9 @@
 //!
 //! Recording aims at a quality and lets the bitrate follow (see `mft.rs`). This
 //! is the one place that does the opposite, and deliberately: the question here
-//! is not "how good can it look" but "will it go through" — Discord takes 10 MB,
-//! 25 MB with Nitro, and a clip that misses the limit is no use however good it
-//! looks.
+//! is not "how good can it look" but "will it go through" — Discord takes 20 MB,
+//! 50 or 500 MB with Nitro, and a clip that misses the limit is no use however
+//! good it looks.
 //!
 //! So the arithmetic runs backwards. From the target size and the clip's length
 //! comes a bitrate; if that bitrate is too thin for the resolution, the picture
@@ -163,13 +163,15 @@ fn width_for(target: &Target, height: u32) -> u32 {
 }
 
 /// The ffmpeg line. Pulled out so it can be checked without a run, exactly like
-/// `edit::arguments`.
+/// `edit::arguments`. `remix`: the sound mixed again from the clip's tracks
+/// instead of the clip's own (a track left out, `stems::without_discord`).
 pub fn arguments(
     source: &Path,
     output: &Path,
     recipe: &Recipe,
     source_height: u32,
     encoder: EncoderId,
+    remix: Option<&crate::stems::Remix>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-y".into(),
@@ -186,7 +188,17 @@ pub fn arguments(
     // The picture, then whatever audio there is. The `?` matters: a clip whose
     // tracks were all muted has no audio stream, and without it ffmpeg refuses
     // the whole run over a missing map.
-    args.extend(["-map", "0:v:0", "-map", "0:a:0?"].map(String::from));
+    let sound = match remix {
+        None => {
+            args.extend(["-map", "0:v:0", "-map", "0:a:0?"].map(String::from));
+            true
+        }
+        Some(remix) => {
+            args.extend(remix.inputs());
+            args.extend(["-map", "0:v:0"].map(String::from));
+            remix_map(&mut args, remix, 1)
+        }
+    };
 
     if recipe.scales(source_height) {
         // `-2` keeps the aspect ratio and lands on an even side by itself;
@@ -200,14 +212,32 @@ pub fn arguments(
     }
 
     args.extend(video_args(encoder, recipe.video_kbps));
-    args.extend(["-c:a", "aac", "-b:a"].map(String::from));
-    args.push(format!("{}k", recipe.audio_kbps));
+    if sound {
+        args.extend(["-c:a", "aac", "-b:a"].map(String::from));
+        args.push(format!("{}k", recipe.audio_kbps));
+    }
     // Unlike a saved clip, this one exists to be sent. `+faststart` costs a
     // second pass over a file that is small by construction, and buys playback
     // that starts before the download has finished.
     args.extend(["-movflags", "+faststart"].map(String::from));
     args.push(output.to_string_lossy().to_string());
     args
+}
+
+/// The remixed sound's graph and map — or `-an` when nothing audible is left.
+/// Says whether there is sound to encode. The graph stands alone: the
+/// picture's `-vf` is a simple filter on another stream and may sit beside it.
+fn remix_map(args: &mut Vec<String>, remix: &crate::stems::Remix, first_input: usize) -> bool {
+    match remix.filter(first_input) {
+        Some(graph) => {
+            args.extend(["-filter_complex".into(), graph, "-map".into(), crate::stems::MIX_LABEL.into()]);
+            true
+        }
+        None => {
+            args.push("-an".into());
+            false
+        }
+    }
 }
 
 /// Which way up the export is.
@@ -245,6 +275,7 @@ pub fn portrait_arguments(
     recipe: &Recipe,
     length_ms: u64,
     encoder: EncoderId,
+    remix: Option<&crate::stems::Remix>,
 ) -> Vec<String> {
     let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
     let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"]
@@ -265,11 +296,37 @@ pub fn portrait_arguments(
     if let Some(mark) = inputs.mark {
         args.extend(["-loop".into(), "1".into(), "-i".into(), mark.to_string_lossy().to_string()]);
     }
-    args.extend(["-filter_complex".into(), graph.to_string(), "-map".into(), "[v]".into()]);
-    args.extend(["-map".into(), format!("{audio_input}:a:0?")]);
+    // A remix's tracks after everything the picture's graph counts on; the
+    // clip file stays an input, unread, so the graph's numbers hold.
+    let remixed = remix.map(|remix| {
+        let first = audio_input + 1 + usize::from(inputs.mark.is_some());
+        args.extend(remix.inputs());
+        (remix.filter(first), remix.tracks.len())
+    });
+    let graph = match &remixed {
+        Some((Some(audio), _)) => format!("{graph};{audio}"),
+        _ => graph.to_string(),
+    };
+    args.extend(["-filter_complex".into(), graph, "-map".into(), "[v]".into()]);
+    let sound = match &remixed {
+        None => {
+            args.extend(["-map".into(), format!("{audio_input}:a:0?")]);
+            true
+        }
+        Some((Some(_), _)) => {
+            args.extend(["-map".into(), crate::stems::MIX_LABEL.into()]);
+            true
+        }
+        Some((None, _)) => {
+            args.push("-an".into());
+            false
+        }
+    };
     args.extend(video_args(encoder, recipe.video_kbps));
-    args.extend(["-c:a", "aac", "-b:a"].map(String::from));
-    args.push(format!("{}k", recipe.audio_kbps));
+    if sound {
+        args.extend(["-c:a", "aac", "-b:a"].map(String::from));
+        args.push(format!("{}k", recipe.audio_kbps));
+    }
     args.extend(["-movflags", "+faststart"].map(String::from));
     // Last before the output: the looped mark and the cam would run on.
     args.extend(["-t".into(), seconds(length_ms)]);
@@ -342,7 +399,7 @@ mod tests {
             audio: Path::new("clip.mp4"),
             mark: Some(Path::new("mark.png")),
         };
-        let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264);
+        let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, None);
         let joined = args.join(" ");
         assert!(joined.contains("-ss 5.000 -i clean.mp4 -ss 1.250000 -i cam.mp4 -i clip.mp4 -loop 1 -i mark.png"), "{joined}");
         assert!(args.windows(2).any(|w| w == ["-map", "[v]"]), "{joined}");
@@ -351,7 +408,7 @@ mod tests {
         assert!(!args.iter().any(|a| a == "-vf"), "-vf and -filter_complex never meet: {joined}");
         // Without a cam the clip file is input 1.
         let bare = PortraitInputs { cam: None, mark: None, ..inputs };
-        let args = portrait_arguments(&bare, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264);
+        let args = portrait_arguments(&bare, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, None);
         assert!(args.windows(2).any(|w| w == ["-map", "1:a:0?"]), "{args:?}");
     }
 
@@ -469,6 +526,7 @@ mod tests {
             &plan,
             1080,
             EncoderId::X264,
+            None,
         );
         assert!(!args.iter().any(|a| a == "-vf"), "{args:?}");
     }
@@ -482,6 +540,7 @@ mod tests {
             &plan,
             1080,
             EncoderId::X264,
+            None,
         );
         let at = args.iter().position(|a| a == "-vf").expect("scale missing");
         assert_eq!(args[at + 1], format!("scale=-2:{}", plan.height));
@@ -498,6 +557,7 @@ mod tests {
             &plan,
             1080,
             EncoderId::Nvenc,
+            None,
         );
         let input = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(args[input + 1], "C:/clips/in.mp4");
@@ -515,8 +575,53 @@ mod tests {
             &plan,
             1080,
             EncoderId::X264,
+            None,
         );
         assert!(args.iter().any(|a| a == "0:a:0?"), "{args:?}");
+    }
+
+    /// "Mute Discord voices when sharing": the sound comes from the kept
+    /// tracks, cut where the clip starts, and the clip's own is not mapped.
+    #[test]
+    fn a_remixed_export_maps_the_kept_tracks() {
+        let plan = recipe(&target(10 * MB, 120_000, 1920, 1080));
+        let remix = crate::stems::Remix {
+            tracks: vec![(Path::new("t/0.m4a").into(), 0.0), (Path::new("t/1.m4a").into(), -3.0)],
+            start_ms: 2_000,
+            length_ms: 120_000,
+        };
+        let args = arguments(Path::new("x.mp4"), Path::new("o.mp4"), &plan, 1080, EncoderId::X264, Some(&remix));
+        let joined = args.join(" ");
+        assert!(joined.contains("-i x.mp4 -ss 2.000 -t 120.000 -i t/0.m4a -ss 2.000 -t 120.000 -i t/1.m4a"), "{joined}");
+        assert!(!args.iter().any(|a| a == "0:a:0?"), "{joined}");
+        assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
+        let graph = args.iter().position(|a| a == "-filter_complex").map(|at| &args[at + 1]).unwrap();
+        assert!(graph.starts_with("[1:a]volume=1[m0];[2:a]"), "{graph}");
+        assert!(args.windows(2).any(|w| w[0] == "-vf"), "the scale stays a simple filter: {joined}");
+
+        // Nothing audible left: no sound at all rather than a failed map.
+        let silent = crate::stems::Remix { tracks: Vec::new(), start_ms: 0, length_ms: 120_000 };
+        let args = arguments(Path::new("x.mp4"), Path::new("o.mp4"), &plan, 1080, EncoderId::X264, Some(&silent));
+        assert!(args.iter().any(|a| a == "-an") && !args.iter().any(|a| a == "-c:a"), "{args:?}");
+    }
+
+    #[test]
+    fn a_remixed_portrait_counts_its_tracks_after_the_mark() {
+        let plan = recipe(&target(25 * MB, 20_000, 1080, 1920));
+        let inputs = PortraitInputs {
+            game: Path::new("clean.mp4"),
+            game_seek_ms: 0,
+            cam: Some((Path::new("cam.mp4"), None)),
+            audio: Path::new("clip.mp4"),
+            mark: Some(Path::new("mark.png")),
+        };
+        let remix = crate::stems::Remix { tracks: vec![(Path::new("t/0.m4a").into(), 0.0)], start_ms: 0, length_ms: 20_000 };
+        let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, Some(&remix));
+        let joined = args.join(" ");
+        assert!(joined.contains("-loop 1 -i mark.png -t 20.000 -i t/0.m4a"), "{joined}");
+        assert!(joined.contains("[0:v]null[v];[4:a]volume=1[m0];[m0]anull[aout]"), "{joined}");
+        assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
+        assert!(!joined.contains("2:a:0?"), "{joined}");
     }
 
     /// Every encoder has to produce a line ffmpeg can actually run.
@@ -548,7 +653,7 @@ mod tests {
     #[test]
     fn a_portrait_export_is_scaled_by_its_width() {
         let plan = recipe(&target((6.1 * MB as f64) as u64, 60_000, 1080, 1920));
-        let args = arguments(Path::new("in.mp4"), Path::new("out.mp4"), &plan, 1920, EncoderId::X264);
+        let args = arguments(Path::new("in.mp4"), Path::new("out.mp4"), &plan, 1920, EncoderId::X264, None);
         assert!(args.windows(2).any(|w| w == ["-vf", "scale=480:-2"]), "{args:?}");
     }
 

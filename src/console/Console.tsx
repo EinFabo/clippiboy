@@ -38,6 +38,7 @@ import { AudioPanel, useLevelBars } from "./Audio";
 import { Offers } from "./Offers";
 import { FriendsPanel, SendTo } from "./Friends";
 import { shareApi } from "@/lib/share";
+import { discordMb } from "@/lib/discord";
 import { useFriends } from "@/lib/friends";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
@@ -45,9 +46,6 @@ import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Troubl
 /** How many clips the strip shows. Beyond that the window in the app is the
  *  better place — this is meant to be read at a glance mid-game. */
 const RECENT = 6;
-
-/** The sizes worth exporting for: Discord's limit, and its Nitro limit. */
-const DISCORD = [10, 25];
 
 /** How long the way out runs before Rust hides the window — has to match the
  *  `[data-leaving]` rules in console.css. */
@@ -241,6 +239,8 @@ export function Console() {
   /** Ob die Konsole in Bildschirmaufnahmen zu sehen ist — nur für den Satz
    *  unter dem Dock, der sonst etwas Falsches behauptet. */
   const [inCapture, setInCapture] = useState(false);
+  /** What "Copy for Discord" aims at, from the setting "Discord upload limit". */
+  const [discordTarget, setDiscordTarget] = useState(() => discordMb(undefined));
   /** Der violette Schein in den unteren Bildschirmecken. Kommt in der App
    *  ausschließlich aus `console-opened` — der Kern legt ihn dem Ereignis bei,
    *  mit dem die Konsole aufgeht, damit er im selben Bild steht wie alles
@@ -371,6 +371,7 @@ export function Console() {
         setTargetFps(config.recording.fps);
         setScale(config.consoleScale);
         setInCapture(config.consoleInCapture);
+        setDiscordTarget(discordMb(config.discordLimit));
         outbox.read(config);
       })
       .catch(() => {});
@@ -490,6 +491,7 @@ export function Console() {
           setBufferLength(Math.max(1, config.buffer.seconds));
           setTargetFps(config.recording.fps);
           setInCapture(config.consoleInCapture);
+          setDiscordTarget(discordMb(config.discordLimit));
           outbox.read(config);
         })
         .catch(() => {});
@@ -791,36 +793,24 @@ export function Console() {
                       >
                         <IconCopy className="h-4 w-4" />
                       </Tool>
-                      {clip.screenshot && (
-                        <Tool
-                          label="Under 10 MB and copy"
-                          busy={busy === `discord-${clip.id}-10`}
-                          onClick={() =>
-                            run(`discord-${clip.id}-10`, async () => {
-                              await api.exportShotForDiscord(clip.id, 10);
-                              say("10 MB · copied");
-                            })
-                          }
-                        >
-                          <span className="text-[11px] font-bold">10</span>
-                        </Tool>
-                      )}
-                      {!clip.screenshot &&
-                        DISCORD.map((mb) => (
-                          <Tool
-                            key={mb}
-                            label={`Shrink to ${mb} MB and copy`}
-                            busy={busy === `discord-${clip.id}-${mb}`}
-                            onClick={() =>
-                              run(`discord-${clip.id}-${mb}`, async () => {
-                                await api.exportForDiscord(clip.id, mb);
-                                say(`${mb} MB · copied`);
-                              })
-                            }
-                          >
-                            <span className="text-[11px] font-bold">{mb}</span>
-                          </Tool>
-                        ))}
+                      <Tool
+                        label={
+                          clip.screenshot
+                            ? `Under ${discordTarget} MB and copy`
+                            : `Shrink to ${discordTarget} MB and copy`
+                        }
+                        busy={busy === `discord-${clip.id}`}
+                        onClick={() =>
+                          run(`discord-${clip.id}`, async () => {
+                            await (clip.screenshot
+                              ? api.exportShotForDiscord(clip.id, discordTarget)
+                              : api.exportForDiscord(clip.id, discordTarget));
+                            say(`${discordTarget} MB · copied`);
+                          })
+                        }
+                      >
+                        <span className="text-[11px] font-bold">{discordTarget}</span>
+                      </Tool>
                       <Tool
                         label="Send to a friend"
                         busy={busy === `send-${clip.id}`}
