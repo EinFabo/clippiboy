@@ -152,6 +152,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/webhook/begin" && method === "POST") return webhookBegin(request, url, env);
+  if (path === "/webhook/cancel" && method === "POST") return webhookCancel(request, env);
   if (path === "/shares/quota" && method === "GET") return shareQuota(env, me);
   if (path === "/shares" && method === "POST") return createShare(request, env, me);
   const share = path.match(/^\/shares\/([a-z0-9]+)(\/poster)?$/);
@@ -385,6 +386,25 @@ async function authExchange(request: Request, env: Env): Promise<Response> {
   return json({ token, me: await loadMe(env, login.user_id) });
 }
 
+/** Hands an access token back to Discord; a failure only costs the token's own expiry. */
+async function revokeToken(env: Env, token: string): Promise<void> {
+  try {
+    const response = await fetch("https://discord.com/api/oauth2/token/revoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token,
+        token_type_hint: "access_token",
+        client_id: env.DISCORD_CLIENT_ID,
+        client_secret: env.DISCORD_CLIENT_SECRET,
+      }),
+    });
+    if (!response.ok) console.error("discord revoke", response.status);
+  } catch (err) {
+    console.error("discord revoke", err);
+  }
+}
+
 // --- Posting to a channel -----------------------------------------------------
 //
 // The app sends a key of its own with its session (begin) and opens the start
@@ -403,17 +423,27 @@ async function webhookBegin(request: Request, url: URL, env: Env): Promise<Respo
   await env.DB.prepare("INSERT INTO webhook_logins (state, key, created_at) VALUES (?, ?, ?)")
     .bind(state, key, Date.now())
     .run();
-  return json({ url: `${url.origin}/webhook/start?state=${state}` });
+  return json({ url: `${url.origin}/webhook/start?state=${state}`, state });
+}
+
+/** "Cancel" in the app: the start page refuses the tab from then on. */
+async function webhookCancel(request: Request, env: Env): Promise<Response> {
+  const { state } = await body<{ state?: unknown }>(request);
+  if (isState(state)) await env.DB.prepare("DELETE FROM webhook_logins WHERE state = ?").bind(state).run();
+  return json({ ok: true });
 }
 
 async function webhookStart(request: Request, url: URL, env: Env): Promise<Response> {
   const state = url.searchParams.get("state");
   const expired = page("Link expired", "Press Connect channel in ClippiBoy again.");
   if (!isState(state)) return expired;
-  const row = await env.DB.prepare("SELECT created_at FROM webhook_logins WHERE state = ?")
-    .bind(state)
-    .first<{ created_at: number }>();
-  if (!row || !fresh(row.created_at, Date.now())) return expired;
+  // Once only: the link opened a second time, in this browser or another, goes nowhere.
+  const started = await env.DB.prepare(
+    "UPDATE webhook_logins SET started = 1 WHERE state = ? AND started = 0 AND created_at > ?",
+  )
+    .bind(state, Date.now() - WEBHOOK_TTL_MS)
+    .run();
+  if (started.meta.changes !== 1) return expired;
   const authorize = new URL("https://discord.com/oauth2/authorize");
   authorize.searchParams.set("client_id", env.DISCORD_CLIENT_ID);
   authorize.searchParams.set("response_type", "code");
@@ -436,7 +466,7 @@ async function webhookCallback(request: Request, url: URL, env: Env): Promise<Re
   if (!statesIn(request.headers.get("Cookie"), WEBHOOK_COOKIE).some((s) => sameText(s, state))) {
     return page("Link expired", "Press Connect channel in ClippiBoy again, in this browser.");
   }
-  const row = await env.DB.prepare("SELECT key, created_at FROM webhook_logins WHERE state = ?")
+  const row = await env.DB.prepare("SELECT key, created_at FROM webhook_logins WHERE state = ? AND started = 1")
     .bind(state)
     .first<{ key: string; created_at: number }>();
   // Spent on the first try, whatever comes of it.
@@ -461,19 +491,30 @@ async function webhookCallback(request: Request, url: URL, env: Env): Promise<Re
     console.error("discord webhook token", tokenResponse.status);
     return page("Discord said no", "Discord did not hand over the channel. Try again from ClippiBoy.");
   }
-  const granted = (await tokenResponse.json()) as { access_token?: string };
+  let granted: { access_token?: string };
+  try {
+    granted = (await tokenResponse.json()) as { access_token?: string };
+  } catch {
+    return page("Discord said no", "Discord did not hand over the channel. Try again from ClippiBoy.");
+  }
   // The server's name, for "Post to <server>". Without it the channel still works.
   let guilds: unknown = null;
   if (granted.access_token) {
-    const guildsResponse = await fetch("https://discord.com/api/users/@me/guilds", {
-      headers: { Authorization: `Bearer ${granted.access_token}` },
-    });
-    if (guildsResponse.ok) guilds = await guildsResponse.json();
+    try {
+      const guildsResponse = await fetch("https://discord.com/api/users/@me/guilds", {
+        headers: { Authorization: `Bearer ${granted.access_token}` },
+      });
+      if (guildsResponse.ok) guilds = await guildsResponse.json();
+    } catch (err) {
+      console.error("discord guilds", err);
+    }
+    // Not needed past this point, and not kept: revoked at once.
+    await revokeToken(env, granted.access_token);
   }
   const webhook = grantedWebhook(granted, guilds);
   if (!webhook) return page("Discord said no", "Discord did not hand over the channel. Try again from ClippiBoy.");
   const back = webhookLink(await seal(row.key, webhook));
-  const response = page("Channel connected", `Clips can go to ${webhook.guild} now. Back to ClippiBoy — you can close this tab.`, back, [
+  const response = page("Almost done", `Return to ClippiBoy to finish connecting ${webhook.guild}. You can close this tab.`, back, [
     `${WEBHOOK_COOKIE}=; Path=/webhook; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
   ]);
   response.headers.set("Cache-Control", "no-store");

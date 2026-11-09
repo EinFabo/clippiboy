@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use crate::state::AppState;
 
@@ -45,6 +45,11 @@ const RATE_TRIES: u32 = 5;
 const LONGEST_WAIT: Duration = Duration::from_secs(120);
 /// Discord's limit for a message's text.
 const CONTENT_MAX: usize = 2000;
+/// Automatic posts wait until no game has run for this long: the Discord copy
+/// is a second encode beside the buffer's, and a game is no place for it.
+const AFTER_GAME: Duration = Duration::from_secs(30);
+/// How often the queue looks whether the game has ended.
+const GAME_CHECK: Duration = Duration::from_secs(5);
 
 /// The webhook as it is kept, and as the server seals it.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -90,11 +95,29 @@ pub struct WebhookView {
     pub posting: Vec<String>,
 }
 
-/// The key of the connection waiting for its link, and since when.
-static PENDING: Mutex<Option<([u8; 32], Instant)>> = Mutex::new(None);
+/// The connection waiting for its link: the key, since when, and the server's
+/// state for it (to call it off there too).
+static PENDING: Mutex<Option<([u8; 32], Instant, String)>> = Mutex::new(None);
+
+/// A clip waiting to be posted, or going up now.
+#[derive(Debug, Clone, PartialEq)]
+struct Job {
+    id: String,
+    /// Saved and posted by the setting, not asked for: waits for the game to end.
+    auto: bool,
+}
+
 /// Clips waiting or going up, in order — one entry per clip.
-static WAITING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
-static QUEUE: OnceLock<mpsc::UnboundedSender<String>> = OnceLock::new();
+static WAITING: Mutex<VecDeque<Job>> = Mutex::new(VecDeque::new());
+/// Wakes the queue when a job comes in.
+fn wake() -> &'static Notify {
+    static WAKE: OnceLock<Notify> = OnceLock::new();
+    WAKE.get_or_init(Notify::new)
+}
+/// The queue runs once started.
+static WORKER: OnceLock<()> = OnceLock::new();
+/// "Will post after your game" is said once a session.
+static SAID_AFTER_GAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// `webhook.json` is read and written under this.
 static FILE: Mutex<()> = Mutex::new(());
 
@@ -125,14 +148,27 @@ fn store(hook: Option<&Hook>) -> Result<(), String> {
     }
 }
 
+/// Forget the stored webhook only if it is still `hook`: an answer about an
+/// old one, after a disconnect and a new connect, must not take the new one.
+fn forget_if(hook: &Hook) -> bool {
+    let _guard = FILE.lock();
+    let stored = std::fs::read(path())
+        .ok()
+        .and_then(|text| serde_json::from_slice::<Hook>(&text).ok());
+    if stored.as_ref() != Some(hook) {
+        return false;
+    }
+    std::fs::remove_file(path()).is_ok()
+}
+
 fn view() -> WebhookView {
     let hook = load();
-    let connecting = PENDING.lock().is_some_and(|(_, at)| at.elapsed() < KEY_TTL);
+    let connecting = PENDING.lock().as_ref().is_some_and(|(_, at, _)| at.elapsed() < KEY_TTL);
     WebhookView {
         connected: hook.is_some(),
         guild: hook.map(|hook| hook.guild),
         connecting,
-        posting: WAITING.lock().iter().cloned().collect(),
+        posting: WAITING.lock().iter().map(|job| job.id.clone()).collect(),
     }
 }
 
@@ -178,20 +214,35 @@ pub async fn webhook_connect(app: AppHandle) -> Result<(), String> {
             .map(str::to_owned)
             .unwrap_or_else(|| format!("The ClippiBoy server answered {status}.")));
     }
-    let Some(start) = value.get("url").and_then(|u| u.as_str()).filter(|u| u.starts_with(crate::friends::SERVER)) else {
+    let prefix = format!("{}/", crate::friends::SERVER);
+    let Some(start) = value.get("url").and_then(|u| u.as_str()).filter(|u| u.starts_with(&prefix)) else {
         return Err("The ClippiBoy server gave no start page.".into());
     };
-    *PENDING.lock() = Some((key, Instant::now()));
+    let state = value.get("state").and_then(|s| s.as_str()).unwrap_or_default().to_owned();
+    *PENDING.lock() = Some((key, Instant::now(), state));
     emit(&app);
     app.opener()
         .open_url(start, None::<&str>)
         .map_err(|err| format!("Could not open the browser: {err}"))
 }
 
+/// Called off here and on the server, whose start then refuses the browser tab.
 #[tauri::command]
-pub fn webhook_cancel(app: AppHandle) {
-    *PENDING.lock() = None;
+pub async fn webhook_cancel(app: AppHandle) {
+    let pending = PENDING.lock().take();
     emit(&app);
+    let (Some((_, _, state)), Some(token)) = (pending, crate::friends::token(&app)) else { return };
+    if state.is_empty() {
+        return;
+    }
+    let _ = client()
+        .post(format!("{}/webhook/cancel", crate::friends::SERVER))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(serde_json::json!({ "state": state }).to_string())
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await;
 }
 
 /// Forget the channel here, and delete the webhook in Discord as well — with
@@ -219,7 +270,7 @@ pub fn webhook_post(app: AppHandle, id: String) -> Result<(), String> {
     let Some(hook) = load() else {
         return Err("No Discord channel is connected.".into());
     };
-    if !enqueue(&app, &id) {
+    if !enqueue(&app, &id, false) {
         return Err(format!("This one is already on its way to {}.", hook.guild));
     }
     Ok(())
@@ -241,7 +292,7 @@ pub fn handle_url(app: &AppHandle, url: &str) -> bool {
         .unwrap_or_default();
     // A link nobody asked for — an old tab, a pasted URL — changes nothing.
     let key = match *PENDING.lock() {
-        Some((key, at)) if at.elapsed() < KEY_TTL => key,
+        Some((key, at, _)) if at.elapsed() < KEY_TTL => key,
         _ => {
             log::info!("webhook: ignored a channel link, no connection is waiting");
             return true;
@@ -272,47 +323,89 @@ pub fn clip_saved(app: &AppHandle, clip: &crate::model::Clip) {
     if clip.recording || !app.state::<AppState>().config_snapshot().webhook_auto_post {
         return;
     }
-    if load().is_some() {
-        enqueue(app, &clip.id);
+    let Some(hook) = load() else { return };
+    if enqueue(app, &clip.id, true)
+        && game_running(app)
+        && !SAID_AFTER_GAME.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        crate::notify(app, "ok", format!("Will post to {} after your game", hook.guild));
+    }
+}
+
+/// A clip went to Recently deleted: it is not posted any more.
+pub fn clip_deleted(app: &AppHandle, id: &str) {
+    let removed = {
+        let mut waiting = WAITING.lock();
+        let before = waiting.len();
+        waiting.retain(|job| job.id != id);
+        waiting.len() != before
+    };
+    if removed {
+        emit(app);
     }
 }
 
 /// Is the clip waiting to be posted, or going up? The clean-up by age leaves it.
 pub fn posting(id: &str) -> bool {
-    WAITING.lock().iter().any(|waiting| waiting == id)
+    WAITING.lock().iter().any(|job| job.id == id)
 }
 
-/// False when the clip is in the queue already.
-fn enqueue(app: &AppHandle, id: &str) -> bool {
+fn game_running(app: &AppHandle) -> bool {
+    app.state::<AppState>().current_game.lock().is_some()
+}
+
+/// False when the clip is in the queue already. Asked for by hand, a clip
+/// waiting as an automatic post goes now instead.
+fn enqueue(app: &AppHandle, id: &str, auto: bool) -> bool {
     {
         let mut waiting = WAITING.lock();
-        if waiting.iter().any(|w| w == id) {
-            return false;
+        match waiting.iter_mut().find(|job| job.id == id) {
+            Some(job) if job.auto && !auto => job.auto = false,
+            Some(_) => return false,
+            None => waiting.push_back(Job { id: id.to_owned(), auto }),
         }
-        waiting.push_back(id.to_owned());
     }
-    let queue = QUEUE.get_or_init(|| {
-        let (tx, rx) = mpsc::unbounded_channel();
-        tauri::async_runtime::spawn(work(app.clone(), rx));
-        tx
+    WORKER.get_or_init(|| {
+        tauri::async_runtime::spawn(work(app.clone()));
     });
-    let _ = queue.send(id.to_owned());
+    wake().notify_one();
     emit(app);
     true
 }
 
-/// One post at a time, in order.
-async fn work(app: AppHandle, mut rx: mpsc::UnboundedReceiver<String>) {
-    while let Some(id) = rx.recv().await {
-        // Disconnected meanwhile: the queue was emptied, nothing to say.
-        if !posting(&id) {
-            continue;
+/// The next clip to post: one asked for by hand first, an automatic one only
+/// while no game runs.
+fn next_job(waiting: &VecDeque<Job>, game_quiet: bool) -> Option<String> {
+    waiting
+        .iter()
+        .find(|job| !job.auto)
+        .or_else(|| waiting.iter().find(|_| game_quiet))
+        .map(|job| job.id.clone())
+}
+
+/// Has no game run for [`AFTER_GAME`]? `last_game` is when one was last seen.
+fn game_quiet(last_game: Option<Instant>, now: Instant) -> bool {
+    last_game.is_none_or(|at| now.saturating_duration_since(at) >= AFTER_GAME)
+}
+
+/// One post at a time.
+async fn work(app: AppHandle) {
+    let mut last_game: Option<Instant> = None;
+    loop {
+        if game_running(&app) {
+            last_game = Some(Instant::now());
         }
+        let next = next_job(&WAITING.lock(), game_quiet(last_game, Instant::now()));
+        let Some(id) = next else {
+            // A new job wakes it; otherwise it looks again whether the game has ended.
+            let _ = tokio::time::timeout(GAME_CHECK, wake().notified()).await;
+            continue;
+        };
         let outcome = match load() {
             Some(hook) => Some((post(&app, &hook, &id).await, hook)),
             None => None,
         };
-        WAITING.lock().retain(|waiting| waiting != &id);
+        WAITING.lock().retain(|job| job.id != id);
         emit(&app);
         match outcome {
             Some((Ok(Posted::File), hook)) => crate::notify(&app, "ok", format!("Posted to {}", hook.guild)),
@@ -324,9 +417,10 @@ async fn work(app: AppHandle, mut rx: mpsc::UnboundedReceiver<String>) {
                 log::warn!("webhook: clip {id} not posted: {why}");
                 crate::notify(&app, "error", format!("Could not post to {}: {why}", hook.guild));
             }
-            Some((Err(Failed::Gone), _)) => {
+            // Only if it is still the one connected: after a disconnect and a
+            // new connect, this answer is about the old one.
+            Some((Err(Failed::Gone), hook)) if forget_if(&hook) => {
                 log::warn!("webhook: Discord no longer knows the webhook — forgotten");
-                let _ = store(None);
                 WAITING.lock().clear();
                 emit(&app);
                 crate::notify(
@@ -335,6 +429,7 @@ async fn work(app: AppHandle, mut rx: mpsc::UnboundedReceiver<String>) {
                     "The channel's webhook was removed in Discord. Connect the channel again in Settings.",
                 );
             }
+            Some((Err(Failed::Gone), _)) => log::info!("webhook: an old webhook was gone; the connected one stays"),
             None => {}
         }
     }
@@ -354,15 +449,16 @@ enum Failed {
     Gone,
 }
 
+/// The clip as the library has it now — none once it went to Recently deleted.
+fn clip_now(app: &AppHandle, id: &str) -> Option<crate::model::Clip> {
+    let state = app.state::<AppState>();
+    let guard = state.library.lock();
+    guard.as_ref().and_then(|library| library.get(id).ok().flatten())
+}
+
 async fn post(app: &AppHandle, hook: &Hook, id: &str) -> Result<Posted, Failed> {
-    let clip = {
-        let state = app.state::<AppState>();
-        let guard = state.library.lock();
-        guard.as_ref().and_then(|library| library.get(id).ok().flatten())
-    };
-    let Some(clip) = clip else {
-        return Err(Failed::Quiet("the clip is gone".into()));
-    };
+    let gone = || Failed::Quiet("the clip is gone".into());
+    let clip = clip_now(app, id).ok_or_else(gone)?;
     let content = message(clip.title.as_deref(), clip.game.as_deref());
 
     // The Discord copy, as "Copy for Discord" makes it — encoding is blocking work.
@@ -379,24 +475,29 @@ async fn post(app: &AppHandle, hook: &Hook, id: &str) -> Result<Posted, Failed> 
         .await
         .unwrap_or_else(|err| Err(err.to_string()))
     };
-    let why_not_a_file = match copy {
-        Ok(path) => match std::fs::metadata(&path).map(|meta| meta.len()) {
-            Ok(len) if len <= FILE_LIMIT => {
-                let name = upload_name(Path::new(&clip.path), &path);
-                match send_file(hook, &content, &name, &path).await {
-                    Ok(()) => return Ok(Posted::File),
-                    Err(Sent::TooLarge) => "Discord turned the file away as too large".to_string(),
-                    Err(Sent::Gone) => return Err(Failed::Gone),
-                    Err(Sent::Failed(why)) => return Err(Failed::Said(why)),
-                }
-            }
-            Ok(_) => "it does not fit in 20 MB".to_string(),
-            Err(err) => err.to_string(),
-        },
-        Err(err) => err,
+    // Deleted while the copy was made: not posted.
+    if !posting(id) || clip_now(app, id).is_none() {
+        return Err(gone());
+    }
+    // Only a copy that is too large falls back to a link; any other failure
+    // is said as it is.
+    let path = copy.map_err(Failed::Said)?;
+    let len = std::fs::metadata(&path)
+        .map_err(|err| Failed::Said(format!("Could not read the copy: {err}")))?
+        .len();
+    let why_not_a_file = if len <= FILE_LIMIT {
+        let name = upload_name(Path::new(&clip.path), &path);
+        match send_file(hook, &content, &name, &path).await {
+            Ok(()) => return Ok(Posted::File),
+            Err(Sent::TooLarge) => "Discord turned the file away as too large".to_string(),
+            Err(Sent::Gone) => return Err(Failed::Gone),
+            Err(Sent::Failed(why)) => return Err(Failed::Said(why)),
+        }
+    } else {
+        "it does not fit in 20 MB".to_string()
     };
 
-    // Too large, or no copy to be had: a share link, where one can be made.
+    // Too large: a share link, where one can be made.
     if clip.screenshot {
         return Err(Failed::Said(why_not_a_file));
     }
@@ -408,6 +509,9 @@ async fn post(app: &AppHandle, hook: &Hook, id: &str) -> Result<Posted, Failed> 
     }
     log::info!("webhook: clip {id} goes as a share link: {why_not_a_file}");
     let link = crate::links::link_for(app, id).await.map_err(Failed::Said)?;
+    if !posting(id) || clip_now(app, id).is_none() {
+        return Err(gone());
+    }
     let text = if content.is_empty() { link.url.clone() } else { format!("{content}\n{}", link.url) };
     match send(hook, "application/json", payload_json(&text).into_bytes()).await {
         Ok(()) => Ok(Posted::Link),
@@ -803,6 +907,30 @@ mod tests {
         assert_eq!(pause_after(Some("0"), None), None);
         assert_eq!(pause_after(Some("0"), Some("nan")), None);
         assert_eq!(pause_after(Some("0"), Some("100000")), Some(LONGEST_WAIT));
+    }
+
+    fn job(id: &str, auto: bool) -> Job {
+        Job { id: id.into(), auto }
+    }
+
+    #[test]
+    fn automatic_posts_wait_for_the_game_and_asked_ones_do_not() {
+        let waiting: VecDeque<Job> = [job("a", true), job("b", false), job("c", true)].into();
+        assert_eq!(next_job(&waiting, false).as_deref(), Some("b"));
+        assert_eq!(next_job(&waiting, true).as_deref(), Some("b"));
+        let autos: VecDeque<Job> = [job("a", true), job("c", true)].into();
+        assert_eq!(next_job(&autos, false), None);
+        assert_eq!(next_job(&autos, true).as_deref(), Some("a"));
+        assert_eq!(next_job(&VecDeque::new(), true), None);
+    }
+
+    #[test]
+    fn the_game_counts_as_over_half_a_minute_after_it_was_last_seen() {
+        let now = Instant::now();
+        assert!(game_quiet(None, now));
+        assert!(!game_quiet(Some(now), now));
+        assert!(!game_quiet(Some(now), now + AFTER_GAME - Duration::from_secs(1)));
+        assert!(game_quiet(Some(now), now + AFTER_GAME));
     }
 
     #[test]

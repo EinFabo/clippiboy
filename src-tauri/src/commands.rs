@@ -1249,6 +1249,7 @@ pub(crate) fn trash_clip(
     // console stays in the main window and opens as "File not found".
     let _ = app.emit("clip-deleted", id);
     crate::links::clip_deleted(app, id);
+    crate::webhook::clip_deleted(app, id);
     Ok(true)
 }
 
