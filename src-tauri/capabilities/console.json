@@ -34,6 +34,8 @@
     "allow-share-accept",
     "allow-share-decline",
     "allow-share-send",
-    "allow-link-exists"
+    "allow-link-exists",
+    "allow-webhook-state",
+    "allow-webhook-post"
   ]
 }

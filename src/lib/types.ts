@@ -254,6 +254,8 @@ export interface AppConfig {
   deleteOlderThanDays: number;
   /** Keeps the windows, friends' names, codes and sounds out of a stream. */
   streamerMode: StreamerMode;
+  /** Post every new clip and screenshot to the connected Discord channel (`webhook.rs`). */
+  webhookAutoPost?: boolean;
   /**
    * Counts up with every change the core takes in. Sent back as it came: a
    * write from an older copy is merged onto what changed since, not over it.

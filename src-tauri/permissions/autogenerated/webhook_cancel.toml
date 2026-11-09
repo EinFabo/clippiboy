@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-webhook-cancel"
+description = "Enables the webhook_cancel command without any pre-configured scope."
+commands.allow = ["webhook_cancel"]
+
+[[permission]]
+identifier = "deny-webhook-cancel"
+description = "Denies the webhook_cancel command without any pre-configured scope."
+commands.deny = ["webhook_cancel"]

@@ -2,8 +2,12 @@ import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Segmented, Toggle } from "@/components/ui/Controls";
+import { Button } from "@/components/ui/Button";
 import { DISCORD_LIMITS } from "@/lib/discord";
 import { useStreamer } from "@/lib/streamer";
+import { useFriends } from "@/lib/friends";
+import { toast } from "@/lib/toastBus";
+import { useWebhook, webhookApi } from "@/lib/webhook";
 import type { DiscordLimit, StreamerMode } from "@/lib/types";
 import { Row, USAGE_HINT } from "./shared";
 
@@ -14,6 +18,9 @@ export function BehaviourTab() {
   );
   const streaming = useStreamer((s) => s.active);
   const streamerMode = config.streamerMode ?? "off";
+  const signedIn = useFriends((s) => s.signedIn);
+  const webhook = useWebhook();
+  const act = (call: Promise<void>) => void call.catch((err) => toast("error", String(err)));
 
   return (
     <div className="space-y-8">
@@ -96,6 +103,40 @@ export function BehaviourTab() {
               onChange={(muteDiscordOnShare) => patchConfig({ muteDiscordOnShare })}
             />
           </Row>
+          <Row
+            label="Post clips to a Discord channel"
+            hint={
+              webhook.connected
+                ? `Connected to ${webhook.guild ?? "a server"}`
+                : webhook.connecting
+                  ? "Waiting for Discord…"
+                  : signedIn
+                    ? undefined
+                    : "Sign in on the Friends page first"
+            }
+          >
+            {webhook.connected ? (
+              <Button size="sm" variant="ghost" onClick={() => act(webhookApi.disconnect())}>
+                Disconnect
+              </Button>
+            ) : webhook.connecting ? (
+              <Button size="sm" variant="ghost" onClick={() => act(webhookApi.cancel())}>
+                Cancel
+              </Button>
+            ) : (
+              <Button size="sm" disabled={!signedIn} onClick={() => act(webhookApi.connect())}>
+                Connect channel
+              </Button>
+            )}
+          </Row>
+          {webhook.connected && (
+            <Row label="Post every clip automatically">
+              <Toggle
+                checked={config.webhookAutoPost ?? false}
+                onChange={(webhookAutoPost) => patchConfig({ webhookAutoPost })}
+              />
+            </Row>
+          )}
         </Card>
       </section>
     </div>

@@ -714,6 +714,7 @@ dependencies = [
  "parking_lot",
  "png 0.17.16",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",

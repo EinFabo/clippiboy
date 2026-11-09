@@ -334,9 +334,24 @@ pub fn link_exists(id: String) -> bool {
 /// handed out again instead.
 #[tauri::command]
 pub async fn link_create(app: AppHandle, id: String) -> Result<Link, String> {
+    linked(&app, id, true).await
+}
+
+/// The clip's live link, or a new one uploaded for it — what posting to a
+/// channel (`webhook.rs`) falls back on when the file is too large. Nothing
+/// goes on the clipboard there.
+pub(crate) async fn link_for(app: &AppHandle, id: &str) -> Result<Link, String> {
+    linked(app, id.to_owned(), false).await
+}
+
+/// `copy`: put the link on the clipboard and say so, as "Share as link" does.
+async fn linked(app: &AppHandle, id: String, copy: bool) -> Result<Link, String> {
+    let app = app.clone();
     if let Some(link) = load().remove(&id) {
-        crate::clipboard::copy_text(&link.url)?;
-        crate::notify(&app, "ok", "Link copied");
+        if copy {
+            crate::clipboard::copy_text(&link.url)?;
+            crate::notify(&app, "ok", "Link copied");
+        }
         return Ok(link);
     }
     let token = token(&app)?;
@@ -401,8 +416,10 @@ pub async fn link_create(app: AppHandle, id: String) -> Result<Link, String> {
         Ok(link) => {
             report.emit("done", 1.0, None);
             let _ = app.emit("links-changed", ());
-            let _ = crate::clipboard::copy_text(&link.url);
-            crate::notify(&app, "ok", "Link copied — it expires in 5 days");
+            if copy {
+                let _ = crate::clipboard::copy_text(&link.url);
+                crate::notify(&app, "ok", "Link copied — it expires in 5 days");
+            }
         }
         Err(err) => report.emit("failed", 0.0, Some(err.clone())),
     }

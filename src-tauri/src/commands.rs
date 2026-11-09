@@ -1570,12 +1570,28 @@ pub fn export_for_discord(
     id: String,
     megabytes: u64,
 ) -> Result<String> {
+    let output = discord_copy_of(&state, &app, &id, megabytes, true)?;
+    crate::clipboard::copy_files(&[output.clone()])?;
+    Ok(output.to_string_lossy().to_string())
+}
+
+/// A clip's Discord copy under `megabytes`, made unless a fitting one is there
+/// already — for "Copy for Discord" and for posting to a channel
+/// (`webhook.rs`). `announce`: say how the export went, as "Copy for Discord"
+/// does; a post in the background says only what went wrong.
+pub(crate) fn discord_copy_of(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+    id: &str,
+    megabytes: u64,
+    announce: bool,
+) -> Result<std::path::PathBuf> {
     // Before the clip's lock: a cam still being added to this clip finishes
     // first, and its job needs that lock.
-    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+    if !crate::composite::wait_settled(id, std::time::Duration::from_secs(300)) {
         return Err(CAM_ON_ITS_WAY.into());
     }
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+    let clip = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     refuse_still(&clip)?;
     let mute_discord = state.config_snapshot().mute_discord_on_share;
@@ -1584,7 +1600,7 @@ pub fn export_for_discord(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "clip".into());
-    let output = discord_copy(&discord_root(), &id, &stem, megabytes, mute_discord);
+    let output = discord_copy(&discord_root(), id, &stem, megabytes, mute_discord);
     if let Some(folder) = output.parent() {
         std::fs::create_dir_all(folder)
             .map_err(|err| format!("Could not make a folder for the Discord copy: {err}"))?;
@@ -1597,7 +1613,7 @@ pub fn export_for_discord(
     // Under the clip's lock, so a save of the clip in progress finishes first
     // and its newer file counts — `shrink` takes the lock again for its run.
     let ready = {
-        let own = edit::clip_lock(&id);
+        let own = edit::clip_lock(id);
         let _clip = own.lock();
         std::fs::metadata(&output)
             .map(|meta| meta.len() > 0 && meta.len() <= target_bytes)
@@ -1607,10 +1623,17 @@ pub fn export_for_discord(
     if !ready {
         // Straight to the work: the target is the core's own, in its data
         // folder — `export_target` would rightly refuse it for the dialog.
-        export_to(&state, &app, &id, target_bytes, &output, crate::export::Orientation::Landscape, mute_discord)?;
+        let landscape = crate::export::Orientation::Landscape;
+        if announce {
+            export_to(state, app, id, target_bytes, &output, landscape, mute_discord)?;
+        } else {
+            let shrunk = shrink(state, id, target_bytes, &output, &|_: f32| {}, landscape, mute_discord)?;
+            if shrunk.discord_kept {
+                crate::notify(app, "error", DISCORD_KEPT);
+            }
+        }
     }
-    crate::clipboard::copy_files(&[output.clone()])?;
-    Ok(output.to_string_lossy().to_string())
+    Ok(output)
 }
 
 /// "Copy for Discord" on a screenshot: the picture under `megabytes`, as a file
@@ -1620,7 +1643,19 @@ pub fn export_for_discord(
 /// the favorites before it is pasted.
 #[tauri::command(async)]
 pub fn export_shot_for_discord(state: State<'_, AppState>, id: String, megabytes: u64) -> Result<String> {
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+    let output = shot_discord_copy_of(&state, &id, megabytes)?;
+    crate::clipboard::copy_files(&[output.clone()])?;
+    Ok(output.to_string_lossy().to_string())
+}
+
+/// A screenshot's Discord copy under `megabytes` — for "Copy for Discord" and
+/// for posting to a channel (`webhook.rs`).
+pub(crate) fn shot_discord_copy_of(
+    state: &State<'_, AppState>,
+    id: &str,
+    megabytes: u64,
+) -> Result<std::path::PathBuf> {
+    let clip = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     if !clip.screenshot {
         return Err("Only a screenshot is copied for Discord this way.".into());
@@ -1631,13 +1666,13 @@ pub fn export_shot_for_discord(state: State<'_, AppState>, id: String, megabytes
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "screenshot".into());
-    let folder = discord_dir(&discord_root(), &id);
+    let folder = discord_dir(&discord_root(), id);
     let named = |ext: &str| folder.join(format!("{stem} ({megabytes} MB).{ext}"));
 
     // Under the clip's lock: a save of the marks in progress finishes first,
     // and its picture is the one that goes.
     let output = {
-        let own = edit::clip_lock(&id);
+        let own = edit::clip_lock(id);
         let _clip = own.lock();
         // Made before and still newer than the picture: no need to encode again.
         let ready = ["png", "jpg"].into_iter().map(named).find(|path| {
@@ -1670,8 +1705,7 @@ pub fn export_shot_for_discord(state: State<'_, AppState>, id: String, megabytes
             }
         }
     };
-    crate::clipboard::copy_files(&[output.clone()])?;
-    Ok(output.to_string_lossy().to_string())
+    Ok(output)
 }
 
 /// Open the clip in whichever player Windows has chosen for it — once its

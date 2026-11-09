@@ -41,6 +41,7 @@ import { shareApi } from "@/lib/share";
 import { discordMb } from "@/lib/discord";
 import { useFriends } from "@/lib/friends";
 import { shownName, useStreamer } from "@/lib/streamer";
+import { postLabel, useWebhook, webhookApi } from "@/lib/webhook";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
 
@@ -159,6 +160,8 @@ export function Console() {
   const [scale, setScale] = useState(1);
   const [bottomInset, setBottomInset] = useState(0);
   const [clips, setClips] = useState<Clip[]>(inTauri ? [] : mockClips.slice(0, RECENT));
+  /** The Discord channel clips can be posted to, if one is connected. */
+  const webhook = useWebhook();
   /** Die eingestellten Tonquellen — allein für den Warnstreifen. Der Kern
    *  meldet Fehler und Auffälligkeiten je Quellen-Id, und einen Namen dazu hat
    *  nur die Konfiguration. */
@@ -820,6 +823,20 @@ export function Console() {
                       >
                         <IconSend className="h-4 w-4" />
                       </Tool>
+                      {webhook.connected && (
+                        <Tool
+                          label={postLabel(webhook, clip.id)}
+                          busy={webhook.posting.includes(clip.id)}
+                          onClick={() =>
+                            run(`post-${clip.id}`, async () => {
+                              await webhookApi.post(clip.id);
+                              say(`Posting to ${webhook.guild ?? "Discord"}…`);
+                            })
+                          }
+                        >
+                          <IconArrowUpRight className="h-4 w-4" />
+                        </Tool>
+                      )}
                       <Tool
                         label={clip.favorite ? "Remove from favorites" : "Favorite"}
                         onClick={() =>

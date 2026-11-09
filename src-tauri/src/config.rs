@@ -85,6 +85,7 @@ pub fn default_config() -> AppConfig {
         mute_discord_on_share: false,
         delete_older_than_days: 0,
         streamer_mode: crate::model::StreamerMode::Off,
+        webhook_auto_post: false,
         revision: 0,
     }
 }

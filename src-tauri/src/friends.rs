@@ -160,6 +160,10 @@ pub fn start(app: &AppHandle) {
 /// `clippiboy://auth?code=…` and `clippiboy://add?code=…`, handed over by the
 /// deep-link plugin.
 pub fn handle_url(app: &AppHandle, url: &str) {
+    // `clippiboy://webhook?data=…`: a channel to post clips to.
+    if crate::webhook::handle_url(app, url) {
+        return;
+    }
     if let Some(code) = add_code_from_url(url) {
         // "Open ClippiBoy" after "Add <name> as friend" on clippiboy.com.
         let friends = app.state::<Friends>();

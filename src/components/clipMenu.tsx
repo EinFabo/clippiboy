@@ -11,6 +11,7 @@ import {
   IconPencil,
   IconPlay,
   IconScissors,
+  IconSend,
   IconTrash,
 } from "@/components/icons";
 import { useMenu, type MenuEntry, type MenuTrigger } from "@/components/ui/Menu";
@@ -20,6 +21,7 @@ import { useShare } from "@/lib/share";
 import { discordMb } from "@/lib/discord";
 import { toast } from "@/lib/toastBus";
 import { freeOn, timeLeft, useLinks } from "@/lib/links";
+import { postLabel, useWebhook, webhookApi } from "@/lib/webhook";
 import type { Clip } from "@/lib/types";
 
 /** What "Copy for Discord" aims at, from the setting "Discord upload limit". */
@@ -216,6 +218,17 @@ export function useClipMenu() {
     });
     // A link for anyone, five days long — clips only, the page is a player.
     if (!clip.screenshot) entries.push(...linkEntries(clip));
+    // The Discord channel connected in Settings → Behaviour → Sharing.
+    const webhook = useWebhook.getState();
+    if (webhook.connected) {
+      entries.push({
+        kind: "item",
+        label: postLabel(webhook, clip.id),
+        icon: <IconSend className={icon} />,
+        disabled: !inTauri || webhook.posting.includes(clip.id),
+        onSelect: () => void run(webhookApi.post(clip.id), `Posting to ${webhook.guild ?? "Discord"}…`),
+      });
+    }
     // Recordings only: a still is small already, and the arithmetic here is all
     // about length.
     if (!clip.screenshot && options.onExport) {

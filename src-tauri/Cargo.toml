@@ -54,6 +54,8 @@ vcam-protocol = { path = "../vcam/protocol" }
 # new is built — reqwest gets its rustls from there as well.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# AES-GCM for the webhook the friends server hands over sealed (webhook.rs) — rustls brings it along.
+ring = { version = "0.17", default-features = false }
 sha2 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 # The friends server's live connection. The TLS is the rustls from above, the

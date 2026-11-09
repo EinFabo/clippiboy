@@ -939,6 +939,36 @@
           "markdownDescription": "Enables the usage_source command without any pre-configured scope."
         },
         {
+          "description": "Enables the webhook_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-webhook-cancel",
+          "markdownDescription": "Enables the webhook_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the webhook_connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-webhook-connect",
+          "markdownDescription": "Enables the webhook_connect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the webhook_disconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-webhook-disconnect",
+          "markdownDescription": "Enables the webhook_disconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the webhook_post command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-webhook-post",
+          "markdownDescription": "Enables the webhook_post command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the webhook_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-webhook-state",
+          "markdownDescription": "Enables the webhook_state command without any pre-configured scope."
+        },
+        {
           "description": "Enables the write_screenshot command without any pre-configured scope.",
           "type": "string",
           "const": "allow-write-screenshot",
@@ -1537,6 +1567,36 @@
           "type": "string",
           "const": "deny-usage-source",
           "markdownDescription": "Denies the usage_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the webhook_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-webhook-cancel",
+          "markdownDescription": "Denies the webhook_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the webhook_connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-webhook-connect",
+          "markdownDescription": "Denies the webhook_connect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the webhook_disconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-webhook-disconnect",
+          "markdownDescription": "Denies the webhook_disconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the webhook_post command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-webhook-post",
+          "markdownDescription": "Denies the webhook_post command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the webhook_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-webhook-state",
+          "markdownDescription": "Denies the webhook_state command without any pre-configured scope."
         },
         {
           "description": "Denies the write_screenshot command without any pre-configured scope.",

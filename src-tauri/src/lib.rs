@@ -54,6 +54,7 @@ pub mod reccam;
 pub mod updater;
 pub mod vcam;
 pub mod watermark;
+pub mod webhook;
 pub mod wgc;
 
 use std::time::Duration;
@@ -204,6 +205,7 @@ pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Res
             if let Some(cam) = cam {
                 save_cam(app, &state, &mut clip, cam);
             }
+            webhook::clip_saved(app, &clip);
             Ok(clip)
         }
         Err(err) => {
@@ -311,6 +313,7 @@ pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip,
                 Some(format!("Screenshot · {}×{}", clip.width, clip.height)),
                 clip.thumb_path.clone(),
             );
+            webhook::clip_saved(app, &clip);
             Ok(clip)
         }
         Err(err) => {
@@ -2098,6 +2101,11 @@ pub fn run() {
             links::link_exists,
             links::link_create,
             links::link_delete,
+            webhook::webhook_state,
+            webhook::webhook_connect,
+            webhook::webhook_cancel,
+            webhook::webhook_disconnect,
+            webhook::webhook_post,
             share::share_state,
             share::share_send,
             share::share_accept,

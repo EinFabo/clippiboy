@@ -179,6 +179,7 @@ export const mockConfig: AppConfig = {
   muteDiscordOnShare: false,
   deleteOlderThanDays: 0,
   streamerMode: "off",
+  webhookAutoPost: false,
   revision: 0,
 };
 

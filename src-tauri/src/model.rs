@@ -756,6 +756,10 @@ pub struct AppConfig {
     /// stream — see `streamer.rs`.
     #[serde(default)]
     pub streamer_mode: StreamerMode,
+    /// Post every new clip and screenshot to the connected Discord channel
+    /// (`webhook.rs`). Recordings never go on their own.
+    #[serde(default)]
+    pub webhook_auto_post: bool,
     /// Counts up with every change the core takes in. A window sends back the
     /// one it was given, so a write built on an older copy can be told apart
     /// and merged onto what changed since (`config::accept`) instead of

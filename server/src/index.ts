@@ -33,6 +33,17 @@ import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
 import { NOBODY, requestRule, type RequestOutcome } from "./friendrules";
 import { clearInviteCookie, cookieValue, INVITE_COOKIE, inviteTarget, verifyInvite } from "./invite";
 import { invitePage, inviteSecret, shareInvite } from "./invitepages";
+import {
+  fresh,
+  grantedWebhook,
+  isKey,
+  isState,
+  seal,
+  WEBHOOK_COOKIE,
+  WEBHOOK_SCOPE,
+  WEBHOOK_TTL_MS,
+  webhookLink,
+} from "./webhook";
 
 export { Hub } from "./hub";
 
@@ -62,6 +73,8 @@ export default {
         // little past their time are harmless — callback and exchange check
         // the age themselves.
         env.DB.prepare("DELETE FROM logins WHERE created_at < ?").bind(Date.now() - LOGIN_TTL_MS).run(),
+        // Channel connections nobody finished: only their keys, never a webhook.
+        env.DB.prepare("DELETE FROM webhook_logins WHERE created_at < ?").bind(Date.now() - WEBHOOK_TTL_MS).run(),
         // Yesterday's count stays readable a day; older ones are done.
         env.DB.prepare("DELETE FROM anon_budget WHERE day < ?").bind(utcDay(Date.now() - DAY_MS)).run(),
         // What a deleted account left behind is kept for seven days.
@@ -90,6 +103,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (!(await underLimit(request, env, "exchange"))) return json({ error: "Too many sign-ins — wait a minute." }, 429);
     return authExchange(request, env);
   }
+
+  // "Post clips to a Discord channel": the browser half, before the session check.
+  if (path === "/webhook/start" && method === "GET") {
+    if (!(await underLimit(request, env, "webhook"))) return page("Slow down", "Wait a minute, then try again from ClippiBoy.");
+    return webhookStart(request, url, env);
+  }
+  if (path === "/webhook/callback" && method === "GET") return webhookCallback(request, url, env);
 
   // Share links are for anyone who has the link.
   const shared = path.match(/^\/c\/([a-z0-9]+)(?:\.(mp4|jpg))?$/);
@@ -131,6 +151,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  if (path === "/webhook/begin" && method === "POST") return webhookBegin(request, url, env);
   if (path === "/shares/quota" && method === "GET") return shareQuota(env, me);
   if (path === "/shares" && method === "POST") return createShare(request, env, me);
   const share = path.match(/^\/shares\/([a-z0-9]+)(\/poster)?$/);
@@ -191,7 +212,7 @@ async function route(request: Request, env: Env): Promise<Response> {
  * its own, so a flood of pings cannot lock the same address out of signing in.
  * An IPv6 address counts as its /64.
  */
-async function underLimit(request: Request, env: Env, route: "auth" | "ping" | "exchange" | "invite"): Promise<boolean> {
+async function underLimit(request: Request, env: Env, route: "auth" | "ping" | "exchange" | "invite" | "webhook"): Promise<boolean> {
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   return (await env.ANON_LIMIT.limit({ key: `${route}:${addressKey(address)}` })).success;
 }
@@ -362,6 +383,101 @@ async function authExchange(request: Request, env: Env): Promise<Response> {
     .bind(await tokenHash(token), login.user_id, now, now)
     .run();
   return json({ token, me: await loadMe(env, login.user_id) });
+}
+
+// --- Posting to a channel -----------------------------------------------------
+//
+// The app sends a key of its own with its session (begin) and opens the start
+// URL it gets back in the browser. Discord asks for a server and a channel and
+// comes back to the callback, which trades the code for the webhook, seals it
+// with the app's key (webhook.ts) and hands it over in clippiboy://webhook. The
+// webhook is never written anywhere here; the row holds only the key, and is
+// spent by the callback. The cookie ties the callback to the browser that
+// started, as with sign-in.
+
+async function webhookBegin(request: Request, url: URL, env: Env): Promise<Response> {
+  const { key } = await body<{ key?: unknown }>(request);
+  if (!isKey(key)) throw new HttpError(400, "Missing key.");
+  if (!env.DISCORD_CLIENT_ID) throw new HttpError(503, "Discord is not configured yet.");
+  const state = randomToken(24);
+  await env.DB.prepare("INSERT INTO webhook_logins (state, key, created_at) VALUES (?, ?, ?)")
+    .bind(state, key, Date.now())
+    .run();
+  return json({ url: `${url.origin}/webhook/start?state=${state}` });
+}
+
+async function webhookStart(request: Request, url: URL, env: Env): Promise<Response> {
+  const state = url.searchParams.get("state");
+  const expired = page("Link expired", "Press Connect channel in ClippiBoy again.");
+  if (!isState(state)) return expired;
+  const row = await env.DB.prepare("SELECT created_at FROM webhook_logins WHERE state = ?")
+    .bind(state)
+    .first<{ created_at: number }>();
+  if (!row || !fresh(row.created_at, Date.now())) return expired;
+  const authorize = new URL("https://discord.com/oauth2/authorize");
+  authorize.searchParams.set("client_id", env.DISCORD_CLIENT_ID);
+  authorize.searchParams.set("response_type", "code");
+  authorize.searchParams.set("redirect_uri", `${url.origin}/webhook/callback`);
+  authorize.searchParams.set("scope", WEBHOOK_SCOPE);
+  authorize.searchParams.set("state", state);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: authorize.toString(),
+      "Set-Cookie": `${WEBHOOK_COOKIE}=${withState(statesIn(request.headers.get("Cookie"), WEBHOOK_COOKIE), state)}; Path=/webhook; Max-Age=600; HttpOnly; Secure; SameSite=Lax`,
+    },
+  });
+}
+
+async function webhookCallback(request: Request, url: URL, env: Env): Promise<Response> {
+  const state = url.searchParams.get("state") ?? "";
+  const code = url.searchParams.get("code");
+  if (!code) return page("Cancelled", "No channel was connected. You can close this tab.");
+  if (!statesIn(request.headers.get("Cookie"), WEBHOOK_COOKIE).some((s) => sameText(s, state))) {
+    return page("Link expired", "Press Connect channel in ClippiBoy again, in this browser.");
+  }
+  const row = await env.DB.prepare("SELECT key, created_at FROM webhook_logins WHERE state = ?")
+    .bind(state)
+    .first<{ key: string; created_at: number }>();
+  // Spent on the first try, whatever comes of it.
+  if (row) await env.DB.prepare("DELETE FROM webhook_logins WHERE state = ?").bind(state).run();
+  if (!row || !fresh(row.created_at, Date.now())) {
+    return page("Link expired", "Press Connect channel in ClippiBoy again.");
+  }
+
+  const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: `${url.origin}/webhook/callback`,
+      client_id: env.DISCORD_CLIENT_ID,
+      client_secret: env.DISCORD_CLIENT_SECRET,
+    }),
+  });
+  if (!tokenResponse.ok) {
+    // Not the body: on success it would hold the webhook.
+    console.error("discord webhook token", tokenResponse.status);
+    return page("Discord said no", "Discord did not hand over the channel. Try again from ClippiBoy.");
+  }
+  const granted = (await tokenResponse.json()) as { access_token?: string };
+  // The server's name, for "Post to <server>". Without it the channel still works.
+  let guilds: unknown = null;
+  if (granted.access_token) {
+    const guildsResponse = await fetch("https://discord.com/api/users/@me/guilds", {
+      headers: { Authorization: `Bearer ${granted.access_token}` },
+    });
+    if (guildsResponse.ok) guilds = await guildsResponse.json();
+  }
+  const webhook = grantedWebhook(granted, guilds);
+  if (!webhook) return page("Discord said no", "Discord did not hand over the channel. Try again from ClippiBoy.");
+  const back = webhookLink(await seal(row.key, webhook));
+  const response = page("Channel connected", `Clips can go to ${webhook.guild} now. Back to ClippiBoy — you can close this tab.`, back, [
+    `${WEBHOOK_COOKIE}=; Path=/webhook; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
+  ]);
+  response.headers.set("Cache-Control", "no-store");
+  return response;
 }
 
 function page(title: string, text: string, redirect?: string, cookies: string[] = []): Response {

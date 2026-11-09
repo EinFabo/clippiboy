@@ -55,8 +55,8 @@ pub fn run(app: &AppHandle) {
         if crate::clips::passes_stopped() {
             break;
         }
-        // Going up as a link or out to a friend: next round.
-        if crate::links::uploading(&clip.id) || crate::share::sending(app, &clip.id) {
+        // Going up as a link, out to a friend or to a channel: next round.
+        if crate::links::uploading(&clip.id) || crate::share::sending(app, &clip.id) || crate::webhook::posting(&clip.id) {
             continue;
         }
         let kept_since = kept.get(&clip.id).copied();
