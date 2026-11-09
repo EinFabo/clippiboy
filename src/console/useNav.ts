@@ -21,7 +21,10 @@ import { nearest, nextTab, pickNext, rangeSteps, type Box, type Dir } from "@/li
  * - `data-nav-trap` — a region the ring stays inside while it stands;
  * - `data-nav-default` — where the ring lands in a region (or `data-nav-home`,
  *   the dock) when it comes in;
- * - `data-nav-tab` — the panel buttons the bumpers go round;
+ * - `data-nav-tab` — the panel buttons the bumpers go round (not while a
+ *   trap stands);
+ * - `data-nav-keys` — needs the keyboard (rename): left out while the console
+ *   stands without the focus, where typing would go to the game;
  * - `data-nav-skip` — never.
  *
  * Text fields are left out: a controller cannot type into them.
@@ -57,6 +60,7 @@ function usable(element: Element): element is HTMLElement {
   if (!(element instanceof HTMLElement)) return false;
   if ((element as HTMLButtonElement).disabled) return false;
   if (element.closest("[data-nav-skip]")) return false;
+  if (element.hasAttribute("data-nav-keys") && !document.hasFocus()) return false;
   return standing(element);
 }
 
@@ -248,6 +252,9 @@ export function useConsoleNav({
     };
 
     const tab = (by: 1 | -1) => {
+      // The question before deleting, the send list: answered or backed out
+      // of first.
+      if (trap()) return;
       const tabs = candidatesIn(document).filter((element) => element.hasAttribute("data-nav-tab"));
       const open = tabs.findIndex((element) => element.getAttribute("aria-pressed") === "true");
       const target = tabs[nextTab(tabs.length, open, by)];

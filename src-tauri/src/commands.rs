@@ -1626,8 +1626,10 @@ pub fn show_clip_in_app(app: tauri::AppHandle, id: String, at: f64) -> Result<()
 
     // The window first, the console second. The console still owns the
     // foreground at this point, and that is the only state in which Windows
-    // lets us hand it on — see `console::hide`.
-    crate::tray::show_main_window(&app);
+    // lets us hand it on — see `console::hide`. A console standing without
+    // the focus owns nothing: then the window stays behind the game and
+    // blinks in the task bar, rather than forcing its way up.
+    crate::tray::bring_main_window_over_game(&app);
     crate::console::hide(&app);
     // A screenshot has no position, and a video that never started reports 0 —
     // both mean "from the top", which is what a negative or unreal number has

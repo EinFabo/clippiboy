@@ -273,11 +273,29 @@ fn big_icon(window: &tauri::WebviewWindow, logo: &Image<'_>) {
 #[cfg(not(windows))]
 fn big_icon(_window: &tauri::WebviewWindow, _logo: &Image<'_>) {}
 
+/// The main window up and in front — from the tray, a second start, a link
+/// opened in the browser. tao's `set_focus` stays here: a browser or the task
+/// bar is in front then, not a game, and without its fallback the window
+/// would often stay behind the browser that opened the link.
 pub fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+/// The main window up, asked to the front without forcing it — from the
+/// console, with a game behind. tao's `set_focus` would fake an Alt press
+/// into the game when Windows refuses (`focus`); refused here, the window
+/// stays behind and its task bar button blinks.
+pub fn bring_main_window_over_game(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        if !crate::focus::request(&window, "main window") {
+            crate::focus::flash(&window);
+        }
     }
 }
 

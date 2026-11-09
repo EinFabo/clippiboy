@@ -5,13 +5,14 @@
 //! The button scheme is Xbox Game Bar's: D-pad or left stick move, the
 //! bottom face button activates, the right one backs out, the bumpers switch
 //! panels, Start closes. On a Nintendo pad the confirm and back buttons swap
-//! places, the way that pad's own menus have them — A sits on the right there.
+//! places, the way that pad's own menus have them — A sits on the right there
+//! ([`swap_confirm`], per pad).
 //!
 //! The game still gets every press: ClippiBoy reads the pads beside it and
 //! cannot take them away. `inputpoll` reads, the console page moves the ring
 //! (`src/console/useNav.ts`).
 
-use crate::bindings::{pad, PadFrame};
+use crate::bindings::{pad, PadFrame, CHORD_MS};
 
 /// A held direction repeats after this long …
 pub const FIRST_REPEAT_MS: u64 = 400;
@@ -51,48 +52,118 @@ pub struct Navigator {
     next_at: u64,
     /// The stick's own direction, kept between rounds for the hysteresis.
     stick: Option<Nav>,
+    /// Buttons held since before the console opened: they are no steps until
+    /// let go — a D-pad direction held through the opening would otherwise
+    /// walk the ring off and keep repeating.
+    ignore: u32,
+    /// The stick was pushed as the console opened: it counts again once it
+    /// has come back under [`STICK_OFF`].
+    stick_blocked: bool,
+    /// Steps of buttons that belong to the console's own binding, waiting
+    /// [`CHORD_MS`] for the rest of it (see [`Navigator::step`]).
+    waiting: Vec<(Nav, u64)>,
 }
 
 impl Navigator {
-    /// One round at `now` (ms). `nintendo`: confirm and back swap sides.
-    pub fn step(&mut self, frame: &PadFrame, now: u64, nintendo: bool) -> Vec<Nav> {
-        let mut out = Vec::new();
+    /// The console opened with `held` down and the stick at `stick`.
+    pub fn new(held: u32, (x, y): (i16, i16)) -> Navigator {
+        Navigator {
+            ignore: held,
+            stick_blocked: i32::from(x).abs().max(i32::from(y).abs()) >= STICK_ON,
+            ..Navigator::default()
+        }
+    }
 
-        self.stick = stick_dir(frame.stick, self.stick);
-        let dir = dpad_dir(frame, self.dir).or(self.stick);
+    /// One round at `now` (ms). `chord`: the buttons of the console's own
+    /// binding when that is a combo — Back+South, say. Pressing one of them
+    /// may be the start of closing the console, so its step waits
+    /// [`CHORD_MS`] (the time a combo's buttons get to come together), and
+    /// the binding firing meanwhile takes it back ([`Navigator::drop_waiting`]).
+    /// Otherwise South would click whatever the ring stands on as the
+    /// console closes.
+    ///
+    /// The frame is in confirm-at-the-bottom positions: a Nintendo pad's
+    /// mask goes through [`swap_confirm`] first.
+    pub fn step(&mut self, frame: &PadFrame, now: u64, chord: u32) -> Vec<Nav> {
+        let mut fresh = Vec::new();
+        self.ignore &= frame.held;
+        let held = frame.held & !self.ignore;
+        let pressed = frame.pressed & !self.ignore;
+
+        if self.stick_blocked {
+            let (x, y) = (i32::from(frame.stick.0), i32::from(frame.stick.1));
+            self.stick_blocked = x.abs().max(y.abs()) >= STICK_OFF;
+        }
+        self.stick = if self.stick_blocked {
+            None
+        } else {
+            stick_dir(frame.stick, self.stick)
+        };
+        let dpad = dpad_dir(held, pressed, self.dir);
+        let dir = dpad.map(|(nav, _)| nav).or(self.stick);
         if dir != self.dir {
             self.dir = dir;
             if let Some(dir) = dir {
-                out.push(dir);
+                let bit = dpad.map_or(0, |(_, bit)| bit);
+                fresh.push((dir, bit));
                 self.next_at = now + FIRST_REPEAT_MS;
             }
         } else if let Some(dir) = dir {
             if now >= self.next_at {
-                out.push(dir);
+                fresh.push((dir, 0));
                 // From now, not from when it was due: a round that came late
                 // must not fire twice in a row to catch up.
                 self.next_at = now + REPEAT_MS;
             }
         }
 
-        let (confirm, back) = if nintendo {
-            (pad::EAST, pad::SOUTH)
-        } else {
-            (pad::SOUTH, pad::EAST)
-        };
         for (bit, nav) in [
-            (confirm, Nav::Activate),
-            (back, Nav::Back),
+            (pad::SOUTH, Nav::Activate),
+            (pad::EAST, Nav::Back),
             (pad::LB, Nav::Prev),
             (pad::RB, Nav::Next),
             (pad::START, Nav::Close),
         ] {
-            if frame.pressed & bit != 0 {
+            if pressed & bit != 0 {
+                fresh.push((nav, bit));
+            }
+        }
+
+        // What waited long enough first — it was pressed earlier.
+        let mut out = Vec::new();
+        self.waiting.retain(|(nav, due)| {
+            if *due <= now {
+                out.push(*nav);
+                false
+            } else {
+                true
+            }
+        });
+        for (nav, bit) in fresh {
+            if bit & chord != 0 {
+                self.waiting.push((nav, now + CHORD_MS));
+            } else {
                 out.push(nav);
             }
         }
         out
     }
+
+    /// The console's binding fired: the steps of its buttons were part of it.
+    pub fn drop_waiting(&mut self) {
+        self.waiting.clear();
+    }
+}
+
+/// A Nintendo pad confirms with A, which sits on the right, and backs out
+/// with B at the bottom — the other way round from Xbox and PlayStation.
+/// Its mask, with those two swapped, reads like theirs.
+pub fn swap_confirm(mask: u32) -> u32 {
+    let both = pad::SOUTH | pad::EAST;
+    let rest = mask & !both;
+    let south = if mask & pad::SOUTH != 0 { pad::EAST } else { 0 };
+    let east = if mask & pad::EAST != 0 { pad::SOUTH } else { 0 };
+    rest | south | east
 }
 
 const DPAD: [(u32, Nav); 4] = [
@@ -102,22 +173,20 @@ const DPAD: [(u32, Nav); 4] = [
     (pad::RIGHT, Nav::Right),
 ];
 
-/// The D-pad's direction: the one already going while it is still held — a
-/// second one pressed beside it (a diagonal) does not take over — else one
-/// pressed just now, else any held.
-fn dpad_dir(frame: &PadFrame, going: Option<Nav>) -> Option<Nav> {
-    let held = |nav: Nav| {
-        DPAD.iter()
-            .find(|(_, n)| *n == nav)
-            .is_some_and(|(bit, _)| frame.held & bit != 0)
-    };
-    if let Some(going) = going.filter(|nav| held(*nav)) {
-        return Some(going);
+/// The D-pad's direction and its button: the one already going while it is
+/// still held — a second one pressed beside it (a diagonal) does not take
+/// over — else one pressed just now, else any held.
+fn dpad_dir(held: u32, pressed: u32, going: Option<Nav>) -> Option<(Nav, u32)> {
+    if let Some(entry) = DPAD
+        .iter()
+        .find(|(bit, nav)| Some(*nav) == going && held & bit != 0)
+    {
+        return Some((entry.1, entry.0));
     }
     DPAD.iter()
-        .find(|(bit, _)| frame.pressed & bit != 0)
-        .or_else(|| DPAD.iter().find(|(bit, _)| frame.held & bit != 0))
-        .map(|(_, nav)| *nav)
+        .find(|(bit, _)| pressed & bit != 0)
+        .or_else(|| DPAD.iter().find(|(bit, _)| held & bit != 0))
+        .map(|(bit, nav)| (*nav, *bit))
 }
 
 /// The stick's direction: the axis pushed further, once past [`STICK_ON`];
@@ -160,22 +229,30 @@ mod tests {
     struct Pads {
         nav: Navigator,
         held: u32,
+        chord: u32,
     }
 
     impl Pads {
         /// Starting with `held` already down — the console opened while
         /// buttons were held, which must not count as pressed.
         fn new(held: u32) -> Pads {
+            Pads::opened(held, (0, 0), 0)
+        }
+
+        /// … with the stick at `stick`, and `chord` the console binding's
+        /// buttons.
+        fn opened(held: u32, stick: (i16, i16), chord: u32) -> Pads {
             Pads {
-                nav: Navigator::default(),
+                nav: Navigator::new(held, stick),
                 held,
+                chord,
             }
         }
 
         fn round(&mut self, now: u64, held: u32, stick: (i16, i16)) -> Vec<Nav> {
             let frame = PadFrame::after(self.held, &[held], stick);
             self.held = frame.held;
-            self.nav.step(&frame, now, false)
+            self.nav.step(&frame, now, self.chord)
         }
     }
 
@@ -206,11 +283,55 @@ mod tests {
 
     #[test]
     fn a_nintendo_pad_confirms_on_the_right_and_backs_out_at_the_bottom() {
-        let mut nav = Navigator::default();
-        let frame = PadFrame::after(0, &[pad::EAST], (0, 0));
-        assert_eq!(nav.step(&frame, 0, true), vec![Nav::Activate]);
-        let frame = PadFrame::after(0, &[pad::SOUTH], (0, 0));
-        assert_eq!(nav.step(&frame, 10, true), vec![Nav::Back]);
+        assert_eq!(swap_confirm(pad::EAST), pad::SOUTH);
+        assert_eq!(swap_confirm(pad::SOUTH | pad::UP), pad::EAST | pad::UP);
+        assert_eq!(swap_confirm(pad::SOUTH | pad::EAST), pad::SOUTH | pad::EAST);
+        assert_eq!(swap_confirm(pad::LB), pad::LB);
+        let mut pads = Pads::new(0);
+        assert_eq!(pads.round(0, swap_confirm(pad::EAST), (0, 0)), vec![Nav::Activate]);
+        assert_eq!(pads.round(10, swap_confirm(pad::SOUTH), (0, 0)), vec![Nav::Back]);
+    }
+
+    #[test]
+    fn a_direction_held_through_the_opening_is_no_step_until_pressed_again() {
+        let mut pads = Pads::new(pad::DOWN);
+        assert!(pads.round(0, pad::DOWN, (0, 0)).is_empty());
+        assert!(pads.round(500, pad::DOWN, (0, 0)).is_empty());
+        assert!(pads.round(1000, pad::DOWN, (0, 0)).is_empty());
+        // Another direction beside it still goes.
+        assert_eq!(pads.round(1010, pad::DOWN | pad::LEFT, (0, 0)), vec![Nav::Left]);
+        assert!(pads.round(1020, 0, (0, 0)).is_empty());
+        assert_eq!(pads.round(1030, pad::DOWN, (0, 0)), vec![Nav::Down]);
+    }
+
+    #[test]
+    fn a_stick_pushed_through_the_opening_counts_once_it_came_back() {
+        let mut pads = Pads::opened(0, (30_000, 0), 0);
+        assert!(pads.round(0, 0, (30_000, 0)).is_empty());
+        assert!(pads.round(600, 0, (30_000, 0)).is_empty());
+        // Sagging, but not back yet.
+        assert!(pads.round(610, 0, (12_000, 0)).is_empty());
+        assert!(pads.round(620, 0, (30_000, 0)).is_empty());
+        assert!(pads.round(630, 0, (2_000, 0)).is_empty());
+        assert_eq!(pads.round(640, 0, (30_000, 0)), vec![Nav::Right]);
+    }
+
+    #[test]
+    fn a_button_of_the_consoles_combo_waits_and_goes_when_the_combo_fires() {
+        let mut pads = Pads::opened(0, (0, 0), pad::BACK | pad::SOUTH);
+        // South alone: a step, only later.
+        assert!(pads.round(0, pad::SOUTH, (0, 0)).is_empty());
+        assert!(pads.round(40, pad::SOUTH, (0, 0)).is_empty());
+        assert_eq!(pads.round(CHORD_MS, pad::SOUTH, (0, 0)), vec![Nav::Activate]);
+        // South, and Back right after: the console's binding fires, the
+        // step goes.
+        assert!(pads.round(100, 0, (0, 0)).is_empty());
+        assert!(pads.round(110, pad::SOUTH, (0, 0)).is_empty());
+        assert!(pads.round(120, pad::SOUTH | pad::BACK, (0, 0)).is_empty());
+        pads.nav.drop_waiting();
+        assert!(pads.round(300, pad::SOUTH | pad::BACK, (0, 0)).is_empty());
+        // East is not part of it: at once.
+        assert_eq!(pads.round(310, pad::EAST, (0, 0)), vec![Nav::Back]);
     }
 
     #[test]

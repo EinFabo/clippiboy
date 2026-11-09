@@ -819,6 +819,19 @@ impl<A: Copy> Table<A> {
         !self.pads.is_empty()
     }
 
+    /// The buttons of every controller combo (two buttons or more) bound,
+    /// tapped or held, to an action `of` names. One-button bindings are left
+    /// out: they fire on the press and need no waiting for.
+    pub fn pad_combo_buttons(&self, of: impl Fn(&A) -> bool) -> u32 {
+        self.pads
+            .iter()
+            .filter(|(mask, slot)| {
+                mask.count_ones() > 1
+                    && (slot.tap.as_ref().is_some_and(&of) || slot.hold.as_ref().is_some_and(&of))
+            })
+            .fold(0, |all, (mask, _)| all | mask)
+    }
+
     /// Is a key held whose hold still has to be timed? Only then does the
     /// poll thread have to tick for the keyboard.
     pub fn keys_held(&self) -> bool {
@@ -1459,6 +1472,20 @@ mod tests {
         assert!(table.poll(40, &pads(pad::SOUTH, 0)).is_empty());
         assert!(table.poll(50, &pads(0, 0)).is_empty());
         assert_eq!(table.poll(60, &pads(pad::SOUTH, 0)), vec![Act::Clip]);
+    }
+
+    #[test]
+    fn the_buttons_of_an_actions_combos() {
+        let mut table = Table::default();
+        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Shot);
+        table.bind_pad(pad::GUIDE, Mode::Tap, Act::Shot);
+        table.bind_pad(pad::LB | pad::RB, Mode::Hold, Act::Shot);
+        table.bind_pad(pad::START | pad::NORTH, Mode::Tap, Act::Clip);
+        assert_eq!(
+            table.pad_combo_buttons(|a| *a == Act::Shot),
+            pad::BACK | pad::SOUTH | pad::LB | pad::RB
+        );
+        assert_eq!(table.pad_combo_buttons(|_| false), 0);
     }
 
     #[test]

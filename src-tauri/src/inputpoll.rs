@@ -29,7 +29,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tauri::{AppHandle, Emitter};
 
 use crate::bindings::{Capture, Family, Input, PadFrame, Source, Table, MAX_PADS};
-use crate::consolenav::Navigator;
+use crate::consolenav::{swap_confirm, Navigator};
 use crate::sdl::{Gamepad, Sdl};
 
 /// What a hotkey does.
@@ -59,8 +59,10 @@ const PAD_RETRY_MS: u64 = 30_000;
 /// the list is no longer needed.
 const WATCH_MS: u64 = 6_000;
 /// The console is steered with a controller while it is open, so the pads
-/// are read then even without a controller binding — SDL starts with the
-/// console and goes down [`PAD_IDLE_MS`] after it closed.
+/// are read then even without a controller binding — but only where one may
+/// be: with a controller binding, SDL up anyway, or a pad seen this session.
+/// A keyboard-only player opening the console does not start SDL (and have
+/// it write to pads, see `sdl`) for nothing.
 const CONSOLE_NAV_READS_PADS: bool = true;
 /// How often the foreground game is checked for running elevated.
 const ELEVATION_MS: u64 = 2_000;
@@ -237,7 +239,15 @@ pub fn key(app: &AppHandle, id: u32, pressed: bool) {
     // A hold has to be timed from here on.
     nudge();
     if let Some(action) = fired {
-        crate::run_hotkey(app, action);
+        // Only the press itself comes as `WM_HOTKEY`, which lets ClippiBoy
+        // take the foreground; a release reported by the shortcut plugin
+        // does not.
+        let opener = if pressed {
+            crate::console::Opener::Hotkey
+        } else {
+            crate::console::Opener::Polled
+        };
+        crate::run_hotkey(app, action, opener);
     }
 }
 
@@ -248,6 +258,8 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     // The console's navigation since it opened, and what all pads held in
     // the last round.
     let mut nav: Option<(Navigator, u32)> = None;
+    // The buttons of the console binding's combos, as of the last round.
+    let mut console_chord = 0u32;
     loop {
         let now = now_ms();
         let capturing = CAPTURING.load(Ordering::SeqCst);
@@ -268,16 +280,23 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
         let console = crate::console::CONSOLE_SHOWN.load(Ordering::SeqCst);
         // Bound controllers want reading only where they can be read; the
         // settings (recording, the list) want to hear why not, too.
-        let want_pads = (controllers && pads.possible(now))
-            || capturing
-            || watching
-            || (console && CONSOLE_NAV_READS_PADS && pads.possible(now));
+        let console_pads = console
+            && CONSOLE_NAV_READS_PADS
+            && (controllers || pads.up || pads.seen)
+            && pads.possible(now);
+        let want_pads = (controllers && pads.possible(now)) || capturing || watching || console_pads;
+        // A console standing without the focus watches where the foreground
+        // goes, pads read or not.
+        let passive = console && crate::console::is_passive();
         // A key bound to be held needs no reading until it is pressed — but
         // the look at the foreground game, every couple of seconds.
         let watch = (mouse || key_holds) && !capturing;
         if !(mouse || want_pads || keys || capturing) {
             if watch {
                 elevation.check(app, now);
+            }
+            if passive {
+                crate::console::watch_passive(app, now);
             }
             // Nothing to read: wait for a change instead of spinning — or
             // until SDL is due to be shut down.
@@ -288,6 +307,9 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             };
             if let Some(left) = pads.idle(app, now) {
                 wait = wait.min(Duration::from_millis(left));
+            }
+            if passive {
+                wait = wait.min(Duration::from_millis(crate::console::PASSIVE_WATCH_MS));
             }
             nav = None;
             if let Err(RecvTimeoutError::Disconnected) = inbox.recv_timeout(wait) {
@@ -349,32 +371,54 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
                     fired.extend(table.poll_holding_back(now, &input, |action| {
                         console && *action != Action::Console
                     }));
+                    console_chord = table.pad_combo_buttons(|action| *action == Action::Console);
                     fired
                 })
                 .unwrap_or_default();
             for (action, source) in fired {
                 console_fired |= action == Action::Console;
-                crate::run_hotkey_from(app, action, source == Source::Pad);
+                let opener = if source == Source::Pad {
+                    crate::console::Opener::Pad
+                } else {
+                    crate::console::Opener::Polled
+                };
+                crate::run_hotkey(app, action, opener);
             }
         }
         if console && want_pads {
+            // A Nintendo pad confirms on the right: its masks read like the
+            // others' once A and B are swapped — and so do the console
+            // binding's buttons on it.
+            let mut masks = read.masks;
+            let mut chord = console_chord;
+            for (mask, nintendo) in masks.iter_mut().zip(read.nintendo) {
+                if nintendo {
+                    *mask = swap_confirm(*mask);
+                    chord |= swap_confirm(console_chord);
+                }
+            }
             let (navigator, held) = nav.get_or_insert_with(|| {
                 // What is held as the console opens — the binding that opened
-                // it, say — was pressed before it: it counts after a let-go.
-                let held = read.masks.iter().fold(0, |all, mask| all | mask);
-                (Navigator::default(), held)
+                // it, a direction, the stick — was pressed before it: it
+                // counts after a let-go.
+                let held = masks.iter().fold(0, |all, mask| all | mask);
+                (Navigator::new(held, read.stick), held)
             });
-            let frame = PadFrame::after(*held, &read.masks, read.stick);
+            let frame = PadFrame::after(*held, &masks, read.stick);
             *held = frame.held;
-            let steps = navigator.step(&frame, now, family() == Family::Nintendo);
+            let steps = navigator.step(&frame, now, chord);
             // The round the console's binding fired, its buttons are not
             // steps: the console is on its way out (or just came).
-            if !console_fired {
+            if console_fired {
+                navigator.drop_waiting();
+            } else {
                 console_nav(app, &steps);
             }
-            crate::console::watch_passive(app, now);
         } else {
             nav = None;
+        }
+        if passive {
+            crate::console::watch_passive(app, now);
         }
         if watch {
             elevation.check(app, now);
@@ -458,6 +502,9 @@ impl Elevation {
 struct PadRead {
     /// One mask per slot, 0 for an empty one.
     masks: [u32; MAX_PADS],
+    /// Which slots hold a Nintendo pad — confirm and back sit the other way
+    /// round there.
+    nintendo: [bool; MAX_PADS],
     /// The left stick pushed furthest, read only while the console is open.
     stick: (i16, i16),
 }
@@ -482,6 +529,8 @@ struct Pads {
     last_used: u64,
     /// SDL failed to start; not again before this.
     retry_at: u64,
+    /// A controller was connected at some point this session.
+    seen: bool,
 }
 
 impl Pads {
@@ -546,6 +595,7 @@ impl Pads {
         let mut furthest = 0i32;
         for open in &self.open {
             read.masks[open.slot] = sdl.buttons(&open.pad);
+            read.nintendo[open.slot] = open.family == Family::Nintendo;
             if console {
                 let (x, y) = sdl.left_stick(&open.pad);
                 let reach = i32::from(x).abs().max(i32::from(y).abs());
@@ -596,6 +646,7 @@ impl Pads {
             });
         }
         self.open.sort_by_key(|open| open.slot);
+        self.seen |= !self.open.is_empty();
         sdl.flush();
         FAMILY.store(
             match self.open.first().map(|open| open.family) {

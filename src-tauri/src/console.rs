@@ -64,7 +64,23 @@ static PASSIVE: AtomicBool = AtomicBool::new(false);
 static PASSIVE_NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// How often a console without the focus checks where the foreground went.
-const PASSIVE_WATCH_MS: u64 = 250;
+pub const PASSIVE_WATCH_MS: u64 = 250;
+
+/// What opened the console — which decides whether it asks for the focus,
+/// and whether Windows is likely to say yes (`focus`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opener {
+    /// The press of a keyboard hotkey (`WM_HOTKEY`), the tray: Windows lets
+    /// ClippiBoy take the foreground.
+    Hotkey,
+    /// A mouse button or a key read by the poll thread (a hold, a release):
+    /// the game got that input, so Windows will mostly refuse. Asked anyway —
+    /// the mouse needs the focus to reach the console.
+    Polled,
+    /// A controller binding: asked only with "Take focus when opened with a
+    /// controller" on.
+    Pad,
+}
 
 /// How long the page gets to play its way out before the hotkey closes the
 /// window anyway — `CLOSE_MS` in Console.tsx plus room for a slow frame.
@@ -130,13 +146,12 @@ pub fn is_open(app: &tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-/// The console's hotkey. `by_pad`: a controller binding fired it — see
-/// [`open`].
-pub fn toggle(app: &tauri::AppHandle, by_pad: bool) {
+/// The console's hotkey — see [`open`] for `opener`.
+pub fn toggle(app: &tauri::AppHandle, opener: Opener) {
     if is_open(app) {
         request_close(app);
     } else {
-        open(app, by_pad);
+        open(app, opener);
     }
 }
 
@@ -164,6 +179,11 @@ fn dropped(window: &tauri::WebviewWindow) {
 /// the poll thread while the console is open (it reads the controllers
 /// then): once the foreground is neither the window the console opened over
 /// nor the console itself, it goes, as a focused one would.
+/// Does the console stand without the focus right now?
+pub fn is_passive() -> bool {
+    PASSIVE.load(Ordering::SeqCst)
+}
+
 pub fn watch_passive(app: &tauri::AppHandle, now: u64) {
     if !PASSIVE.load(Ordering::SeqCst) || now < PASSIVE_NEXT.load(Ordering::Relaxed) {
         return;
@@ -227,16 +247,17 @@ pub fn request_close(app: &tauri::AppHandle) {
 
 /// Bring the console up on the screen being played on.
 ///
-/// It takes the focus — the keyboard (Escape, a clip's name) and the mouse
-/// need it, and a game that ignores its input in the background then leaves
-/// the console's controller steps alone too. Opened with a controller
-/// (`by_pad`), Windows does not let ClippiBoy take it as a matter of course:
-/// a press read off a pad is not input to this process. Then it is asked for
-/// only with "Take focus when opened with a controller" on, plainly — no
-/// faked key press, no borrowed input queue — and when Windows says no, the
-/// console stands without it. Never over exclusive fullscreen: that case
-/// does not open at all, see below.
-pub fn open(app: &tauri::AppHandle, by_pad: bool) {
+/// It asks for the focus — the keyboard (Escape, a clip's name) and the
+/// mouse need it, and a game that ignores its input in the background then
+/// leaves the console's controller steps alone too. Asked plainly, once
+/// (`focus::request`): never tao's `set_focus`, whose fallback fakes an Alt
+/// press. Windows says yes to a keyboard hotkey's press ([`Opener::Hotkey`]),
+/// mostly no to a mouse button or a controller the game got as well; then
+/// the console stands without the focus ([`PASSIVE`]). Opened with a
+/// controller it asks only with "Take focus when opened with a controller"
+/// on. Never over exclusive fullscreen: that case does not open at all, see
+/// below.
+pub fn open(app: &tauri::AppHandle, opener: Opener) {
     let config = app.state::<AppState>().config_snapshot();
     if !config.console_enabled {
         return;
@@ -273,20 +294,14 @@ pub fn open(app: &tauri::AppHandle, by_pad: bool) {
     let _ = window.show();
     CONSOLE_SHOWN.store(true, Ordering::SeqCst);
     let _ = window.set_always_on_top(true);
-    if !by_pad {
-        let _ = window.set_focus();
-    } else {
-        let took = config.console_take_focus && take_focus(&window);
-        if config.console_take_focus && !took {
-            log::info!("console: Windows refused the focus after a controller opened it");
-        }
-        // `show` may have been handed the focus anyway; `Focused(true)` may
-        // not have come through yet.
-        let own = own_handle(&window);
-        if !took && foreground() != own {
-            PASSIVE.store(true, Ordering::SeqCst);
-            PASSIVE_NEXT.store(0, Ordering::Relaxed);
-        }
+    let ask = opener != Opener::Pad || config.console_take_focus;
+    let took = ask && crate::focus::request(&window, "console");
+    // `show` may have been handed the focus anyway; `Focused(true)` may not
+    // have come through yet.
+    if !took && foreground() != own_handle(&window) {
+        log::info!("console: standing without the focus (opened by {opener:?})");
+        PASSIVE.store(true, Ordering::SeqCst);
+        PASSIVE_NEXT.store(0, Ordering::Relaxed);
     }
     crate::inputpoll::console_changed();
     // Once more now that it is up: a hidden window is not always on the monitor
@@ -508,21 +523,6 @@ fn foreground() -> isize {
     unsafe { GetForegroundWindow() }.0 as isize
 }
 
-/// Ask for the foreground once, the documented way. Windows grants it only to
-/// a process it counts as the user's latest — which one reading a controller
-/// is not, unless the user has not touched mouse or keyboard for a while.
-/// When it says no, that is the answer: none of the tricks that force it
-/// (a faked Alt press, attaching to the game's input queue).
-#[cfg(windows)]
-fn take_focus(window: &tauri::WebviewWindow) -> bool {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-    let Ok(handle) = window.hwnd() else {
-        return false;
-    };
-    unsafe { SetForegroundWindow(HWND(handle.0)) }.as_bool()
-}
-
 /// Take the remembered window out, leaving nothing behind for a second caller.
 fn take_foreground() -> isize {
     PREVIOUS.swap(0, Ordering::SeqCst)
@@ -570,10 +570,6 @@ fn foreground() -> isize {
     0
 }
 
-#[cfg(not(windows))]
-fn take_focus(_window: &tauri::WebviewWindow) -> bool {
-    false
-}
 
 #[cfg(not(windows))]
 fn restore_foreground(raw: isize) {

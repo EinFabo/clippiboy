@@ -12,6 +12,7 @@ pub mod composite;
 pub mod config;
 pub mod console;
 pub mod consolenav;
+pub mod focus;
 pub mod control;
 pub mod convert;
 pub mod disk;
@@ -1197,17 +1198,11 @@ pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut
     Shortcut::from_str(text).map_err(|_| format!("\"{text}\" is not a valid key combination."))
 }
 
-/// Do what a hotkey is bound to — a keyboard combination or a mouse button;
-/// a controller goes through [`run_hotkey_from`].
-pub fn run_hotkey(app: &tauri::AppHandle, action: inputpoll::Action) {
-    run_hotkey_from(app, action, false);
-}
-
-/// [`run_hotkey`], knowing whether a controller fired it: Windows does not
-/// count a press read off a pad as input to ClippiBoy, so the console opened
-/// that way takes the focus only when the settings ask for it
-/// (`console::open`).
-pub fn run_hotkey_from(app: &tauri::AppHandle, action: inputpoll::Action, by_pad: bool) {
+/// Do what a hotkey is bound to — a keyboard combination, a mouse button or
+/// a controller binding. `opener` says what fired it, which matters to the
+/// console alone: whether Windows will let it take the focus, and whether
+/// it should ask (`console::open`).
+pub fn run_hotkey(app: &tauri::AppHandle, action: inputpoll::Action, opener: console::Opener) {
     use inputpoll::Action;
 
     match action {
@@ -1230,7 +1225,7 @@ pub fn run_hotkey_from(app: &tauri::AppHandle, action: inputpoll::Action, by_pad
             // Showing a window belongs on the main thread; the hotkey
             // arrives on one of its own.
             let handle = app.clone();
-            let _ = app.run_on_main_thread(move || console::toggle(&handle, by_pad));
+            let _ = app.run_on_main_thread(move || console::toggle(&handle, opener));
         }
         Action::Record => {
             let app = app.clone();

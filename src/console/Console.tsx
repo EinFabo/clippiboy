@@ -867,7 +867,7 @@ export function Console() {
                           className={cn("h-4 w-4", clip.favorite && "text-live")}
                         />
                       </Tool>
-                      <Tool label="Rename" onClick={() => setRenaming(clip.id)}>
+                      <Tool label="Rename" keys onClick={() => setRenaming(clip.id)}>
                         <IconPencil className="h-4 w-4" />
                       </Tool>
                       <Tool
@@ -1517,6 +1517,7 @@ function ClipStage({
               <button
                 onClick={() => onRenaming(true)}
                 title="Rename"
+                data-nav-keys
                 className="group/name flex min-w-0 max-w-full items-center gap-1.5 text-left"
               >
                 <span className="truncate text-[15px] font-semibold">{clipName(clip)}</span>
@@ -1619,16 +1620,20 @@ function Tool({
   onClick,
   danger,
   busy,
+  keys,
 }: {
   children: React.ReactNode;
   label: string;
   onClick: () => void;
   danger?: boolean;
   busy?: boolean;
+  /** Leads to typing — the controller's ring skips it without the focus. */
+  keys?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      data-nav-keys={keys || undefined}
       title={label}
       aria-label={label}
       disabled={busy}
