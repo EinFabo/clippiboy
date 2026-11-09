@@ -8,6 +8,9 @@ import {
   keyLabel,
   padButton,
   padLabel,
+  placeBinding,
+  switchMode,
+  triggerKey,
   triggerOf,
   withHold,
 } from "./hotkeyText.ts";
@@ -71,4 +74,66 @@ test("tap and hold switch without touching what is pressed", () => {
   assert.equal(withHold("Hold:Mouse5", false), "Mouse5");
   assert.equal(withHold("Hold:Ctrl+S", true), "Hold:Ctrl+S");
   assert.equal(withHold("", true), "");
+});
+
+test("one input in two spellings is the same input", () => {
+  assert.equal(triggerKey("ctrl+s"), triggerKey("Hold:Ctrl+S"));
+  assert.equal(triggerKey("Control+KeyS"), triggerKey("Ctrl+S"));
+  assert.equal(triggerKey("Pad:View+A"), triggerKey("Hold:Pad:Back+South"));
+  assert.equal(triggerKey("Shift+Ctrl+Mouse5"), triggerKey("Ctrl+Shift+Mouse5"));
+  assert.notEqual(triggerKey("Ctrl+Mouse5"), triggerKey("Mouse5"));
+  assert.notEqual(triggerKey("Pad:South"), triggerKey("Pad:Back+South"));
+  assert.equal(triggerKey(""), "");
+});
+
+const bound = (changes: Record<string, string>) => ({
+  saveClip: "",
+  screenshot: "",
+  record: "",
+  screenshotAlt: "",
+  ...changes,
+});
+
+test("a second action on the same input takes the free way", () => {
+  // Mouse5 tapped saves a clip: recorded for the screenshot, it becomes held.
+  assert.deepEqual(placeBinding(bound({ saveClip: "Mouse5" }), "screenshot", "Mouse5"), {
+    screenshot: "Hold:Mouse5",
+  });
+  // And the other way round, in another spelling, in the second slot.
+  assert.deepEqual(
+    placeBinding(bound({ saveClip: "Hold:Pad:View+A" }), "screenshotAlt", "Pad:Back+South"),
+    { screenshotAlt: "Pad:Back+South" },
+  );
+  assert.deepEqual(
+    placeBinding(bound({ saveClip: "Pad:Back+South" }), "screenshotAlt", "Pad:View+A"),
+    { screenshotAlt: "Hold:Pad:View+A" },
+  );
+  // A free input, or the same binding recorded again on its own field: as it is.
+  assert.deepEqual(placeBinding(bound({ saveClip: "Mouse4" }), "screenshot", "Mouse5"), {
+    screenshot: "Mouse5",
+  });
+  assert.deepEqual(placeBinding(bound({ saveClip: "Mouse5" }), "saveClip", "Mouse5"), {
+    saveClip: "Mouse5",
+  });
+});
+
+test("a third action on an input with both ways taken stays a clash", () => {
+  const both = bound({ saveClip: "Mouse5", screenshot: "Hold:Mouse5" });
+  assert.deepEqual(placeBinding(both, "record", "Mouse5"), { record: "Mouse5" });
+  assert.deepEqual(placeBinding(both, "record", "Hold:Mouse5"), { record: "Hold:Mouse5" });
+});
+
+test("switching tap and hold swaps with the action sharing the input", () => {
+  const pair = bound({ saveClip: "Mouse5", screenshot: "Hold:Mouse5" });
+  assert.deepEqual(switchMode(pair, "saveClip", true), {
+    saveClip: "Hold:Mouse5",
+    screenshot: "Mouse5",
+  });
+  assert.deepEqual(switchMode(pair, "screenshot", false), {
+    screenshot: "Mouse5",
+    saveClip: "Hold:Mouse5",
+  });
+  // Alone on its input: only itself; already that way: nothing.
+  assert.deepEqual(switchMode(bound({ record: "F9" }), "record", true), { record: "Hold:F9" });
+  assert.deepEqual(switchMode(pair, "saveClip", false), {});
 });

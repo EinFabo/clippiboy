@@ -72,6 +72,65 @@ export function isPad(value: string): boolean {
   return PAD.test(triggerOf(value));
 }
 
+/** What is pressed, in one spelling, so that two bindings on the same input
+    compare equal however they were written: `ctrl+s` and `Ctrl+S`,
+    `Pad:View+A` and `Pad:Back+South`, `Shift+Ctrl+Mouse5` and
+    `Ctrl+Shift+Mouse5`. Tap or hold plays no part. */
+export function triggerKey(value: string): string {
+  const trigger = triggerOf(value);
+  if (!trigger) return "";
+  if (isPad(value)) {
+    const buttons = new Set(trigger.replace(PAD, "").split("+").map(padButton));
+    return `pad:${[...buttons].sort().join("+").toLowerCase()}`;
+  }
+  const parts = trigger.split("+").map((part) => part.trim().toLowerCase());
+  const key = (parts.pop() ?? "").replace(/^key(?=[a-z]$)/, "").replace(/^digit(?=[0-9]$)/, "");
+  const mods = new Set(parts.map((mod) => (mod === "control" ? "ctrl" : mod)));
+  return [...[...mods].sort(), key].join("+");
+}
+
+/** The changes that put the recorded binding `next` on `field`. One input may
+    carry two actions, one tapped and one held: when another binding already
+    sits on the same input in the same way and the other way is still free,
+    `next` takes the other way. Both ways taken, it stays as it is — and the
+    core reports the clash. */
+export function placeBinding<F extends string>(
+  bindings: Record<F, string>,
+  field: F,
+  next: string,
+): Partial<Record<F, string>> {
+  const key = triggerKey(next);
+  if (!key) return { [field]: next } as Partial<Record<F, string>>;
+  const taken = new Set(
+    (Object.keys(bindings) as F[])
+      .filter((other) => other !== field && triggerKey(bindings[other]) === key)
+      .map((other) => isHold(bindings[other])),
+  );
+  const hold = isHold(next);
+  const placed = taken.has(hold) && !taken.has(!hold) ? withHold(next, !hold) : next;
+  return { [field]: placed } as Partial<Record<F, string>>;
+}
+
+/** The changes that switch `field` to tapped or held. Shares it its input with
+    another action that is already that way, the two swap: the other one takes
+    the way `field` leaves. */
+export function switchMode<F extends string>(
+  bindings: Record<F, string>,
+  field: F,
+  hold: boolean,
+): Partial<Record<F, string>> {
+  const value = bindings[field];
+  if (!triggerOf(value) || isHold(value) === hold) return {};
+  const key = triggerKey(value);
+  const partner = (Object.keys(bindings) as F[]).find(
+    (other) =>
+      other !== field && triggerKey(bindings[other]) === key && isHold(bindings[other]) === hold,
+  );
+  const changes = { [field]: withHold(value, hold) } as Partial<Record<F, string>>;
+  if (partner) changes[partner] = withHold(bindings[partner], !hold);
+  return changes;
+}
+
 /** Whose names a controller's buttons carry. */
 export type PadFamily = "xbox" | "playstation" | "nintendo" | "gamecube";
 

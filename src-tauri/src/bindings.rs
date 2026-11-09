@@ -309,6 +309,16 @@ impl Family {
     }
 }
 
+/// Whose names buttons are shown with when several pads are connected: the
+/// pad a button was pressed on last (by SDL's id), or — before any was, or
+/// when that one is gone — the first; Xbox's with none.
+pub fn family_in_use(pads: &[(u32, Family)], pressed_last: Option<u32>) -> Family {
+    pressed_last
+        .and_then(|last| pads.iter().find(|(id, _)| *id == last))
+        .or(pads.first())
+        .map_or(Family::Xbox, |(_, family)| *family)
+}
+
 /// The Windows virtual-key code of a key, by the name the shortcut parser
 /// gives it (`KeyS`, `Digit4`, `F9`, `Numpad1`, `PrintScreen` …) — the same
 /// table the `global-hotkey` crate registers with. `None` for a key that is
@@ -1190,6 +1200,17 @@ mod tests {
     }
 
     #[test]
+    fn buttons_are_named_after_the_pad_pressed_last() {
+        let pads = [(7, Family::Xbox), (9, Family::Nintendo)];
+        assert_eq!(family_in_use(&pads, None), Family::Xbox);
+        assert_eq!(family_in_use(&pads, Some(9)), Family::Nintendo);
+        assert_eq!(family_in_use(&pads, Some(7)), Family::Xbox);
+        // The pad pressed last is gone: the first one again.
+        assert_eq!(family_in_use(&pads[1..], Some(7)), Family::Nintendo);
+        assert_eq!(family_in_use(&[], Some(7)), Family::Xbox);
+    }
+
+    #[test]
     fn bits_follow_sdls_button_order() {
         // SDL_GAMEPAD_BUTTON_SOUTH = 0, GUIDE = 5, DPAD_RIGHT = 14,
         // MISC1 = 15, TOUCHPAD = 20.
@@ -1217,6 +1238,14 @@ mod tests {
     fn a_clash_is_the_same_thing_pressed_the_same_way() {
         let one = |text: &str, id: Option<u32>| (parse(text).unwrap(), id);
         assert!(!clashes(&[one("Mouse5", None), one("Hold:Mouse5", None)]));
+        // Two actions on one pad button, tapped and held, in either spelling;
+        // a third on it is a clash.
+        assert!(!clashes(&[one("Hold:Pad:View+A", None), one("Pad:Back+South", None)]));
+        assert!(clashes(&[
+            one("Mouse5", None),
+            one("Hold:Mouse5", None),
+            one("mouse5", None)
+        ]));
         assert!(clashes(&[
             one("Mouse5", None),
             one("F9", Some(1)),

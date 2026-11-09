@@ -790,6 +790,8 @@ export interface Controllers {
   /** Why controllers cannot be read at all (SDL3.dll missing …), else null. */
   unavailable: string | null;
   pads: Controller[];
+  /** Whose names buttons are shown with: the pad pressed last, else the first. */
+  family: Controller["family"];
 }
 
 /** Every binding at once, as `set_hotkeys` takes them. */

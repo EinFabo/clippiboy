@@ -108,6 +108,9 @@ pub struct Controllers {
     /// to start) — `None` when they can.
     pub unavailable: Option<String>,
     pub pads: Vec<Controller>,
+    /// Whose names buttons are shown with: those of the pad pressed last, or
+    /// of the first one before any was pressed.
+    pub family: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -124,6 +127,7 @@ impl Controllers {
         ready: false,
         unavailable: None,
         pads: Vec::new(),
+        family: "xbox",
     };
 }
 
@@ -198,8 +202,8 @@ fn controllers() -> std::sync::MutexGuard<'static, Controllers> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Whose names the controller's buttons carry — the first one connected, or
-/// Xbox's when none is.
+/// Whose names the controller's buttons carry — the pad pressed last, else the
+/// first one connected, or Xbox's when none is.
 pub fn family() -> Family {
     match FAMILY.load(Ordering::Relaxed) {
         1 => Family::PlayStation,
@@ -516,6 +520,9 @@ struct Open {
     slot: usize,
     name: String,
     family: Family,
+    /// What it held in the last round — a button newly down makes it the pad
+    /// in use.
+    held: u32,
 }
 
 /// SDL and the controllers it has open. Lives on the poll thread.
@@ -531,6 +538,8 @@ struct Pads {
     retry_at: u64,
     /// A controller was connected at some point this session.
     seen: bool,
+    /// SDL's id of the pad a button was last pressed on.
+    pressed_last: Option<u32>,
 }
 
 impl Pads {
@@ -593,8 +602,14 @@ impl Pads {
             self.scan(app, sdl);
         }
         let mut furthest = 0i32;
-        for open in &self.open {
-            read.masks[open.slot] = sdl.buttons(&open.pad);
+        let mut pressed = None;
+        for open in &mut self.open {
+            let held = sdl.buttons(&open.pad);
+            if held & !open.held != 0 {
+                pressed = Some(open.id);
+            }
+            open.held = held;
+            read.masks[open.slot] = held;
             read.nintendo[open.slot] = open.family == Family::Nintendo;
             if console {
                 let (x, y) = sdl.left_stick(&open.pad);
@@ -605,7 +620,27 @@ impl Pads {
                 }
             }
         }
+        if pressed.is_some() && pressed != self.pressed_last {
+            self.pressed_last = pressed;
+            self.show_family(app);
+        }
         read
+    }
+
+    /// Name the buttons after the pad in use, here and in the settings.
+    fn show_family(&self, app: &AppHandle) {
+        let pads: Vec<(u32, Family)> = self.open.iter().map(|o| (o.id, o.family)).collect();
+        let family = crate::bindings::family_in_use(&pads, self.pressed_last);
+        FAMILY.store(
+            match family {
+                Family::Xbox => 0,
+                Family::PlayStation => 1,
+                Family::Nintendo => 2,
+                Family::GameCube => 3,
+            },
+            Ordering::Relaxed,
+        );
+        publish(app, |list| list.family = family.key());
     }
 
     /// Open the pads that came, close the ones that went, and tell the
@@ -643,20 +678,13 @@ impl Pads {
                 slot,
                 name,
                 family,
+                held: 0,
             });
         }
         self.open.sort_by_key(|open| open.slot);
         self.seen |= !self.open.is_empty();
         sdl.flush();
-        FAMILY.store(
-            match self.open.first().map(|open| open.family) {
-                Some(Family::PlayStation) => 1,
-                Some(Family::Nintendo) => 2,
-                Some(Family::GameCube) => 3,
-                _ => 0,
-            },
-            Ordering::Relaxed,
-        );
+        self.show_family(app);
         let pads: Vec<Controller> = self
             .open
             .iter()

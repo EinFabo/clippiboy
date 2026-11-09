@@ -6,11 +6,13 @@ import { IconClose } from "@/components/icons";
 import { Segmented } from "@/components/ui/Controls";
 import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
-import type { Controllers, HotkeyField } from "@/lib/types";
+import type { AppConfig, Controllers, HotkeyField } from "@/lib/types";
 import {
   hotkeyKeys,
   isHold,
   isPad,
+  placeBinding,
+  switchMode,
   triggerOf,
   withHold,
   type PadFamily,
@@ -148,7 +150,7 @@ const GUIDE_NOTE =
     asks while the window is hidden (in the tray, minimised). */
 function useControllers(): Controllers | null {
   const [controllers, setControllers] = useState<Controllers | null>(
-    inTauri ? null : { ready: true, unavailable: null, pads: [] },
+    inTauri ? null : { ready: true, unavailable: null, pads: [], family: "xbox" },
   );
   useEffect(() => {
     if (!inTauri) return;
@@ -195,8 +197,8 @@ export function Hotkeys() {
   const [recording, setRecording] = useState<HotkeyField | null>(null);
   const warn = ROWS.some(({ first, second }) => risky(config[first]) || risky(config[second]));
   const controllers = useControllers();
-  // Buttons named as on the pad plugged in — the first one, if several.
-  const family: PadFamily = controllers?.pads[0]?.family ?? "xbox";
+  // Buttons named as on the pad in use — the one pressed last, if several.
+  const family: PadFamily = controllers?.family ?? "xbox";
 
   // The once-notes: shown when a save from this page turns their flag on.
   const [notes, setNotes] = useState<string[]>([]);
@@ -212,12 +214,23 @@ export function Hotkeys() {
     if (said.length) setNotes(said);
   }, [config.padButtonHintShown, config.guideHintShown]);
 
-  const apply = async (field: HotkeyField, value: string) => {
+  // Every binding by field, for working out what a change does to the others.
+  const bindings = Object.fromEntries(
+    ROWS.flatMap(({ first, second }) => [
+      [first, config[first]],
+      [second, config[second]],
+    ]),
+  ) as Record<HotkeyField, string>;
+
+  // One call for all it changes: a swap of tap and hold between two actions
+  // reaches the core whole, never half done and a clash.
+  const apply = async (changes: Partial<Pick<AppConfig, HotkeyField>>) => {
+    if (Object.keys(changes).length === 0) return;
     applied.current = true;
     setSaving(true);
     setError(null);
     try {
-      await setHotkeys({ [field]: value });
+      await setHotkeys(changes);
     } catch (err) {
       setError(String(err));
       // The core puts the hotkeys back itself after a rejected set; this is
@@ -236,7 +249,8 @@ export function Hotkeys() {
       busy={saving}
       recording={recording === field}
       onRecording={(on) => setRecording((now) => (on ? field : now === field ? null : now))}
-      onChange={(value) => apply(field, value)}
+      onChange={(value) => apply(value ? placeBinding(bindings, field, value) : { [field]: "" })}
+      onMode={(hold) => apply(switchMode(bindings, field, hold))}
     />
   );
 
@@ -308,6 +322,7 @@ function HotkeyInput({
   recording,
   onRecording,
   onChange,
+  onMode,
 }: {
   value: string;
   /** Whose names controller buttons are shown with. */
@@ -317,7 +332,10 @@ function HotkeyInput({
   busy?: boolean;
   recording: boolean;
   onRecording: (on: boolean) => void;
+  /** A new binding, or "" to unbind. */
   onChange: (value: string) => void;
+  /** Tapped or held. */
+  onMode: (hold: boolean) => void;
 }) {
   const onRecordingRef = useRef(onRecording);
   onRecordingRef.current = onRecording;
@@ -413,7 +431,7 @@ function HotkeyInput({
             { key: "hold", label: "Hold" },
           ]}
           onChange={(mode) => {
-            if ((mode === "hold") !== hold) onChange(withHold(value, mode === "hold"));
+            if ((mode === "hold") !== hold) onMode(mode === "hold");
           }}
           disabled={busy}
           className="mr-1"
