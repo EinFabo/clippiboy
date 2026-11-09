@@ -8,6 +8,7 @@
 import { HttpError, json } from "./util";
 import { addressKey, readLimited } from "./limits";
 import { renderGone, renderPage } from "./page";
+import { inviteKey } from "./invite";
 import {
   byteRange,
   canUpload,
@@ -390,7 +391,10 @@ export async function sharePage(env: Env, id: string): Promise<Response> {
     game: row.game,
     tags,
     uploader: uploader ? { name: uploader.display_name, avatar: uploader.avatar } : null,
-    addFriend: uploader?.allow_requests === 1 ? `${PAGE_ORIGIN}/c/${id}/add` : null,
+    addFriend:
+      uploader?.allow_requests === 1 && inviteKey(env.INVITE_SECRET, env.DISCORD_CLIENT_SECRET)
+        ? `${PAGE_ORIGIN}/c/${id}/add`
+        : null,
     expires: expiresIn(row.expires_at, now),
     width: row.width,
     height: row.height,

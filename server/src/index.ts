@@ -102,7 +102,11 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   // Invites: someone's own link, and "Add <name> as friend" there and on a share page.
   const invite = path.match(/^\/i\/([A-Za-z0-9-]{8,9})(\/add)?$/);
-  if (invite && (method === "GET" || method === "HEAD")) return invitePage(request, env, invite[1], !!invite[2]);
+  if (invite && (method === "GET" || method === "HEAD")) {
+    // Each one looks a friend code up: counted per address, like sign-in.
+    if (!(await underLimit(request, env, "invite"))) return page("Slow down", "Wait a minute, then open the link again.");
+    return invitePage(request, env, invite[1], !!invite[2]);
+  }
   const shareAdd = path.match(/^\/c\/([a-z0-9]+)\/add$/);
   if (shareAdd && (method === "GET" || method === "HEAD")) return shareInvite(request, env, shareAdd[1]);
 
@@ -187,7 +191,7 @@ async function route(request: Request, env: Env): Promise<Response> {
  * its own, so a flood of pings cannot lock the same address out of signing in.
  * An IPv6 address counts as its /64.
  */
-async function underLimit(request: Request, env: Env, route: "auth" | "ping" | "exchange"): Promise<boolean> {
+async function underLimit(request: Request, env: Env, route: "auth" | "ping" | "exchange" | "invite"): Promise<boolean> {
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   return (await env.ANON_LIMIT.limit({ key: `${route}:${addressKey(address)}` })).success;
 }
@@ -303,8 +307,10 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
 
 /**
  * The friend request an invite cookie asks for (invite.ts): sent at sign-in,
- * from the one signing in to whoever invited them, by the same rule as the Add
- * field — blocks, "don't take requests", an existing pair all hold. Counted
+ * from the one signing in to whoever invited them — only for an account made
+ * after the click, and never to a suspended inviter (`inviteTarget`) — by the
+ * same rule as the Add field: blocks, "don't take requests", an existing pair
+ * all hold. Counted
  * against the user's limit like any other request. A forged, expired or
  * refused invite is dropped without a word; it never fails the sign-in.
  */
@@ -315,13 +321,19 @@ async function inviteAtSignIn(
 ): Promise<{ present: boolean; outcome: RequestOutcome["kind"] | null; name: string }> {
   const token = cookieValue(request.headers.get("Cookie"), INVITE_COOKIE);
   const none = { present: token !== null, outcome: null, name: "" };
-  if (!token) return none;
+  const secret = inviteSecret(env);
+  if (!token || !secret) return none;
   try {
-    const inviter = inviteTarget(await verifyInvite(inviteSecret(env), token, Date.now()), me);
-    if (!inviter) return none;
+    const invite = await verifyInvite(secret, token, Date.now());
+    if (!invite) return none;
+    const [self, target] = await Promise.all([userById(env.DB, me), userById(env.DB, invite.inviter)]);
+    const to = inviteTarget(
+      invite,
+      { id: me, createdAt: self?.created_at ?? 0 },
+      target ? { banned: target.banned_at != null } : null,
+    );
+    if (!to || !target) return none;
     if (!(await env.USER_LIMIT.limit({ key: me })).success) return none;
-    const target = await userById(env.DB, inviter);
-    if (!target) return none;
     const outcome = await requestTo(env, me, target, true);
     return { present: true, outcome: outcome.kind, name: target.display_name };
   } catch (err) {

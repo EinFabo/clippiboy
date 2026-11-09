@@ -21,6 +21,9 @@ interface UserRow {
   avatar: string | null;
   friend_code: string;
   allow_requests: number;
+  /** Set on rows read whole (`SELECT *`). */
+  created_at?: number;
+  banned_at?: number | null;
 }
 
 export function toUser(row: UserRow): User {

@@ -15,6 +15,18 @@ export const INVITE_TTL_MS = 14 * DAY_MS;
 export const COOKIE_DOMAIN = ".clippiboy.com";
 /** Domain separation: the key may be shared with another purpose (see `inviteKey`). */
 const LABEL = "clippiboy-invite:v1:";
+/** An account counts as made after the click if it is no older than this before it (clock steps). */
+export const ISSUE_SLACK_MS = 60 * 1000;
+
+/**
+ * The key invites are signed with: `INVITE_SECRET` when it is set, else the
+ * Discord client secret, which every deploy has — the label keeps the two uses
+ * apart. Null when neither is there: then there are no invites at all, rather
+ * than tokens signed with an empty key that anyone could make.
+ */
+export function inviteKey(inviteSecret: string | undefined, discordSecret: string | undefined): string | null {
+  return inviteSecret || discordSecret || null;
+}
 
 function base64url(data: Uint8Array): string {
   let text = "";
@@ -53,8 +65,14 @@ export async function signInvite(secret: string, userId: string, now: number): P
   return `${body}.${base64url(new Uint8Array(mac))}`;
 }
 
-/** The inviting user's id, or null for anything forged, mangled or expired. */
-export async function verifyInvite(secret: string, token: string, now: number): Promise<string | null> {
+export interface Invite {
+  inviter: string;
+  /** When the click was, ms since the epoch: the expiry less the lifetime. */
+  issuedAt: number;
+}
+
+/** Who invited and when, or null for anything forged, mangled or expired. */
+export async function verifyInvite(secret: string, token: string, now: number): Promise<Invite | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [userId, expires, mac] = parts;
@@ -69,7 +87,17 @@ export async function verifyInvite(secret: string, token: string, now: number): 
     new TextEncoder().encode(`${LABEL}${userId}.${expires}`),
   );
   if (!valid) return null;
-  return parseInt(expires, 36) * 1000 > now ? userId : null;
+  const expiresAt = parseInt(expires, 36) * 1000;
+  return expiresAt > now ? { inviter: userId, issuedAt: expiresAt - INVITE_TTL_MS } : null;
+}
+
+/**
+ * Does someone's invite link work? Not for someone who takes no requests or
+ * is suspended — their link looks like one nobody has, without a name — and
+ * not at all without a key.
+ */
+export function inviteOpen(user: { allowRequests: boolean; banned: boolean } | null, haveKey: boolean): boolean {
+  return haveKey && user !== null && user.allowRequests && !user.banned;
 }
 
 /** A cookie's value from a Cookie header, or null. */
@@ -94,9 +122,13 @@ export function clearInviteCookie(): string {
  * sign-in is worth something to whoever is named in it: another site that
  * navigates a visitor to `/i/<code>/add` must not plant one. Browsers say where
  * a navigation came from in `Sec-Fetch-Site`; older ones only in `Referer`.
- * Neither — refused; the visitor lands on the page and can click there.
+ * Neither — refused; the visitor lands on the page and can click there. And
+ * only on clippiboy.com itself (the site proxy hands the request over with its
+ * URL unchanged): a same-origin click on api.clippiboy.com or workers.dev is
+ * no click on our page.
  */
-export function ownClick(secFetchSite: string | null, referer: string | null, origin: string): boolean {
+export function ownClick(requestUrl: string, secFetchSite: string | null, referer: string | null, origin: string): boolean {
+  if (new URL(requestUrl).origin !== origin) return false;
   if (secFetchSite !== null) return secFetchSite === "same-origin";
   if (!referer) return false;
   try {
@@ -107,10 +139,20 @@ export function ownClick(secFetchSite: string | null, referer: string | null, or
 }
 
 /**
- * The request the callback makes: only for a valid invite, never to oneself.
- * What happens then (already friends, blocked, no requests taken) is the
- * ordinary request rule's business.
+ * Whom the sign-in asks: only for a valid invite, only from an account made
+ * after the click — the invite is for someone new to ClippiBoy; signing in
+ * again within the fortnight must not ask again after a decline, and another
+ * account in the same browser must not ask in their place (those who have the
+ * app use "Open ClippiBoy" instead) — and never oneself. A suspended inviter is
+ * asked by nobody. What happens then (already friends, blocked, no requests
+ * taken) is the ordinary request rule's business.
  */
-export function inviteTarget(inviter: string | null, me: string): string | null {
-  return inviter && inviter !== me ? inviter : null;
+export function inviteTarget(
+  invite: Invite | null,
+  me: { id: string; createdAt: number },
+  inviter: { banned: boolean } | null,
+): string | null {
+  if (!invite || !inviter || inviter.banned) return null;
+  if (invite.inviter === me.id) return null;
+  return me.createdAt >= invite.issuedAt - ISSUE_SLACK_MS ? invite.inviter : null;
 }

@@ -5,19 +5,14 @@
 // site proxy forwards all of these paths here.
 
 import { userByCode } from "./db";
-import { inviteCookie, ownClick, signInvite } from "./invite";
+import { inviteCookie, inviteKey, inviteOpen, ownClick, signInvite } from "./invite";
 import { PAGE_ORIGIN, shareUploader } from "./links";
 import { renderInvite, type InviteData } from "./page";
 import { normalizeCode } from "./util";
 
-/**
- * The key invites are signed with. `INVITE_SECRET` when it is set; until then
- * the Discord client secret, which every deploy has — the label in invite.ts
- * keeps the two uses apart. Setting the secret later only voids the invites
- * still waiting.
- */
-export function inviteSecret(env: Env): string {
-  return env.INVITE_SECRET || env.DISCORD_CLIENT_SECRET;
+/** The key invites are signed with, or null — then there are no invites (invite.ts). */
+export function inviteSecret(env: Env): string | null {
+  return inviteKey(env.INVITE_SECRET, env.DISCORD_CLIENT_SECRET);
 }
 
 interface Inviter {
@@ -43,44 +38,54 @@ function back(to: string): Response {
   return new Response(null, { status: 303, headers: { Location: to, "Cache-Control": "no-store" } });
 }
 
-/** Clicked on our own page: the cookie, and what to do next. */
-async function added(request: Request, env: Env, inviter: Inviter, from: string): Promise<Response> {
-  if (inviter.allow_requests !== 1 || !ownClick(request.headers.get("Sec-Fetch-Site"), request.headers.get("Referer"), PAGE_ORIGIN)) {
+const INVALID: Omit<InviteData, "site"> = { state: "invalid", inviter: null, add: null, open: null };
+
+/**
+ * Clicked on our own page: the cookie, and what to do next. From a share page
+ * the next page names the uploader (the share page did already) but offers no
+ * "Open ClippiBoy": its link would carry the friend code, which never changes,
+ * to anyone who opens a public share link.
+ */
+async function added(request: Request, env: Env, inviter: Inviter, from: string, fromShare: boolean): Promise<Response> {
+  const secret = inviteSecret(env);
+  if (
+    !secret ||
+    inviter.allow_requests !== 1 ||
+    !ownClick(request.url, request.headers.get("Sec-Fetch-Site"), request.headers.get("Referer"), PAGE_ORIGIN)
+  ) {
     return back(from);
   }
-  const token = await signInvite(inviteSecret(env), inviter.id, Date.now());
+  const token = await signInvite(secret, inviter.id, Date.now());
   return html(
     {
-      inviter: { name: inviter.display_name, avatar: inviter.avatar },
+      state: "added",
+      inviter: fromShare ? { name: inviter.display_name, avatar: inviter.avatar } : null,
       add: null,
-      added: true,
-      open: `clippiboy://add?code=${inviter.friend_code}`,
+      open: fromShare ? null : `clippiboy://add?code=${inviter.friend_code}`,
     },
     200,
     inviteCookie(token),
   );
 }
 
-/** clippiboy.com/i/<code>, and /i/<code>/add behind its button. */
+/**
+ * clippiboy.com/i/<code>, and /i/<code>/add behind its button. Someone who
+ * takes no requests, or is suspended, has no invite link: the same page as
+ * for a code nobody has.
+ */
 export async function invitePage(request: Request, env: Env, rawCode: string, add: boolean): Promise<Response> {
   const code = normalizeCode(rawCode);
   const row = code ? await userByCode(env.DB, code) : null;
-  // A suspended account invites nobody.
-  const banned = row ? (row as { banned_at?: number | null }).banned_at != null : false;
-  if (!row || banned) return html({ inviter: null, add: null, added: false, open: null }, 404);
+  const user = row ? { allowRequests: row.allow_requests === 1, banned: row.banned_at != null } : null;
+  if (!row || !inviteOpen(user, inviteSecret(env) !== null)) return html(INVALID, 404);
   const self = `${PAGE_ORIGIN}/i/${row.friend_code}`;
-  if (add) return added(request, env, row, self);
-  return html({
-    inviter: { name: row.display_name, avatar: row.avatar },
-    add: row.allow_requests === 1 ? `${self}/add` : null,
-    added: false,
-    open: null,
-  });
+  if (add) return added(request, env, row, self, false);
+  return html({ state: "invite", inviter: null, add: `${self}/add`, open: null });
 }
 
 /** clippiboy.com/c/<id>/add — the share page's button; back to the clip if it no longer applies. */
 export async function shareInvite(request: Request, env: Env, id: string): Promise<Response> {
   const uploader = await shareUploader(env, id);
   const page = `${PAGE_ORIGIN}/c/${id}`;
-  return uploader ? added(request, env, uploader, page) : back(page);
+  return uploader ? added(request, env, uploader, page, true) : back(page);
 }
