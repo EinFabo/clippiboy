@@ -159,6 +159,8 @@ body,
   --con-btn-hover: rgb(255 255 255 / 0.14);
   --con-btn-open: rgb(255 255 255 / 0.18);
   --con-mark: var(--color-accent-bright);
+  /* The ring a controller walks over the console (`useNav.ts`). */
+  --con-nav-ring: var(--color-accent-bright);
 
   --con-tile-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
 
@@ -633,6 +635,24 @@ body,
   transition-duration: 70ms;
 }
 
+/* --- The controller's ring --------------------------------------------- */
+
+/* Where a controller stands (`useNav.ts`). A line around the control, clear
+   of it, in the dock's violet — not a hover look: the mouse may be resting on
+   a different button at the same time, and the two must not be mistaken for
+   each other. The dock's buttons light up as under the mouse as well, since
+   their surface is what says "this one" there. Follows each control's own
+   rounding. */
+[data-nav-focus] {
+  outline: 2px solid var(--con-nav-ring);
+  outline-offset: 3px;
+  transition: outline-offset 120ms var(--ease-out-soft);
+}
+
+.cb-dock-btn[data-nav-focus]:not(:disabled) {
+  background: var(--con-btn-hover);
+}
+
 /* --- Clip tiles ---------------------------------------------------------- */
 
 /* The picture pushes forward under the mouse and the play mark fades up over
@@ -770,7 +790,8 @@ body,
   .cb-tool,
   .cb-btn,
   .cb-tile,
-  .cb-tile img {
+  .cb-tile img,
+  [data-nav-focus] {
     transition-duration: 1ms;
   }
   .cb-dock-btn:hover:not(:disabled),

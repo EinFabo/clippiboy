@@ -24,7 +24,7 @@
 //! of fullscreen. So that case is recognised before anything is shown and only
 //! says so.
 
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
@@ -51,6 +51,20 @@ static OPENINGS: AtomicU64 = AtomicU64::new(0);
 /// hidden console is never throttled, and a page that kept asking would keep
 /// the camera's frames flowing for nobody.
 pub static CONSOLE_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The console stands over the game without the focus — opened with a
+/// controller, which Windows does not count as input to ClippiBoy, and the
+/// setting "take focus" off (or Windows refusing it). The game keeps the
+/// keyboard, and nothing tells the window when the user goes elsewhere: the
+/// poll thread watches the foreground instead (`watch_passive`), and closing
+/// hands nothing back. A click into the console makes it an ordinary one.
+static PASSIVE: AtomicBool = AtomicBool::new(false);
+
+/// When [`watch_passive`] looks next, on the poll thread's clock.
+static PASSIVE_NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// How often a console without the focus checks where the foreground went.
+const PASSIVE_WATCH_MS: u64 = 250;
 
 /// How long the page gets to play its way out before the hotkey closes the
 /// window anyway — `CLOSE_MS` in Console.tsx plus room for a slow frame.
@@ -96,20 +110,13 @@ pub fn create(app: &tauri::AppHandle) {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
                     CONSOLE_SHOWN.store(false, Ordering::SeqCst);
                 }
+                if matches!(event, tauri::WindowEvent::Focused(true)) {
+                    // Clicked into, or Windows gave it the focus after all:
+                    // from here it is a console like any other.
+                    PASSIVE.store(false, Ordering::SeqCst);
+                }
                 if matches!(event, tauri::WindowEvent::Focused(false)) {
-                    CONSOLE_SHOWN.store(false, Ordering::SeqCst);
-                    crate::inputpoll::console_changed();
-                    let _ = handle.hide();
-                    // Whoever was in front before is no longer where the user
-                    // is going — they just chose somewhere else themselves.
-                    // Leaving the handle standing let a `close_console` still
-                    // on its way out hand the foreground back to the game, out
-                    // of the window that had just been tabbed to.
-                    PREVIOUS.store(0, Ordering::SeqCst);
-                    // The page back to its first screen: whoever comes back
-                    // wants the console as it opens, not the panel they left
-                    // standing an hour ago.
-                    let _ = handle.emit("console-closed", ());
+                    dropped(&handle);
                 }
             });
         }
@@ -123,12 +130,64 @@ pub fn is_open(app: &tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-pub fn toggle(app: &tauri::AppHandle) {
+/// The console's hotkey. `by_pad`: a controller binding fired it — see
+/// [`open`].
+pub fn toggle(app: &tauri::AppHandle, by_pad: bool) {
     if is_open(app) {
         request_close(app);
     } else {
-        open(app);
+        open(app, by_pad);
     }
+}
+
+/// Gone because the user went elsewhere — the console lost the focus, or one
+/// standing without it saw the foreground move (`watch_passive`). It only
+/// hides: the focus already went somewhere the user chose, so there is
+/// nothing to hand back.
+fn dropped(window: &tauri::WebviewWindow) {
+    CONSOLE_SHOWN.store(false, Ordering::SeqCst);
+    PASSIVE.store(false, Ordering::SeqCst);
+    crate::inputpoll::console_changed();
+    let _ = window.hide();
+    // Whoever was in front before is no longer where the user is going —
+    // they just chose somewhere else themselves. Leaving the handle standing
+    // let a `close_console` still on its way out hand the foreground back to
+    // the game, out of the window that had just been tabbed to.
+    PREVIOUS.store(0, Ordering::SeqCst);
+    // The page back to its first screen: whoever comes back wants the
+    // console as it opens, not the panel they left standing an hour ago.
+    let _ = window.emit("console-closed", ());
+}
+
+/// A console standing without the focus has no `Focused(false)` to tell it
+/// the user went elsewhere — Alt+Tab, a click on another window. Called from
+/// the poll thread while the console is open (it reads the controllers
+/// then): once the foreground is neither the window the console opened over
+/// nor the console itself, it goes, as a focused one would.
+pub fn watch_passive(app: &tauri::AppHandle, now: u64) {
+    if !PASSIVE.load(Ordering::SeqCst) || now < PASSIVE_NEXT.load(Ordering::Relaxed) {
+        return;
+    }
+    PASSIVE_NEXT.store(now + PASSIVE_WATCH_MS, Ordering::Relaxed);
+    let previous = PREVIOUS.load(Ordering::SeqCst);
+    if previous == 0 {
+        return;
+    }
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    let own = own_handle(&window);
+    let front = foreground();
+    if front == 0 || front == previous || front == own {
+        return;
+    }
+    log::info!("console: the foreground moved on while it stood without the focus; hiding it");
+    let handle = window.clone();
+    let _ = app.run_on_main_thread(move || {
+        if PASSIVE.load(Ordering::SeqCst) && CONSOLE_SHOWN.load(Ordering::SeqCst) {
+            dropped(&handle);
+        }
+    });
 }
 
 /// The hotkey's way out: through the page, like Escape and the click beside the
@@ -167,8 +226,19 @@ pub fn request_close(app: &tauri::AppHandle) {
 }
 
 /// Bring the console up on the screen being played on.
-pub fn open(app: &tauri::AppHandle) {
-    if !app.state::<AppState>().config_snapshot().console_enabled {
+///
+/// It takes the focus — the keyboard (Escape, a clip's name) and the mouse
+/// need it, and a game that ignores its input in the background then leaves
+/// the console's controller steps alone too. Opened with a controller
+/// (`by_pad`), Windows does not let ClippiBoy take it as a matter of course:
+/// a press read off a pad is not input to this process. Then it is asked for
+/// only with "Take focus when opened with a controller" on, plainly — no
+/// faked key press, no borrowed input queue — and when Windows says no, the
+/// console stands without it. Never over exclusive fullscreen: that case
+/// does not open at all, see below.
+pub fn open(app: &tauri::AppHandle, by_pad: bool) {
+    let config = app.state::<AppState>().config_snapshot();
+    if !config.console_enabled {
         return;
     }
     if exclusive_fullscreen() {
@@ -199,11 +269,26 @@ pub fn open(app: &tauri::AppHandle) {
     // window standing in front of the game.
     protect(app, &window);
     let mut layout = place(&window).unwrap_or_default();
+    PASSIVE.store(false, Ordering::SeqCst);
     let _ = window.show();
     CONSOLE_SHOWN.store(true, Ordering::SeqCst);
-    crate::inputpoll::console_changed();
     let _ = window.set_always_on_top(true);
-    let _ = window.set_focus();
+    if !by_pad {
+        let _ = window.set_focus();
+    } else {
+        let took = config.console_take_focus && take_focus(&window);
+        if config.console_take_focus && !took {
+            log::info!("console: Windows refused the focus after a controller opened it");
+        }
+        // `show` may have been handed the focus anyway; `Focused(true)` may
+        // not have come through yet.
+        let own = own_handle(&window);
+        if !took && foreground() != own {
+            PASSIVE.store(true, Ordering::SeqCst);
+            PASSIVE_NEXT.store(0, Ordering::Relaxed);
+        }
+    }
+    crate::inputpoll::console_changed();
     // Once more now that it is up: a hidden window is not always on the monitor
     // it will land on, and its size is then worked out against the wrong one's
     // scaling.
@@ -233,10 +318,16 @@ pub fn close(app: &tauri::AppHandle) {
     // and the game would go deaf, which is the one thing this function exists to
     // prevent. Taking it first makes the order stop mattering.
     let previous = take_foreground();
+    // Without the focus the console never took it from anyone: the game still
+    // has it, or whatever the user went to since. Pushing the remembered
+    // window forward could only pull it from there.
+    let passive = PASSIVE.swap(false, Ordering::SeqCst);
     CONSOLE_SHOWN.store(false, Ordering::SeqCst);
     crate::inputpoll::console_changed();
     let _ = window.hide();
-    restore_foreground(previous);
+    if !passive {
+        restore_foreground(previous);
+    }
 }
 
 /// Hide it without handing the focus anywhere.
@@ -248,6 +339,7 @@ pub fn close(app: &tauri::AppHandle) {
 /// window would blink in the task bar and stay where it was.
 pub fn hide(app: &tauri::AppHandle) {
     CONSOLE_SHOWN.store(false, Ordering::SeqCst);
+    PASSIVE.store(false, Ordering::SeqCst);
     crate::inputpoll::console_changed();
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.hide();
@@ -404,6 +496,33 @@ fn remember_foreground() {
     PREVIOUS.store(hwnd.0 as isize, Ordering::SeqCst);
 }
 
+/// The console window's own handle, raw; 0 when unknown.
+#[cfg(windows)]
+fn own_handle(window: &tauri::WebviewWindow) -> isize {
+    window.hwnd().map(|h| h.0 as isize).unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn foreground() -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow() }.0 as isize
+}
+
+/// Ask for the foreground once, the documented way. Windows grants it only to
+/// a process it counts as the user's latest — which one reading a controller
+/// is not, unless the user has not touched mouse or keyboard for a while.
+/// When it says no, that is the answer: none of the tricks that force it
+/// (a faked Alt press, attaching to the game's input queue).
+#[cfg(windows)]
+fn take_focus(window: &tauri::WebviewWindow) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    let Ok(handle) = window.hwnd() else {
+        return false;
+    };
+    unsafe { SetForegroundWindow(HWND(handle.0)) }.as_bool()
+}
+
 /// Take the remembered window out, leaving nothing behind for a second caller.
 fn take_foreground() -> isize {
     PREVIOUS.swap(0, Ordering::SeqCst)
@@ -440,6 +559,21 @@ pub fn exclusive_fullscreen() -> bool {
 
 #[cfg(not(windows))]
 fn remember_foreground() {}
+
+#[cfg(not(windows))]
+fn own_handle(_window: &tauri::WebviewWindow) -> isize {
+    0
+}
+
+#[cfg(not(windows))]
+fn foreground() -> isize {
+    0
+}
+
+#[cfg(not(windows))]
+fn take_focus(_window: &tauri::WebviewWindow) -> bool {
+    false
+}
 
 #[cfg(not(windows))]
 fn restore_foreground(raw: isize) {

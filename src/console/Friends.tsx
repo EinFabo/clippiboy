@@ -165,7 +165,7 @@ export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: C
   const streamer = useStreamer((s) => s.active);
   const reachable = lists.friends.filter((f) => canReceive(presence[f.id]));
   return (
-    <div className="absolute inset-0 z-10 flex flex-col rounded-inner bg-black/85 p-2 backdrop-blur-md">
+    <div data-nav-region data-nav-trap className="absolute inset-0 z-10 flex flex-col rounded-inner bg-black/85 p-2 backdrop-blur-md">
       <div className="flex items-center justify-between px-1 pb-1">
         <span className="text-xs font-semibold text-ink-muted">Send to</span>
         <button
@@ -184,9 +184,10 @@ export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: C
         ) : reachable.length === 0 ? (
           <p className="px-1 text-xs text-ink-muted">No friend is online right now.</p>
         ) : (
-          reachable.map((friend) => (
+          reachable.map((friend, index) => (
             <button
               key={friend.id}
+              data-nav-default={index === 0 || undefined}
               onClick={() => onSend(clip, friend)}
               className="flex w-full items-center gap-2 rounded-[10px] px-1.5 py-1 text-left transition-colors hover:bg-white/10"
             >

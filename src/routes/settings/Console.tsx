@@ -145,6 +145,13 @@ export function ConsoleTab() {
             onChange={(consoleInCapture) => patchConfig({ consoleInCapture })}
           />
         </Row>
+        <Row label="Take focus when opened with a controller">
+          <Toggle
+            checked={config.consoleTakeFocus}
+            disabled={!config.consoleEnabled}
+            onChange={(consoleTakeFocus) => patchConfig({ consoleTakeFocus })}
+          />
+        </Row>
       </Card>
     </section>
   );

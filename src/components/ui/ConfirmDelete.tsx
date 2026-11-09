@@ -53,6 +53,10 @@ export function ConfirmDelete({
     <div
       style={{ transformOrigin: `${origin} center` }}
       onClick={(event) => event.stopPropagation()}
+      // For the console's controller steering: the ring goes in, onto Keep —
+      // the same caution as with Enter, see above.
+      data-nav-region
+      data-nav-trap
       className={cn(
         "cb-chip-expand flex h-8 shrink-0 items-center gap-1 rounded-pill border",
         "border-live/40 bg-live/20 pl-3 text-[13px] font-medium text-live backdrop-blur-md",
@@ -72,6 +76,7 @@ export function ConfirmDelete({
         aria-label={cancelLabel}
         title={cancelTitle}
         onClick={onCancel}
+        data-nav-default
         className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-pill text-white/70
           hover:bg-white/15 hover:text-white"
       >

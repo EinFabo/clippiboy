@@ -44,6 +44,7 @@ import { shownName, useStreamer } from "@/lib/streamer";
 import { postLabel, useWebhook, webhookApi } from "@/lib/webhook";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
+import { useConsoleNav } from "./useNav";
 
 /** How many clips the strip shows. Beyond that the window in the app is the
  *  better place — this is meant to be read at a glance mid-game. */
@@ -542,18 +543,27 @@ export function Console() {
   }, [panel]);
 
   // Escape backs out one step at a time, and closes the console at the end.
+  // The controller's back button goes the same way (`useNav`).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
       if (confirming) setConfirming(null);
       else if (renaming) setRenaming(null);
+      else if (sendFor) setSendFor(null);
       else if (playing || panel) back();
       else close();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [playing, confirming, renaming, panel, close, back]);
+  }, [playing, confirming, renaming, sendFor, panel, close, back]);
+
+  // Steered with a controller while open — a ring over what can be pressed.
+  useConsoleNav({
+    live: () => !closingRef.current && !hidden.current,
+    close,
+    opened,
+  });
 
   const run = async (what: string, job: () => Promise<unknown>) => {
     setBusy(what);
@@ -708,6 +718,7 @@ export function Console() {
                 <button
                   onClick={() => void show("clips", clip.id)}
                   className="cb-tile group relative block aspect-video w-full overflow-hidden rounded-inner bg-gradient-to-br from-accent-deep/40 to-black"
+                  data-nav-default={clip === clips[0] || undefined}
                   aria-label={`${clip.screenshot ? "Open" : "Play"}: ${clipName(clip)}`}
                 >
                   {clip.thumbPath && (
@@ -720,7 +731,7 @@ export function Console() {
                   {/* What the tile does, said only while the mouse is on it —
                       standing there permanently it would be six marks over
                       six pictures. */}
-                  <span className="absolute inset-0 grid place-items-center bg-black/35 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                  <span className="absolute inset-0 grid place-items-center bg-black/35 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-data-[nav-focus]:opacity-100">
                     <span className="grid h-10 w-10 place-items-center rounded-pill bg-white/15 backdrop-blur-sm">
                       {clip.screenshot ? (
                         <IconSearch className="h-5 w-5" />
@@ -1113,6 +1124,7 @@ export function Console() {
           <TroubleStrip list={trouble} />
           <div
             data-leaving={closing}
+            data-nav-home
             className="cb-dock cb-glass flex items-stretch gap-1.5 rounded-[22px] p-2.5"
           >
             <div className="cb-status flex min-w-[200px] flex-col justify-center gap-1.5 px-3">
@@ -1181,6 +1193,7 @@ export function Console() {
 
             <DockButton
               label="Clips"
+              tab
               active={panel === "clips"}
               onClick={() => (panel === "clips" ? back() : void show("clips"))}
             >
@@ -1188,6 +1201,7 @@ export function Console() {
             </DockButton>
             <DockButton
               label="Audio"
+              tab
               active={panel === "audio"}
               onClick={() => (panel === "audio" ? back() : void show("audio"))}
             >
@@ -1195,6 +1209,7 @@ export function Console() {
             </DockButton>
             <DockButton
               label="Performance"
+              tab
               active={panel === "perf"}
               onClick={() => (panel === "perf" ? back() : void show("perf"))}
             >
@@ -1203,6 +1218,7 @@ export function Console() {
             {friendsSignedIn && (
               <DockButton
                 label="Friends"
+                tab
                 active={panel === "friends"}
                 onClick={() => (panel === "friends" ? back() : void show("friends"))}
               >
@@ -1262,6 +1278,7 @@ function Sheet({
       <section
         className="cb-sheet cb-glass cb-cap overflow-y-auto rounded-card p-5"
         data-leaving={leaving}
+        data-nav-region
       >
         <header className="mb-3 flex items-baseline justify-between gap-4">
           <h2 className="text-[13px] font-bold uppercase tracking-[0.1em] text-ink-muted">
@@ -1409,6 +1426,7 @@ function ClipStage({
       // wurde die Karte in einem Kasten zentriert, dessen untere Kante viel zu
       // hoch lag, und stand entsprechend zu weit oben.
       className="cb-stage absolute inset-x-0 top-0 bottom-[calc(var(--inset,0px)+8rem)] grid place-items-center p-6"
+      data-nav-region
     >
       {/* Die Karte nimmt die ganze Höhe und teilt sie auf: das Bild bekommt,
           was Leiste und Namenszeile übrig lassen. Kein `vh` mehr — `.cb-ui`
@@ -1522,6 +1540,8 @@ function ClipStage({
           <div className="flex items-center gap-2">
             <button
               onClick={onCopy}
+              // A picture has no play button to land on.
+              data-nav-default={clip.screenshot || undefined}
               className="cb-btn inline-flex items-center gap-2 rounded-pill border border-line bg-elevated px-4 py-2 text-[13px] font-semibold hover:border-line-strong hover:bg-hover"
             >
               <IconCopy className="h-4 w-4" />
@@ -1553,6 +1573,7 @@ function DockButton({
   hint,
   onClick,
   active,
+  tab,
   disabled,
   busy,
 }: {
@@ -1561,12 +1582,15 @@ function DockButton({
   hint?: string;
   onClick: () => void;
   active?: boolean;
+  /** Opens a panel — one of those the controller's bumpers go round. */
+  tab?: boolean;
   disabled?: boolean;
   busy?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      data-nav-tab={tab || undefined}
       disabled={disabled || busy}
       title={hint ?? label}
       aria-pressed={active}

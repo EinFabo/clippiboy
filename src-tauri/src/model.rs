@@ -701,6 +701,12 @@ pub struct AppConfig {
     /// Die Gestalt des Docks — siehe [`ConsoleStyle`].
     #[serde(default)]
     pub console_style: ConsoleStyle,
+    /// Opened with a controller binding, the console asks Windows for the
+    /// focus too, so a game that ignores its controller in the background
+    /// leaves the console's steps alone. Off, it stands over the game without
+    /// it. Opened from the keyboard it always takes the focus (`console::open`).
+    #[serde(default)]
+    pub console_take_focus: bool,
     pub auto_start_with_windows: bool,
     pub only_buffer_in_game: bool,
     // Newly added fields need `default` — otherwise `config::load()` throws away

@@ -69,6 +69,7 @@ pub fn default_config() -> AppConfig {
         console_in_capture: false,
         console_glow: true,
         console_style: crate::model::ConsoleStyle::default(),
+        console_take_focus: false,
         auto_start_with_windows: false,
         only_buffer_in_game: true,
         overlay: OverlayConfig::default(),

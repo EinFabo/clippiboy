@@ -225,6 +225,9 @@ export interface AppConfig {
       `dock` ist die beschriftete Leiste unten, `pill` das runde Dock ohne
       Beschriftung, `radial` die Aktionen im Kreis mit dem Panel rechts. */
   consoleStyle: ConsoleStyle;
+  /** Opened with a controller, the console asks for the focus too (opened
+      from the keyboard it always takes it). */
+  consoleTakeFocus: boolean;
   autoStartWithWindows: boolean;
   onlyBufferInGame: boolean;
   overlay: OverlayConfig;

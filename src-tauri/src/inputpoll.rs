@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tauri::{AppHandle, Emitter};
 
-use crate::bindings::{Capture, Family, Input, PadFrame, Table, MAX_PADS};
+use crate::bindings::{Capture, Family, Input, PadFrame, Source, Table, MAX_PADS};
+use crate::consolenav::Navigator;
 use crate::sdl::{Gamepad, Sdl};
 
 /// What a hotkey does.
@@ -54,10 +55,10 @@ const PAD_RETRY_MS: u64 = 30_000;
 /// A settings page showing the controllers asks again within this; after it,
 /// the list is no longer needed.
 const WATCH_MS: u64 = 6_000;
-/// The console's navigation (phase 7b) wants controller frames while the
-/// console is open, even without a controller binding. Not built yet: until
-/// it is, frames reach [`console_nav`] only while the pads are read anyway.
-const CONSOLE_NAV_READS_PADS: bool = false;
+/// The console is steered with a controller while it is open, so the pads
+/// are read then even without a controller binding — SDL starts with the
+/// console and goes down [`PAD_IDLE_MS`] after it closed.
+const CONSOLE_NAV_READS_PADS: bool = true;
 /// How often the foreground game is checked for running elevated.
 const ELEVATION_MS: u64 = 2_000;
 /// Recording a binding ends by itself after this long — a page that went
@@ -239,7 +240,9 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     let mut capture: Option<Capture> = None;
     let mut pads = Pads::default();
     let mut elevation = Elevation::default();
-    let mut nav_held = 0u32;
+    // The console's navigation since it opened, and what all pads held in
+    // the last round.
+    let mut nav: Option<(Navigator, u32)> = None;
     loop {
         let now = now_ms();
         let capturing = CAPTURING.load(Ordering::SeqCst);
@@ -263,7 +266,7 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
         let want_pads = (controllers && pads.possible(now))
             || capturing
             || watching
-            || (console && CONSOLE_NAV_READS_PADS);
+            || (console && CONSOLE_NAV_READS_PADS && pads.possible(now));
         // A key bound to be held needs no reading until it is pressed — but
         // the look at the foreground game, every couple of seconds.
         let watch = (mouse || key_holds) && !capturing;
@@ -281,7 +284,7 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             if let Some(left) = pads.idle(app, now) {
                 wait = wait.min(Duration::from_millis(left));
             }
-            nav_held = 0;
+            nav = None;
             if let Err(RecvTimeoutError::Disconnected) = inbox.recv_timeout(wait) {
                 return;
             }
@@ -312,13 +315,7 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             },
             pads: read.masks,
         };
-        if console && want_pads {
-            let frame = PadFrame::after(nav_held, &read.masks, read.stick);
-            nav_held = frame.held;
-            console_nav(app, &frame, now);
-        } else {
-            nav_held = 0;
-        }
+        let mut console_fired = false;
         if capturing {
             if let Some(binding) = capture.get_or_insert_with(Capture::default).poll(&input) {
                 let _ = app.emit(
@@ -337,16 +334,42 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
                     let mut fired = Vec::new();
                     for vk in table.held_vks() {
                         if !platform::key_down(vk) {
-                            fired.extend(table.vk_up(vk, now));
+                            let up = table.vk_up(vk, now);
+                            fired.extend(up.into_iter().map(|a| (a, Source::Key)));
                         }
                     }
-                    fired.extend(table.poll(now, &input));
+                    // While the console is open the pads steer it: of their
+                    // bindings only the console's own still fires, so the
+                    // same button closes it again.
+                    fired.extend(table.poll_holding_back(now, &input, |action| {
+                        console && *action != Action::Console
+                    }));
                     fired
                 })
                 .unwrap_or_default();
-            for action in fired {
-                crate::run_hotkey(app, action);
+            for (action, source) in fired {
+                console_fired |= action == Action::Console;
+                crate::run_hotkey_from(app, action, source == Source::Pad);
             }
+        }
+        if console && want_pads {
+            let (navigator, held) = nav.get_or_insert_with(|| {
+                // What is held as the console opens — the binding that opened
+                // it, say — was pressed before it: it counts after a let-go.
+                let held = read.masks.iter().fold(0, |all, mask| all | mask);
+                (Navigator::default(), held)
+            });
+            let frame = PadFrame::after(*held, &read.masks, read.stick);
+            *held = frame.held;
+            let steps = navigator.step(&frame, now, family() == Family::Nintendo);
+            // The round the console's binding fired, its buttons are not
+            // steps: the console is on its way out (or just came).
+            if !console_fired {
+                console_nav(app, &steps);
+            }
+            crate::console::watch_passive(app, now);
+        } else {
+            nav = None;
         }
         if watch {
             elevation.check(app, now);
@@ -358,15 +381,13 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     }
 }
 
-/// Where the console's controller navigation hooks in (phase 7b): called
-/// every round the controllers are read while the console is open, with what
-/// went down and up since the last round (`console::CONSOLE_SHOWN` says it is
-/// open). Navigation itself is not built yet — this is the place it goes:
-/// map [`PadFrame::pressed`] (D-pad, stick, South/East, LB/RB) to
-/// `console-nav` events for the console window, and decide which pad
-/// hotkeys to hold back while it is open. To have frames without a
-/// controller binding, set [`CONSOLE_NAV_READS_PADS`].
-fn console_nav(_app: &AppHandle, _frame: &PadFrame, _now: u64) {}
+/// Hand the console page its steps (`consolenav`), as `console-nav` events
+/// to that window alone.
+fn console_nav(app: &AppHandle, steps: &[crate::consolenav::Nav]) {
+    for step in steps {
+        let _ = app.emit_to(crate::console::LABEL, "console-nav", step);
+    }
+}
 
 /// Tell once per session that a game running elevated keeps the mouse
 /// buttons and key releases from ClippiBoy — otherwise the binding just seems

@@ -706,6 +706,14 @@ impl PadFrame {
     }
 }
 
+/// What kind of input fired an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Key,
+    Mouse,
+    Pad,
+}
+
 /// Every binding, by what is pressed, and where each one stands.
 #[derive(Clone, Debug)]
 pub struct Table<A> {
@@ -860,10 +868,39 @@ impl<A: Copy> Table<A> {
     /// One round of the poll thread at `now` (ms): edges of the mouse buttons,
     /// combos standing on the controllers, and time for every slot held.
     pub fn poll(&mut self, now: u64, input: &Input) -> Vec<A> {
+        self.poll_holding_back(now, input, |_| false)
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect()
+    }
+
+    /// [`Table::poll`], with the controller bindings whose action
+    /// `held_back` names left out — while the console is open the pads
+    /// steer it, and only the binding that closes it may still fire. A
+    /// binding held back and still held when that ends counts again only
+    /// after being let go; a hold on a binding kept (`Hold:` beside the
+    /// console's tap) is dropped while held back. Says which kind of input
+    /// fired each action.
+    pub fn poll_holding_back(
+        &mut self,
+        now: u64,
+        input: &Input,
+        held_back: impl Fn(&A) -> bool,
+    ) -> Vec<(A, Source)> {
         let satisfied: Vec<bool> = self
             .pads
             .iter()
             .map(|(mask, _)| input.pads.iter().any(|pad| pad & mask == *mask))
+            .collect();
+        // A slot all of whose actions are held back is out for now.
+        let out: Vec<bool> = self
+            .pads
+            .iter()
+            .map(|(_, slot)| {
+                let any = slot.tap.is_some() || slot.hold.is_some();
+                any && slot.tap.as_ref().is_none_or(&held_back)
+                    && slot.hold.as_ref().is_none_or(&held_back)
+            })
             .collect();
         if !self.primed {
             // Whatever is held as the bindings arrive was pressed before them —
@@ -876,6 +913,7 @@ impl<A: Copy> Table<A> {
                 .keys
                 .iter_mut()
                 .filter_map(|(_, _, s)| s.tick(now))
+                .map(|action| (action, Source::Key))
                 .collect();
         }
 
@@ -886,47 +924,65 @@ impl<A: Copy> Table<A> {
             if down && !self.mouse_was[at] {
                 if let Some(slot) = self.pick_mouse(button, input.mods) {
                     self.mouse_owner[at] = Some(slot);
-                    fired.extend(self.mouse[slot].2.press(now));
+                    fired.extend(self.mouse[slot].2.press(now).map(|a| (a, Source::Mouse)));
                 }
             } else if !down && self.mouse_was[at] {
                 if let Some(slot) = self.mouse_owner[at].take() {
-                    fired.extend(self.mouse[slot].2.release(now));
+                    fired.extend(self.mouse[slot].2.release(now).map(|a| (a, Source::Mouse)));
                 }
             }
         }
         self.mouse_was = input.mouse;
 
+        // What a held-back combo would outdo, it outdoes no more: it is not
+        // there for the bindings.
+        let live: Vec<bool> = satisfied.iter().zip(&out).map(|(s, o)| *s && !*o).collect();
+        let mut pad_fired = Vec::new();
         for at in 0..self.pads.len() {
             let mask = self.pads[at].0;
             if !satisfied[at] {
                 self.pad_blocked[at] = false;
             }
+            if out[at] {
+                // Held back: gone without counting, and blocked until let go.
+                self.pads[at].1.cancel();
+                if satisfied[at] {
+                    self.pad_blocked[at] = true;
+                }
+                continue;
+            }
             let outdone = self.pads.iter().enumerate().any(|(other, (bigger, _))| {
-                other != at && satisfied[other] && bigger & mask == mask && *bigger != mask
+                other != at && live[other] && bigger & mask == mask && *bigger != mask
             });
             let active = satisfied[at] && !outdone && !self.pad_blocked[at];
             let slot = &mut self.pads[at].1;
             if active && !slot.is_down() {
-                fired.extend(slot.press(now));
+                pad_fired.extend(slot.press(now));
             } else if !active && slot.is_down() {
                 if satisfied[at] {
                     slot.cancel();
                     self.pad_blocked[at] = true;
                 } else {
-                    fired.extend(slot.release(now));
+                    pad_fired.extend(slot.release(now));
                 }
             }
         }
 
-        let slots = self
-            .keys
-            .iter_mut()
-            .map(|(_, _, s)| s)
-            .chain(self.mouse.iter_mut().map(|(_, _, s)| s))
-            .chain(self.pads.iter_mut().map(|(_, s)| s));
-        for slot in slots {
-            fired.extend(slot.tick(now));
+        for (_, _, slot) in &mut self.keys {
+            fired.extend(slot.tick(now).map(|a| (a, Source::Key)));
         }
+        for (_, _, slot) in &mut self.mouse {
+            fired.extend(slot.tick(now).map(|a| (a, Source::Mouse)));
+        }
+        for (_, slot) in &mut self.pads {
+            pad_fired.extend(slot.tick(now));
+        }
+        fired.extend(
+            pad_fired
+                .into_iter()
+                .filter(|action| !held_back(action))
+                .map(|action| (action, Source::Pad)),
+        );
         fired
     }
 }
@@ -1362,6 +1418,68 @@ mod tests {
         let still = PadFrame::after(frame.held, &[pad::EAST | pad::UP], (0, 0));
         assert_eq!(still.pressed, 0);
         assert_eq!(still.released, 0);
+    }
+
+    #[test]
+    fn while_held_back_only_the_kept_pad_binding_fires() {
+        // Clip on South, Shot (the console, say) on Back.
+        let mut table = Table::default();
+        table.bind_pad(pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(pad::BACK, Mode::Tap, Act::Shot);
+        table.bind_mouse(MouseButton::X2, Mods::NONE, Mode::Tap, Act::Clip);
+        let back = |a: &Act| *a == Act::Clip;
+        assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
+        assert!(table.poll_holding_back(10, &pads(pad::SOUTH, 0), back).is_empty());
+        assert_eq!(
+            table.poll_holding_back(20, &pads(pad::SOUTH | pad::BACK, 0), back),
+            vec![(Act::Shot, Source::Pad)]
+        );
+        // The mouse is not the console's business.
+        let mut x2 = pads(pad::SOUTH | pad::BACK, 0);
+        x2.mouse[MouseButton::X2.index()] = true;
+        assert_eq!(
+            table.poll_holding_back(30, &x2, back),
+            vec![(Act::Clip, Source::Mouse)]
+        );
+        // Held back no more, South still held: nothing until let go.
+        assert!(table.poll(40, &pads(pad::SOUTH, 0)).is_empty());
+        assert!(table.poll(50, &pads(0, 0)).is_empty());
+        assert_eq!(table.poll(60, &pads(pad::SOUTH, 0)), vec![Act::Clip]);
+    }
+
+    #[test]
+    fn a_held_back_combo_outdoes_no_smaller_one() {
+        let mut table = Table::default();
+        table.bind_pad(pad::BACK, Mode::Tap, Act::Shot);
+        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
+        let back = |a: &Act| *a == Act::Clip;
+        assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
+        assert!(table.poll_holding_back(10, &pads(pad::SOUTH, 0), back).is_empty());
+        // Back alone waits a moment for the bigger combo — which is out.
+        let both = pads(pad::SOUTH | pad::BACK, 0);
+        assert!(table.poll_holding_back(20, &both, back).is_empty());
+        assert_eq!(
+            table.poll_holding_back(20 + CHORD_MS, &both, back),
+            vec![(Act::Shot, Source::Pad)]
+        );
+    }
+
+    #[test]
+    fn a_hold_held_back_beside_a_kept_tap_is_dropped() {
+        let mut table = Table::default();
+        table.bind_pad(pad::BACK, Mode::Tap, Act::Shot);
+        table.bind_pad(pad::BACK, Mode::Hold, Act::Clip);
+        let back = |a: &Act| *a == Act::Clip;
+        assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
+        assert!(table.poll_holding_back(10, &pads(pad::BACK, 0), back).is_empty());
+        assert!(table.poll_holding_back(500, &pads(pad::BACK, 0), back).is_empty());
+        assert!(table.poll_holding_back(510, &pads(0, 0), back).is_empty());
+        // The tap still comes through.
+        assert!(table.poll_holding_back(520, &pads(pad::BACK, 0), back).is_empty());
+        assert_eq!(
+            table.poll_holding_back(600, &pads(0, 0), back),
+            vec![(Act::Shot, Source::Pad)]
+        );
     }
 
     #[test]
