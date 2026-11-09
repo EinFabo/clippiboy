@@ -653,6 +653,14 @@ body,
   background: var(--con-btn-hover);
 }
 
+/* Taken with A — left and right now move the slider or the clip instead of
+   the ring. The line closes in and a halo comes up, so the difference shows
+   at a glance. */
+[data-nav-focus][data-nav-editing] {
+  outline-offset: 1px;
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--con-nav-ring) 28%, transparent);
+}
+
 /* --- Clip tiles ---------------------------------------------------------- */
 
 /* The picture pushes forward under the mouse and the play mark fades up over

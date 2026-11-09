@@ -719,6 +719,7 @@ export function Console() {
                   onClick={() => void show("clips", clip.id)}
                   className="cb-tile group relative block aspect-video w-full overflow-hidden rounded-inner bg-gradient-to-br from-accent-deep/40 to-black"
                   data-nav-default={clip === clips[0] || undefined}
+                  data-nav-id={`tile-${clip.id}`}
                   aria-label={`${clip.screenshot ? "Open" : "Play"}: ${clipName(clip)}`}
                 >
                   {clip.thumbPath && (
@@ -829,6 +830,7 @@ export function Console() {
                       </Tool>
                       <Tool
                         label="Send to a friend"
+                        navId={`send-${clip.id}`}
                         busy={busy === `send-${clip.id}`}
                         onClick={() => setSendFor(clip.id)}
                       >
@@ -867,11 +869,12 @@ export function Console() {
                           className={cn("h-4 w-4", clip.favorite && "text-live")}
                         />
                       </Tool>
-                      <Tool label="Rename" keys onClick={() => setRenaming(clip.id)}>
+                      <Tool label="Rename" keys navId={`rename-${clip.id}`} onClick={() => setRenaming(clip.id)}>
                         <IconPencil className="h-4 w-4" />
                       </Tool>
                       <Tool
                         label="Delete"
+                        navId={`delete-${clip.id}`}
                         onClick={() => {
                           setConfirming(clip.id);
                           setLinkedClip(null);
@@ -1392,6 +1395,22 @@ function ClipStage({
     jump(element, seconds);
   }, []);
 
+  // The controller's left and right on the picture or the timeline
+  // (`useNav`, `data-nav-adjust`): five seconds, like the arrow keys.
+  const stage = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const root = stage.current;
+    if (!root || clip.screenshot) return;
+    const onAdjust = (event: Event) => {
+      const element = video.current;
+      const by = (event as CustomEvent<number>).detail;
+      if (!element || (by !== 1 && by !== -1)) return;
+      jump(element, element.currentTime + 5 * by);
+    };
+    root.addEventListener("nav-adjust", onAdjust);
+    return () => root.removeEventListener("nav-adjust", onAdjust);
+  }, [clip.screenshot]);
+
   // Dieselben Tasten wie im Fenster. Escape bleibt beim Elternteil, das backt
   // sich Schritt für Schritt heraus.
   useEffect(() => {
@@ -1426,7 +1445,11 @@ function ClipStage({
       // wurde die Karte in einem Kasten zentriert, dessen untere Kante viel zu
       // hoch lag, und stand entsprechend zu weit oben.
       className="cb-stage absolute inset-x-0 top-0 bottom-[calc(var(--inset,0px)+8rem)] grid place-items-center p-6"
+      // For the controller: three rows — the picture, the play bar, the name
+      // and its buttons — gone round and between rather than by geometry.
       data-nav-region
+      data-nav-rows
+      ref={stage}
     >
       {/* Die Karte nimmt die ganze Höhe und teilt sie auf: das Bild bekommt,
           was Leiste und Namenszeile übrig lassen. Kein `vh` mehr — `.cb-ui`
@@ -1435,7 +1458,7 @@ function ClipStage({
       {/* `min()` aus beidem: die Pixelgrenze wächst mit dem Zoom mit, der
           Prozentsatz hält die Karte trotzdem im Bild. */}
       <div className="cb-glass flex h-full w-full max-w-[min(1180px,92%)] flex-col overflow-hidden rounded-card">
-        <div className="grid min-h-0 flex-1 place-items-center bg-black/70 p-2">
+        <div data-nav-row className="grid min-h-0 flex-1 place-items-center bg-black/70 p-2">
           {clip.screenshot ? (
             <img
               src={src}
@@ -1450,6 +1473,11 @@ function ClipStage({
               onError={() => (failed.current = true)}
               autoPlay
               onClick={toggle}
+              // The ring lands here: A plays and pauses, left and right
+              // jump five seconds (see `nav-adjust` above).
+              data-nav
+              data-nav-adjust="direct"
+              data-nav-default
               onPlay={() => setPlaying(true)}
               // Beim Anhalten übernimmt React die Stelle wieder — sonst spränge
               // sie beim nächsten Rendern dorthin zurück, wo sie vor dem
@@ -1476,15 +1504,23 @@ function ClipStage({
         </div>
 
         {!clip.screenshot && (
-          <div className="flex items-center gap-4 border-t border-line px-5 py-3">
+          <div data-nav-row className="flex items-center gap-4 border-t border-line px-5 py-3">
             <PlayButton size="sm" playing={playing} onClick={toggle} />
-            <Scrubber
-              progress={progress}
-              fillRef={fill}
-              knobRef={knob}
-              duration={duration}
-              onSeek={(ratio) => seekTo(ratio * duration)}
-            />
+            {/* A stop for the controller's ring: A takes it, left and right
+                then jump five seconds. */}
+            <div
+              data-nav
+              data-nav-adjust="engage"
+              className="flex min-w-0 flex-1 items-center rounded-inner"
+            >
+              <Scrubber
+                progress={progress}
+                fillRef={fill}
+                knobRef={knob}
+                duration={duration}
+                onSeek={(ratio) => seekTo(ratio * duration)}
+              />
+            </div>
             <span className="shrink-0 font-mono text-xs text-ink-muted tabular-nums">
               <span ref={clockLabel}>{clock(time)}</span> / {clock(duration)}
             </span>
@@ -1499,7 +1535,7 @@ function ClipStage({
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-3 px-5 py-4">
+        <div data-nav-row className="flex flex-wrap items-center gap-x-5 gap-y-3 px-5 py-4">
           <div className="min-w-0 flex-1">
             {renaming ? (
               <input
@@ -1592,6 +1628,7 @@ function DockButton({
     <button
       onClick={onClick}
       data-nav-tab={tab || undefined}
+      data-nav-id={tab ? `tab-${label}` : undefined}
       disabled={disabled || busy}
       title={hint ?? label}
       aria-pressed={active}
@@ -1621,6 +1658,7 @@ function Tool({
   danger,
   busy,
   keys,
+  navId,
 }: {
   children: React.ReactNode;
   label: string;
@@ -1629,11 +1667,15 @@ function Tool({
   busy?: boolean;
   /** Leads to typing — the controller's ring skips it without the focus. */
   keys?: boolean;
+  /** For the controller's ring to come back to it once what it opened
+   *  closes, even after it was drawn anew. */
+  navId?: string;
 }) {
   return (
     <button
       onClick={onClick}
       data-nav-keys={keys || undefined}
+      data-nav-id={navId}
       title={label}
       aria-label={label}
       disabled={busy}

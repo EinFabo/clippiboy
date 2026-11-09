@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "@/lib/ipc";
-import { nearest, nextTab, pickNext, rangeSteps, type Box, type Dir } from "@/lib/spatialNav";
+import { navigate, nearest, nextTab, rangeSteps, type Box, type Dir, type Stop } from "@/lib/spatialNav";
 
 /**
  * The console steered with a controller.
@@ -25,7 +25,17 @@ import { nearest, nextTab, pickNext, rangeSteps, type Box, type Dir } from "@/li
  *   trap stands);
  * - `data-nav-keys` — needs the keyboard (rename): left out while the console
  *   stands without the focus, where typing would go to the game;
- * - `data-nav-skip` — never.
+ * - `data-nav-skip` — never;
+ * - `data-nav-rows` / `data-nav-row` — a group laid out in rows (the
+ *   player): inside it the ring goes round each row and from row to row
+ *   instead of by geometry, which left Play out of reach from the right;
+ * - `data-nav-adjust` — `engage`: a control that takes left/right once
+ *   activated (A), until A or B again or a step up or down — range inputs are
+ *   this anyway; `direct`: takes left/right at once (the picture, which is a
+ *   row of its own). Adjusting sends a `nav-adjust` event (detail ±1), a
+ *   range input is moved itself;
+ * - `data-nav-id` — a name that outlives the element, for finding the
+ *   control that opened something after it was drawn anew.
  *
  * Text fields are left out: a controller cannot type into them.
  */
@@ -33,6 +43,7 @@ import { nearest, nextTab, pickNext, rangeSteps, type Box, type Dir } from "@/li
 type Step = Dir | "activate" | "back" | "prev" | "next" | "close";
 
 const RING = "data-nav-focus";
+const EDITING = "data-nav-editing";
 const CANDIDATES = 'button, input[type="range"], [data-nav]';
 /** The mouse has to travel this far before it takes over from the ring — a
  *  game that keeps putting its hidden cursor back in the middle sends moves
@@ -56,16 +67,49 @@ function standing(element: Element): boolean {
   return getComputedStyle(element).pointerEvents !== "none";
 }
 
-function usable(element: Element): element is HTMLElement {
-  if (!(element instanceof HTMLElement)) return false;
-  if ((element as HTMLButtonElement).disabled) return false;
+/** Where the ring may stand. A disabled button too — the dock's Clip while
+ *  it saves: the ring stays on it rather than jumping to a neighbour. */
+function holdable(element: Element | null): element is HTMLElement {
+  if (!(element instanceof HTMLElement) || !element.isConnected) return false;
   if (element.closest("[data-nav-skip]")) return false;
   if (element.hasAttribute("data-nav-keys") && !document.hasFocus()) return false;
   return standing(element);
 }
 
+/** Where the ring may go. */
+function usable(element: Element): element is HTMLElement {
+  return holdable(element) && !(element as HTMLButtonElement).disabled;
+}
+
 function isRange(element: Element | null): element is HTMLInputElement {
   return element instanceof HTMLInputElement && element.type === "range";
+}
+
+/** Takes left/right once activated. */
+function engages(element: Element | null): boolean {
+  return isRange(element) || element?.getAttribute("data-nav-adjust") === "engage";
+}
+
+/** Left or right on it, once taken. */
+function adjust(element: HTMLElement, by: 1 | -1) {
+  if (isRange(element)) nudge(element, by);
+  else element.dispatchEvent(new CustomEvent("nav-adjust", { detail: by, bubbles: true }));
+}
+
+/** The controls as {@link navigate} wants them: a group and row for those in
+ *  a `data-nav-rows` group. */
+function stopsOf(pool: HTMLElement[]): Stop[] {
+  const groups = [...document.querySelectorAll("[data-nav-rows]")];
+  return pool.map((element) => {
+    const row = element.closest("[data-nav-row]");
+    const group = row?.closest("[data-nav-rows]");
+    if (!row || !group) return { box: boxOf(element) };
+    return {
+      box: boxOf(element),
+      group: groups.indexOf(group),
+      row: [...group.querySelectorAll("[data-nav-row]")].indexOf(row),
+    };
+  });
 }
 
 function candidatesIn(scope: ParentNode): HTMLElement[] {
@@ -141,10 +185,13 @@ export function useConsoleNav({
   const state = useRef({
     current: null as HTMLElement | null,
     shown: false,
+    /** The control under the ring has taken left/right (`data-nav-adjust`). */
+    editing: false,
     /** Where the ring last stood, for when that control is gone. */
     lastBox: null as Box | null,
-    /** The regions gone into, each with what the ring stood on before. */
-    stack: [] as { region: Element; opener: HTMLElement | null }[],
+    /** The regions gone into, each with what the ring stood on before — the
+     *  element, and its `data-nav-id` for when it has been drawn anew. */
+    stack: [] as { region: Element; opener: HTMLElement | null; openerId: string | null }[],
     seen: new WeakSet<Element>(),
     /** What a region coming up next should lead back to, when not the
      *  control the ring stands on — the panel button a bumper pressed. */
@@ -159,22 +206,40 @@ export function useConsoleNav({
 
     const paint = () => {
       document.querySelectorAll(`[${RING}]`).forEach((element) => {
-        if (element !== s.current || !s.shown) element.removeAttribute(RING);
+        if (element !== s.current || !s.shown) {
+          element.removeAttribute(RING);
+          element.removeAttribute(EDITING);
+        }
       });
       if (s.shown && s.current) {
         s.current.setAttribute(RING, "");
+        if (s.editing) s.current.setAttribute(EDITING, "");
+        else s.current.removeAttribute(EDITING);
         reveal(s.current);
       }
     };
 
     const put = (element: HTMLElement | null) => {
+      if (element !== s.current) s.editing = false;
       s.current = element;
       if (element) s.lastBox = boxOf(element);
       paint();
     };
 
     const valid = (element: HTMLElement | null, scope: Element | null): element is HTMLElement =>
-      !!element && element.isConnected && usable(element) && (!scope || scope.contains(element));
+      holdable(element) && (!scope || scope.contains(element));
+
+    /** What opened a region, as it stands now — the same element, or the one
+     *  drawn in its place under the same `data-nav-id`. */
+    const opener = (
+      entry: { opener: HTMLElement | null; openerId: string | null },
+      scope: Element | null,
+    ): HTMLElement | null => {
+      if (valid(entry.opener, scope)) return entry.opener;
+      if (!entry.openerId) return null;
+      const again = document.querySelector(`[data-nav-id="${CSS.escape(entry.openerId)}"]`);
+      return again instanceof HTMLElement && valid(again, scope) ? again : null;
+    };
 
     /** Where the ring goes with nothing else to go by. */
     const landing = (): HTMLElement | null => {
@@ -189,36 +254,44 @@ export function useConsoleNav({
       return (home && landingIn(home)) ?? candidatesIn(document)[0] ?? null;
     };
 
+    const standingRegion = (region: Element) => region.isConnected && standing(region);
+
     /** Bring the ring in line with the page as it now stands: into a region
      *  that just came up, out of one that went. */
     const settle = () => {
       const standingRegions = regions();
       const fresh = standingRegions.filter((r) => !s.seen.has(r));
       standingRegions.forEach((r) => s.seen.add(r));
-      const opener = s.opener;
+      const pending = s.opener;
       s.opener = null;
       for (let i = fresh.length - 1; i >= 0; i -= 1) {
         const target = landingIn(fresh[i]);
         if (!target) continue;
-        s.stack.push({ region: fresh[i], opener: opener ?? s.current });
+        const from = pending ?? s.current;
+        s.stack.push({ region: fresh[i], opener: from, openerId: from?.dataset.navId ?? null });
         put(target);
         return;
       }
       const scope = trap();
       if (valid(s.current, scope)) {
         s.lastBox = boxOf(s.current);
-        // Regions left some other way (the ring walked out first) lead
-        // nowhere any more.
-        s.stack = s.stack.filter((entry) => entry.region.isConnected && standing(entry.region));
+        // The ring walked out of the regions gone into (down into the dock,
+        // say) and they closed behind it: they lead nowhere any more. Not
+        // while it stands inside one of them — the player stands where the
+        // clip list was, and closing it goes back past the list.
+        const current = s.current;
+        const inside = s.stack.some((e) => standingRegion(e.region) && e.region.contains(current));
+        if (!inside) s.stack = s.stack.filter((e) => standingRegion(e.region));
         return;
       }
       // Out of every region that went, back to what opened the last of them.
       while (s.stack.length > 0) {
         const top = s.stack[s.stack.length - 1];
-        if (top.region.isConnected && standing(top.region)) break;
+        if (standingRegion(top.region)) break;
         s.stack.pop();
-        if (valid(top.opener, scope)) {
-          put(top.opener);
+        const back = opener(top, scope);
+        if (back) {
+          put(back);
           return;
         }
       }
@@ -242,13 +315,19 @@ export function useConsoleNav({
     const move = (dir: Dir) => {
       const from = s.current;
       if (!from) return;
-      if (isRange(from) && (dir === "left" || dir === "right")) {
-        nudge(from, dir === "right" ? 1 : -1);
+      const sideways = dir === "left" || dir === "right";
+      const by = dir === "right" ? 1 : -1;
+      if (sideways && (s.editing || from.getAttribute("data-nav-adjust") === "direct")) {
+        adjust(from, by);
         return;
       }
-      const pool = candidatesIn(trap() ?? document).filter((element) => element !== from);
-      const at = pickNext(boxOf(from), pool.map(boxOf), dir);
+      // Up or down ends adjusting and goes on.
+      s.editing = false;
+      const pool = candidatesIn(trap() ?? document);
+      if (!pool.includes(from)) pool.push(from);
+      const at = navigate(stopsOf(pool), pool.indexOf(from), dir);
       if (at >= 0) put(pool[at]);
+      else paint();
     };
 
     const tab = (by: 1 | -1) => {
@@ -281,11 +360,22 @@ export function useConsoleNav({
         case "right":
           // The first step only shows where the ring is.
           if (wasShown) move(what);
-          break;
+          return;
         case "activate":
-          if (wasShown && s.current && !isRange(s.current)) s.current.click();
+          if (!wasShown || !s.current) return;
+          if (engages(s.current)) {
+            s.editing = !s.editing;
+            paint();
+            return;
+          }
+          if (!(s.current as HTMLButtonElement).disabled) s.current.click();
           break;
         case "back":
+          if (s.editing) {
+            s.editing = false;
+            paint();
+            return;
+          }
           // Exactly what Escape does: one step out, the console at the end.
           window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
           break;
@@ -310,6 +400,7 @@ export function useConsoleNav({
       }
       if (Math.hypot(event.clientX - s.pointer.x, event.clientY - s.pointer.y) < MOUSE_PX) return;
       s.shown = false;
+      s.editing = false;
       paint();
     };
     window.addEventListener("pointermove", onPointer);
@@ -326,8 +417,10 @@ export function useConsoleNav({
   useEffect(() => {
     const s = state.current;
     s.current?.removeAttribute(RING);
+    s.current?.removeAttribute(EDITING);
     s.current = null;
     s.shown = false;
+    s.editing = false;
     s.lastBox = null;
     s.stack = [];
     s.seen = new WeakSet();
