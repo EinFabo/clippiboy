@@ -414,9 +414,15 @@ export async function shareFile(request: Request, env: Env, id: string, kind: "m
   return new Response(body, { status: ranged ? 206 : 200, headers });
 }
 
+/**
+ * The page of a link that is gone. 200, not 410: Discord builds a preview only
+ * from a 2xx answer (docs.discord.com/developers/link-previews), and the
+ * preview is the invitation. The page says `noindex` itself (`head` in
+ * page.ts), and `no-store` keeps any cache from holding it.
+ */
 function gone(): Response {
   return new Response(renderGone(PAGE_ORIGIN), {
-    status: 410,
+    status: 200,
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
   });
 }

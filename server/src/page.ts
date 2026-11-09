@@ -81,12 +81,24 @@ function head(site: string, title: string): string {
 const CTA_TEXT =
   "<strong>Clipped with ClippiBoy</strong> — it keeps the last minutes of your game, so you can save the best moment after it happened. Free for Windows.";
 
-/** A link that ran out or was deleted: the clip's frame, empty, in the same look. */
+/**
+ * A link that ran out or was deleted: the clip's frame, empty, in the same look.
+ * A link pasted in Discord lives longer than its five days, so the preview it
+ * keeps showing is an invitation: the logo (a PNG — Discord shows no SVG), and
+ * what ClippiBoy is.
+ */
 export function renderGone(site: string): string {
   return `${head(site, "Clip expired · ClippiBoy")}
+<meta property="og:type" content="website">
 <meta property="og:site_name" content="ClippiBoy">
-<meta property="og:title" content="This clip has expired">
-<meta property="og:description" content="Links from ClippiBoy last five days.">
+<meta property="og:title" content="This clip has expired · Get ClippiBoy">
+<meta property="og:description" content="Clip your own best moments after they happened. ClippiBoy keeps the last minutes of your game — free for Windows.">
+<meta property="og:image" content="${site}/img/logo.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
+<meta property="og:image:alt" content="ClippiBoy logo">
+<meta name="twitter:card" content="summary">
 <style>
 ${baseCss(site)}
 .gone{position:relative;aspect-ratio:16/9;max-height:70vh;margin:0 auto;display:grid;place-items:center;text-align:center;padding:24px;background:radial-gradient(ellipse at 50% 40%,rgb(139 92 246/.14),transparent 65%),var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:0 30px 80px -20px rgb(0 0 0/.7)}
