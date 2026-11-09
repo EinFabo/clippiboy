@@ -111,6 +111,9 @@ pub fn set_config(
     if previous.friends != next.friends {
         crate::friends::config_changed(&app);
     }
+    if previous.streamer_mode != next.streamer_mode {
+        crate::streamer::nudge();
+    }
     // Every window paints in the accent — the banner and the console too, which
     // never read the settings page. Told once, to all of them.
     if previous.accent() != next.accent() {

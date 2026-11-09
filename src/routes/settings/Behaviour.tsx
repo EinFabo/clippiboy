@@ -3,7 +3,8 @@ import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Segmented, Toggle } from "@/components/ui/Controls";
 import { DISCORD_LIMITS } from "@/lib/discord";
-import type { DiscordLimit } from "@/lib/types";
+import { useStreamer } from "@/lib/streamer";
+import type { DiscordLimit, StreamerMode } from "@/lib/types";
 import { Row, USAGE_HINT } from "./shared";
 
 export function BehaviourTab() {
@@ -11,6 +12,8 @@ export function BehaviourTab() {
   const { config, patchConfig } = useEngine(
     useShallow((s) => ({ config: s.config, patchConfig: s.patchConfig })),
   );
+  const streaming = useStreamer((s) => s.active);
+  const streamerMode = config.streamerMode ?? "off";
 
   return (
     <div className="space-y-8">
@@ -51,6 +54,25 @@ export function BehaviourTab() {
             <Toggle
               checked={config.usageStats && config.usageStatsAsked}
               onChange={(usageStats) => patchConfig({ usageStats, usageStatsAsked: true })}
+            />
+          </Row>
+        </Card>
+      </section>
+      <section>
+        <SectionTitle title="Streaming" />
+        <Card className="divide-y divide-line">
+          <Row
+            label="Streamer mode"
+            hint={streamerMode === "automatic" && streaming ? "Active" : undefined}
+          >
+            <Segmented<StreamerMode>
+              value={streamerMode}
+              options={[
+                { key: "off", label: "Off" },
+                { key: "on", label: "On" },
+                { key: "automatic", label: <span title="While OBS or Streamlabs runs">Automatic</span> },
+              ]}
+              onChange={(streamerMode) => patchConfig({ streamerMode })}
             />
           </Row>
         </Card>

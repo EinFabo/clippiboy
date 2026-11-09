@@ -460,6 +460,16 @@ pub enum DiscordLimit {
     Nitro,
 }
 
+/// Streamer mode (`streamer.rs`): off, on, or on while OBS or Streamlabs runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StreamerMode {
+    #[default]
+    Off,
+    On,
+    Automatic,
+}
+
 /// Everything about the accent, as the windows are told it in `accent-changed`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -742,6 +752,10 @@ pub struct AppConfig {
     /// Recently deleted (`cleanup.rs`); favorites never. `0` is off.
     #[serde(default)]
     pub delete_older_than_days: u32,
+    /// Keeps every ClippiBoy window, friends' names, codes and sounds out of a
+    /// stream — see `streamer.rs`.
+    #[serde(default)]
+    pub streamer_mode: StreamerMode,
     /// Counts up with every change the core takes in. A window sends back the
     /// one it was given, so a write built on an older copy can be told apart
     /// and merged onto what changed since (`config::accept`) instead of
@@ -1159,6 +1173,9 @@ pub struct EngineStatus {
     /// ClippiBoy Camera, the virtual camera.
     #[serde(default)]
     pub vcam: Option<crate::vcam::VcamStatus>,
+    /// Streamer mode is in effect right now (`streamer::active`).
+    #[serde(default)]
+    pub streamer: bool,
 }
 
 /// What the cam track is doing, for the Facecam tab and the health log.

@@ -406,13 +406,20 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
             alert(
                 app,
                 Alert::Request,
+                &request.user.display_name,
                 &format!("{} sent you a friend request", request.user.display_name),
                 request.user.avatar.clone(),
             );
         }
         let asked: HashSet<&str> = previous.outgoing.iter().map(|p| p.user.id.as_str()).collect();
         for friend in lists.friends.iter().filter(|user| asked.contains(user.id.as_str())) {
-            alert(app, Alert::Accepted, &format!("{} accepted your friend request", friend.display_name), friend.avatar.clone());
+            alert(
+                app,
+                Alert::Accepted,
+                &friend.display_name,
+                &format!("{} accepted your friend request", friend.display_name),
+                friend.avatar.clone(),
+            );
         }
     }
     Ok(())
@@ -611,10 +618,10 @@ async fn handle_message(app: &AppHandle, text: &str) {
             emit(app);
             if let (Some((name, avatar)), Some(now)) = (name, presence) {
                 match (before, now.game) {
-                    (None, Some(game)) => alert(app, Alert::Game, &format!("{name} is playing {game}"), avatar),
-                    (None, None) => alert(app, Alert::Online, &format!("{name} is online"), avatar),
+                    (None, Some(game)) => alert(app, Alert::Game, &name, &format!("{name} is playing {game}"), avatar),
+                    (None, None) => alert(app, Alert::Online, &name, &format!("{name} is online"), avatar),
                     (Some(before), Some(game)) if before.game.as_deref() != Some(game.as_str()) => {
-                        alert(app, Alert::Game, &format!("{name} started {game}"), avatar)
+                        alert(app, Alert::Game, &name, &format!("{name} started {game}"), avatar)
                     }
                     _ => {}
                 }
@@ -694,9 +701,9 @@ pub fn send_relay(app: &AppHandle, to: &str, body: &impl Serialize) -> bool {
     outbox.send(text).is_ok()
 }
 
-/// Someone wants to send a clip.
-pub fn announce_clip(app: &AppHandle, text: &str) {
-    alert(app, Alert::Clip, text, None);
+/// Someone (`who`, as named in `text`) wants to send a clip.
+pub fn announce_clip(app: &AppHandle, who: &str, text: &str) {
+    alert(app, Alert::Clip, who, text, None);
 }
 
 fn send_presence(app: &AppHandle, kind: &str) {
@@ -718,8 +725,9 @@ enum Alert {
 }
 
 /// In the app while its window is in front; as a Windows notification while it
-/// is not — but never over one's own game unless that is wanted.
-fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
+/// is not — but never over one's own game unless that is wanted. `who` is the
+/// friend's name in `text`, for streamer mode to hide.
+fn alert(app: &AppHandle, kind: Alert, who: &str, text: &str, avatar: Option<String>) {
     let config = app.state::<AppState>().config_snapshot().friends;
     let wanted = match kind {
         Alert::Request | Alert::Accepted => config.notify_requests,
@@ -752,11 +760,12 @@ fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
     if overlay.overlay.enabled {
         use crate::overlay::BannerKind;
         match kind {
-            Alert::Online => crate::overlay::show_friend(app, BannerKind::FriendOnline, text.to_owned(), None, None, avatar),
-            Alert::Game => crate::overlay::show_friend(app, BannerKind::FriendGame, text.to_owned(), None, None, avatar),
+            Alert::Online => crate::overlay::show_friend(app, BannerKind::FriendOnline, who, text.to_owned(), None, None, avatar),
+            Alert::Game => crate::overlay::show_friend(app, BannerKind::FriendGame, who, text.to_owned(), None, None, avatar),
             Alert::Request => crate::overlay::show_friend(
                 app,
                 BannerKind::Friend,
+                who,
                 text.to_owned(),
                 // Unbound, the console cannot be reached over the game either.
                 (!overlay.console_hotkey.is_empty())
@@ -764,7 +773,7 @@ fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
                 None,
                 avatar,
             ),
-            Alert::Accepted => crate::overlay::show_friend(app, BannerKind::Friend, text.to_owned(), None, None, avatar),
+            Alert::Accepted => crate::overlay::show_friend(app, BannerKind::Friend, who, text.to_owned(), None, None, avatar),
             // `share.rs` has put its banner up already.
             Alert::Clip => {}
         }
@@ -773,6 +782,7 @@ fn alert(app: &AppHandle, kind: Alert, text: &str, avatar: Option<String>) {
     // Banners switched off altogether: then Windows' notice is the only way
     // left to hear of it.
     use tauri_plugin_notification::NotificationExt;
+    let text = if crate::streamer::active() { crate::streamer::mask_name(text, who) } else { text.to_owned() };
     if let Err(err) = app.notification().builder().title("ClippiBoy").body(text).show() {
         log::info!("friends: notification failed: {err}");
     }

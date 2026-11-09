@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
 import { canReceive, friendsApi, playingFor, useFriends } from "@/lib/friends";
 import { clipName } from "@/lib/format";
+import { shownName, useStreamer } from "@/lib/streamer";
 import type { Clip, FriendPresence, FriendUser } from "@/lib/types";
 import { IconClose, IconSend } from "@/components/icons";
 
@@ -72,6 +73,7 @@ export function FriendsPanel({
 }
 
 function Request({ user }: { user: FriendUser }) {
+  const streamer = useStreamer((s) => s.active);
   const [busy, setBusy] = useState(false);
   const run = (action: Promise<void>) => {
     setBusy(true);
@@ -81,7 +83,7 @@ function Request({ user }: { user: FriendUser }) {
     <div className="mb-1 flex items-center gap-3 rounded-[16px] bg-accent/15 px-3 py-2.5">
       <Face user={user} />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-[13px] font-semibold">{user.displayName}</p>
+        <p className="truncate text-[13px] font-semibold">{shownName(user.displayName, streamer)}</p>
         <p className="truncate text-xs text-ink-muted">wants to be your friend</p>
       </div>
       <button
@@ -117,6 +119,7 @@ function Row({
   latest?: Clip | null;
   onSend?: (clip: Clip, friend: FriendUser) => void;
 }) {
+  const streamer = useStreamer((s) => s.active);
   const duration = presence?.game ? playingFor(presence.since, now) : null;
   const line = !presence
     ? zuletzt(lastSeen, now)
@@ -129,7 +132,7 @@ function Row({
     <div className={cn("flex items-center gap-3 rounded-[14px] px-2 py-2", !presence && "opacity-60")}>
       <Face user={friend} status={!presence ? "off" : presence.busy ? "busy" : presence.game ? "game" : "on"} />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-[13px] font-semibold">{friend.displayName}</p>
+        <p className="truncate text-[13px] font-semibold">{shownName(friend.displayName, streamer)}</p>
         <p className={cn("truncate text-xs", presence?.game ? "text-accent-bright" : "text-ink-muted")}>{line}</p>
       </div>
       {latest && onSend && canReceive(presence) && (
@@ -152,6 +155,7 @@ function Row({
  */
 export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: Clip, friend: FriendUser) => void; onClose: () => void }) {
   const { signedIn, lists, presence } = useFriends();
+  const streamer = useStreamer((s) => s.active);
   const reachable = lists.friends.filter((f) => canReceive(presence[f.id]));
   return (
     <div className="absolute inset-0 z-10 flex flex-col rounded-inner bg-black/85 p-2 backdrop-blur-md">
@@ -178,7 +182,7 @@ export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: C
               className="flex w-full items-center gap-2 rounded-[10px] px-1.5 py-1 text-left transition-colors hover:bg-white/10"
             >
               <Face user={friend} size="sm" />
-              <span className="min-w-0 flex-1 truncate text-xs font-semibold">{friend.displayName}</span>
+              <span className="min-w-0 flex-1 truncate text-xs font-semibold">{shownName(friend.displayName, streamer)}</span>
               <IconSend className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
             </button>
           ))
@@ -198,10 +202,14 @@ function Face({
   size?: "sm" | "md";
 }) {
   const [broken, setBroken] = useState(false);
+  // Streamer mode: neither picture nor initial, only the circle.
+  const streamer = useStreamer((s) => s.active);
   const box = size === "sm" ? "h-6 w-6" : "h-9 w-9";
   return (
     <span className={cn("relative shrink-0", box)}>
-      {user.avatar && !broken ? (
+      {streamer ? (
+        <span className={cn("block rounded-pill bg-white/10", box)} />
+      ) : user.avatar && !broken ? (
         <img
           src={user.avatar}
           alt=""

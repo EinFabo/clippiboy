@@ -437,6 +437,7 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
                 crate::overlay::show_friend(
                     &app,
                     crate::overlay::BannerKind::Friend,
+                    &name,
                     format!("{what} from {name}"),
                     Some("In your clips".into()),
                     clip.thumb_path.clone(),
@@ -703,7 +704,7 @@ fn offered(
         Incoming { transfer, size, sha256, secret, addr, meta },
     );
     emit(app);
-    crate::friends::announce_clip(app, &format!("{friend_name} wants to send you {name} ({})", megabytes(total)));
+    crate::friends::announce_clip(app, &friend_name, &format!("{friend_name} wants to send you {name} ({})", megabytes(total)));
     // Over the game too: the banner cannot be clicked, so it says where the
     // answer goes — the console has the buttons.
     let hotkey = app.state::<AppState>().config_snapshot().console_hotkey;
@@ -711,6 +712,7 @@ fn offered(
     crate::overlay::show_friend(
         app,
         crate::overlay::BannerKind::Friend,
+        &friend_name,
         format!("{friend_name} wants to send you a {what}"),
         Some(if hotkey.is_empty() {
             megabytes(total)
@@ -1192,6 +1194,7 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         crate::overlay::show_friend(
             app,
             crate::overlay::BannerKind::Friend,
+            &name,
             format!("{name} has your {what}"),
             None,
             None,

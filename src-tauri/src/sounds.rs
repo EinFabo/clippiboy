@@ -56,9 +56,18 @@ pub fn level(config: &SoundConfig, kind: SoundKind) -> f32 {
     (config.volume * setting.volume).clamp(0.0, 1.0)
 }
 
+/// May a sound play? In streamer mode only on a device of its own: the default
+/// one is what the stream records.
+pub fn audible(streamer: bool, device: Option<&str>) -> bool {
+    !streamer || device.is_some_and(|id| !id.is_empty())
+}
+
 /// Play the sound for `kind`, as the settings say.
 pub fn play(app: &tauri::AppHandle, kind: SoundKind) {
     let config = app.state::<AppState>().config_snapshot().sounds;
+    if !audible(crate::streamer::active(), config.device.as_deref()) {
+        return;
+    }
     play_at(kind, level(&config, kind), config.device);
 }
 
@@ -131,7 +140,8 @@ mod imp {
                     .spawn(move || {
                         if let Err(err) = play_on(&id, &data, this) {
                             log::warn!("sound on its own device failed ({err}), playing on the default one");
-                            if LATEST.load(Ordering::SeqCst) == this {
+                            // Not into a stream, though (`audible`).
+                            if LATEST.load(Ordering::SeqCst) == this && !crate::streamer::active() {
                                 play_default(data);
                             }
                         }
@@ -249,6 +259,15 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamer_mode_keeps_sounds_off_the_default_device() {
+        assert!(audible(false, None));
+        assert!(audible(false, Some("{dev}")));
+        assert!(audible(true, Some("{dev}")));
+        assert!(!audible(true, None));
+        assert!(!audible(true, Some("")));
+    }
 
     const ALL: [SoundKind; 9] = [
         SoundKind::ClipSaved,

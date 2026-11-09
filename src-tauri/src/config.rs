@@ -84,6 +84,7 @@ pub fn default_config() -> AppConfig {
         discord_limit: crate::model::DiscordLimit::default(),
         mute_discord_on_share: false,
         delete_older_than_days: 0,
+        streamer_mode: crate::model::StreamerMode::Off,
         revision: 0,
     }
 }

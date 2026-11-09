@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { cn } from "@/lib/cn";
 import { megabytes, shareApi, useShare } from "@/lib/share";
+import { shownName, useStreamer } from "@/lib/streamer";
 import type { Transfer } from "@/lib/types";
 
 /**
@@ -26,6 +27,8 @@ export function Offers() {
 
 function Offer({ transfer: t }: { transfer: Transfer }) {
   const [busy, setBusy] = useState(false);
+  const streamer = useStreamer((s) => s.active);
+  const who = shownName(t.friendName, streamer);
   const run = (action: Promise<void>) => {
     setBusy(true);
     action.finally(() => setBusy(false));
@@ -36,7 +39,7 @@ function Offer({ transfer: t }: { transfer: Transfer }) {
   return (
     <div className="cb-glass rounded-[18px] px-4 py-3.5">
       <p className="truncate text-[13px] font-semibold">
-        {t.stage === "asking" ? `${t.friendName} wants to send you ${what}` : `Receiving from ${t.friendName}…`}
+        {t.stage === "asking" ? `${who} wants to send you ${what}` : `Receiving from ${streamer ? "a friend" : who}…`}
       </p>
       <p className="truncate text-xs text-ink-muted">
         {t.name} · {megabytes(t.size)}

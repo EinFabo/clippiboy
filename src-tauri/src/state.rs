@@ -663,6 +663,7 @@ impl AppState {
             screen_fallback: None,
             cam: None,
             vcam: None,
+            streamer: false,
         };
         let audio = Arc::new(AudioEngine::new());
         let mut history = std::collections::VecDeque::new();
@@ -1383,6 +1384,7 @@ impl AppState {
         status.cam = self.camera.status();
         let cam = self.config_snapshot().facecam;
         status.vcam = Some(self.vcam.status(crate::vcam::feeds(cam.enabled, cam.virtual_camera)));
+        status.streamer = crate::streamer::active();
         if let Some(recorder) = self.recorder.lock().as_ref() {
             status.recording = true;
             let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);

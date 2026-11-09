@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { cn } from "@/lib/cn";
 import { canReceive, formatCode, friendsApi, inviteLink, lastSeenText, playingFor, useFriends } from "@/lib/friends";
+import { shownCode, useStreamer } from "@/lib/streamer";
 import { useShare } from "@/lib/share";
 import type { FriendPending, FriendPresence, FriendUser } from "@/lib/types";
 import { useEngine } from "@/store";
@@ -159,6 +160,7 @@ function Profile({ connected }: { connected: boolean }) {
   const { config, patchConfig } = useEngine(useShallow((s) => ({ config: s.config.friends, patchConfig: s.patchConfig })));
   const invisible = config.invisible;
   const [copied, setCopied] = useState<"code" | "link" | null>(null);
+  const streamer = useStreamer((s) => s.active);
   const [status, setStatus] = useState(config.status);
   useEffect(() => setStatus(config.status), [config.status]);
   if (!me) return <Card className="h-[112px] animate-pulse" />;
@@ -215,12 +217,12 @@ function Profile({ connected }: { connected: boolean }) {
           className="flex items-center gap-2 rounded-pill border border-line bg-elevated px-3.5 py-2
             font-mono text-sm tracking-wider transition-colors hover:bg-hover"
         >
-          {formatCode(me.friendCode)}
+          {shownCode(formatCode(me.friendCode), streamer)}
           {copied === "code" ? <IconCheck className="h-4 w-4 text-ok" /> : <IconCopy className="h-4 w-4 text-ink-muted" />}
         </button>
         <button
           onClick={() => copy("link")}
-          title={inviteLink(me.friendCode)}
+          title={streamer ? "Copy your invite link" : inviteLink(me.friendCode)}
           className="flex items-center gap-1.5 rounded-pill px-3 py-1 text-xs text-ink-muted transition-colors
             hover:bg-hover hover:text-ink"
         >

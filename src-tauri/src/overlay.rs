@@ -333,14 +333,24 @@ pub fn show_with_thumb(
 /// clips). All of them wear the half-height card; a clip that arrived shows its
 /// frame there instead of the face. Whether one is wanted at all — per
 /// occasion, and over a game — is decided before it gets here.
+///
+/// `who` is the friend's name as it stands in `title` and `detail`: in
+/// streamer mode it becomes "a friend" there, and the picture stays away.
 pub fn show_friend(
     app: &tauri::AppHandle,
     kind: BannerKind,
+    who: &str,
     title: String,
     detail: Option<String>,
     thumb_path: Option<String>,
     avatar: Option<String>,
 ) {
+    if crate::streamer::active() {
+        let title = crate::streamer::mask_name(&title, who);
+        let detail = detail.map(|text| crate::streamer::mask_name(&text, who));
+        show_banner(app, kind, title, detail, thumb_path, None);
+        return;
+    }
     show_banner(app, kind, title, detail, thumb_path, avatar);
 }
 

@@ -39,6 +39,7 @@ pub mod shotfit;
 pub mod sounds;
 pub mod state;
 pub mod stems;
+pub mod streamer;
 pub mod sweep;
 pub mod thumbs;
 pub mod tint;
@@ -1916,6 +1917,8 @@ pub fn run() {
                 });
             }
             console::create(handle);
+            // Streamer mode: follows its setting and, on Automatic, OBS.
+            streamer::start(handle);
             friends::start(handle);
             {
                 use tauri_plugin_deep_link::DeepLinkExt;

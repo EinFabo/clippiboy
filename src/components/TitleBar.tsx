@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Mark } from "@/components/ui/Logo";
+import { useStreamer } from "@/lib/streamer";
 
 const win = () => getCurrentWindow();
 
@@ -34,6 +35,7 @@ function Ctrl({
  * the strip free for it (`pt-12` on their header).
  */
 export function TitleBar() {
+  const streamer = useStreamer((s) => s.active);
   return (
     <div
       data-tauri-drag-region
@@ -43,6 +45,14 @@ export function TitleBar() {
         {/* Inline rather than the file: it takes the accent colour. */}
         <Mark className="pointer-events-none h-[18px] w-[18px]" />
         <span className="text-[13px] font-semibold tracking-tight">ClippiBoy</span>
+        {streamer && (
+          <span
+            data-tauri-drag-region
+            className="ml-1 rounded-pill border border-live/40 bg-live/10 px-2 py-0.5 text-[11px] text-live"
+          >
+            Streamer mode
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-1">
         <Ctrl label="Minimize" onClick={() => win().minimize()}>

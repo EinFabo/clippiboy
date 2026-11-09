@@ -178,6 +178,7 @@ export const mockConfig: AppConfig = {
   discordLimit: "free",
   muteDiscordOnShare: false,
   deleteOlderThanDays: 0,
+  streamerMode: "off",
   revision: 0,
 };
 

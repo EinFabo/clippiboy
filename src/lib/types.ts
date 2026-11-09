@@ -252,12 +252,17 @@ export interface AppConfig {
    * deleted (`cleanup.rs`); favorites never. `0` is off.
    */
   deleteOlderThanDays: number;
+  /** Keeps the windows, friends' names, codes and sounds out of a stream. */
+  streamerMode: StreamerMode;
   /**
    * Counts up with every change the core takes in. Sent back as it came: a
    * write from an older copy is merged onto what changed since, not over it.
    */
   revision: number;
 }
+
+/** Streamer mode (`streamer.rs`): `automatic` is on while OBS or Streamlabs runs. */
+export type StreamerMode = "off" | "on" | "automatic";
 
 /** Discord's upload limit by account: 20, 50 or 500 MB. */
 export type DiscordLimit = "free" | "nitroBasic" | "nitro";
@@ -663,6 +668,8 @@ export interface EngineStatus {
   /** The webcam while it runs; `null` when it is off. */
   cam: CamStatus | null;
   vcam: VcamStatus | null;
+  /** Streamer mode is in effect right now. */
+  streamer: boolean;
 }
 
 /** A rectangle in pixels of a screenshot's original. */

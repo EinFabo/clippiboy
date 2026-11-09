@@ -40,6 +40,7 @@ import { FriendsPanel, SendTo } from "./Friends";
 import { shareApi } from "@/lib/share";
 import { discordMb } from "@/lib/discord";
 import { useFriends } from "@/lib/friends";
+import { shownName, useStreamer } from "@/lib/streamer";
 import { TREND_SECONDS, TrendChart, useTrend } from "./Trend";
 import { TROUBLE_LINES, TroubleStrip, troubles, useAudioTrouble } from "./Trouble";
 
@@ -70,6 +71,7 @@ const RESTING: EngineStatus = {
   screenFallback: null,
   cam: null,
   vcam: null,
+  streamer: false,
 };
 
 type Panel = "clips" | "audio" | "perf" | "friends" | null;
@@ -567,7 +569,7 @@ export function Console() {
     run(`send-${clip.id}`, async () => {
       setSendFor(null);
       await shareApi.send(clip.id, friend.id);
-      say(`Asked ${friend.displayName}`);
+      say(`Asked ${shownName(friend.displayName, useStreamer.getState().active)}`);
     });
 
   const saveClip = () =>

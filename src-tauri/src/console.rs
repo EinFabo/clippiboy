@@ -279,12 +279,10 @@ pub fn relayout(app: &tauri::AppHandle) {
 /// clip, and out of Discord's screen share with it, because the recording takes
 /// the whole monitor rather than the game's window. Whoever wants to show a clip
 /// to the others needs the second half of that trade, and pays for it with the
-/// console standing in any clip saved while it is up.
+/// console standing in any clip saved while it is up. Streamer mode hides it
+/// either way (`streamer::affinity`).
 fn protect(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
-    let seen = app.state::<AppState>().config_snapshot().console_in_capture;
-    if let Err(err) = window.set_content_protected(!seen) {
-        log::warn!("could not set the console's copy protection: {err}");
-    }
+    crate::streamer::apply(app, window);
 }
 
 /// What the page has to know about the screen it was just laid over.

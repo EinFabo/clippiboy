@@ -290,7 +290,7 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
         return;
     };
 
-    let tooltip = if status.recording {
+    let mut tooltip = if status.recording {
         let total = status.recording_seconds as u64;
         format!(
             "ClippiBoy · recording {}:{:02}:{:02}",
@@ -314,6 +314,9 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
             None => "ClippiBoy · buffer off".to_string(),
         }
     };
+    if status.streamer {
+        tooltip.push_str(" · streamer mode");
+    }
 
     {
         let mut last = handles.last_tooltip.lock();
