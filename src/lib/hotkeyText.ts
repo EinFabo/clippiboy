@@ -93,7 +93,9 @@ export function triggerKey(value: string): string {
     carry two actions, one tapped and one held: when another binding already
     sits on the same input in the same way and the other way is still free,
     `next` takes the other way. Both ways taken, it stays as it is — and the
-    core reports the clash. */
+    core reports the clash. So it does when the same action's other slot
+    (`saveClipHotkey` / `saveClipHotkeyAlt`) is on that input: one action
+    tapped and held on one input is no pair, only the tap firing late. */
 export function placeBinding<F extends string>(
   bindings: Record<F, string>,
   field: F,
@@ -101,11 +103,14 @@ export function placeBinding<F extends string>(
 ): Partial<Record<F, string>> {
   const key = triggerKey(next);
   if (!key) return { [field]: next } as Partial<Record<F, string>>;
-  const taken = new Set(
-    (Object.keys(bindings) as F[])
-      .filter((other) => other !== field && triggerKey(bindings[other]) === key)
-      .map((other) => isHold(bindings[other])),
+  const others = (Object.keys(bindings) as F[]).filter(
+    (other) => other !== field && triggerKey(bindings[other]) === key,
   );
+  const sibling = field.endsWith("Alt") ? field.slice(0, -3) : `${field}Alt`;
+  if (others.some((other) => other === sibling)) {
+    return { [field]: next } as Partial<Record<F, string>>;
+  }
+  const taken = new Set(others.map((other) => isHold(bindings[other])));
   const hold = isHold(next);
   const placed = taken.has(hold) && !taken.has(!hold) ? withHold(next, !hold) : next;
   return { [field]: placed } as Partial<Record<F, string>>;

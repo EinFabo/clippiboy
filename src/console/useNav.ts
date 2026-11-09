@@ -268,6 +268,11 @@ export function useConsoleNav({
         const target = landingIn(fresh[i]);
         if (!target) continue;
         const from = pending ?? s.current;
+        // Closed regions go, unless what opens this one stood inside them —
+        // the player opened from the clip list keeps the list's entry, so
+        // closing it goes back past the list. A panel switched away from
+        // with a bumper does not linger (`contains` works on detached nodes).
+        s.stack = s.stack.filter((e) => standingRegion(e.region) || (!!from && e.region.contains(from)));
         s.stack.push({ region: fresh[i], opener: from, openerId: from?.dataset.navId ?? null });
         put(target);
         return;

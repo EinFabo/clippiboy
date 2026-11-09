@@ -117,6 +117,16 @@ test("a second action on the same input takes the free way", () => {
   });
 });
 
+test("the same input in an action's own second slot stays as recorded — a clash", () => {
+  const slots = { saveClipHotkey: "Mouse5", saveClipHotkeyAlt: "", screenshotHotkey: "" };
+  assert.deepEqual(placeBinding(slots, "saveClipHotkeyAlt", "Mouse5"), { saveClipHotkeyAlt: "Mouse5" });
+  const back = { saveClipHotkey: "", saveClipHotkeyAlt: "Pad:Back+South", screenshotHotkey: "" };
+  assert.deepEqual(placeBinding(back, "saveClipHotkey", "Pad:View+A"), { saveClipHotkey: "Pad:View+A" });
+  // Another action on it as well: still no flip onto the action's own input.
+  const shared = { saveClipHotkey: "Mouse5", saveClipHotkeyAlt: "", screenshotHotkey: "Mouse5" };
+  assert.deepEqual(placeBinding(shared, "saveClipHotkeyAlt", "Mouse5"), { saveClipHotkeyAlt: "Mouse5" });
+});
+
 test("a third action on an input with both ways taken stays a clash", () => {
   const both = bound({ saveClip: "Mouse5", screenshot: "Hold:Mouse5" });
   assert.deepEqual(placeBinding(both, "record", "Mouse5"), { record: "Mouse5" });
