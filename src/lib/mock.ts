@@ -177,6 +177,7 @@ export const mockConfig: AppConfig = {
   },
   discordLimit: "free",
   muteDiscordOnShare: false,
+  deleteOlderThanDays: 0,
   revision: 0,
 };
 

@@ -7,15 +7,50 @@ import { Button } from "@/components/ui/Button";
 import { api, inTauri } from "@/lib/ipc";
 import { formatSize } from "@/lib/format";
 import { IconCheck, IconClose } from "@/components/icons";
+import { Segmented } from "@/components/ui/Controls";
 import { useCountUp } from "@/lib/useCountUp";
 import type { StorageUsage, TrimOriginals } from "@/lib/types";
+import { Row } from "./shared";
 
 export function StorageTab() {
   return (
+    <div className="space-y-8">
+      <section>
+        <SectionTitle title="Storage location" />
+        <ClipDir />
+        <Storage />
+      </section>
+      <AutoDelete />
+    </div>
+  );
+}
+
+/** "Delete clips older than": in days, `0` is off (`cleanup.rs`). */
+const AUTO_DELETE_DAYS = [0, 14, 30, 60, 90] as const;
+
+/**
+ * Clean-up by age: clips, screenshots and recordings past the age go to
+ * Recently deleted once an hour — favorites never.
+ */
+function AutoDelete() {
+  const { days, patchConfig } = useEngine(
+    useShallow((s) => ({ days: s.config.deleteOlderThanDays ?? 0, patchConfig: s.patchConfig })),
+  );
+  return (
     <section>
-      <SectionTitle title="Storage location" />
-      <ClipDir />
-      <Storage />
+      <SectionTitle title="Clean up" />
+      <Card className="divide-y divide-line">
+        <Row label="Delete clips older than">
+          <Segmented<string>
+            value={AUTO_DELETE_DAYS.some((d) => d === days) ? String(days) : null}
+            options={AUTO_DELETE_DAYS.map((d) => ({
+              key: String(d),
+              label: d === 0 ? "Off" : `${d} days`,
+            }))}
+            onChange={(key) => patchConfig({ deleteOlderThanDays: Number(key) })}
+          />
+        </Row>
+      </Card>
     </section>
   );
 }

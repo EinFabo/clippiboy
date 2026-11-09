@@ -1045,30 +1045,67 @@ pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
 /// and the Discord copies go now, they would show what was deleted.
 #[tauri::command(async)]
 pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
+    trash_clip(&state, &app, &id, Asked::ByHand, &|_| true)?;
+    announce_change(&app);
+    Ok(())
+}
+
+/// Who wants a clip in Recently deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// Delete in a window: waits for a save of the clip, says what went wrong.
+    ByHand,
+    /// The clean-up by age (`cleanup.rs`): skips a clip that is busy and
+    /// stays quiet — it comes round again in an hour.
+    Automatically,
+}
+
+/// The core of [`delete_clip`], callable without a window. `still_wanted` is
+/// asked once more on the clip's row as it stands under its lock — a clip
+/// marked favorite in the meantime stays. Tells every window the clip went,
+/// but leaves `clips-changed` to the caller: a clean-up moving a hundred
+/// clips says it once. Returns whether the clip went.
+pub(crate) fn trash_clip(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+    id: &str,
+    asked: Asked,
+    still_wanted: &dyn Fn(&Clip) -> bool,
+) -> Result<bool> {
     use tauri::Emitter;
     let clip_dir = state.config_snapshot().clip_dir;
     // Held to the end, before the row is even read: an edit, a move or an
     // export of this clip finishes first — a save swapping its file back in
     // after the row went left a clip nobody could see.
-    let own = edit::clip_lock(&id);
+    let own = edit::clip_lock(id);
     let _clip = match own.try_lock() {
         Some(held) => held,
+        None if asked == Asked::Automatically => return Ok(false),
         None => {
             // A save or an export of this clip is running; it can take a
             // while, and a delete that seems to do nothing gets clicked again.
-            crate::notify(&app, "ok", "Waiting for this clip to finish saving…");
+            crate::notify(app, "ok", "Waiting for this clip to finish saving…");
             own.lock()
         }
     };
     // A cam still waiting to be added goes with the clip; a clip's being
     // added has finished by now, the lock above waited for it. A recording's
-    // burn-in runs without that lock and is stopped here instead.
-    crate::composite::cancel(&id);
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?;
+    // burn-in runs without that lock and is stopped here instead. The
+    // clean-up only touches clips it is sure to take, further down.
+    if asked == Asked::ByHand {
+        crate::composite::cancel(id);
+    }
+    let clip = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))?;
     // Already gone (deleted from another window): nothing left to clear.
     let Some(clip) = clip else {
-        return Ok(());
+        return Ok(false);
     };
+    if !still_wanted(&clip) {
+        return Ok(false);
+    }
+    if asked == Asked::Automatically {
+        crate::composite::cancel(id);
+    }
     let from = PathBuf::from(&clip.path);
     if from.is_file() {
         // The file first, without the library lock — a player that holds it
@@ -1081,13 +1118,15 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
             Ok(target) => target,
             Err(err) => {
                 let msg = format!("Could not delete the clip ({err}). Is it open somewhere right now?");
-                crate::notify(&app, "error", msg.clone());
+                if asked == Asked::ByHand {
+                    crate::notify(app, "error", msg.clone());
+                }
                 return Err(msg);
             }
         };
         let mut gone = clip.clone();
         gone.path = target.to_string_lossy().to_string();
-        let trashed = with_library(&state, |lib| {
+        let trashed = with_library(state, |lib| {
             lib.trash(&gone, &clip.path, crate::trash::now_ms()).map_err(|e| e.to_string())
         });
         if let Err(err) = trashed {
@@ -1099,7 +1138,7 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
         }
     } else {
         // No file to keep: nothing a restore could bring back.
-        with_library(&state, |lib| lib.delete(&clip.id).map_err(|e| e.to_string()))?;
+        with_library(state, |lib| lib.delete(&clip.id).map_err(|e| e.to_string()))?;
         erase_stores(&clip);
     }
     // Its Discord copies too — they would show what is gone.
@@ -1111,10 +1150,9 @@ pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String
     }
     // Every window keeps its own list. Without this, a clip deleted in the
     // console stays in the main window and opens as "File not found".
-    let _ = app.emit("clip-deleted", &id);
-    crate::links::clip_deleted(&app, &id);
-    announce_change(&app);
-    Ok(())
+    let _ = app.emit("clip-deleted", id);
+    crate::links::clip_deleted(app, id);
+    Ok(true)
 }
 
 /// Moves a file, trying again for a while when something holds it (a player,
@@ -1314,7 +1352,7 @@ pub fn set_clip_favorite(
 /// the console renames and hearts clips too. No clip goes along on purpose:
 /// a copy taken now could arrive after a newer one, so every window reads the
 /// list back from the database instead.
-fn announce_change(app: &tauri::AppHandle) {
+pub(crate) fn announce_change(app: &tauri::AppHandle) {
     use tauri::Emitter;
     let _ = app.emit("clips-changed", ());
 }

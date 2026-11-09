@@ -738,6 +738,10 @@ pub struct AppConfig {
     /// Discord": friends' voices stay home. The clip itself keeps them.
     #[serde(default)]
     pub mute_discord_on_share: bool,
+    /// Clips, screenshots and recordings older than this many days go to
+    /// Recently deleted (`cleanup.rs`); favorites never. `0` is off.
+    #[serde(default)]
+    pub delete_older_than_days: u32,
     /// Counts up with every change the core takes in. A window sends back the
     /// one it was given, so a write built on an older copy can be told apart
     /// and merged onto what changed since (`config::accept`) instead of

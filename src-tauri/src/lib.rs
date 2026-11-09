@@ -3,6 +3,7 @@ pub mod buffer;
 pub mod camera;
 pub mod camtrack;
 pub mod capture;
+pub mod cleanup;
 pub mod clipboard;
 pub mod clips;
 pub mod commands;
@@ -1870,6 +1871,7 @@ pub fn run() {
             sweep::run(handle);
             // Recently deleted: what has waited 30 days goes, a minute after
             // the start (the library passes come first) and then every hour.
+            // Before it, the clean-up by age moves what is too old in there.
             {
                 let app = handle.clone();
                 let _ = std::thread::Builder::new().name("clippiboy-trash".into()).spawn(move || {
@@ -1878,6 +1880,7 @@ pub fn run() {
                         if clips::passes_stopped() {
                             break;
                         }
+                        cleanup::run(&app);
                         commands::purge_expired(&app);
                         std::thread::sleep(trash::CHECK_EVERY);
                     }

@@ -248,6 +248,11 @@ export interface AppConfig {
   /** A separate Discord track stays out of share links and "Copy for Discord". */
   muteDiscordOnShare: boolean;
   /**
+   * Clips, screenshots and recordings older than this many days go to Recently
+   * deleted (`cleanup.rs`); favorites never. `0` is off.
+   */
+  deleteOlderThanDays: number;
+  /**
    * Counts up with every change the core takes in. Sent back as it came: a
    * write from an older copy is merged onto what changed since, not over it.
    */
