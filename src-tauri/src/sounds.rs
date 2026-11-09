@@ -57,15 +57,24 @@ pub fn level(config: &SoundConfig, kind: SoundKind) -> f32 {
 }
 
 /// May a sound play? In streamer mode only on a device of its own: the default
-/// one is what the stream records.
-pub fn audible(streamer: bool, device: Option<&str>) -> bool {
-    !streamer || device.is_some_and(|id| !id.is_empty())
+/// one is what the stream records — and a chosen device that is at the same
+/// time Windows' default output (`defaults`) is no device of its own.
+pub fn audible(streamer: bool, device: Option<&str>, defaults: &[String]) -> bool {
+    !streamer || device.is_some_and(|id| !id.is_empty() && !defaults.iter().any(|d| d == id))
+}
+
+/// [`audible`] as things stand now. Asks Windows for its default outputs only
+/// in streamer mode.
+pub fn audible_now(device: Option<&str>) -> bool {
+    let streamer = crate::streamer::active();
+    let defaults = if streamer && device.is_some() { imp::default_outputs() } else { Vec::new() };
+    audible(streamer, device, &defaults)
 }
 
 /// Play the sound for `kind`, as the settings say.
 pub fn play(app: &tauri::AppHandle, kind: SoundKind) {
     let config = app.state::<AppState>().config_snapshot().sounds;
-    if !audible(crate::streamer::active(), config.device.as_deref()) {
+    if !audible_now(config.device.as_deref()) {
         return;
     }
     play_at(kind, level(&config, kind), config.device);
@@ -115,7 +124,9 @@ mod imp {
         AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, SND_ASYNC, SND_FLAGS, SND_MEMORY, SND_NODEFAULT,
         WAVEFORMATEX, WAVE_FORMAT_PCM,
     };
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
 
     use super::{header_format, HEADER};
 
@@ -151,6 +162,32 @@ mod imp {
                 }
             }
         }
+    }
+
+    /// The endpoint ids of Windows' default output, for games/system sounds
+    /// (`eConsole`) and for media (`eMultimedia`) — usually the same one.
+    pub fn default_outputs() -> Vec<String> {
+        use windows::Win32::Media::Audio::{eConsole, eMultimedia, eRender};
+        let mut out = Vec::new();
+        // SAFETY: plain COM calls; the id string is freed after copying it.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            else {
+                return out;
+            };
+            for role in [eConsole, eMultimedia] {
+                let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, role) else { continue };
+                let Ok(id) = device.GetId() else { continue };
+                if let Ok(text) = id.to_string() {
+                    if !out.contains(&text) {
+                        out.push(text);
+                    }
+                }
+                CoTaskMemFree(Some(id.0 as *const _));
+            }
+        }
+        out
     }
 
     fn stop_default() {
@@ -254,6 +291,10 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     pub fn play(_data: Vec<u8>, _device: Option<String>) {}
+
+    pub fn default_outputs() -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -262,11 +303,20 @@ mod tests {
 
     #[test]
     fn streamer_mode_keeps_sounds_off_the_default_device() {
-        assert!(audible(false, None));
-        assert!(audible(false, Some("{dev}")));
-        assert!(audible(true, Some("{dev}")));
-        assert!(!audible(true, None));
-        assert!(!audible(true, Some("")));
+        assert!(audible(false, None, &[]));
+        assert!(audible(false, Some("{dev}"), &[]));
+        assert!(audible(true, Some("{dev}"), &[]));
+        assert!(!audible(true, None, &[]));
+        assert!(!audible(true, Some(""), &[]));
+    }
+
+    #[test]
+    fn a_chosen_device_that_is_the_windows_default_is_not_one_of_its_own() {
+        let defaults = vec!["{default}".to_string()];
+        assert!(!audible(true, Some("{default}"), &defaults));
+        assert!(audible(true, Some("{other}"), &defaults));
+        // Outside streamer mode the default is as good as any.
+        assert!(audible(false, Some("{default}"), &defaults));
     }
 
     const ALL: [SoundKind; 9] = [

@@ -86,20 +86,27 @@ function Request({ user }: { user: FriendUser }) {
         <p className="truncate text-[13px] font-semibold">{shownName(user.displayName, streamer)}</p>
         <p className="truncate text-xs text-ink-muted">wants to be your friend</p>
       </div>
-      <button
-        disabled={busy}
-        onClick={() => run(friendsApi.remove(user.id))}
-        className="rounded-pill bg-white/10 px-3 py-1.5 text-xs font-semibold transition-colors hover:bg-white/15"
-      >
-        Decline
-      </button>
-      <button
-        disabled={busy}
-        onClick={() => run(friendsApi.accept(user.id))}
-        className="rounded-pill bg-white px-3 py-1.5 text-xs font-semibold text-black"
-      >
-        Accept
-      </button>
+      {/* Who it is stays hidden, so no blind answer here — the app window has the name. */}
+      {streamer ? (
+        <span className="shrink-0 text-xs text-ink-muted">Answer in the app</span>
+      ) : (
+        <>
+          <button
+            disabled={busy}
+            onClick={() => run(friendsApi.remove(user.id))}
+            className="rounded-pill bg-white/10 px-3 py-1.5 text-xs font-semibold transition-colors hover:bg-white/15"
+          >
+            Decline
+          </button>
+          <button
+            disabled={busy}
+            onClick={() => run(friendsApi.accept(user.id))}
+            className="rounded-pill bg-white px-3 py-1.5 text-xs font-semibold text-black"
+          >
+            Accept
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -135,7 +142,7 @@ function Row({
         <p className="truncate text-[13px] font-semibold">{shownName(friend.displayName, streamer)}</p>
         <p className={cn("truncate text-xs", presence?.game ? "text-accent-bright" : "text-ink-muted")}>{line}</p>
       </div>
-      {latest && onSend && canReceive(presence) && (
+      {latest && onSend && canReceive(presence) && !streamer && (
         <button
           title={`Send latest clip: ${clipName(latest)}`}
           onClick={() => onSend(latest, friend)}
@@ -172,6 +179,8 @@ export function SendTo({ clip, onSend, onClose }: { clip: Clip; onSend: (clip: C
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!signedIn ? (
           <p className="px-1 text-xs text-ink-muted">Sign in under Friends in the main window first.</p>
+        ) : streamer ? (
+          <p className="px-1 text-xs text-ink-muted">Send from the app in streamer mode.</p>
         ) : reachable.length === 0 ? (
           <p className="px-1 text-xs text-ink-muted">No friend is online right now.</p>
         ) : (

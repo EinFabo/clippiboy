@@ -67,8 +67,13 @@ pub fn ui_error(window: tauri::Window, message: String) {
 /// not it is switched on.
 #[tauri::command]
 pub fn preview_sound(state: State<'_, AppState>, kind: crate::model::SoundKind, volume: f32) {
-    // On the device the sounds are set to — listening is how to check it.
-    crate::sounds::play_at(kind, volume, state.config_snapshot().sounds.device);
+    // On the device the sounds are set to — listening is how to check it. Not
+    // into a stream, though: in streamer mode only on a device of its own.
+    let device = state.config_snapshot().sounds.device;
+    if !crate::sounds::audible_now(device.as_deref()) {
+        return;
+    }
+    crate::sounds::play_at(kind, volume, device);
 }
 
 #[tauri::command]

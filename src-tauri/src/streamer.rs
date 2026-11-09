@@ -46,6 +46,15 @@ const TICK: Duration = Duration::from_secs(5);
 /// In effect right now.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Held while an affinity is set and while [`ACTIVE`] changes, so a window set
+/// from elsewhere (the console opening) cannot land its old answer after the
+/// poll thread's new one.
+static APPLYING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// How many looks in a row must find no streaming program before Automatic
+/// lets go — one odd snapshot should not show the windows for five seconds.
+const MISSES_TO_END: u8 = 2;
+
 static INBOX: OnceLock<Sender<()>> = OnceLock::new();
 
 /// Is streamer mode in effect right now?
@@ -66,6 +75,48 @@ pub fn effective(mode: StreamerMode, streaming_app_running: bool) -> bool {
         StreamerMode::On => true,
         StreamerMode::Automatic => streaming_app_running,
     }
+}
+
+/// Automatic's memory of what the process list said.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Follow {
+    running: bool,
+    misses: u8,
+}
+
+impl Follow {
+    /// Takes one look: `Some(found)`, or `None` when the snapshot came back
+    /// empty or failed — then nothing is known and nothing changes. Comes on at
+    /// the first sighting, goes after [`MISSES_TO_END`] looks without one.
+    pub fn step(&mut self, seen: Option<bool>) -> bool {
+        match seen {
+            Some(true) => {
+                self.running = true;
+                self.misses = 0;
+            }
+            Some(false) => {
+                self.misses = self.misses.saturating_add(1);
+                if self.misses >= MISSES_TO_END {
+                    self.running = false;
+                }
+            }
+            None => {}
+        }
+        self.running
+    }
+}
+
+/// Is a streaming program among `exes`? `None` for an empty list: a process
+/// snapshot that failed says nothing.
+pub fn streaming_app_among<'a>(mut exes: impl Iterator<Item = &'a str>) -> Option<bool> {
+    let mut any = false;
+    for exe in exes.by_ref() {
+        any = true;
+        if is_streaming_app(exe) {
+            return Some(true);
+        }
+    }
+    any.then_some(false)
 }
 
 /// What a window is to screen capture.
@@ -94,6 +145,11 @@ pub fn affinity(label: &str, streamer: bool, console_in_capture: bool) -> Affini
 
 /// Gives `window` the affinity it should have now.
 pub fn apply(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let _held = APPLYING.lock();
+    set_affinity(app, window);
+}
+
+fn set_affinity(app: &AppHandle, window: &tauri::WebviewWindow) {
     let console_in_capture = app.state::<AppState>().config_snapshot().console_in_capture;
     let excluded = affinity(window.label(), active(), console_in_capture) == Affinity::Excluded;
     if let Err(err) = window.set_content_protected(excluded) {
@@ -101,12 +157,7 @@ pub fn apply(app: &AppHandle, window: &tauri::WebviewWindow) {
     }
 }
 
-/// [`apply`] to every window there is.
-fn apply_all(app: &AppHandle) {
-    for window in app.webview_windows().values() {
-        apply(app, window);
-    }
-}
+
 
 /// What a friend banner says in streamer mode: `name` becomes "A friend" at
 /// the start of `text`, "a friend" anywhere else. Only whole words count, so a
@@ -116,6 +167,9 @@ pub fn mask_name(text: &str, name: &str) -> String {
     if name.is_empty() {
         return text.to_owned();
     }
+    // A name like "A" or "is" is also a word of the sentence around it: only
+    // where a name stands — at the start or the end — is it the name.
+    let risky = name.chars().count() < 2 || STOPWORDS.iter().any(|w| w.eq_ignore_ascii_case(name));
     let is_word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -124,9 +178,11 @@ pub fn mask_name(text: &str, name: &str) -> String {
         let before = text[..at + found].chars().next_back();
         let after = rest[found + name.len()..].chars().next();
         out.push_str(&rest[..found]);
-        if is_word(before) || is_word(after) {
+        let start = text[..at + found].trim().is_empty();
+        let end = rest[found + name.len()..].trim().is_empty();
+        if is_word(before) || is_word(after) || (risky && !start && !end) {
             out.push_str(name);
-        } else if at + found == 0 {
+        } else if start {
             out.push_str("A friend");
         } else {
             out.push_str("a friend");
@@ -138,6 +194,12 @@ pub fn mask_name(text: &str, name: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// Words a name can collide with in the banner sentences.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "the", "is", "from", "you", "your", "has", "to", "send", "sent", "wants", "playing",
+    "started", "online", "clip", "friend", "request", "accepted",
+];
 
 /// Starts the thread that follows the setting and, for Automatic, the
 /// process list.
@@ -163,12 +225,28 @@ pub fn nudge() {
 }
 
 fn run(app: &AppHandle, inbox: &Receiver<()>) {
+    let mut follow = Follow::default();
     loop {
         if let Some(state) = app.try_state::<AppState>() {
             let mode = state.config.lock().streamer_mode;
-            let running = mode == StreamerMode::Automatic && streaming_app_running();
+            let running = if mode == StreamerMode::Automatic {
+                follow.step(streaming_app_running())
+            } else {
+                follow = Follow::default();
+                false
+            };
             let now = effective(mode, running);
-            if ACTIVE.swap(now, Ordering::SeqCst) != now {
+            let flipped = {
+                let _held = APPLYING.lock();
+                let flipped = ACTIVE.swap(now, Ordering::SeqCst) != now;
+                if flipped {
+                    for window in app.webview_windows().values() {
+                        set_affinity(app, window);
+                    }
+                }
+                flipped
+            };
+            if flipped {
                 changed(app, now);
             }
         }
@@ -179,15 +257,14 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     }
 }
 
-fn streaming_app_running() -> bool {
-    crate::audio::devices::process_tree()
-        .values()
-        .any(|(_, exe)| is_streaming_app(exe))
+fn streaming_app_running() -> Option<bool> {
+    let tree = crate::audio::devices::process_tree();
+    streaming_app_among(tree.values().map(|(_, exe)| exe.as_str()))
 }
 
+/// Everything besides the windows, which were set under the lock.
 fn changed(app: &AppHandle, on: bool) {
     log::info!("streamer mode {}", if on { "on" } else { "off" });
-    apply_all(app);
     crate::presence::suppress(on);
     let _ = app.emit("streamer-mode", on);
 }
@@ -213,6 +290,36 @@ mod tests {
         assert!(!is_streaming_app("obs-browser-page.exe"));
         assert!(!is_streaming_app("Discord.exe"));
         assert!(!is_streaming_app(""));
+    }
+
+    #[test]
+    fn automatic_comes_at_once_and_goes_after_two_misses() {
+        let mut follow = Follow::default();
+        assert!(!follow.step(Some(false)));
+        assert!(follow.step(Some(true)));
+        assert!(follow.step(Some(false)), "one miss is not enough");
+        assert!(follow.step(Some(true)));
+        assert!(follow.step(Some(false)));
+        assert!(!follow.step(Some(false)));
+    }
+
+    #[test]
+    fn a_failed_snapshot_changes_nothing() {
+        let mut follow = Follow::default();
+        assert!(follow.step(Some(true)));
+        for _ in 0..5 {
+            assert!(follow.step(None));
+        }
+        assert!(follow.step(Some(false)));
+        assert!(!follow.step(Some(false)));
+        assert!(!follow.step(None));
+    }
+
+    #[test]
+    fn an_empty_process_list_is_unknown() {
+        assert_eq!(streaming_app_among(std::iter::empty()), None);
+        assert_eq!(streaming_app_among(["explorer.exe", "OBS64.exe"].into_iter()), Some(true));
+        assert_eq!(streaming_app_among(["explorer.exe"].into_iter()), Some(false));
     }
 
     #[test]
@@ -249,6 +356,21 @@ mod tests {
         assert_eq!(mask_name("Al is playing Valorant", "Al"), "A friend is playing Valorant");
         assert_eq!(mask_name("Alan is online", "Al"), "Alan is online");
         assert_eq!(mask_name("Al, Al and Al", "Al"), "A friend, a friend and a friend");
+    }
+
+    #[test]
+    fn short_names_and_common_words_count_only_where_a_name_stands() {
+        assert_eq!(mask_name("A is online", "A"), "A friend is online");
+        assert_eq!(mask_name("Clip from A", "A"), "Clip from a friend");
+        assert_eq!(mask_name("Is wants to send you a clip", "Is"), "A friend wants to send you a clip");
+        assert_eq!(mask_name("Is is online", "is"), "Is is online");
+        assert_eq!(mask_name("Clip from a", "a"), "Clip from a friend");
+        assert_eq!(mask_name("Luca wants to send you a clip", "a"), "Luca wants to send you a clip");
+    }
+
+    #[test]
+    fn leading_space_still_counts_as_the_start() {
+        assert_eq!(mask_name("  Luca is online", "Luca"), "  A friend is online");
     }
 
     #[test]
