@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::config;
-use crate::model::{AudioSource, Clip, ClipTrack, SourceKind, TrackMix};
+use crate::model::{AudioSource, Clip, ClipTrack, ProcessMode, SourceKind, TrackMix};
 use crate::muxer::{command, ffmpeg, run, sanitize};
 
 /// Output label of the mix chain from [`mix_filter`].
@@ -401,7 +401,7 @@ pub fn is_discord(label: &str, sources: &[AudioSource]) -> bool {
     }
     sources.iter().any(|source| {
         source.label.trim().eq_ignore_ascii_case(label)
-            && matches!(&source.kind, SourceKind::Process { exe: Some(exe), .. }
+            && matches!(&source.kind, SourceKind::Process { exe: Some(exe), mode: ProcessMode::Include, .. }
                 if exe.to_ascii_lowercase().starts_with("discord"))
     })
 }
@@ -470,23 +470,75 @@ fn kept_tracks(
     Some(kept)
 }
 
+/// What "Mute Discord voices when sharing" makes of a clip's sound.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WithoutDiscord {
+    /// Nothing to leave out: no separate Discord track — Discord in the main
+    /// mix cannot be taken out of it — or a single track with the mix saved
+    /// into the file.
+    Unchanged,
+    /// The sound mixed again without it.
+    Remix(Remix),
+    /// The clip had tracks of its own, but they are no longer there to mix
+    /// from: its sound goes as it is, Discord perhaps with it. Worth saying.
+    Impossible,
+}
+
 /// The clip's sound without its Discord track (setting "Mute Discord voices
-/// when sharing"). `None` when there is nothing to leave out: no separate
-/// Discord track — Discord in the main mix cannot be taken out of it — or a
-/// mix already saved into the file.
-pub fn without_discord(clip: &Clip, sources: &[AudioSource]) -> Option<Remix> {
+/// when sharing").
+///
+/// The store first. Without one, a clip from before the store still carries
+/// its tracks inside the MP4, and they are pulled out as the editor would.
+/// A store folder without a complete index lost its tracks: nothing can be
+/// told about it, and that is said rather than passed over.
+pub fn without_discord(clip: &Clip, sources: &[AudioSource]) -> WithoutDiscord {
     let edit = clip.edit.as_ref();
     if clip.screenshot || edit.is_some_and(|edit| edit.baked) {
-        return None;
+        return WithoutDiscord::Unchanged;
     }
-    let tracks = stored(&clip.id)?;
+    let tracks = match stored(&clip.id) {
+        Some(tracks) => tracks,
+        None => {
+            let source = crate::edit::source_path(clip);
+            let in_file = tracks_in_file(&source).ok().map(|list| list.len());
+            match unstored(in_file, dir(&clip.id).exists()) {
+                Unstored::Extract => match tracks(&clip.id, &source, false) {
+                    Ok(list) if list.len() > 1 && list.iter().all(|t| t.preview_path.is_some()) => list,
+                    _ => return WithoutDiscord::Impossible,
+                },
+                Unstored::Single => return WithoutDiscord::Unchanged,
+                Unstored::Lost => return WithoutDiscord::Impossible,
+            }
+        }
+    };
     let mix = edit.map(|edit| edit.tracks.as_slice()).unwrap_or(&[]);
-    let tracks = kept_tracks(&tracks, mix, |track| is_discord(&track.label, sources))?;
-    Some(Remix {
-        tracks,
-        start_ms: clip.original.map(|original| original.start_ms).unwrap_or(0),
-        length_ms: clip.duration_ms,
-    })
+    match kept_tracks(&tracks, mix, |track| is_discord(&track.label, sources)) {
+        Some(tracks) => WithoutDiscord::Remix(Remix {
+            tracks,
+            start_ms: clip.original.map(|original| original.start_ms).unwrap_or(0),
+            length_ms: clip.duration_ms,
+        }),
+        None => WithoutDiscord::Unchanged,
+    }
+}
+
+/// A clip with no complete store, by what its file holds.
+#[derive(Debug, PartialEq)]
+enum Unstored {
+    /// Its tracks sit inside the MP4 (from before the store): pull them out.
+    Extract,
+    /// One track: nothing separate was recorded.
+    Single,
+    /// A store that lost its files, or a file that cannot be read.
+    Lost,
+}
+
+fn unstored(tracks_in_file: Option<usize>, store_dir: bool) -> Unstored {
+    match tracks_in_file {
+        Some(n) if n > 1 => Unstored::Extract,
+        Some(_) if !store_dir => Unstored::Single,
+        _ => Unstored::Lost,
+    }
 }
 
 /// Is `file` newer than `source` — and therefore still valid?
@@ -620,6 +672,21 @@ mod tests {
         assert!(is_discord("squad", &[process("Squad", Some("DiscordPTB.exe"))]));
         assert!(!is_discord("Music", &sources));
         assert!(!is_discord("Squad", &[process("Squad", None)]));
+        // Everything but Discord: the track is the rest of the PC, not Discord.
+        let mut all_but = process("Everything else", Some("Discord.exe"));
+        if let SourceKind::Process { mode, .. } = &mut all_but.kind {
+            *mode = crate::model::ProcessMode::Exclude;
+        }
+        assert!(!is_discord("Everything else", &[all_but]));
+    }
+
+    #[test]
+    fn a_clip_without_a_store_is_told_apart_by_its_file() {
+        assert_eq!(unstored(Some(3), false), Unstored::Extract, "tracks inside the MP4, from before the store");
+        assert_eq!(unstored(Some(1), false), Unstored::Single);
+        assert_eq!(unstored(Some(0), false), Unstored::Single);
+        assert_eq!(unstored(Some(1), true), Unstored::Lost, "a store folder whose tracks are gone");
+        assert_eq!(unstored(None, false), Unstored::Lost);
     }
 
     #[test]

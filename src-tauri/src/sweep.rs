@@ -321,7 +321,9 @@ pub fn orphan_stores(root: &Path, known: &HashSet<String>, before: SystemTime) -
 
 /// The Discord copies under `root` last changed before `before`: a clip's
 /// whole folder when everything in it is that old (an empty one by its own
-/// time), otherwise the old copies in it one by one.
+/// time), otherwise the old copies in it one by one. The copies without the
+/// Discord track lie in a folder inside the clip's (`without-discord`) and
+/// are looked at the same way.
 pub fn aged_copies(root: &Path, before: SystemTime) -> Vec<PathBuf> {
     let Ok(folders) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -331,22 +333,46 @@ pub fn aged_copies(root: &Path, before: SystemTime) -> Vec<PathBuf> {
         if !folder.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(folder.path()) else {
-            continue;
-        };
-        let entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
-        let old: Vec<PathBuf> = entries
-            .iter()
-            .filter(|path| modified_before(path, before))
-            .cloned()
-            .collect();
-        if old.len() == entries.len() && (!entries.is_empty() || modified_before(&folder.path(), before)) {
+        let mut inside = Vec::new();
+        if aged_in(&folder.path(), before, true, &mut inside) {
             found.push(folder.path());
         } else {
-            found.extend(old.into_iter().filter(|path| path.is_file()));
+            found.extend(inside);
         }
     }
     found
+}
+
+/// Whether everything in `folder` is older than `before`. When not, the old
+/// things in it go into `found`: copies, and a folder of copies that is old
+/// as a whole. `nested`: a clip's folder, which may hold one more level.
+fn aged_in(folder: &Path, before: SystemTime, nested: bool, found: &mut Vec<PathBuf>) -> bool {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    let (mut old, mut all, mut any) = (Vec::new(), true, false);
+    for entry in entries.flatten() {
+        any = true;
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let mut inside = Vec::new();
+            if nested && aged_in(&path, before, false, &mut inside) {
+                old.push(path);
+            } else {
+                all = false;
+                found.extend(inside);
+            }
+        } else if modified_before(&path, before) {
+            old.push(path);
+        } else {
+            all = false;
+        }
+    }
+    if all && (any || modified_before(folder, before)) {
+        return true;
+    }
+    found.extend(old);
+    false
 }
 
 #[cfg(test)]
@@ -600,6 +626,36 @@ mod tests {
         expected.sort();
         assert_eq!(found, expected, "the old folder whole, an old copy beside a fresh one alone");
         assert!(aged_copies(&root, SystemTime::UNIX_EPOCH).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The copies without the Discord track lie one folder deeper, and age
+    /// out just the same — also beside a fresh copy with the voices.
+    #[test]
+    fn copies_without_discord_age_out_too() {
+        let root = scratch_dir();
+        let week = Duration::from_secs(7 * 24 * 60 * 60);
+        let day = Duration::from_secs(24 * 60 * 60);
+        let clip = root.join("clip");
+        let muted = clip.join("without-discord");
+        std::fs::create_dir_all(&muted).unwrap();
+        let fresh = clip.join("Valorant (19 MB).mp4");
+        let stale = muted.join("Valorant (19 MB).mp4");
+        let newer = muted.join("Valorant (47 MB).mp4");
+        for file in [&fresh, &stale, &newer] {
+            std::fs::write(file, b"x").unwrap();
+        }
+        age(&stale, week + day);
+        age(&newer, week + day);
+        let before = SystemTime::now() - week;
+        assert_eq!(aged_copies(&root, before), vec![muted.clone()], "the old folder of copies whole, the fresh copy kept");
+
+        age(&newer, day);
+        assert_eq!(aged_copies(&root, before), vec![stale.clone()], "an old copy beside a fresh one alone");
+
+        age(&fresh, week + day);
+        age(&newer, week + day);
+        assert_eq!(aged_copies(&root, before), vec![clip], "all of it old: the clip's folder whole");
         let _ = std::fs::remove_dir_all(&root);
     }
 

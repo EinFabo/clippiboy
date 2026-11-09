@@ -52,6 +52,11 @@ pub struct Target {
     pub duration_ms: u64,
     pub width: u32,
     pub height: u32,
+    /// What the clip itself spends, in kbit/s, when it is the picture being
+    /// shrunk: the picture never gets more. A target far above the clip (a
+    /// short clip at Nitro's 475 MB) would otherwise be met with a bitrate the
+    /// clip never had — a bigger file, no better picture.
+    pub source_kbps: Option<u32>,
 }
 
 /// What that works out to.
@@ -120,9 +125,14 @@ pub fn recipe(target: &Target) -> Recipe {
         }
     }
 
+    // A floor, or ffmpeg is handed a bitrate it cannot encode at all.
+    let video_kbps = budget.max(VIDEO_FLOOR_KBPS);
+    let video_kbps = match target.source_kbps {
+        Some(source) => video_kbps.min(source.max(VIDEO_FLOOR_KBPS)),
+        None => video_kbps,
+    };
     Recipe {
-        // A floor, or ffmpeg is handed a bitrate it cannot encode at all.
-        video_kbps: budget.max(VIDEO_FLOOR_KBPS),
+        video_kbps,
         audio_kbps,
         width: size.0,
         height: size.1,
@@ -380,6 +390,7 @@ mod tests {
             duration_ms,
             width,
             height,
+            source_kbps: None,
         }
     }
 
@@ -391,7 +402,7 @@ mod tests {
     /// 720×1280, then 480×852 — never 608×1080 from stepping on the height.
     #[test]
     fn portrait_audio_comes_from_the_clip_file() {
-        let plan = recipe(&Target { bytes: 50 * MB, duration_ms: 20_000, width: PORTRAIT.0, height: PORTRAIT.1 });
+        let plan = recipe(&Target { bytes: 50 * MB, duration_ms: 20_000, width: PORTRAIT.0, height: PORTRAIT.1, source_kbps: None });
         let inputs = PortraitInputs {
             game: Path::new("clean.mp4"),
             game_seek_ms: 5_000,
@@ -414,7 +425,7 @@ mod tests {
 
     #[test]
     fn a_portrait_export_is_never_squashed() {
-        let at = |mb: u64| recipe(&Target { bytes: mb * 1024 * 1024, duration_ms: 30_000, width: 1080, height: 1920 });
+        let at = |mb: u64| recipe(&Target { bytes: mb * 1024 * 1024, duration_ms: 30_000, width: 1080, height: 1920, source_kbps: None });
         let roomy = at(100);
         assert_eq!((roomy.width, roomy.height), (1080, 1920));
         let tighter = at(8);
@@ -642,6 +653,22 @@ mod tests {
             let bits = (plan.video_kbps + plan.audio_kbps) as u64 * ms;
             assert!(bits / 8 <= 10 * MB, "{ms} ms: {} bytes", bits / 8);
         }
+    }
+
+    /// A 30 s clip at Nitro's 475 MB: the budget is over 100 Mbit/s, the clip
+    /// spends 12. The picture gets what the clip had, not what the size allows.
+    #[test]
+    fn the_picture_never_gets_more_than_the_clip_spends() {
+        let roomy = Target { source_kbps: Some(12_000), ..target(475 * MB, 30_000, 1920, 1080) };
+        let plan = recipe(&roomy);
+        assert_eq!(plan.video_kbps, 12_000);
+        assert_eq!(plan.height, 1080);
+        // Tight targets are unchanged by it.
+        let tight = Target { source_kbps: Some(12_000), ..target(10 * MB, 120_000, 1920, 1080) };
+        assert_eq!(recipe(&tight), recipe(&target(10 * MB, 120_000, 1920, 1080)));
+        // And a starved clip still gets the floor.
+        let thin = Target { source_kbps: Some(50), ..target(475 * MB, 30_000, 1920, 1080) };
+        assert_eq!(recipe(&thin).video_kbps, VIDEO_FLOOR_KBPS);
     }
 
     #[test]

@@ -1967,12 +1967,20 @@ pub fn bake_all_cams(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     Ok(freed)
 }
 
+/// Said when "Mute Discord voices when sharing" could not be kept to.
+pub(crate) const DISCORD_KEPT: &str =
+    "Discord voices could not be left out of this clip — its separate tracks are gone, so it goes with its full sound.";
+
 /// What [`shrink`] wrote.
 pub(crate) struct Shrunk {
     pub bytes: u64,
     /// The clip was too long for the target: written at the least bitrate a
     /// picture gets, and larger than asked (`export::Recipe::too_long`).
     pub too_long: bool,
+    /// Discord was to stay out, but the clip's tracks were not there to mix
+    /// without it (`stems::WithoutDiscord::Impossible`): the copy has the
+    /// clip's own sound.
+    pub discord_kept: bool,
 }
 
 /// The work of an export, without its notices: shrink a clip into `output`,
@@ -2026,15 +2034,62 @@ pub(crate) fn shrink(
     // limit it exists to stay under.
     let duration_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(clip.duration_ms);
     let portrait = orientation == crate::export::Orientation::Portrait;
-    let (width, height) = if portrait { crate::export::PORTRAIT } else { (clip.width, clip.height) };
-    let recipe = crate::export::recipe(&crate::export::Target { bytes: target_bytes, duration_ms, width, height });
-    let job = portrait.then(|| portrait_job(&clip, duration_ms, (recipe.width, recipe.height)));
     // Read under the clip's lock, like the clip: a save in progress may still
     // change its tracks and levels.
-    let remix = mute_discord
-        .then(|| stems::without_discord(&clip, &sources))
-        .flatten()
-        .map(|remix| stems::Remix { length_ms: duration_ms, ..remix });
+    let without = if mute_discord {
+        stems::without_discord(&clip, &sources)
+    } else {
+        stems::WithoutDiscord::Unchanged
+    };
+    let discord_kept = without == stems::WithoutDiscord::Impossible;
+    if discord_kept {
+        log::warn!("export of {id}: Discord was to stay out, but the clip's tracks are not there to mix without it");
+    }
+    let remix = match without {
+        stems::WithoutDiscord::Remix(remix) => Some(stems::Remix { length_ms: duration_ms, ..remix }),
+        _ => None,
+    };
+
+    // A clip that already fits goes as it is — re-encoding it at its target
+    // would only make it bigger and worse (a 30 s clip at Nitro's 475 MB). The
+    // picture is copied; the sound too, or mixed again without Discord. Should
+    // the copy come out over the target after all, the encode below runs.
+    let source_bytes = std::fs::metadata(&source).map(|meta| meta.len()).unwrap_or(u64::MAX);
+    if !portrait && source_bytes <= target_bytes {
+        let copied = match &remix {
+            None => crate::links::faststart(&source, &part, "copying the clip"),
+            Some(remix) => crate::links::remix_copy(&source, &part, remix, "copying the clip"),
+        };
+        let written = std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0);
+        match copied {
+            Ok(()) if written > 0 && written <= target_bytes => {
+                if crate::muxer::replace_file(&part, &output).is_err() {
+                    let _ = std::fs::remove_file(&part);
+                    let name = output.file_name().unwrap_or_default().to_string_lossy();
+                    return Err(format!("Could not put the export in place — is \"{name}\" open somewhere right now?"));
+                }
+                on_progress(1.0);
+                return Ok(Shrunk { bytes: written, too_long: false, discord_kept });
+            }
+            other => {
+                log::info!("export of {id}: the copy did not fit ({other:?}, {written} bytes) — encoding instead");
+                let _ = std::fs::remove_file(&part);
+            }
+        }
+    }
+
+    let (width, height) = if portrait { crate::export::PORTRAIT } else { (clip.width, clip.height) };
+    // Never more than the clip itself spends: bits beyond it buy nothing.
+    let source_kbps = (!portrait && source_bytes != u64::MAX)
+        .then(|| (source_bytes.saturating_mul(8) / duration_ms.max(1)).min(u32::MAX as u64) as u32);
+    let recipe = crate::export::recipe(&crate::export::Target {
+        bytes: target_bytes,
+        duration_ms,
+        width,
+        height,
+        source_kbps,
+    });
+    let job = portrait.then(|| portrait_job(&clip, duration_ms, (recipe.width, recipe.height)));
     let build = |encoder| match &job {
         Some(job) => crate::export::portrait_arguments(&job.inputs(), &job.graph, &part, &recipe, duration_ms, encoder, remix.as_ref()),
         None => crate::export::arguments(&source, &part, &recipe, clip.height, encoder, remix.as_ref()),
@@ -2071,7 +2126,7 @@ pub(crate) fn shrink(
         let name = output.file_name().unwrap_or_default().to_string_lossy();
         return Err(format!("Could not put the export in place — is \"{name}\" open somewhere right now?"));
     }
-    Ok(Shrunk { bytes: written, too_long: recipe.too_long })
+    Ok(Shrunk { bytes: written, too_long: recipe.too_long, discord_kept })
 }
 
 /// What a 9:16 export reads and the graph that puts it together.
@@ -2243,6 +2298,9 @@ fn export_to(
         .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
     let written = shrunk.bytes;
     progress(app, id)(1.0);
+    if shrunk.discord_kept {
+        crate::notify(app, "error", DISCORD_KEPT);
+    }
     let (size, asked) = (crate::export::megabytes(written), crate::export::megabytes(target_bytes));
     if written > target_bytes && shrunk.too_long {
         // Said by the core: the console's "Export for Discord" and the Stream

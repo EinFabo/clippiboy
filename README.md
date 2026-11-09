@@ -396,7 +396,7 @@ whatever is set in it the core remembers on the clip:
 * **Save** — writes both into the file: the mix **and** the trim. What lies in
   the folder afterwards is the finished clip, ready to send as is.
 * **Export a copy** — for when "ready to send" runs into a limit. Pick a size
-  (10 MB, 25 MB, whatever), and ClippiBoy works backwards from it: the bitrate
+  (19 MB for Discord, 100 MB, whatever), and ClippiBoy works backwards from it: the bitrate
   comes out of the size and the length, and if that would be too thin for the
   resolution the picture is made smaller rather than muddier. A sharp 720p beats
   a smeared 1080p. The clip itself is not touched — this is a second file.

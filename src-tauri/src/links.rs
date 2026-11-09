@@ -426,11 +426,28 @@ async fn upload(
         .len();
     // "Mute Discord voices when sharing": a separate Discord track stays home,
     // the rest of the sound is mixed again from the clip's tracks.
+    // Off the async thread: a clip from before the track store has its tracks
+    // pulled out of the MP4 first.
     let config = report.app.state::<AppState>().config_snapshot();
     let mute_discord = config.mute_discord_on_share;
-    let remix = mute_discord
-        .then(|| crate::stems::without_discord(clip, &config.sources))
-        .flatten();
+    let without = if mute_discord {
+        let (clip, sources) = (clip.clone(), config.sources);
+        tokio::task::spawn_blocking(move || crate::stems::without_discord(&clip, &sources))
+            .await
+            .unwrap_or(crate::stems::WithoutDiscord::Impossible)
+    } else {
+        crate::stems::WithoutDiscord::Unchanged
+    };
+    let remix = match without {
+        crate::stems::WithoutDiscord::Remix(remix) => Some(remix),
+        crate::stems::WithoutDiscord::Impossible => {
+            // Said, not refused: the link was asked for.
+            log::warn!("share link {}: Discord was to stay out, but the clip's tracks are not there to mix without it", clip.id);
+            crate::notify(&report.app, "error", crate::commands::DISCORD_KEPT);
+            None
+        }
+        crate::stems::WithoutDiscord::Unchanged => None,
+    };
     let temp = crate::config::data_dir()
         .join("temp")
         .join(format!("link-{}.mp4", clip.id));
@@ -450,9 +467,7 @@ async fn upload(
                     // The tracks cut to the file's own length, not the row's.
                     let length_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(remix.length_ms);
                     let remix = crate::stems::Remix { length_ms, ..remix };
-                    let mut command = crate::muxer::ffmpeg();
-                    command.args(remix_args(&source, &temp, &remix));
-                    crate::muxer::run(&mut command, "preparing a clip for its link")
+                    remix_copy(&source, &temp, &remix, "preparing a clip for its link")
                 }
             })
             .await
@@ -570,6 +585,19 @@ fn remix_args(source: &std::path::Path, output: &std::path::Path, remix: &crate:
     args.extend(["-map_metadata", "-1", "-map_chapters", "-1", "-c:v", "copy", "-movflags", "+faststart"].map(String::from));
     args.push(output.to_string_lossy().to_string());
     args
+}
+
+/// The copy [`remix_args`] describes. An export of a clip that already fits
+/// its target makes the same one (`commands::shrink`).
+pub(crate) fn remix_copy(
+    source: &std::path::Path,
+    output: &std::path::Path,
+    remix: &crate::stems::Remix,
+    doing: &str,
+) -> Result<(), String> {
+    let mut command = crate::muxer::ffmpeg();
+    command.args(remix_args(source, output, remix));
+    crate::muxer::run(&mut command, doing)
 }
 
 /// Copy the clip with its index at the front, as [`faststart_args`] says.
