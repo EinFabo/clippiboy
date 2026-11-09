@@ -769,7 +769,7 @@ fn alert(app: &AppHandle, kind: Alert, who: &str, text: &str, avatar: Option<Str
                 text.to_owned(),
                 // Unbound, the console cannot be reached over the game either.
                 (!overlay.console_hotkey.is_empty())
-                    .then(|| format!("{} to answer", overlay.console_hotkey)),
+                    .then(|| format!("{} to answer", crate::bindings::spoken(&overlay.console_hotkey))),
                 None,
                 avatar,
             ),

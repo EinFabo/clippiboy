@@ -48,6 +48,7 @@
     "allow-set-hotkeys",
     "allow-suspend-hotkeys",
     "allow-resume-hotkeys",
+    "allow-capture-input",
     "allow-set-clip-dir",
     "allow-default-clip-dir",
     "allow-add-audio-source",

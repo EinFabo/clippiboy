@@ -16,6 +16,7 @@ import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
 import { SourceTrouble } from "@/components/SourceTrouble";
 import { cn } from "@/lib/cn";
+import { hotkeyLabel } from "@/lib/hotkeyText";
 import { LiveDot } from "@/components/ui/LiveDot";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { useCountUp } from "@/lib/useCountUp";
@@ -161,7 +162,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
               <>
                 {" "}·{" "}
                 <kbd className="rounded-inner border border-line bg-elevated px-1.5 py-0.5">
-                  {config.recordHotkey}
+                  {hotkeyLabel(config.recordHotkey)}
                 </kbd>{" "}
                 stops it
               </>
@@ -237,7 +238,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
               <>
                 No clips yet — start the buffer and press{" "}
                 <kbd className="mx-1 rounded-inner border border-line bg-elevated px-2 py-0.5 text-xs">
-                  {config.saveClipHotkey}
+                  {hotkeyLabel(config.saveClipHotkey)}
                 </kbd>
               </>
             ) : (

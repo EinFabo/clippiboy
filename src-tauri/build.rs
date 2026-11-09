@@ -35,6 +35,7 @@ fn main() {
         "set_hotkeys",
         "suspend_hotkeys",
         "resume_hotkeys",
+        "capture_input",
         "set_clip_dir",
         "default_clip_dir",
         "add_audio_source",

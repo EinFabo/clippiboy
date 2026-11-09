@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod bindings;
 pub mod buffer;
 pub mod camera;
 pub mod camtrack;
@@ -23,6 +24,7 @@ pub mod game;
 pub mod links;
 pub mod share;
 pub mod gpu;
+pub mod inputpoll;
 #[cfg(test)]
 mod grants;
 pub mod logging;
@@ -1190,12 +1192,63 @@ pub fn parse_hotkey(text: &str) -> Result<tauri_plugin_global_shortcut::Shortcut
     Shortcut::from_str(text).map_err(|_| format!("\"{text}\" is not a valid key combination."))
 }
 
-/// Register the global hotkeys (save, screenshot, recording, buffer on/off).
+/// Do what a hotkey is bound to — from a keyboard combination, a mouse button
+/// or a controller combo alike.
+pub fn run_hotkey(app: &tauri::AppHandle, action: inputpoll::Action) {
+    use inputpoll::Action;
+
+    match action {
+        Action::SaveClip => {
+            let app = app.clone();
+            // Muxing takes a moment — do not do it on the hotkey thread.
+            std::thread::spawn(move || {
+                let _ = save_clip_and_notify(&app, None);
+            });
+        }
+        Action::Screenshot => {
+            let app = app.clone();
+            // Reading the picture back off the GPU and writing the PNG takes a
+            // few hundred milliseconds — not on the hotkey thread.
+            std::thread::spawn(move || {
+                let _ = take_screenshot_and_notify(&app);
+            });
+        }
+        Action::Console => {
+            // Showing a window belongs on the main thread; the hotkey
+            // arrives on one of its own.
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || console::toggle(&handle));
+        }
+        Action::Record => {
+            let app = app.clone();
+            // Stopping writes the whole recording out — not on the hotkey thread.
+            std::thread::spawn(move || toggle_recording_and_notify(&app));
+        }
+        Action::ToggleBuffer => {
+            // On a thread of its own, like every other hotkey. Run on the main
+            // thread, starting or stopping the capture froze every window
+            // until it was done — and gave a worker waiting on the main thread
+            // the chance to deadlock.
+            let app = app.clone();
+            std::thread::spawn(move || toggle_buffer_and_notify(&app));
+        }
+    }
+}
+
+/// Register the global hotkeys (save, screenshot, recording, buffer on/off,
+/// console).
 ///
 /// Called at startup and after every change. Hence unregistering everything
 /// first: otherwise the old assignment would stay active as well. An empty
 /// assignment is an unbound action and is skipped.
+///
+/// Keyboard combinations go to `RegisterHotKey`, once per combination even
+/// when it is bound tapped and held; mouse buttons and controller combos go to
+/// the poll thread (`inputpoll`). Either way the press lands in one table that
+/// decides between tap and hold (`bindings`).
 pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
+    use bindings::Trigger;
+    use inputpoll::Action;
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
     let config = app.state::<AppState>().config_snapshot();
@@ -1204,86 +1257,62 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
         log::warn!("could not unregister the old hotkeys: {err}");
     }
 
+    let assigned = [
+        (Action::SaveClip, config.save_clip_hotkey.as_str()),
+        (Action::Screenshot, config.screenshot_hotkey.as_str()),
+        // Unbound while the console is switched off.
+        (
+            Action::Console,
+            if config.console_enabled { config.console_hotkey.as_str() } else { "" },
+        ),
+        (Action::Record, config.record_hotkey.as_str()),
+        (Action::ToggleBuffer, config.toggle_buffer_hotkey.as_str()),
+    ];
+
     let mut failed: Vec<String> = Vec::new();
-
-    let save = config.save_clip_hotkey.clone();
-    if !save.is_empty() {
-        if let Err(err) = shortcuts.on_shortcut(save.as_str(), move |app, _shortcut, event| {
-            if event.state() == ShortcutState::Pressed {
-                let app = app.clone();
-                // Muxing takes a moment — do not do it on the hotkey thread.
-                std::thread::spawn(move || {
-                    let _ = save_clip_and_notify(&app, None);
-                });
+    let mut table = bindings::Table::default();
+    // Each keyboard combination once, by its id, with how it was written.
+    let mut keys: Vec<(u32, String)> = Vec::new();
+    for (action, text) in assigned {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let binding = match bindings::parse(text) {
+            Ok(binding) => binding,
+            Err(err) => {
+                log::warn!("could not register hotkey '{text}': {err}");
+                failed.push(text.to_string());
+                continue;
             }
-        }) {
-            log::warn!("could not register hotkey '{save}': {err}");
-            failed.push(save);
+        };
+        match &binding.trigger {
+            Trigger::Key(combo) => match parse_hotkey(combo) {
+                Ok(shortcut) => {
+                    let id = shortcut.id();
+                    table.bind_key(id, binding.mode, action);
+                    if !keys.iter().any(|(known, _)| *known == id) {
+                        keys.push((id, combo.clone()));
+                    }
+                }
+                Err(err) => {
+                    log::warn!("could not register hotkey '{text}': {err}");
+                    failed.push(text.to_string());
+                }
+            },
+            Trigger::Mouse(button, mods) => table.bind_mouse(*button, *mods, binding.mode, action),
+            Trigger::Pad(mask) => table.bind_pad(*mask, binding.mode, action),
         }
     }
 
-    let shot = config.screenshot_hotkey.clone();
-    if !shot.is_empty() {
-        if let Err(err) = shortcuts.on_shortcut(shot.as_str(), move |app, _shortcut, event| {
-            if event.state() == ShortcutState::Pressed {
-                let app = app.clone();
-                // Reading the picture back off the GPU and writing the PNG takes a
-                // few hundred milliseconds — not on the hotkey thread.
-                std::thread::spawn(move || {
-                    let _ = take_screenshot_and_notify(&app);
-                });
-            }
+    for (id, combo) in keys {
+        if let Err(err) = shortcuts.on_shortcut(combo.as_str(), move |app, _shortcut, event| {
+            inputpoll::key(app, id, event.state() == ShortcutState::Pressed);
         }) {
-            log::warn!("could not register hotkey '{shot}': {err}");
-            failed.push(shot);
+            log::warn!("could not register hotkey '{combo}': {err}");
+            failed.push(combo);
         }
     }
-
-    let console = config.console_hotkey.clone();
-    if config.console_enabled && !console.is_empty() {
-        if let Err(err) = shortcuts.on_shortcut(console.as_str(), move |app, _shortcut, event| {
-            if event.state() == ShortcutState::Pressed {
-                // Showing a window belongs on the main thread; the hotkey
-                // arrives on one of its own.
-                let handle = app.clone();
-                let _ = app.run_on_main_thread(move || console::toggle(&handle));
-            }
-        }) {
-            log::warn!("could not register hotkey '{console}': {err}");
-            failed.push(console);
-        }
-    }
-
-    let record = config.record_hotkey.clone();
-    if !record.is_empty() {
-        if let Err(err) = shortcuts.on_shortcut(record.as_str(), move |app, _shortcut, event| {
-            if event.state() == ShortcutState::Pressed {
-                let app = app.clone();
-                // Stopping writes the whole recording out — not on the hotkey thread.
-                std::thread::spawn(move || toggle_recording_and_notify(&app));
-            }
-        }) {
-            log::warn!("could not register hotkey '{record}': {err}");
-            failed.push(record);
-        }
-    }
-
-    let toggle = config.toggle_buffer_hotkey.clone();
-    if !toggle.is_empty() {
-        if let Err(err) = shortcuts.on_shortcut(toggle.as_str(), move |app, _shortcut, event| {
-            if event.state() == ShortcutState::Pressed {
-                // On a thread of its own, like every other hotkey. The handler
-                // runs on the main thread, and starting or stopping the capture
-                // there froze every window until it was done — and gave a
-                // worker waiting on the main thread the chance to deadlock.
-                let app = app.clone();
-                std::thread::spawn(move || toggle_buffer_and_notify(&app));
-            }
-        }) {
-            log::warn!("could not register hotkey '{toggle}': {err}");
-            failed.push(toggle);
-        }
-    }
+    inputpoll::install(table);
 
     match failed.len() {
         0 => Ok(()),
@@ -1919,6 +1948,7 @@ pub fn run() {
             console::create(handle);
             // Streamer mode: follows its setting and, on Automatic, OBS.
             streamer::start(handle);
+            inputpoll::start(handle);
             friends::start(handle);
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -2006,6 +2036,7 @@ pub fn run() {
             commands::set_hotkeys,
             commands::suspend_hotkeys,
             commands::resume_hotkeys,
+            commands::capture_input,
             commands::set_clip_dir,
             commands::default_clip_dir,
             commands::add_audio_source,

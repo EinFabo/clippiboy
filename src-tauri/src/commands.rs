@@ -238,26 +238,35 @@ fn apply_hotkeys(
     record: String,
     console: String,
 ) -> Result<AppConfig> {
-    let save_clip = save_clip.trim().to_string();
-    let toggle_buffer = toggle_buffer.trim().to_string();
-    let screenshot = screenshot.trim().to_string();
-    let record = record.trim().to_string();
-    let console = console.trim().to_string();
     // Empty means unbound: that action then has no hotkey, only its buttons.
-    let taken = [&save_clip, &toggle_buffer, &screenshot, &record, &console];
-    for one in taken.iter().filter(|one| !one.is_empty()) {
-        crate::parse_hotkey(one)?;
+    // The rest goes in as the core writes it ("hold:mouse5" → "Hold:Mouse5").
+    let mut written = [save_clip, toggle_buffer, screenshot, record, console];
+    let mut parsed: Vec<crate::bindings::Binding> = Vec::new();
+    for one in written.iter_mut() {
+        let text = one.trim();
+        if text.is_empty() {
+            one.clear();
+            continue;
+        }
+        let binding = crate::bindings::parse(text)?;
+        *one = binding.to_string();
+        parsed.push(binding);
     }
     // Every pair, not just the first two — with five assignments the clash can
-    // sit anywhere among them. Two unbound ones do not clash.
-    for (at, one) in taken.iter().enumerate().filter(|(_, one)| !one.is_empty()) {
-        if taken[at + 1..]
-            .iter()
-            .any(|other| one.eq_ignore_ascii_case(other))
-        {
-            return Err("Two hotkeys are on the same key combination.".into());
-        }
+    // sit anywhere among them. Two unbound ones do not clash, and neither do
+    // the same key tapped and held: that is what holding is for.
+    let mut keyed = Vec::new();
+    for binding in parsed {
+        let id = match &binding.trigger {
+            crate::bindings::Trigger::Key(combo) => Some(crate::parse_hotkey(combo)?.id()),
+            _ => None,
+        };
+        keyed.push((binding, id));
     }
+    if crate::bindings::clashes(&keyed) {
+        return Err("Two hotkeys are on the same key combination.".into());
+    }
+    let [save_clip, toggle_buffer, screenshot, record, console] = written;
 
     let previous = state.config_snapshot();
     let mut config = previous.clone();
@@ -286,11 +295,12 @@ fn apply_hotkeys(
 
 /// Suspend the global hotkeys while a new combination is being recorded in the
 /// settings — otherwise pressing the old assignment would save a clip or stop
-/// the buffer along the way.
+/// the buffer along the way. Mouse buttons and controller combos as well.
 #[tauri::command]
 pub fn suspend_hotkeys(app: tauri::AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+    crate::inputpoll::suspend();
     if let Err(err) = app.global_shortcut().unregister_all() {
         log::warn!("could not suspend hotkeys: {err}");
     }
@@ -302,6 +312,15 @@ pub fn resume_hotkeys(app: tauri::AppHandle) {
     if let Err(err) = crate::register_hotkeys(&app) {
         log::warn!("{err}");
     }
+}
+
+/// While the settings record a binding: the next mouse button (middle or
+/// side) or controller combo comes back as `input-captured` — the page sees
+/// neither itself, a controller not at all and a mouse button only over the
+/// window.
+#[tauri::command]
+pub fn capture_input(on: bool) {
+    crate::inputpoll::capture(on);
 }
 
 /// Change the folder new clips land in.

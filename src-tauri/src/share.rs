@@ -707,7 +707,7 @@ fn offered(
     crate::friends::announce_clip(app, &friend_name, &format!("{friend_name} wants to send you {name} ({})", megabytes(total)));
     // Over the game too: the banner cannot be clicked, so it says where the
     // answer goes — the console has the buttons.
-    let hotkey = app.state::<AppState>().config_snapshot().console_hotkey;
+    let hotkey = crate::bindings::spoken(&app.state::<AppState>().config_snapshot().console_hotkey);
     crate::sounds::play(app, crate::model::SoundKind::ClipReceived);
     crate::overlay::show_friend(
         app,

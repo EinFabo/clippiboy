@@ -3,8 +3,10 @@ import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { IconClose } from "@/components/icons";
-import { api, inTauri } from "@/lib/ipc";
+import { Segmented } from "@/components/ui/Controls";
+import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
+import { hotkeyKeys, isHold, isPad, triggerOf, withHold } from "@/lib/hotkeyText";
 import { Row } from "./shared";
 import { StreamDeck } from "./StreamDeck";
 
@@ -26,43 +28,6 @@ export function HotkeysTab() {
       </section>
     </>
   );
-}
-
-/**
- * Display name of a key. What gets stored is always the spelling the core's
- * shortcut parser understands — this only holds what is printed on the keyboard.
- * Keys whose name already matches are left out.
- */
-const KEY_LABELS: Record<string, string> = {
-  Super: "Win",
-  Escape: "Esc",
-  ArrowUp: "↑",
-  ArrowDown: "↓",
-  ArrowLeft: "←",
-  ArrowRight: "→",
-  PageUp: "Page ↑",
-  PageDown: "Page ↓",
-  PrintScreen: "PrtSc",
-  Delete: "Del",
-  Insert: "Ins",
-  CapsLock: "Caps",
-  ScrollLock: "Scroll",
-  NumLock: "Num",
-  NumpadAdd: "Num +",
-  NumpadSubtract: "Num −",
-  NumpadMultiply: "Num ×",
-  NumpadDivide: "Num ÷",
-  NumpadDecimal: "Num .",
-  NumpadEnter: "Num Enter",
-  NumpadEqual: "Num =",
-};
-
-/** What is printed on the key. The numpad follows a pattern, the rest is in
-    {@link KEY_LABELS}; everything else is already called what it is called. */
-export function keyLabel(key: string): string {
-  const numpad = /^Numpad([0-9])$/.exec(key);
-  if (numpad) return `Num ${numpad[1]}`;
-  return KEY_LABELS[key] ?? key;
 }
 
 /**
@@ -133,8 +98,9 @@ const HARMLESS =
  * in a text field too. `F9` or `PrtSc` are harmless, a bare `S` is not.
  */
 function risky(value: string): boolean {
-  if (!value) return false;
-  const keys = value.split("+");
+  if (!value || isPad(value)) return false;
+  const keys = triggerOf(value).split("+");
+  if (/^Mouse[345]$/.test(keys[keys.length - 1] ?? "")) return false;
   if (keys.some((key) => MODIFIERS.includes(key))) return false;
   return !HARMLESS.test(keys[0] ?? "");
 }
@@ -175,6 +141,7 @@ export function Hotkeys() {
       <Card className="divide-y divide-line">
         <Row label="Save clip">
           <HotkeyInput
+            onError={setError}
             value={config.saveClipHotkey}
             busy={saving}
             onChange={(value) =>
@@ -190,6 +157,7 @@ export function Hotkeys() {
         </Row>
         <Row label="Buffer on/off">
           <HotkeyInput
+            onError={setError}
             value={config.toggleBufferHotkey}
             busy={saving}
             onChange={(value) =>
@@ -205,6 +173,7 @@ export function Hotkeys() {
         </Row>
         <Row label="Screenshot" hint="Info: Works without a running buffer">
           <HotkeyInput
+            onError={setError}
             value={config.screenshotHotkey}
             busy={saving}
             onChange={(value) =>
@@ -220,6 +189,7 @@ export function Hotkeys() {
         </Row>
         <Row label="Recording start/stop" hint="Info: Brings the capture up by itself">
           <HotkeyInput
+            onError={setError}
             value={config.recordHotkey}
             busy={saving}
             onChange={(value) =>
@@ -238,6 +208,7 @@ export function Hotkeys() {
           hint="Does not work over games in exclusive fullscreen"
         >
           <HotkeyInput
+            onError={setError}
             value={config.consoleHotkey}
             busy={saving}
             onChange={(value) =>
@@ -253,8 +224,8 @@ export function Hotkeys() {
         </Row>
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
-        Click and press the key you want — with or without Ctrl, Alt, Shift and
-        the Windows key. Escape cancels, × unbinds.
+        Click, then press a key, a mouse button (middle or side) or a controller
+        combo. Escape cancels, × unbinds.
       </p>
       {warn && (
         <p className="mt-2 text-xs text-ink-muted">
@@ -267,21 +238,30 @@ export function Hotkeys() {
   );
 }
 
-/** Shows a combination and records a new one on click. The × beside it
-    unbinds: an empty value is an action without a hotkey. */
+/** Shows a combination and records a new one on click — a key, a mouse
+    button or a controller combo. Tap or hold sits beside it; the × unbinds:
+    an empty value is an action without a hotkey. */
 function HotkeyInput({
   value,
   busy,
   onChange,
+  onError,
 }: {
   value: string;
   busy?: boolean;
   onChange: (value: string) => void;
+  onError: (message: string | null) => void;
 }) {
   const [recording, setRecording] = useState(false);
   // Otherwise the handler would hold the value from when recording started.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  // A new binding keeps tap or hold as it was.
+  const hold = isHold(value);
+  const holdRef = useRef(hold);
+  holdRef.current = hold;
   // Did recording end with a new combination? Then the core re-registers the
   // hotkeys itself, and a `resume` here would get in its way.
   const committed = useRef(false);
@@ -291,7 +271,32 @@ function HotkeyInput({
   useEffect(() => {
     if (!recording) return;
     committed.current = false;
-    if (inTauri) void api.suspendHotkeys();
+    const commit = (next: string) => {
+      // Even an unchanged combination goes through the core: that re-registers
+      // the suspended hotkeys along the way.
+      committed.current = true;
+      stop();
+      onChangeRef.current(withHold(next, holdRef.current));
+    };
+    if (inTauri) {
+      void api.suspendHotkeys();
+      void api.captureInput(true);
+    }
+    // Mouse buttons and controllers come from the core: the page sees a
+    // controller not at all, and a mouse button only over the window.
+    let unlisten: (() => void) | null = null;
+    let gone = false;
+    if (inTauri) {
+      void events
+        .onInputCaptured(({ binding, error }) => {
+          if (binding) commit(binding);
+          else if (error) onErrorRef.current(error);
+        })
+        .then((off) => {
+          if (gone) off();
+          else unlisten = off;
+        });
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       // While recording, every keystroke belongs here — including Tab and Enter,
       // which would otherwise travel through the UI.
@@ -302,34 +307,52 @@ function HotkeyInput({
         return;
       }
       const next = accelerator(event);
-      if (!next) return;
-      // Even an unchanged combination goes through the core: that re-registers
-      // the suspended hotkeys along the way.
-      committed.current = true;
-      stop();
-      onChangeRef.current(next);
+      if (next) commit(next);
+    };
+    // A click elsewhere or a window switch also ends recording — the left or
+    // right button; middle and side buttons are what is being recorded.
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button === 0 || event.button === 2) stop();
     };
     window.addEventListener("keydown", onKeyDown, true);
-    // A click elsewhere or a window switch also ends recording.
-    window.addEventListener("mousedown", stop);
+    window.addEventListener("mousedown", onMouseDown);
     window.addEventListener("blur", stop);
     return () => {
+      gone = true;
+      unlisten?.();
       window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("mousedown", stop);
+      window.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("blur", stop);
-      if (inTauri && !committed.current) void api.resumeHotkeys();
+      if (inTauri) {
+        void api.captureInput(false);
+        if (!committed.current) void api.resumeHotkeys();
+      }
     };
   }, [recording, stop]);
 
   return (
     <div className="flex items-center gap-1">
+      {value && !recording && (
+        <Segmented
+          value={hold ? "hold" : "tap"}
+          options={[
+            { key: "tap", label: "Tap" },
+            { key: "hold", label: "Hold" },
+          ]}
+          onChange={(mode) => {
+            if ((mode === "hold") !== hold) onChange(withHold(value, mode === "hold"));
+          }}
+          disabled={busy}
+          className="mr-1"
+        />
+      )}
       <button
         type="button"
         disabled={busy}
         onMouseDown={(event) => {
           // Without this our own click would end recording again immediately.
           event.stopPropagation();
-          setRecording((on) => !on);
+          if (event.button === 0) setRecording((on) => !on);
         }}
         className={cn(
           "flex items-center gap-1.5 rounded-pill border px-2 py-1.5 transition-colors duration-150",
@@ -340,7 +363,7 @@ function HotkeyInput({
         )}
       >
         {recording ? (
-          <span className="px-1.5 text-[13px] text-accent">Press a key …</span>
+          <span className="px-1.5 text-[13px] text-accent">Press a key or button …</span>
         ) : value ? (
           <Hotkey value={value} />
         ) : (
@@ -368,14 +391,19 @@ function HotkeyInput({
 }
 
 function Hotkey({ value }: { value: string }) {
+  const pad = isPad(value);
   return (
-    <div className="flex gap-1.5">
-      {value.split("+").map((key) => (
+    <div className="flex items-center gap-1.5">
+      {pad && <span className="text-[11px] uppercase tracking-wide text-ink-faint">Pad</span>}
+      {hotkeyKeys(value).map((key) => (
         <kbd
           key={key}
-          className="rounded-inner border border-line bg-elevated px-2.5 py-1 font-mono text-xs text-ink-muted"
+          className={cn(
+            "border border-line bg-elevated px-2.5 py-1 font-mono text-xs text-ink-muted",
+            pad ? "rounded-pill" : "rounded-inner",
+          )}
         >
-          {keyLabel(key)}
+          {key}
         </kbd>
       ))}
     </div>

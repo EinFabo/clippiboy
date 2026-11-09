@@ -89,6 +89,9 @@ export const api = {
   /** Suspend the hotkeys while the settings record a combination. */
   suspendHotkeys: () => invoke<void>("suspend_hotkeys"),
   resumeHotkeys: () => invoke<void>("resume_hotkeys"),
+  /** While recording a binding: the core reports the next mouse button or
+   *  controller combo as `input-captured`. */
+  captureInput: (on: boolean) => invoke<void>("capture_input", { on }),
 
   /** `revision`: of the settings the row was built on — the core merges the
    *  row against that copy, so what changed elsewhere since stays. */
@@ -268,6 +271,11 @@ export const events = {
    * read the list back, a copy could be older than what this window has.
    */
   onClipsChanged: (cb: () => void): Promise<UnlistenFn> => listen("clips-changed", () => cb()),
+  /** A mouse button or controller combo pressed while recording a binding. */
+  onInputCaptured: (
+    cb: (captured: { binding: string | null; error: string | null }) => void,
+  ): Promise<UnlistenFn> =>
+    listen<{ binding: string | null; error: string | null }>("input-captured", (e) => cb(e.payload)),
   /** The core changed the settings by itself (a screen came back under a new name). */
   onConfigChanged: (cb: (config: AppConfig) => void): Promise<UnlistenFn> =>
     listen<AppConfig>("config-changed", (e) => cb(e.payload)),

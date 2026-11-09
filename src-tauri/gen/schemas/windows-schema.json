@@ -381,6 +381,12 @@
           "markdownDescription": "Enables the cam_preview_frame command without any pre-configured scope."
         },
         {
+          "description": "Enables the capture_input command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-capture-input",
+          "markdownDescription": "Enables the capture_input command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_update command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-update",
@@ -973,6 +979,12 @@
           "type": "string",
           "const": "deny-cam-preview-frame",
           "markdownDescription": "Denies the cam_preview_frame command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the capture_input command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-capture-input",
+          "markdownDescription": "Denies the capture_input command without any pre-configured scope."
         },
         {
           "description": "Denies the check_update command without any pre-configured scope.",

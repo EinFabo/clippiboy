@@ -2,6 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Segmented, Select, Slider, Toggle } from "@/components/ui/Controls";
+import { hotkeyLabel } from "@/lib/hotkeyText";
 import { FOLLOW, Row, UNKNOWN, screenChoice } from "./shared";
 
 export function ConsoleTab() {
@@ -30,7 +31,7 @@ export function ConsoleTab() {
           label="Open with the hotkey"
           hint={
             config.consoleHotkey
-              ? `${config.consoleHotkey} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`
+              ? `${hotkeyLabel(config.consoleHotkey)} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`
               : "No hotkey set — assign one under Hotkeys, the console only opens with it."
           }
         >
