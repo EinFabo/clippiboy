@@ -15,7 +15,7 @@
     "sdl": "node scripts/fetch-sdl.mjs",
     "probe": "node scripts/make-probe.mjs",
     "report": "cargo build --release --manifest-path tools/report/Cargo.toml",
-    "app:build": "tauri build"
+    "app:build": "node scripts/fetch-sdl.mjs && tauri build --config src-tauri/tauri.local.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

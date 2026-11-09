@@ -144,7 +144,8 @@ const GUIDE_NOTE =
   "Turn off \u201cOpen Xbox Game Bar using this button\u201d in Windows settings, or Game Bar opens too.";
 
 /** The controllers the core sees, kept current while the page shows them:
-    the core reads them only as long as someone keeps asking. */
+    the core reads them only as long as someone keeps asking — and nobody
+    asks while the window is hidden (in the tray, minimised). */
 function useControllers(): Controllers | null {
   const [controllers, setControllers] = useState<Controllers | null>(
     inTauri ? null : { ready: true, unavailable: null, pads: [] },
@@ -161,19 +162,24 @@ function useControllers(): Controllers | null {
         if (gone) off();
         else unlisten = off;
       });
-    const ask = () =>
+    const ask = () => {
+      if (document.visibilityState !== "visible") return;
       api
         .watchControllers()
         .then((next) => {
           if (!gone) setControllers(next);
         })
         .catch(() => {});
-    void ask();
+    };
+    ask();
     const timer = window.setInterval(ask, 3000);
+    // Back from the tray: ask at once rather than at the next tick.
+    document.addEventListener("visibilitychange", ask);
     return () => {
       gone = true;
       unlisten?.();
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", ask);
     };
   }, []);
   return controllers;

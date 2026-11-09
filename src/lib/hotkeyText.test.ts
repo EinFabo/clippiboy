@@ -57,6 +57,7 @@ test("buttons carry the names printed on the pad in use", () => {
   assert.equal(padLabel("A", "nintendo"), "B");
   assert.equal(hotkeyLabel("Pad:Misc", "nintendo"), "Capture");
   assert.equal(padLabel("Guide", "nintendo"), "Home");
+  assert.equal(hotkeyLabel("Pad:East+West", "gamecube"), "X + B");
   // What a family has no name of its own for, Xbox's name stands in.
   assert.equal(padLabel("Touchpad", "nintendo"), "Touchpad");
   assert.equal(padLabel("LS", "nintendo"), "LS");

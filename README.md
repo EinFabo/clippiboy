@@ -726,9 +726,11 @@ workflow prints into `tools.rs`.
 
 Controllers are read through SDL3 (its gamepad part only), loaded at run time
 from `SDL3.dll` beside the exe. `npm run sdl` fetches the pinned official
-build into `dist-sdl/`, where a dev build finds it; the release workflow puts it
-into the installer (`src-tauri/tauri.release.conf.json`). Without it the app
-runs as before, only without controllers, and `cargo test` does not need it.
+build into `dist-sdl/`, where a dev build finds it; `npm run app:build` fetches
+it and puts it into the local installer (`src-tauri/tauri.local.conf.json`),
+the release workflow into the real one (`src-tauri/tauri.release.conf.json`).
+Without it the app runs as before, only without controllers, and `cargo test`
+does not need it.
 
 The UI alone runs anywhere, with mock data instead of a core:
 

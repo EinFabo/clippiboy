@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../dist-sdl/SDL3.dll": "SDL3.dll",
+      "../dist-sdl/SDL3-LICENSE.txt": "licenses/SDL3-LICENSE.txt"
+    }
+  }
+}

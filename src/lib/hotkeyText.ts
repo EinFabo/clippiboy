@@ -73,7 +73,7 @@ export function isPad(value: string): boolean {
 }
 
 /** Whose names a controller's buttons carry. */
-export type PadFamily = "xbox" | "playstation" | "nintendo";
+export type PadFamily = "xbox" | "playstation" | "nintendo" | "gamecube";
 
 /** Other spellings the core reads, by the position they stand for — the Xbox
     names older bindings were written in among them. Lower case. */
@@ -144,6 +144,16 @@ const PAD_LABELS: Record<PadFamily, Record<string, string>> = {
     RB: "R",
     LT: "ZL",
     RT: "ZR",
+  },
+  // Face buttons A (bottom), X (right), B (left), Y (top).
+  gamecube: {
+    South: "A",
+    East: "X",
+    West: "B",
+    North: "Y",
+    Start: "Start",
+    LT: "L",
+    RT: "R",
   },
 };
 

@@ -47,9 +47,12 @@ const TICK: Duration = Duration::from_millis(10);
 /// How often the list of controllers is looked at for pads that came or went.
 /// SDL notices them itself; this only picks up what it found.
 const SCAN_MS: u64 = 500;
-/// SDL stays up this long after the last need of a controller — recording a
-/// binding and then the new hotkeys arriving should not start it twice.
-const PAD_IDLE_MS: u64 = 15_000;
+/// SDL stays up this long after the last need of a controller. While a
+/// controller binding exists or the console is open it is needed all along;
+/// this is for the settings' list and recording a binding — every start
+/// opens the pads anew, and opening writes to some (see `sdl`), so it should
+/// not come and go.
+const PAD_IDLE_MS: u64 = 5 * 60_000;
 /// After SDL failed to start, try again no sooner than this.
 const PAD_RETRY_MS: u64 = 30_000;
 /// A settings page showing the controllers asks again within this; after it,
@@ -109,7 +112,8 @@ pub struct Controllers {
 #[serde(rename_all = "camelCase")]
 pub struct Controller {
     pub name: String,
-    /// `xbox`, `playstation` or `nintendo` — whose names its buttons carry.
+    /// `xbox`, `playstation`, `nintendo` or `gamecube` — whose names its
+    /// buttons carry.
     pub family: &'static str,
 }
 
@@ -198,6 +202,7 @@ pub fn family() -> Family {
     match FAMILY.load(Ordering::Relaxed) {
         1 => Family::PlayStation,
         2 => Family::Nintendo,
+        3 => Family::GameCube,
         _ => Family::Xbox,
     }
 }
@@ -596,6 +601,7 @@ impl Pads {
             match self.open.first().map(|open| open.family) {
                 Some(Family::PlayStation) => 1,
                 Some(Family::Nintendo) => 2,
+                Some(Family::GameCube) => 3,
                 _ => 0,
             },
             Ordering::Relaxed,

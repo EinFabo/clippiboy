@@ -19,7 +19,8 @@ export function entries(buf) {
   for (let i = 0; i < count; i++) {
     if (buf.readUInt32LE(at) !== 0x02014b50) throw new Error("ZIP entry damaged");
     const method = buf.readUInt16LE(at + 10);
-    const size = buf.readUInt32LE(at + 24);
+    // The compressed size: what `extract` reads from the file.
+    const size = buf.readUInt32LE(at + 20);
     const nameLen = buf.readUInt16LE(at + 28);
     const extraLen = buf.readUInt16LE(at + 30);
     const commentLen = buf.readUInt16LE(at + 32);

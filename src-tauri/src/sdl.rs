@@ -14,25 +14,58 @@
 //! missing — and `cargo test` needs neither the DLL nor a C build. zlib
 //! licence.
 //!
-//! SDL writes to some pads by default: rumble and lights on PlayStation pads
-//! after switching them to "enhanced reports" (which, once on, breaks
-//! DirectInput for other programs until the pad is switched off), player
-//! LEDs. The hints in [`Sdl::init`] keep all of that off; what remains is what
-//! SDL needs to read a pad at all.
+//! SDL writes to some pads, and not all of it can be switched off (checked
+//! against the 3.4.20 sources):
+//! - Over Bluetooth, PlayStation pads stay in the report mode they are in:
+//!   with `SDL_JOYSTICK_ENHANCED_REPORTS=auto` SDL switches to enhanced
+//!   reports (rumble, lightbar, gyro — and, once on, no DirectInput for other
+//!   programs until the pad is switched off) only when the application asks
+//!   for rumble, LEDs or sensors, which ClippiBoy never does. If Steam already
+//!   switched it, it stays switched.
+//! - Over USB, SDL always puts a DS4 or DualSense into enhanced reports and
+//!   sets the lightbar and player lights to the player number, whatever the
+//!   hints say — as Steam does. The only way round it would be to drop SDL's
+//!   PlayStation driver, and then those pads could not be read at all.
+//! - A Switch Pro Controller or Joy-Con gets the USB handshake, vibration
+//!   enabled and its player lights set on opening, and on closing its simple
+//!   report mode back if it had it before. `auto` leaves a Bluetooth pad in
+//!   the full report mode Steam may have put it in, so Steam keeps its gyro.
+//! - Player lights are left at SDL's default (the player number, as Steam
+//!   sets them) rather than switched off: both are writes, and two programs
+//!   writing the same pattern do not fight. Home LEDs SDL leaves alone.
+//!
+//! The pads are opened once and stay open while SDL is up, which is as long as
+//! a controller binding exists or the console is open (`inputpoll`).
 //!
 //! Everything here is called from the poll thread (`inputpoll`) only.
 
 /// What kind of pad — for the names on its buttons.
 pub use crate::bindings::Family;
 
-/// SDL's `SDL_GamepadType` as a [`Family`].
-pub fn family_of_type(kind: i32) -> Family {
+/// `SDL_GamepadButtonLabel` values of the face buttons.
+const LABEL_A: i32 = 1;
+const LABEL_B: i32 = 2;
+const LABEL_X: i32 = 3;
+const LABEL_CROSS: i32 = 5;
+
+/// A pad as a [`Family`]: by SDL's `SDL_GamepadType`, and where that says
+/// nothing (unknown, standard), by the labels SDL gives its bottom (`south`)
+/// and right (`east`) face buttons.
+pub fn family_of(kind: i32, south: i32, east: i32) -> Family {
     match kind {
         // PS3, PS4, PS5
         4..=6 => Family::PlayStation,
-        // Switch Pro, Joy-Con left/right/pair, GameCube
-        7..=11 => Family::Nintendo,
-        // Xbox 360, Xbox One, standard, Steam, unknown: Xbox's names.
+        // Switch Pro, Joy-Con left/right/pair
+        7..=10 => Family::Nintendo,
+        11 => Family::GameCube,
+        // Unknown, standard: the face buttons tell.
+        0 | 1 => match (south, east) {
+            (LABEL_CROSS, _) => Family::PlayStation,
+            (LABEL_B, LABEL_A) => Family::Nintendo,
+            (LABEL_A, LABEL_X) => Family::GameCube,
+            _ => Family::Xbox,
+        },
+        // Xbox 360, Xbox One, Steam: Xbox's names.
         _ => Family::Xbox,
     }
 }
@@ -64,6 +97,8 @@ mod imp {
     const HINT_OVERRIDE: c_int = 2;
     /// SDL 3.2.0 — every hint below exists from there on.
     const MIN_VERSION: c_int = 3_002_000;
+    const BUTTON_SOUTH: c_int = 0;
+    const BUTTON_EAST: c_int = 1;
     const AXIS_LEFTX: c_int = 0;
     const AXIS_LEFTY: c_int = 1;
     const AXIS_LEFT_TRIGGER: c_int = 4;
@@ -71,24 +106,23 @@ mod imp {
 
     /// Set before `SDL_Init`, each over any environment variable of the same
     /// name.
-    const HINTS: [(&str, &str); 14] = [
+    const HINTS: [(&str, &str); 13] = [
         // No window, no focus: read the pads whatever is in front.
         ("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1"),
-        // Never switch a PlayStation pad into enhanced reports (rumble, LEDs,
-        // gyro): it stays that way until power-off and breaks DirectInput for
-        // every other program. Switch pads stay in their simple report over
-        // Bluetooth too; over USB SDL needs the full one.
-        ("SDL_JOYSTICK_ENHANCED_REPORTS", "0"),
-        // Player LEDs stay as they are. The Home LEDs SDL leaves alone unless
-        // asked, so they are not named here.
-        ("SDL_JOYSTICK_HIDAPI_PS5_PLAYER_LED", "0"),
-        ("SDL_JOYSTICK_HIDAPI_SWITCH_PLAYER_LED", "0"),
-        ("SDL_JOYSTICK_HIDAPI_XBOX_360_PLAYER_LED", "0"),
-        ("SDL_JOYSTICK_HIDAPI_WII_PLAYER_LED", "0"),
-        // No pads hidden or let through by a list from outside (Steam sets
-        // these for the games it starts).
+        // Enhanced reports only when the application asks for rumble, LEDs or
+        // sensors — never, here. "0" would be worse: it forces Switch pads
+        // over Bluetooth into the simple report, taking Steam's gyro away.
+        // See the module notes for what SDL writes regardless.
+        ("SDL_JOYSTICK_ENHANCED_REPORTS", "auto"),
+        // No pads hidden, let through or mapped by a list from outside (Steam
+        // sets these for the programs it starts).
         ("SDL_GAMECONTROLLER_IGNORE_DEVICES", ""),
         ("SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", ""),
+        ("SDL_GAMECONTROLLERCONFIG", ""),
+        ("SDL_GAMECONTROLLERCONFIG_FILE", ""),
+        // DirectInput opens a pad exclusively; XInput and SDL's HID drivers
+        // cover the pads meant here, and a game keeps its DirectInput pad.
+        ("SDL_JOYSTICK_DIRECTINPUT", "0"),
         // Raw input and Windows.Gaming.Input only work for a focused window;
         // both are off by default already — and stay off.
         ("SDL_JOYSTICK_RAWINPUT", "0"),
@@ -123,6 +157,7 @@ mod imp {
     type GetAxis = unsafe extern "C" fn(*mut c_void, c_int) -> i16;
     type GetName = unsafe extern "C" fn(*mut c_void) -> *const c_char;
     type GetType = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type GetLabel = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
 
     /// The SDL functions used, out of the loaded DLL. Never unloaded.
     pub struct Sdl {
@@ -143,6 +178,7 @@ mod imp {
         axis: GetAxis,
         name: GetName,
         kind: GetType,
+        label: GetLabel,
     }
 
     /// An open pad. Lives on the poll thread only — the raw pointer keeps it
@@ -182,6 +218,10 @@ mod imp {
         /// off: the state is read directly, and nothing piles up in a queue
         /// no one empties.
         pub fn init(&self) -> Result<(), String> {
+            // Not a hint: SDL reads it straight from the environment. Steam
+            // sets it for the programs it starts, and with it SDL would show
+            // Steam's virtual pads (28DE:11FF) beside the real ones.
+            std::env::remove_var("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD");
             for (name, value) in HINTS {
                 let (name, value) = (cstring(name), cstring(value));
                 unsafe { (self.set_hint)(name.as_ptr(), value.as_ptr(), HINT_OVERRIDE) };
@@ -282,7 +322,14 @@ mod imp {
         }
 
         pub fn family(&self, pad: &Gamepad) -> Family {
-            super::family_of_type(unsafe { (self.kind)(pad.0.as_ptr()) })
+            let ptr = pad.0.as_ptr();
+            unsafe {
+                super::family_of(
+                    (self.kind)(ptr),
+                    (self.label)(ptr, BUTTON_SOUTH),
+                    (self.label)(ptr, BUTTON_EAST),
+                )
+            }
         }
     }
 
@@ -351,6 +398,7 @@ mod imp {
             axis: symbol!("SDL_GetGamepadAxis"),
             name: symbol!("SDL_GetGamepadName"),
             kind: symbol!("SDL_GetGamepadType"),
+            label: symbol!("SDL_GetGamepadButtonLabel"),
         })
     }
 }
@@ -407,12 +455,22 @@ mod tests {
 
     #[test]
     fn sdl_gamepad_types_map_to_the_names_printed_on_the_pad() {
-        assert_eq!(family_of_type(0), Family::Xbox); // unknown
-        assert_eq!(family_of_type(3), Family::Xbox); // Xbox One
-        assert_eq!(family_of_type(6), Family::PlayStation); // PS5
-        assert_eq!(family_of_type(7), Family::Nintendo); // Switch Pro
-        assert_eq!(family_of_type(10), Family::Nintendo); // Joy-Con pair
-        assert_eq!(family_of_type(12), Family::Xbox); // Steam
+        let ab = (LABEL_A, LABEL_B);
+        assert_eq!(family_of(0, ab.0, ab.1), Family::Xbox); // unknown
+        assert_eq!(family_of(3, ab.0, ab.1), Family::Xbox); // Xbox One
+        assert_eq!(family_of(6, LABEL_CROSS, 6), Family::PlayStation); // PS5
+        assert_eq!(family_of(7, LABEL_B, LABEL_A), Family::Nintendo); // Switch Pro
+        assert_eq!(family_of(10, LABEL_B, LABEL_A), Family::Nintendo); // Joy-Con pair
+        assert_eq!(family_of(11, LABEL_A, LABEL_X), Family::GameCube);
+        assert_eq!(family_of(12, ab.0, ab.1), Family::Xbox); // Steam
+    }
+
+    #[test]
+    fn a_pad_of_unknown_type_is_told_by_its_face_buttons() {
+        assert_eq!(family_of(1, LABEL_CROSS, 6), Family::PlayStation);
+        assert_eq!(family_of(1, LABEL_B, LABEL_A), Family::Nintendo);
+        assert_eq!(family_of(0, LABEL_A, LABEL_X), Family::GameCube);
+        assert_eq!(family_of(0, 0, 0), Family::Xbox);
     }
 
     /// Against the real `SDL3.dll` (`npm run sdl`): loads, starts, lists the

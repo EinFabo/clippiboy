@@ -230,6 +230,8 @@ pub enum Family {
     Xbox,
     PlayStation,
     Nintendo,
+    /// Face buttons A (bottom), X (right), B (left), Y (top).
+    GameCube,
 }
 
 impl Family {
@@ -238,6 +240,7 @@ impl Family {
             Family::Xbox => "xbox",
             Family::PlayStation => "playstation",
             Family::Nintendo => "nintendo",
+            Family::GameCube => "gamecube",
         }
     }
 
@@ -290,6 +293,16 @@ impl Family {
                 RB => "R",
                 LT => "ZL",
                 RT => "ZR",
+                _ => xbox,
+            },
+            Family::GameCube => match bit {
+                SOUTH => "A",
+                EAST => "X",
+                WEST => "B",
+                NORTH => "Y",
+                START => "Start",
+                LT => "L",
+                RT => "R",
                 _ => xbox,
             },
         }
@@ -1160,6 +1173,7 @@ mod tests {
         assert_eq!(spoken_for("Pad:East", Family::Nintendo), "A");
         assert_eq!(spoken_for("Hold:Pad:Misc", Family::Nintendo), "Hold Capture");
         assert_eq!(spoken_for("Pad:Guide", Family::Nintendo), "Home");
+        assert_eq!(spoken_for("Pad:East+West", Family::GameCube), "X+B");
     }
 
     #[test]

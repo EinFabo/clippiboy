@@ -780,7 +780,7 @@ export type HotkeyField =
 export interface Controller {
   name: string;
   /** Whose names its buttons carry. */
-  family: "xbox" | "playstation" | "nintendo";
+  family: "xbox" | "playstation" | "nintendo" | "gamecube";
 }
 
 /** The controllers for the settings. */
