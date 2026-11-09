@@ -6,6 +6,7 @@ import { IconClose } from "@/components/icons";
 import { Segmented } from "@/components/ui/Controls";
 import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
+import type { HotkeyField } from "@/lib/types";
 import { hotkeyKeys, isHold, isPad, triggerOf, withHold } from "@/lib/hotkeyText";
 import { Row } from "./shared";
 import { StreamDeck } from "./StreamDeck";
@@ -105,123 +106,78 @@ function risky(value: string): boolean {
   return !HARMLESS.test(keys[0] ?? "");
 }
 
+/** One row per action: the label, its first binding and its second. */
+const ROWS: Array<{ label: string; hint?: string; first: HotkeyField; second: HotkeyField }> = [
+  { label: "Save clip", first: "saveClipHotkey", second: "saveClipHotkeyAlt" },
+  { label: "Buffer on/off", first: "toggleBufferHotkey", second: "toggleBufferHotkeyAlt" },
+  {
+    label: "Screenshot",
+    hint: "Info: Works without a running buffer",
+    first: "screenshotHotkey",
+    second: "screenshotHotkeyAlt",
+  },
+  {
+    label: "Recording start/stop",
+    hint: "Info: Brings the capture up by itself",
+    first: "recordHotkey",
+    second: "recordHotkeyAlt",
+  },
+  {
+    label: "Console over the game",
+    hint: "Does not work over games in exclusive fullscreen",
+    first: "consoleHotkey",
+    second: "consoleHotkeyAlt",
+  },
+];
+
 export function Hotkeys() {
   const { config, setHotkeys } = useEngine(
     useShallow((s) => ({ config: s.config, setHotkeys: s.setHotkeys })),
   );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const warn =
-    risky(config.saveClipHotkey) ||
-    risky(config.toggleBufferHotkey) ||
-    risky(config.screenshotHotkey) ||
-    risky(config.recordHotkey) ||
-    risky(config.consoleHotkey);
+  // One field records at a time — starting another ends the first.
+  const [recording, setRecording] = useState<HotkeyField | null>(null);
+  const warn = ROWS.some(({ first, second }) => risky(config[first]) || risky(config[second]));
 
-  const apply = async (
-    saveClip: string,
-    toggleBuffer: string,
-    screenshot: string,
-    record: string,
-    consoleKey: string,
-  ) => {
+  const apply = async (field: HotkeyField, value: string) => {
     setSaving(true);
     setError(null);
     try {
-      await setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey);
+      await setHotkeys({ [field]: value });
     } catch (err) {
       setError(String(err));
+      // The core puts the hotkeys back itself after a rejected set; this is
+      // for a call that never got there.
+      if (inTauri) void api.resumeHotkeys();
     } finally {
       setSaving(false);
     }
   };
 
+  const input = (field: HotkeyField, second: boolean) => (
+    <HotkeyInput
+      value={config[field]}
+      second={second}
+      busy={saving}
+      recording={recording === field}
+      onRecording={(on) => setRecording((now) => (on ? field : now === field ? null : now))}
+      onError={setError}
+      onChange={(value) => apply(field, value)}
+    />
+  );
+
   return (
     <>
       <Card className="divide-y divide-line">
-        <Row label="Save clip">
-          <HotkeyInput
-            onError={setError}
-            value={config.saveClipHotkey}
-            busy={saving}
-            onChange={(value) =>
-              apply(
-                value,
-                config.toggleBufferHotkey,
-                config.screenshotHotkey,
-                config.recordHotkey,
-                config.consoleHotkey,
-              )
-            }
-          />
-        </Row>
-        <Row label="Buffer on/off">
-          <HotkeyInput
-            onError={setError}
-            value={config.toggleBufferHotkey}
-            busy={saving}
-            onChange={(value) =>
-              apply(
-                config.saveClipHotkey,
-                value,
-                config.screenshotHotkey,
-                config.recordHotkey,
-                config.consoleHotkey,
-              )
-            }
-          />
-        </Row>
-        <Row label="Screenshot" hint="Info: Works without a running buffer">
-          <HotkeyInput
-            onError={setError}
-            value={config.screenshotHotkey}
-            busy={saving}
-            onChange={(value) =>
-              apply(
-                config.saveClipHotkey,
-                config.toggleBufferHotkey,
-                value,
-                config.recordHotkey,
-                config.consoleHotkey,
-              )
-            }
-          />
-        </Row>
-        <Row label="Recording start/stop" hint="Info: Brings the capture up by itself">
-          <HotkeyInput
-            onError={setError}
-            value={config.recordHotkey}
-            busy={saving}
-            onChange={(value) =>
-              apply(
-                config.saveClipHotkey,
-                config.toggleBufferHotkey,
-                config.screenshotHotkey,
-                value,
-                config.consoleHotkey,
-              )
-            }
-          />
-        </Row>
-        <Row
-          label="Console over the game"
-          hint="Does not work over games in exclusive fullscreen"
-        >
-          <HotkeyInput
-            onError={setError}
-            value={config.consoleHotkey}
-            busy={saving}
-            onChange={(value) =>
-              apply(
-                config.saveClipHotkey,
-                config.toggleBufferHotkey,
-                config.screenshotHotkey,
-                config.recordHotkey,
-                value,
-              )
-            }
-          />
-        </Row>
+        {ROWS.map(({ label, hint, first, second }) => (
+          <Row key={first} label={label} hint={hint}>
+            <div className="flex flex-col items-end gap-1">
+              {input(first, false)}
+              {input(second, true)}
+            </div>
+          </Row>
+        ))}
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
         Click, then press a key, a mouse button (middle or side) or a controller
@@ -243,16 +199,24 @@ export function Hotkeys() {
     an empty value is an action without a hotkey. */
 function HotkeyInput({
   value,
+  second,
   busy,
+  recording,
+  onRecording,
   onChange,
   onError,
 }: {
   value: string;
+  /** The second binding: smaller, and "Add" while empty. */
+  second?: boolean;
   busy?: boolean;
+  recording: boolean;
+  onRecording: (on: boolean) => void;
   onChange: (value: string) => void;
   onError: (message: string | null) => void;
 }) {
-  const [recording, setRecording] = useState(false);
+  const onRecordingRef = useRef(onRecording);
+  onRecordingRef.current = onRecording;
   // Otherwise the handler would hold the value from when recording started.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -266,7 +230,7 @@ function HotkeyInput({
   // hotkeys itself, and a `resume` here would get in its way.
   const committed = useRef(false);
 
-  const stop = useCallback(() => setRecording(false), []);
+  const stop = useCallback(() => onRecordingRef.current(false), []);
 
   useEffect(() => {
     if (!recording) return;
@@ -291,6 +255,12 @@ function HotkeyInput({
         .onInputCaptured(({ binding, error }) => {
           if (binding) commit(binding);
           else if (error) onErrorRef.current(error);
+          // Neither: the core ended recording (timed out, focus gone) and
+          // has put the hotkeys back already.
+          else {
+            committed.current = true;
+            stop();
+          }
         })
         .then((off) => {
           if (gone) off();
@@ -313,6 +283,8 @@ function HotkeyInput({
     // right button; middle and side buttons are what is being recorded.
     const onMouseDown = (event: MouseEvent) => {
       if (event.button === 0 || event.button === 2) stop();
+      // A middle click would start the WebView's autoscroll on top.
+      else if (event.button === 1) event.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("mousedown", onMouseDown);
@@ -352,10 +324,11 @@ function HotkeyInput({
         onMouseDown={(event) => {
           // Without this our own click would end recording again immediately.
           event.stopPropagation();
-          if (event.button === 0) setRecording((on) => !on);
+          if (event.button === 0) onRecording(!recording);
         }}
         className={cn(
-          "flex items-center gap-1.5 rounded-pill border px-2 py-1.5 transition-colors duration-150",
+          "flex items-center gap-1.5 rounded-pill border transition-colors duration-150",
+          second ? "px-1.5 py-1" : "px-2 py-1.5",
           "disabled:pointer-events-none disabled:opacity-40",
           recording
             ? "border-accent bg-accent/10"
@@ -365,7 +338,9 @@ function HotkeyInput({
         {recording ? (
           <span className="px-1.5 text-[13px] text-accent">Press a key or button …</span>
         ) : value ? (
-          <Hotkey value={value} />
+          <Hotkey value={value} small={second} />
+        ) : second ? (
+          <span className="px-1 text-xs text-ink-faint">+ Add</span>
         ) : (
           <span className="px-1.5 text-[13px] text-ink-faint">Not set</span>
         )}
@@ -390,7 +365,7 @@ function HotkeyInput({
   );
 }
 
-function Hotkey({ value }: { value: string }) {
+function Hotkey({ value, small }: { value: string; small?: boolean }) {
   const pad = isPad(value);
   return (
     <div className="flex items-center gap-1.5">
@@ -399,7 +374,8 @@ function Hotkey({ value }: { value: string }) {
         <kbd
           key={key}
           className={cn(
-            "border border-line bg-elevated px-2.5 py-1 font-mono text-xs text-ink-muted",
+            "border border-line bg-elevated font-mono text-ink-muted",
+            small ? "px-2 py-0.5 text-[11px]" : "px-2.5 py-1 text-xs",
             pad ? "rounded-pill" : "rounded-inner",
           )}
         >

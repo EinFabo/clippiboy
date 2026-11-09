@@ -6,6 +6,7 @@ import { api, events, inTauri } from "./lib/ipc";
 import { toast } from "./lib/toastBus";
 import * as mock from "./lib/mock";
 import type {
+  HotkeyField,
   AppConfig,
   AudioDevice,
   CameraDevice,
@@ -116,14 +117,8 @@ interface EngineState {
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  /** All five hotkeys at once — the core only accepts them together. */
-  setHotkeys: (
-    saveClip: string,
-    toggleBuffer: string,
-    screenshot: string,
-    record: string,
-    consoleKey: string,
-  ) => Promise<void>;
+  /** Change some hotkeys; all ten go to the core together, it only accepts them so. */
+  setHotkeys: (changes: Partial<Pick<AppConfig, HotkeyField>>) => Promise<void>;
   setClipDir: (dir: string) => Promise<void>;
   /** New token for the Stream Deck port; the old one stops working at once. */
   regenerateControlToken: () => Promise<void>;
@@ -531,18 +526,9 @@ export const useEngine = create<EngineState>((set, get) => ({
     });
   },
 
-  async setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey) {
+  async setHotkeys(changes) {
     if (!inTauri) {
-      set((st) => ({
-        config: {
-          ...st.config,
-          saveClipHotkey: saveClip,
-          toggleBufferHotkey: toggleBuffer,
-          screenshotHotkey: screenshot,
-          recordHotkey: record,
-          consoleHotkey: consoleKey,
-        },
-      }));
+      set((st) => ({ config: { ...st.config, ...changes } }));
       return;
     }
     if (!(await settingsReadable(set))) {
@@ -550,7 +536,22 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
     // Deliberately without an optimistic update: if registering fails, the old
     // assignment should stand, and the error belongs on that row.
-    outbox.offer(await api.setHotkeys(saveClip, toggleBuffer, screenshot, record, consoleKey));
+    // All ten go together: the core checks them against each other.
+    const next = { ...get().config, ...changes };
+    outbox.offer(
+      await api.setHotkeys({
+        saveClip: next.saveClipHotkey,
+        toggleBuffer: next.toggleBufferHotkey,
+        screenshot: next.screenshotHotkey,
+        record: next.recordHotkey,
+        console: next.consoleHotkey,
+        saveClipAlt: next.saveClipHotkeyAlt,
+        toggleBufferAlt: next.toggleBufferHotkeyAlt,
+        screenshotAlt: next.screenshotHotkeyAlt,
+        recordAlt: next.recordHotkeyAlt,
+        consoleAlt: next.consoleHotkeyAlt,
+      }),
+    );
   },
 
   async regenerateControlToken() {

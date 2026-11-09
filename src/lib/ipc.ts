@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  HotkeySet,
   CameraDevice,
   FacecamEdit,
   FacecamView,
@@ -69,20 +70,7 @@ export const api = {
   usageSetHeard: (heard: string | null) => invoke<void>("usage_set_heard", { heard }),
   /** Throws when a combination is invalid or already taken. */
   /** All four at once — the core only accepts them together. */
-  setHotkeys: (
-    saveClip: string,
-    toggleBuffer: string,
-    screenshot: string,
-    record: string,
-    console: string,
-  ) =>
-    invoke<AppConfig>("set_hotkeys", {
-      saveClip,
-      toggleBuffer,
-      screenshot,
-      record,
-      console,
-    }),
+  setHotkeys: (hotkeys: HotkeySet) => invoke<AppConfig>("set_hotkeys", { hotkeys }),
   /** Throws when the folder cannot be created or written to. */
   setClipDir: (dir: string) => invoke<AppConfig>("set_clip_dir", { dir }),
   defaultClipDir: () => invoke<string>("default_clip_dir"),

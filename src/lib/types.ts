@@ -200,6 +200,12 @@ export interface AppConfig {
   recordHotkey: string;
   /** Open the console over the game. */
   consoleHotkey: string;
+  /** A second binding per action beside the first; empty is none. */
+  saveClipHotkeyAlt: string;
+  toggleBufferHotkeyAlt: string;
+  screenshotHotkeyAlt: string;
+  recordHotkeyAlt: string;
+  consoleHotkeyAlt: string;
   /** Whether that hotkey does anything at all. */
   consoleEnabled: boolean;
   /** How big the console is drawn, 0.8 to 1.6. */
@@ -748,4 +754,31 @@ export interface UpdateProgress {
   total: number | null;
   /** The package is in; the installer is being started. */
   finished: boolean;
+}
+
+/** The config fields that hold a hotkey binding — first and second per action. */
+export type HotkeyField =
+  | "saveClipHotkey"
+  | "toggleBufferHotkey"
+  | "screenshotHotkey"
+  | "recordHotkey"
+  | "consoleHotkey"
+  | "saveClipHotkeyAlt"
+  | "toggleBufferHotkeyAlt"
+  | "screenshotHotkeyAlt"
+  | "recordHotkeyAlt"
+  | "consoleHotkeyAlt";
+
+/** Every binding at once, as `set_hotkeys` takes them. */
+export interface HotkeySet {
+  saveClip: string;
+  toggleBuffer: string;
+  screenshot: string;
+  record: string;
+  console: string;
+  saveClipAlt: string;
+  toggleBufferAlt: string;
+  screenshotAlt: string;
+  recordAlt: string;
+  consoleAlt: string;
 }

@@ -2,7 +2,8 @@
 //! controller combos, and tapping versus holding — the pure part.
 //!
 //! A binding is still one string in the config, as before, so an old config
-//! loads unchanged:
+//! loads unchanged; each action has a second one beside it (`…_hotkey_alt`),
+//! so a mouse button or a controller combo can come on top of the keyboard:
 //! - `Ctrl+Shift+S` — a keyboard combination, as `tauri_plugin_global_shortcut`
 //!   spells it;
 //! - `Mouse3` (middle), `Mouse4`, `Mouse5`, optionally behind `Ctrl`, `Alt`,
@@ -170,6 +171,78 @@ pub mod pad {
         }
         mask
     }
+}
+
+/// The Windows virtual-key code of a key, by the name the shortcut parser
+/// gives it (`KeyS`, `Digit4`, `F9`, `Numpad1`, `PrintScreen` …) — the same
+/// table the `global-hotkey` crate registers with. `None` for a key that is
+/// not on it.
+pub fn vk_of(code: &str) -> Option<u16> {
+    let single = |rest: &str| -> Option<u8> {
+        let mut bytes = rest.bytes();
+        let first = bytes.next()?;
+        bytes.next().is_none().then_some(first)
+    };
+    if let Some(letter) = code.strip_prefix("Key").and_then(single) {
+        return letter.is_ascii_uppercase().then_some(u16::from(letter));
+    }
+    if let Some(digit) = code.strip_prefix("Digit").and_then(single) {
+        return digit.is_ascii_digit().then_some(u16::from(digit));
+    }
+    if let Some(digit) = code.strip_prefix("Numpad").and_then(single) {
+        if digit.is_ascii_digit() {
+            return Some(0x60 + u16::from(digit - b'0'));
+        }
+    }
+    if let Some(number) = code.strip_prefix('F').and_then(|n| n.parse::<u16>().ok()) {
+        return (1..=24).contains(&number).then_some(0x6F + number);
+    }
+    Some(match code {
+        "Equal" => 0xBB,
+        "Comma" => 0xBC,
+        "Minus" => 0xBD,
+        "Period" => 0xBE,
+        "Semicolon" => 0xBA,
+        "Slash" => 0xBF,
+        "Backquote" => 0xC0,
+        "BracketLeft" => 0xDB,
+        "Backslash" => 0xDC,
+        "BracketRight" => 0xDD,
+        "Quote" => 0xDE,
+        "Backspace" => 0x08,
+        "Tab" => 0x09,
+        "Space" => 0x20,
+        "Enter" | "NumpadEnter" => 0x0D,
+        "CapsLock" => 0x14,
+        "Escape" => 0x1B,
+        "PageUp" => 0x21,
+        "PageDown" => 0x22,
+        "End" => 0x23,
+        "Home" => 0x24,
+        "ArrowLeft" => 0x25,
+        "ArrowUp" => 0x26,
+        "ArrowRight" => 0x27,
+        "ArrowDown" => 0x28,
+        "PrintScreen" => 0x2C,
+        "Insert" => 0x2D,
+        "Delete" => 0x2E,
+        "NumLock" => 0x90,
+        "ScrollLock" => 0x91,
+        "Pause" => 0x13,
+        "NumpadMultiply" => 0x6A,
+        "NumpadAdd" => 0x6B,
+        "NumpadSubtract" => 0x6D,
+        "NumpadDecimal" => 0x6E,
+        "NumpadDivide" => 0x6F,
+        "AudioVolumeMute" => 0xAD,
+        "AudioVolumeDown" => 0xAE,
+        "AudioVolumeUp" => 0xAF,
+        "MediaTrackNext" => 0xB0,
+        "MediaTrackPrevious" => 0xB1,
+        "MediaStop" => 0xB2,
+        "MediaPlayPause" => 0xB3,
+        _ => return None,
+    })
 }
 
 /// What is pressed.
@@ -463,7 +536,11 @@ pub struct Input {
 /// Every binding, by what is pressed, and where each one stands.
 #[derive(Clone, Debug)]
 pub struct Table<A> {
-    keys: Vec<(u32, Slot<A>)>,
+    /// By the shortcut's id, with its key's virtual-key code when known: then
+    /// the poll reads the release itself instead of waiting for the shortcut
+    /// plugin's, which comes 50–60 ms late and would turn a quick tap near the
+    /// hold time into a hold.
+    keys: Vec<(u32, Option<u16>, Slot<A>)>,
     mouse: Vec<(MouseButton, Mods, Slot<A>)>,
     pads: Vec<(u32, Slot<A>)>,
     /// Which mouse slot the press of each button went to, so its release
@@ -491,16 +568,17 @@ impl<A: Copy> Default for Table<A> {
 }
 
 impl<A: Copy> Table<A> {
-    /// A keyboard combination, by the id the shortcut parser gives it.
-    pub fn bind_key(&mut self, id: u32, mode: Mode, action: A) {
-        let at = match self.keys.iter().position(|(known, _)| *known == id) {
+    /// A keyboard combination, by the id the shortcut parser gives it, and
+    /// the virtual-key code of its key ([`vk_of`]) if there is one.
+    pub fn bind_key(&mut self, id: u32, vk: Option<u16>, mode: Mode, action: A) {
+        let at = match self.keys.iter().position(|(known, _, _)| *known == id) {
             Some(at) => at,
             None => {
-                self.keys.push((id, Slot::new(0, HOLD_MS)));
+                self.keys.push((id, vk, Slot::new(0, HOLD_MS)));
                 self.keys.len() - 1
             }
         };
-        self.keys[at].1.set(mode, action);
+        self.keys[at].2.set(mode, action);
     }
 
     pub fn bind_mouse(&mut self, button: MouseButton, mods: Mods, mode: Mode, action: A) {
@@ -541,17 +619,48 @@ impl<A: Copy> Table<A> {
     /// Is a key held whose hold still has to be timed? Only then does the
     /// poll thread have to tick for the keyboard.
     pub fn keys_held(&self) -> bool {
-        self.keys.iter().any(|(_, slot)| slot.is_down())
+        self.keys.iter().any(|(_, _, slot)| slot.is_down())
     }
 
-    /// A keyboard combination went down or up.
+    /// Is any keyboard combination bound to be held? A game running elevated
+    /// hides the key's release from ClippiBoy, and such a hold never comes.
+    pub fn key_holds(&self) -> bool {
+        self.keys.iter().any(|(_, _, slot)| slot.hold.is_some())
+    }
+
+    /// A keyboard combination went down or up. A release is taken only for a
+    /// key without a known code — the others' releases the poll reads
+    /// ([`Table::held_vks`], [`Table::vk_up`]).
     pub fn key(&mut self, id: u32, pressed: bool, now: u64) -> Option<A> {
-        let (_, slot) = self.keys.iter_mut().find(|(known, _)| *known == id)?;
+        let (_, vk, slot) = self.keys.iter_mut().find(|(known, _, _)| *known == id)?;
         if pressed {
             slot.press(now)
-        } else {
+        } else if vk.is_none() {
             slot.release(now)
+        } else {
+            None
         }
+    }
+
+    /// The keys held right now whose release the poll has to look for.
+    pub fn held_vks(&self) -> Vec<u16> {
+        let mut vks: Vec<u16> = self
+            .keys
+            .iter()
+            .filter(|(_, _, slot)| slot.is_down())
+            .filter_map(|(_, vk, _)| *vk)
+            .collect();
+        vks.dedup();
+        vks
+    }
+
+    /// The key `vk` was seen let go at `now`.
+    pub fn vk_up(&mut self, vk: u16, now: u64) -> Vec<A> {
+        self.keys
+            .iter_mut()
+            .filter(|(_, known, _)| *known == Some(vk))
+            .filter_map(|(_, _, slot)| slot.release(now))
+            .collect()
     }
 
     /// The slot a press of `button` with `mods` held goes to: the one asking
@@ -584,7 +693,7 @@ impl<A: Copy> Table<A> {
             return self
                 .keys
                 .iter_mut()
-                .filter_map(|(_, s)| s.tick(now))
+                .filter_map(|(_, _, s)| s.tick(now))
                 .collect();
         }
 
@@ -630,7 +739,7 @@ impl<A: Copy> Table<A> {
         let slots = self
             .keys
             .iter_mut()
-            .map(|(_, s)| s)
+            .map(|(_, _, s)| s)
             .chain(self.mouse.iter_mut().map(|(_, _, s)| s))
             .chain(self.pads.iter_mut().map(|(_, s)| s));
         for slot in slots {
@@ -979,8 +1088,9 @@ mod tests {
     #[test]
     fn keyboard_holds_are_timed_by_the_poll() {
         let mut table: Table<Act> = Table::default();
-        table.bind_key(7, Mode::Tap, Act::Clip);
-        table.bind_key(7, Mode::Hold, Act::Shot);
+        table.bind_key(7, None, Mode::Tap, Act::Clip);
+        table.bind_key(7, None, Mode::Hold, Act::Shot);
+        assert!(table.key_holds());
         assert_eq!(table.key(7, true, 0), None);
         assert!(table.keys_held());
         assert_eq!(table.poll(200, &Input::default()), vec![]);
@@ -990,6 +1100,41 @@ mod tests {
         assert_eq!(table.key(7, true, 1000), None);
         assert_eq!(table.key(7, false, 1100), Some(Act::Clip));
         assert_eq!(table.key(8, true, 1200), None);
+    }
+
+    #[test]
+    fn a_known_key_is_let_go_when_the_poll_sees_it() {
+        let mut table: Table<Act> = Table::default();
+        table.bind_key(7, Some(0x53), Mode::Tap, Act::Clip);
+        table.bind_key(7, Some(0x53), Mode::Hold, Act::Shot);
+        table.bind_key(9, Some(0x78), Mode::Tap, Act::Clip);
+        assert!(table.held_vks().is_empty());
+        assert_eq!(table.key(7, true, 1000), None);
+        assert_eq!(table.held_vks(), vec![0x53]);
+        // Let go at 1390, just under the hold: the plugin's release at 1450
+        // is ignored, the poll's counts — a tap.
+        assert_eq!(table.vk_up(0x53, 1390), vec![Act::Clip]);
+        assert_eq!(table.key(7, false, 1450), None);
+        assert!(!table.keys_held());
+        // A tap-only key fires on the press and is let go by the poll too.
+        assert_eq!(table.key(9, true, 2000), Some(Act::Clip));
+        assert_eq!(table.held_vks(), vec![0x78]);
+        assert!(table.vk_up(0x78, 2100).is_empty());
+        assert!(!table.keys_held());
+    }
+
+    #[test]
+    fn virtual_key_codes_follow_the_windows_table() {
+        assert_eq!(vk_of("KeyS"), Some(0x53));
+        assert_eq!(vk_of("Digit0"), Some(0x30));
+        assert_eq!(vk_of("Numpad7"), Some(0x67));
+        assert_eq!(vk_of("F1"), Some(0x70));
+        assert_eq!(vk_of("F24"), Some(0x87));
+        assert_eq!(vk_of("PrintScreen"), Some(0x2C));
+        assert_eq!(vk_of("NumpadEnter"), Some(0x0D));
+        assert_eq!(vk_of("F25"), None);
+        assert_eq!(vk_of("Keya"), None);
+        assert_eq!(vk_of("ContextMenu"), None);
     }
 
     #[test]

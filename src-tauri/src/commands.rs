@@ -168,6 +168,11 @@ pub fn set_config(
         || previous.screenshot_hotkey != next.screenshot_hotkey
         || previous.record_hotkey != next.record_hotkey
         || previous.console_hotkey != next.console_hotkey
+        || previous.save_clip_hotkey_alt != next.save_clip_hotkey_alt
+        || previous.toggle_buffer_hotkey_alt != next.toggle_buffer_hotkey_alt
+        || previous.screenshot_hotkey_alt != next.screenshot_hotkey_alt
+        || previous.record_hotkey_alt != next.record_hotkey_alt
+        || previous.console_hotkey_alt != next.console_hotkey_alt
         || previous.console_enabled != next.console_enabled
     {
         if let Err(err) = crate::register_hotkeys(&app) {
@@ -204,7 +209,29 @@ pub fn set_config(
     next
 }
 
-/// Reassign the two global hotkeys.
+/// Every hotkey at once: the first binding of each action and the second
+/// beside it. A second one left out is none.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeySet {
+    pub save_clip: String,
+    pub toggle_buffer: String,
+    pub screenshot: String,
+    pub record: String,
+    pub console: String,
+    #[serde(default)]
+    pub save_clip_alt: String,
+    #[serde(default)]
+    pub toggle_buffer_alt: String,
+    #[serde(default)]
+    pub screenshot_alt: String,
+    #[serde(default)]
+    pub record_alt: String,
+    #[serde(default)]
+    pub console_alt: String,
+}
+
+/// Reassign the global hotkeys.
 ///
 /// Kept apart from `set_config` because something can go wrong here: an
 /// unusable combination, or one another program already holds. If registering
@@ -214,13 +241,9 @@ pub fn set_config(
 pub fn set_hotkeys(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
-    save_clip: String,
-    toggle_buffer: String,
-    screenshot: String,
-    record: String,
-    console: String,
+    hotkeys: HotkeySet,
 ) -> Result<AppConfig> {
-    let result = apply_hotkeys(&state, &app, save_clip, toggle_buffer, screenshot, record, console);
+    let result = apply_hotkeys(&state, &app, hotkeys);
     if result.is_err() {
         // Even after rejected input the previous hotkeys have to take hold
         // again — the settings suspend them while recording a new one.
@@ -232,15 +255,34 @@ pub fn set_hotkeys(
 fn apply_hotkeys(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
-    save_clip: String,
-    toggle_buffer: String,
-    screenshot: String,
-    record: String,
-    console: String,
+    hotkeys: HotkeySet,
 ) -> Result<AppConfig> {
     // Empty means unbound: that action then has no hotkey, only its buttons.
     // The rest goes in as the core writes it ("hold:mouse5" → "Hold:Mouse5").
-    let mut written = [save_clip, toggle_buffer, screenshot, record, console];
+    let HotkeySet {
+        save_clip,
+        toggle_buffer,
+        screenshot,
+        record,
+        console,
+        save_clip_alt,
+        toggle_buffer_alt,
+        screenshot_alt,
+        record_alt,
+        console_alt,
+    } = hotkeys;
+    let mut written = [
+        save_clip,
+        toggle_buffer,
+        screenshot,
+        record,
+        console,
+        save_clip_alt,
+        toggle_buffer_alt,
+        screenshot_alt,
+        record_alt,
+        console_alt,
+    ];
     let mut parsed: Vec<crate::bindings::Binding> = Vec::new();
     for one in written.iter_mut() {
         let text = one.trim();
@@ -252,9 +294,10 @@ fn apply_hotkeys(
         *one = binding.to_string();
         parsed.push(binding);
     }
-    // Every pair, not just the first two — with five assignments the clash can
+    // Every pair, first and second bindings alike — with ten the clash can
     // sit anywhere among them. Two unbound ones do not clash, and neither do
-    // the same key tapped and held: that is what holding is for.
+    // the same key tapped and held: that is what holding is for. The same
+    // binding twice on one action is a clash too: it would fire twice.
     let mut keyed = Vec::new();
     for binding in parsed {
         let id = match &binding.trigger {
@@ -266,7 +309,18 @@ fn apply_hotkeys(
     if crate::bindings::clashes(&keyed) {
         return Err("Two hotkeys are on the same key combination.".into());
     }
-    let [save_clip, toggle_buffer, screenshot, record, console] = written;
+    let [
+        save_clip,
+        toggle_buffer,
+        screenshot,
+        record,
+        console,
+        save_clip_alt,
+        toggle_buffer_alt,
+        screenshot_alt,
+        record_alt,
+        console_alt,
+    ] = written;
 
     let previous = state.config_snapshot();
     let mut config = previous.clone();
@@ -275,6 +329,11 @@ fn apply_hotkeys(
     config.screenshot_hotkey = screenshot;
     config.record_hotkey = record;
     config.console_hotkey = console;
+    config.save_clip_hotkey_alt = save_clip_alt;
+    config.toggle_buffer_hotkey_alt = toggle_buffer_alt;
+    config.screenshot_hotkey_alt = screenshot_alt;
+    config.record_hotkey_alt = record_alt;
+    config.console_hotkey_alt = console_alt;
     let next = state.replace_config(config);
 
     match crate::register_hotkeys(app) {
@@ -286,6 +345,11 @@ fn apply_hotkeys(
             rollback.screenshot_hotkey = previous.screenshot_hotkey;
             rollback.record_hotkey = previous.record_hotkey;
             rollback.console_hotkey = previous.console_hotkey;
+            rollback.save_clip_hotkey_alt = previous.save_clip_hotkey_alt;
+            rollback.toggle_buffer_hotkey_alt = previous.toggle_buffer_hotkey_alt;
+            rollback.screenshot_hotkey_alt = previous.screenshot_hotkey_alt;
+            rollback.record_hotkey_alt = previous.record_hotkey_alt;
+            rollback.console_hotkey_alt = previous.console_hotkey_alt;
             state.replace_config(rollback);
             let _ = crate::register_hotkeys(app);
             Err(err)

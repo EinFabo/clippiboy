@@ -30,8 +30,8 @@ export function ConsoleTab() {
         <Row
           label="Open with the hotkey"
           hint={
-            config.consoleHotkey
-              ? `${hotkeyLabel(config.consoleHotkey)} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`
+            config.consoleHotkey || config.consoleHotkeyAlt
+              ? `${hotkeyLabel(config.consoleHotkey || config.consoleHotkeyAlt)} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`
               : "No hotkey set — assign one under Hotkeys, the console only opens with it."
           }
         >

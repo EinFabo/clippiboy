@@ -655,6 +655,19 @@ pub struct AppConfig {
     /// Open the console over the game.
     #[serde(default = "default_console_hotkey")]
     pub console_hotkey: String,
+    /// A second binding for each action, beside the one above — a mouse
+    /// button or a controller combo on top of the keyboard. Empty is none; a
+    /// config from before has none.
+    #[serde(default)]
+    pub save_clip_hotkey_alt: String,
+    #[serde(default)]
+    pub toggle_buffer_hotkey_alt: String,
+    #[serde(default)]
+    pub screenshot_hotkey_alt: String,
+    #[serde(default)]
+    pub record_hotkey_alt: String,
+    #[serde(default)]
+    pub console_hotkey_alt: String,
     /// Whether that hotkey does anything at all. For whoever wants nothing but
     /// the banner over their game.
     #[serde(default = "yes")]
@@ -859,6 +872,16 @@ impl SoundConfig {
 }
 
 impl AppConfig {
+    /// The console's binding as a banner names it: the first one, or the
+    /// second when only that is set. Empty when neither is.
+    pub fn console_hotkey_shown(&self) -> &str {
+        if self.console_hotkey.trim().is_empty() {
+            &self.console_hotkey_alt
+        } else {
+            &self.console_hotkey
+        }
+    }
+
     pub fn accent(&self) -> Accent {
         Accent {
             mode: self.accent_mode,

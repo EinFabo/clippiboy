@@ -14,11 +14,11 @@
 //! The thread sleeps while nothing needs it: no mouse or controller binding,
 //! no keyboard hold being timed, no binding being recorded in the settings.
 //!
-//! The limit is the same as for every hook: a game running as administrator
-//! keeps its input from a program that is not. Then [`warn_elevated`] says so
-//! once.
+//! The limit is the same as for every hook: a game running with elevated
+//! rights keeps its input from a program that runs without. Then
+//! [`warn_elevated`] says so once.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -42,20 +42,26 @@ const TICK: Duration = Duration::from_millis(10);
 /// How often an empty controller slot is asked whether a pad came —
 /// Microsoft advises against asking every frame.
 const PROBE_MS: u64 = 2_500;
-/// How often the foreground process is checked for running as administrator.
+/// How often the foreground game is checked for running elevated.
 const ELEVATION_MS: u64 = 2_000;
+/// Recording a binding ends by itself after this long — a page that went
+/// away mid-recording must not leave the hotkeys suspended.
+const CAPTURE_MS: u64 = 30_000;
 
 static TABLE: Mutex<Option<Table<Action>>> = Mutex::new(None);
 /// The settings are recording a new binding: nothing fires.
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 /// The settings want the next mouse button or controller combo.
 static CAPTURING: AtomicBool = AtomicBool::new(false);
-/// The administrator notice came already this session.
+/// The elevated-game notice came already this session.
 static WARNED: AtomicBool = AtomicBool::new(false);
+/// When recording began, on [`now_ms`].
+static CAPTURE_SINCE: AtomicU64 = AtomicU64::new(0);
 static INBOX: OnceLock<Sender<()>> = OnceLock::new();
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
-/// What the settings get on `input-captured`.
+/// What the settings get on `input-captured`. Neither a binding nor an error:
+/// recording was ended from here (timed out, or the window lost the focus).
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapturedEvent {
@@ -112,8 +118,29 @@ pub fn suspend() {
 
 /// The settings start or stop recording a binding.
 pub fn capture(on: bool) {
+    if on {
+        CAPTURE_SINCE.store(now_ms(), Ordering::SeqCst);
+    }
     CAPTURING.store(on, Ordering::SeqCst);
     nudge();
+}
+
+/// End a recording the page did not end itself: tell it, and put the hotkeys
+/// back — they were suspended for it. Nothing happens when none runs.
+pub fn end_capture(app: &AppHandle) {
+    if !CAPTURING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let _ = app.emit(
+        "input-captured",
+        CapturedEvent {
+            binding: None,
+            error: None,
+        },
+    );
+    if let Err(err) = crate::register_hotkeys(app) {
+        log::warn!("{err}");
+    }
 }
 
 /// A keyboard combination went down or up (from `RegisterHotKey`, by the id
@@ -139,25 +166,43 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     loop {
         let capturing = CAPTURING.load(Ordering::SeqCst);
         let suspended = SUSPENDED.load(Ordering::SeqCst);
-        let (mouse, controllers, keys) = match table().as_ref() {
-            Some(table) if !suspended => {
-                (table.wants_mouse(), table.wants_pads(), table.keys_held())
-            }
-            _ => (false, false, false),
+        let (mouse, controllers, keys, key_holds) = match table().as_ref() {
+            Some(table) if !suspended => (
+                table.wants_mouse(),
+                table.wants_pads(),
+                table.keys_held(),
+                table.key_holds(),
+            ),
+            _ => (false, false, false, false),
         };
         if !capturing {
             capture = None;
         }
+        // A key bound to be held needs no reading until it is pressed — but
+        // the look at the foreground game, every couple of seconds.
+        let watch = (mouse || key_holds) && !capturing;
         if !(mouse || controllers || keys || capturing) {
+            if watch {
+                elevation.check(app, now_ms());
+            }
             // Nothing to read: wait for a change instead of spinning.
-            if let Err(RecvTimeoutError::Disconnected) = inbox.recv_timeout(Duration::from_secs(60))
-            {
+            let wait = if watch {
+                Duration::from_millis(ELEVATION_MS)
+            } else {
+                Duration::from_secs(60)
+            };
+            if let Err(RecvTimeoutError::Disconnected) = inbox.recv_timeout(wait) {
                 return;
             }
             continue;
         }
 
         let now = now_ms();
+        if capturing && now.saturating_sub(CAPTURE_SINCE.load(Ordering::SeqCst)) > CAPTURE_MS {
+            log::info!("input poll: recording a binding timed out");
+            end_capture(app);
+            continue;
+        }
         let input = Input {
             mouse: if mouse || capturing {
                 read_mouse()
@@ -192,13 +237,24 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
         } else if !suspended {
             let fired = table()
                 .as_mut()
-                .map(|table| table.poll(now, &input))
+                .map(|table| {
+                    // The keys held, let go as the poll sees them rather than
+                    // as the shortcut plugin reports it, 50–60 ms later.
+                    let mut fired = Vec::new();
+                    for vk in table.held_vks() {
+                        if !platform::key_down(vk) {
+                            fired.extend(table.vk_up(vk, now));
+                        }
+                    }
+                    fired.extend(table.poll(now, &input));
+                    fired
+                })
                 .unwrap_or_default();
             for action in fired {
                 crate::run_hotkey(app, action);
             }
         }
-        if mouse && !capturing {
+        if watch {
             elevation.check(app, now);
         }
 
@@ -208,32 +264,35 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
     }
 }
 
-/// Tell once per session that a game running as administrator keeps its
-/// mouse buttons from ClippiBoy — otherwise the binding just seems broken.
-/// XInput reads the controller itself, not the window's input, so
+/// Tell once per session that a game running elevated keeps the mouse
+/// buttons and key releases from ClippiBoy — otherwise the binding just seems
+/// broken. XInput reads the controller itself, not the window's input, so
 /// controllers are left out of it.
-fn warn_elevated(app: &AppHandle) {
+fn warn_elevated(app: &AppHandle, game: &str) {
     if WARNED.swap(true, Ordering::SeqCst) {
         return;
     }
-    log::info!("input poll: foreground process runs as administrator; mouse hotkeys cannot see it");
+    log::info!("input poll: {game} runs elevated; mouse and hold hotkeys cannot see it");
     crate::overlay::show(
         app,
         crate::overlay::BannerKind::Info,
-        "Mouse hotkeys can't reach this game",
-        Some("It runs as administrator. Use a keyboard hotkey here.".into()),
+        "Mouse and hold hotkeys can't reach this game",
+        Some("It runs with elevated rights.".into()),
     );
     crate::notify(
         app,
         "error",
-        "Mouse hotkeys can't reach games running as administrator.",
+        format!("Mouse and hold hotkeys can't reach {game}: it runs with elevated rights."),
     );
 }
 
-/// Watches the foreground process for running as administrator.
+/// Watches the foreground game for running elevated. Only a game: Task
+/// Manager or an elevated terminal in front says nothing about where the
+/// hotkeys are wanted.
 #[derive(Default)]
 struct Elevation {
     next: u64,
+    /// The last game looked at, so each is asked once.
     last_pid: u32,
     /// ClippiBoy itself runs elevated: then it sees everything anyway.
     own: Option<bool>,
@@ -251,13 +310,15 @@ impl Elevation {
         if own {
             return;
         }
-        let pid = platform::foreground_pid();
-        if pid == 0 || pid == self.last_pid {
+        let Some(game) = crate::game::detect_detailed() else {
+            return;
+        };
+        if game.pid == self.last_pid {
             return;
         }
-        self.last_pid = pid;
-        if platform::elevated(pid) == Some(true) {
-            warn_elevated(app);
+        self.last_pid = game.pid;
+        if platform::elevated(game.pid) == Some(true) {
+            warn_elevated(app, &game.name);
         }
     }
 }
@@ -316,7 +377,6 @@ mod platform {
         VK_XBUTTON2,
     };
     use windows::Win32::UI::Input::XboxController::{XInputGetState, XINPUT_STATE};
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     fn down(key: VIRTUAL_KEY) -> bool {
         // The high bit: held right now. Only reads the state — the press
@@ -356,19 +416,12 @@ mod platform {
         })
     }
 
-    pub fn foreground_pid() -> u32 {
-        let mut pid = 0u32;
-        unsafe {
-            let hwnd = GetForegroundWindow();
-            if hwnd.0.is_null() {
-                return 0;
-            }
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
-        pid
+    /// Is the key with this virtual-key code held right now?
+    pub fn key_down(vk: u16) -> bool {
+        down(VIRTUAL_KEY(vk))
     }
 
-    /// Does `pid` run as administrator? `None` when that cannot be told.
+    /// Does `pid` run elevated? `None` when that cannot be told.
     ///
     /// A process running elevated lets a normal one open it for
     /// `PROCESS_QUERY_LIMITED_INFORMATION`, but not its token. So: the
@@ -425,8 +478,8 @@ mod platform {
     pub fn pad(_slot: u32) -> Option<u32> {
         None
     }
-    pub fn foreground_pid() -> u32 {
-        0
+    pub fn key_down(_vk: u16) -> bool {
+        false
     }
     pub fn elevated(_pid: u32) -> Option<bool> {
         None

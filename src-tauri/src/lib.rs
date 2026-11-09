@@ -1260,16 +1260,24 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
         log::warn!("could not unregister the old hotkeys: {err}");
     }
 
+    // Unbound while the console is switched off.
+    let console = if config.console_enabled {
+        [config.console_hotkey.as_str(), config.console_hotkey_alt.as_str()]
+    } else {
+        ["", ""]
+    };
+    // Each action twice: the first binding and the second beside it.
     let assigned = [
         (Action::SaveClip, config.save_clip_hotkey.as_str()),
+        (Action::SaveClip, config.save_clip_hotkey_alt.as_str()),
         (Action::Screenshot, config.screenshot_hotkey.as_str()),
-        // Unbound while the console is switched off.
-        (
-            Action::Console,
-            if config.console_enabled { config.console_hotkey.as_str() } else { "" },
-        ),
+        (Action::Screenshot, config.screenshot_hotkey_alt.as_str()),
+        (Action::Console, console[0]),
+        (Action::Console, console[1]),
         (Action::Record, config.record_hotkey.as_str()),
+        (Action::Record, config.record_hotkey_alt.as_str()),
         (Action::ToggleBuffer, config.toggle_buffer_hotkey.as_str()),
+        (Action::ToggleBuffer, config.toggle_buffer_hotkey_alt.as_str()),
     ];
 
     let mut failed: Vec<String> = Vec::new();
@@ -1292,7 +1300,8 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
             Trigger::Key(combo) => match parse_hotkey(combo) {
                 Ok(shortcut) => {
                     let id = shortcut.id();
-                    table.bind_key(id, binding.mode, action);
+                    let vk = bindings::vk_of(&shortcut.key.to_string());
+                    table.bind_key(id, vk, binding.mode, action);
                     if !keys.iter().any(|(known, _)| *known == id) {
                         keys.push((id, combo.clone()));
                     }
@@ -2006,6 +2015,13 @@ pub fn run() {
                     console::request_close(window.app_handle());
                 } else if label == overlay::LABEL {
                     api.prevent_close();
+                }
+            }
+            // Recording a binding in the settings ends when the window goes
+            // out of focus — the page's own blur may never come if it hung.
+            if let tauri::WindowEvent::Focused(false) = event {
+                if window.label() == "main" {
+                    inputpoll::end_capture(window.app_handle());
                 }
             }
         })

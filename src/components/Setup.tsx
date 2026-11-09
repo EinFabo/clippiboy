@@ -193,7 +193,7 @@ export function Setup() {
           follow: false,
         }).value
       : null;
-  const saveKey = config.saveClipHotkey ? hotkeyLabel(config.saveClipHotkey) : null;
+  const saveKey = hotkeyLabel(config.saveClipHotkey || config.saveClipHotkeyAlt) || null;
 
   return createPortal(
     <div data-fullview className="fixed inset-x-0 bottom-0 top-10 z-[45] overflow-y-auto bg-base">
