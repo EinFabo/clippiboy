@@ -23,8 +23,11 @@ export default {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
     }
-    // A share link's page; the video on it loads from api.clippiboy.com directly.
-    if (/^\/c\/[a-z0-9]+$/.test(url.pathname)) {
+    // A share link's page (the video on it loads from api.clippiboy.com
+    // directly), someone's invite link, and "Add <name> as friend" on either.
+    // The click's cookie is for all of clippiboy.com, so sign-in on the API
+    // reads it.
+    if (/^\/c\/[a-z0-9]+(\/add)?$/.test(url.pathname) || /^\/i\/[A-Za-z0-9-]{8,9}(\/add)?$/.test(url.pathname)) {
       return env.API.fetch(request);
     }
     if (/^\/get(\/|$)/.test(url.pathname)) {

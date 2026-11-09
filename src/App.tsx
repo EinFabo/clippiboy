@@ -3,6 +3,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { listen } from "@tauri-apps/api/event";
 import { useEngine } from "./store";
 import { inTauri } from "./lib/ipc";
+import { useFriends } from "./lib/friends";
 // Pausiert einen Clip, sobald das Fenster in den Tray geht.
 import "./lib/hidden";
 import type { FocusClip } from "./lib/types";
@@ -33,6 +34,13 @@ export default function App() {
   useEffect(() => {
     void init();
   }, [init]);
+
+  // "Open ClippiBoy" after "Add <name> as friend" on the website: the core
+  // brings the window up, the Friends page puts the code into its Add field.
+  const addSeq = useFriends((s) => s.add?.seq ?? 0);
+  useEffect(() => {
+    if (addSeq > 0) setRoute("friends");
+  }, [addSeq]);
 
   // "Open in the app" from the console over the game: the core brings the
   // window up and says which clip was meant.

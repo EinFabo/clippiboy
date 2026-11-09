@@ -1924,6 +1924,13 @@ pub fn run() {
                         friends::handle_url(&links, url.as_str());
                     }
                 });
+                // A link that started ClippiBoy itself (an "Open ClippiBoy"
+                // with the app closed) comes as the start's argument instead.
+                if let Ok(Some(urls)) = handle.deep_link().get_current() {
+                    for url in urls {
+                        friends::handle_url(handle, url.as_str());
+                    }
+                }
             }
             if let Err(err) = tray::build(handle) {
                 log::error!("could not create the tray icon: {err}");

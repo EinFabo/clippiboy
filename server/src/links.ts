@@ -347,15 +347,33 @@ export async function reportShare(request: Request, env: Env, id: string): Promi
   return answer({ ok: true });
 }
 
+export interface Uploader {
+  id: string;
+  display_name: string;
+  avatar: string | null;
+  friend_code: string;
+  allow_requests: number;
+}
+
+/** Who shared a live link — only when they let the page show their name. */
+async function uploaderOf(env: Env, row: ShareRow): Promise<Uploader | null> {
+  if (!row.show_name) return null;
+  return env.DB.prepare("SELECT id, display_name, avatar, friend_code, allow_requests FROM users WHERE id = ?")
+    .bind(row.owner)
+    .first<Uploader>();
+}
+
+/** The uploader of a live link, for "Add <name> as friend" — null for a gone link or a hidden name. */
+export async function shareUploader(env: Env, id: string): Promise<Uploader | null> {
+  const row = await live(env, id, Date.now());
+  return row ? uploaderOf(env, row) : null;
+}
+
 export async function sharePage(env: Env, id: string): Promise<Response> {
   const now = Date.now();
   const row = await live(env, id, now);
   if (!row) return gone();
-  const uploader = row.show_name
-    ? await env.DB.prepare("SELECT display_name, avatar FROM users WHERE id = ?")
-        .bind(row.owner)
-        .first<{ display_name: string; avatar: string | null }>()
-    : null;
+  const uploader = await uploaderOf(env, row);
   let tags: string[] = [];
   try {
     tags = JSON.parse(row.tags);
@@ -372,13 +390,19 @@ export async function sharePage(env: Env, id: string): Promise<Response> {
     game: row.game,
     tags,
     uploader: uploader ? { name: uploader.display_name, avatar: uploader.avatar } : null,
+    addFriend: uploader?.allow_requests === 1 ? `${PAGE_ORIGIN}/c/${id}/add` : null,
     expires: expiresIn(row.expires_at, now),
     width: row.width,
     height: row.height,
     site: PAGE_ORIGIN,
   });
   return new Response(html, {
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      // Its "Add as friend" must not be clicked through someone else's frame.
+      "Content-Security-Policy": "frame-ancestors 'none'",
+    },
   });
 }
 

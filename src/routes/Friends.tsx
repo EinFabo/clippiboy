@@ -1,6 +1,6 @@
-import { useEffect, useState, type FormEvent, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { cn } from "@/lib/cn";
-import { canReceive, formatCode, friendsApi, lastSeenText, playingFor, useFriends } from "@/lib/friends";
+import { canReceive, formatCode, friendsApi, inviteLink, lastSeenText, playingFor, useFriends } from "@/lib/friends";
 import { useShare } from "@/lib/share";
 import type { FriendPending, FriendPresence, FriendUser } from "@/lib/types";
 import { useEngine } from "@/store";
@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { useMenu } from "@/components/ui/Menu";
 import { useShallow } from "zustand/react/shallow";
-import { IconCheck, IconClose, IconCopy, IconGamepad, IconHeart, IconPlus, IconSend } from "@/components/icons";
+import { IconCheck, IconClose, IconCopy, IconGamepad, IconHeart, IconLink, IconPlus, IconSend } from "@/components/icons";
 
 /** Shows what the core answered — a refusal from the server reads as it is. */
 function report(error: unknown) {
@@ -141,7 +141,7 @@ function SignedIn() {
 
       {lists.friends.length === 0 ? (
         <Card className="px-8 py-12 text-center text-sm text-ink-muted">
-          No friends yet. Send them your code, or add them by their Discord name.
+          No friends yet. Send them your code or invite link, or add them by their Discord name.
         </Card>
       ) : (
         <>
@@ -158,7 +158,7 @@ function Profile({ connected }: { connected: boolean }) {
   const me = useFriends((s) => s.me);
   const { config, patchConfig } = useEngine(useShallow((s) => ({ config: s.config.friends, patchConfig: s.patchConfig })));
   const invisible = config.invisible;
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"code" | "link" | null>(null);
   const [status, setStatus] = useState(config.status);
   useEffect(() => setStatus(config.status), [config.status]);
   if (!me) return <Card className="h-[112px] animate-pulse" />;
@@ -169,10 +169,11 @@ function Profile({ connected }: { connected: boolean }) {
   };
   const presenceStatus: Status = !connected ? "offline" : invisible ? "invisible" : config.busy ? "busy" : "online";
 
-  const copy = () => {
-    void navigator.clipboard.writeText(formatCode(me.friendCode)).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
+  const copy = (what: "code" | "link") => {
+    const text = what === "code" ? formatCode(me.friendCode) : inviteLink(me.friendCode);
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(what);
+      window.setTimeout(() => setCopied(null), 1500);
     });
   };
 
@@ -207,23 +208,49 @@ function Profile({ connected }: { connected: boolean }) {
             focus:text-ink"
         />
       </div>
-      <button
-        onClick={copy}
-        title="Copy your friend code"
-        className="flex shrink-0 items-center gap-2 rounded-pill border border-line bg-elevated px-3.5 py-2
-          font-mono text-sm tracking-wider transition-colors hover:bg-hover"
-      >
-        {formatCode(me.friendCode)}
-        {copied ? <IconCheck className="h-4 w-4 text-ok" /> : <IconCopy className="h-4 w-4 text-ink-muted" />}
-      </button>
+      <div className="flex shrink-0 flex-col items-end gap-1.5">
+        <button
+          onClick={() => copy("code")}
+          title="Copy your friend code"
+          className="flex items-center gap-2 rounded-pill border border-line bg-elevated px-3.5 py-2
+            font-mono text-sm tracking-wider transition-colors hover:bg-hover"
+        >
+          {formatCode(me.friendCode)}
+          {copied === "code" ? <IconCheck className="h-4 w-4 text-ok" /> : <IconCopy className="h-4 w-4 text-ink-muted" />}
+        </button>
+        <button
+          onClick={() => copy("link")}
+          title={inviteLink(me.friendCode)}
+          className="flex items-center gap-1.5 rounded-pill px-3 py-1 text-xs text-ink-muted transition-colors
+            hover:bg-hover hover:text-ink"
+        >
+          {copied === "link" ? <IconCheck className="h-3.5 w-3.5 text-ok" /> : <IconLink className="h-3.5 w-3.5" />}
+          {copied === "link" ? "Copied" : "Invite link"}
+        </button>
+      </div>
     </Card>
   );
 }
+
+/** The last `clippiboy://add` link already put into the field. */
+let takenAddSeq = 0;
 
 function AddFriend() {
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [answer, setAnswer] = useState<{ ok: boolean; text: string } | null>(null);
+  const add = useFriends((s) => s.add);
+  const input = useRef<HTMLInputElement>(null);
+
+  // "Open ClippiBoy" after "Add <name> as friend" on the website: the code
+  // waits in the field, sending stays the user's click.
+  useEffect(() => {
+    if (!add || add.seq <= takenAddSeq) return;
+    takenAddSeq = add.seq;
+    setQuery(formatCode(add.code));
+    setAnswer(null);
+    input.current?.focus();
+  }, [add]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -248,6 +275,7 @@ function AddFriend() {
     <Card className="flex flex-col justify-center gap-3 p-5">
       <form onSubmit={submit} className="flex gap-2">
         <input
+          ref={input}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);

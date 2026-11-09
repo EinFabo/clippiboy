@@ -23,13 +23,13 @@
   <main id="main">
     <article class="legal">
       <h1>Privacy policy</h1>
-      <p class="small">Last updated: November 7, 2026</p>
+      <p class="small">Last updated: November 9, 2026</p>
 
       <section>
         <h2>In short</h2>
         <ul>
           <li>ClippiBoy runs on your PC. Recordings, clips, screenshots and settings stay there.</li>
-          <li>No ads, no cookies, no tracking across sites. The app sends one anonymous usage count a day, but only if you allow it.</li>
+          <li>No ads, no tracking cookies, no tracking across sites. The app sends one anonymous usage count a day, but only if you allow it.</li>
           <li>Apart from that count, only the friends feature talks to our server, and only once you sign in with Discord for it.</li>
           <li>Clips sent to friends go straight from PC to PC and never touch our server.</li>
           <li>Only a clip you share as a link is uploaded. It is deleted after five days.</li>
@@ -46,7 +46,7 @@
       <section>
         <h2>This website</h2>
         <p>clippiboy.com is hosted on GitHub Pages (GitHub, Inc., USA). In front of it sits Cloudflare (Cloudflare, Inc., USA), which provides the address and delivers the page. Both process the data technically required for a visit, such as IP address, time, requested page and browser identifier, and keep their own logs of it.</p>
-        <p>The site sets no cookies and loads no fonts or scripts from third-party servers. Only if the current version is not already baked into the page does your browser ask the GitHub API (api.github.com) for it.</p>
+        <p>The site sets no cookies, except the invite cookie when you click <em>Add … as friend</em> (see Invite links below), and loads no fonts or scripts from third-party servers. Only if the current version is not already baked into the page does your browser ask the GitHub API (api.github.com) for it.</p>
         <p>The download buttons fetch the installer from GitHub through <strong>clippiboy.com/get/…</strong>. For each download we add one to a count per link and day, for example “tiktok1, October 11: 12 downloads”. Nothing else about the download is stored. The link's name is also put into the installer's file name, so the app can tell which link it came from (see below).</p>
         <p>The legal basis is our legitimate interest in delivering the site securely and reliably (Art. 6(1)(f) GDPR).</p>
       </section>
@@ -99,6 +99,9 @@
         <h3>Share links</h3>
         <p>When you choose <em>Share as link</em> on a clip, the app uploads that clip, if needed shrunk to under 50 MB, together with its title, game, tags (not the ones that name friends, “with …” and “from …”), size and a preview picture. Unless you turn off <em>Settings → Friends → Show my name on share links</em>, the page also shows your Discord display name and avatar. It is stored in Cloudflare R2 and anyone with the link can watch it at <strong>clippiboy.com/c/…</strong> for five days. After that, the clip and its picture are deleted automatically. You can delete a link earlier from the clip's menu; deleting the clip in the app deletes its link too. To keep the weekly limit, we keep a record of when you created a link and how large the clip was for up to two weeks. Once a link is deleted or expired, that record no longer holds the clip, its title, game or tags.</p>
         <p>Links are not listed anywhere and are not indexed by search engines. We don't look at shared clips unless one is reported. To report a clip, use <em>Report it</em> on its page, or write to <a href="mailto:privacy@clippiboy.com">privacy@clippiboy.com</a>. A report stores the clip, the reason you picked and your note, if you wrote one. It does not store who you are or your IP address, and it is deleted after 30 days. A reported clip may be removed, and an account that breaks the rules may be suspended. A suspended account is signed out, cannot sign in or share links, and its links are taken down.</p>
+
+        <h3>Invite links</h3>
+        <p>Your invite link (<strong>clippiboy.com/i/…</strong>, with your friend code) shows your Discord display name and avatar to anyone who opens it. When someone clicks <em>Add … as friend</em> there or on a share link's page, their browser stores a cookie <code>cb_invite</code> for clippiboy.com with your account ID, signed and valid for 14 days. If they then sign in to ClippiBoy with Discord in that browser, our server sends you a friend request from them once and deletes the cookie; it is never used for anything else.</p>
 
         <h3>Legal basis and deletion</h3>
         <p>We process this data so the friends feature works the way you use it (Art. 6(1)(b) GDPR). It stays stored until you delete your account. In the app under <em>Settings → Friends → Delete account</em>, your account, sign-ins, friendships, blocks, online status and share links are removed immediately. Only a one-way fingerprint of your Discord ID and the times of your share links from the last week and, if your account was suspended, the suspension itself are kept for 7 days, so that the weekly link limit and any suspension still apply if you sign in again, and then deleted.</p>

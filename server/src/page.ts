@@ -21,6 +21,8 @@ export interface PageData {
   tags: string[];
   /** Only when the uploader allows it (Settings → Friends). */
   uploader: { name: string; avatar: string | null } | null;
+  /** "Add <name> as friend" goes here — only with a name shown and requests taken. */
+  addFriend: string | null;
   expires: string;
   width: number;
   height: number;
@@ -62,6 +64,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .brand svg{width:32px;height:32px}
 .btn{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#000;border-radius:999px;padding:0 20px;height:40px;text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap;transition:background .15s}
 .btn:hover{background:rgb(255 255 255/.88)}
+.btn.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}.btn.alt:hover{background:var(--hover)}
 .cta{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;margin-top:32px;padding:20px 22px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,rgb(139 92 246/.12),transparent 60%),var(--surface)}
 .cta p{margin:0;color:var(--muted);font-size:14px;max-width:560px}.cta strong{color:var(--ink)}
 footer{margin-top:22px;font-size:12px;color:var(--faint)}footer a{color:var(--muted)}`;
@@ -113,6 +116,82 @@ ${baseCss(site)}
 </main></body></html>`;
 }
 
+/** A round Discord avatar, or the name's first letter when there is none. */
+function avatar(user: { name: string; avatar: string | null }, size: number): string {
+  return user.avatar
+    ? `<img src="${escapeHtml(user.avatar)}" alt="" width="${size}" height="${size}" referrerpolicy="no-referrer">`
+    : `<span class="initial">${escapeHtml(user.name.slice(0, 1).toUpperCase())}</span>`;
+}
+
+export interface InviteData {
+  site: string;
+  /** Null: no account has that code. */
+  inviter: { name: string; avatar: string | null } | null;
+  /** Where "Add <name> as friend" goes; null when they take no requests. */
+  add: string | null;
+  /** The click went through and the invite cookie is set. */
+  added: boolean;
+  /** `clippiboy://add?code=…` for those who have the app already. */
+  open: string | null;
+}
+
+/**
+ * clippiboy.com/i/<code>, someone's own invite link — and the page after
+ * "Add <name> as friend", from there or from a share page. Same look as the
+ * expired page: the frame in the middle, the logo, the buttons.
+ */
+export function renderInvite(d: InviteData): string {
+  const name = d.inviter ? escapeHtml(d.inviter.name) : "";
+  const get = `<a class="btn${d.inviter && !d.added && d.add ? " alt" : ""}" href="${d.site}${d.added ? "/get/invite" : ""}">Get ClippiBoy</a>`;
+  let title: string;
+  let heading: string;
+  let text: string;
+  let actions: string;
+  if (!d.inviter) {
+    title = "Invite not found";
+    heading = "This invite link isn't valid";
+    text = "Ask whoever sent it for a new one.";
+    actions = get;
+  } else if (d.added) {
+    title = `Add ${name} as friend`;
+    heading = "Almost there";
+    text = `Get ClippiBoy and sign in with Discord — your friend request to <strong>${name}</strong> goes out by itself.`;
+    actions = `${get}${d.open ? `<a class="btn alt" href="${escapeHtml(d.open)}">Open ClippiBoy</a>` : ""}`;
+  } else {
+    title = `${name} invites you to ClippiBoy`;
+    heading = title;
+    text = d.add
+      ? "ClippiBoy keeps the last minutes of your game, so you can save the best moment after it happened. Free for Windows."
+      : `${name} isn't taking friend requests right now.`;
+    actions = `${d.add ? `<a class="btn" href="${escapeHtml(d.add)}">Add ${name} as friend</a>` : ""}${get}`;
+  }
+  const picture = d.inviter ? `<div class="face">${avatar(d.inviter, 72)}</div>` : logo("faded", false);
+  return `${head(d.site, title.endsWith("ClippiBoy") ? title : `${title} · ClippiBoy`)}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ClippiBoy">
+<meta property="og:title" content="${title}">
+<meta property="og:description" content="Clip your best moments after they happened. ClippiBoy keeps the last minutes of your game — free for Windows.">
+<meta property="og:image" content="${d.site}/img/logo.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
+<meta property="og:image:alt" content="ClippiBoy logo">
+<meta name="twitter:card" content="summary">
+<style>
+${baseCss(d.site)}
+.invite{position:relative;max-width:640px;margin:48px auto 0;display:grid;place-items:center;text-align:center;padding:48px 28px;background:radial-gradient(ellipse at 50% 30%,rgb(139 92 246/.16),transparent 65%),var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:0 30px 80px -20px rgb(0 0 0/.7)}
+.invite>div>svg{width:84px;height:84px;opacity:.55;filter:grayscale(.35)}
+.face img,.face .initial{width:72px;height:72px;border-radius:999px;background:var(--elevated);object-fit:cover;display:grid;place-items:center;margin:0 auto;font-weight:650;font-size:28px;box-shadow:0 0 0 4px rgb(139 92 246/.35)}
+.invite h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:18px 0 6px;overflow-wrap:anywhere}
+.invite p{margin:0 auto;color:var(--muted);font-size:14px;max-width:440px}.invite strong{color:var(--ink)}
+.actions{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:24px}
+@media (max-width:560px){.invite{padding:40px 20px;border-radius:14px}.invite h1{font-size:20px}}
+</style></head><body><div class="hero"></div><main>
+<header><a class="brand" href="${d.site}">${logo("mark", false)}ClippiBoy</a></header>
+<div class="invite"><div>${picture}<h1>${heading}</h1><p>${text}</p><div class="actions">${actions}</div></div></div>
+</main></body></html>`;
+}
+
 export function renderPage(d: PageData): string {
   const title = escapeHtml(d.title);
   const by = d.uploader ? ` by ${d.uploader.name}` : "";
@@ -123,11 +202,9 @@ export function renderPage(d: PageData): string {
     ...d.tags.map((tag) => `<span class="pill">${escapeHtml(tag)}</span>`),
   ].join("");
   const uploader = d.uploader
-    ? `<div class="by">${
-        d.uploader.avatar
-          ? `<img src="${escapeHtml(d.uploader.avatar)}" alt="" width="28" height="28" referrerpolicy="no-referrer">`
-          : `<span class="initial">${escapeHtml(d.uploader.name.slice(0, 1).toUpperCase())}</span>`
-      }<span>Shared by <strong>${escapeHtml(d.uploader.name)}</strong></span></div>`
+    ? `<div class="by">${avatar(d.uploader, 28)}<span>Shared by <strong>${escapeHtml(d.uploader.name)}</strong></span>${
+        d.addFriend ? `<a class="add" href="${escapeHtml(d.addFriend)}">Add ${escapeHtml(d.uploader.name)} as friend</a>` : ""
+      }</div>`
     : "";
 
   return `${head(d.site, `${title} · ClippiBoy`)}
@@ -179,6 +256,8 @@ h1{font-size:24px;font-weight:650;letter-spacing:-.02em;margin:0;overflow-wrap:a
 .by img,.by .initial{width:28px;height:28px;border-radius:999px;background:var(--elevated);object-fit:cover}
 .by .initial{display:grid;place-items:center;color:var(--ink);font-weight:600;font-size:12px}
 .by strong{color:var(--ink);font-weight:600}
+.by{flex-wrap:wrap}.add{display:inline-flex;align-items:center;height:28px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--elevated);color:var(--ink);font-size:12px;font-weight:600;text-decoration:none;transition:background .15s}
+.add:hover{background:var(--hover)}
 .expires{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:13px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:6px 13px;white-space:nowrap}
 .expires svg{width:14px;height:14px}
 .linkish{background:none;border:0;padding:0;font:inherit;color:var(--muted);text-decoration:underline;cursor:pointer}

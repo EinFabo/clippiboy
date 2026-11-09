@@ -34,6 +34,7 @@ const empty: FriendsView = {
   lists: { friends: [], incoming: [], outgoing: [], blocked: [] },
   presence: {},
   lastSeen: {},
+  add: null,
 };
 
 export const useFriends = create<FriendsView>(() => empty);
@@ -47,6 +48,11 @@ if (inTauri) {
  *  there is no mailbox for the others. */
 export function canReceive(presence: FriendPresence | null | undefined): boolean {
   return !!presence && !presence.busy;
+}
+
+/** Someone's own invite link: "Add <name> as friend" on clippiboy.com. */
+export function inviteLink(code: string): string {
+  return `https://clippiboy.com/i/${code}`;
 }
 
 /** "XXXX-XXXX" — readable over voice chat. */

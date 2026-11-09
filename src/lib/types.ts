@@ -439,6 +439,8 @@ export interface FriendsView {
   presence: Record<string, FriendPresence>;
   /** When an offline friend was last seen, ms since the epoch. */
   lastSeen: Record<string, number>;
+  /** The last `clippiboy://add?code=…` link — goes into the Add field once per `seq`. */
+  add: { code: string; seq: number } | null;
 }
 
 /** A clip on its way to or from a friend — see `share.rs`. */

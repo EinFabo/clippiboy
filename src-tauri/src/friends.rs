@@ -102,6 +102,17 @@ pub struct FriendsView {
     pub presence: HashMap<String, Presence>,
     /// When an offline friend was last seen, ms since the epoch, by id.
     pub last_seen: HashMap<String, i64>,
+    /// The last `clippiboy://add?code=…` link: the page puts the code into the
+    /// Add field once per `seq`. The user still presses Add — a link from any
+    /// web page must not send a request on its own.
+    pub add: Option<AddLink>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AddLink {
+    pub code: String,
+    pub seq: u64,
 }
 
 #[derive(Default)]
@@ -146,8 +157,21 @@ pub fn start(app: &AppHandle) {
     spawn_connection(app);
 }
 
-/// `clippiboy://auth?code=…`, handed over by the deep-link plugin.
+/// `clippiboy://auth?code=…` and `clippiboy://add?code=…`, handed over by the
+/// deep-link plugin.
 pub fn handle_url(app: &AppHandle, url: &str) {
+    if let Some(code) = add_code_from_url(url) {
+        // "Open ClippiBoy" after "Add <name> as friend" on clippiboy.com.
+        let friends = app.state::<Friends>();
+        {
+            let mut view = friends.view.lock();
+            let seq = view.add.as_ref().map_or(0, |add| add.seq) + 1;
+            view.add = Some(AddLink { code, seq });
+        }
+        emit(app);
+        crate::tray::show_main_window(app);
+        return;
+    }
     let Some(rest) = url.strip_prefix("clippiboy://auth") else { return };
     let code = rest
         .trim_start_matches('/')
@@ -826,6 +850,27 @@ fn checked_id(id: &str) -> Result<&str, String> {
 
 // --- Bits ----------------------------------------------------------------------
 
+/// The friend code in `clippiboy://add?code=K7QXM2PD` (the dash and case as
+/// people type them are fine), or None — the server's alphabet, eight long.
+fn add_code_from_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("clippiboy://add")?;
+    if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('?')) {
+        return None;
+    }
+    let raw = rest
+        .trim_start_matches('/')
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("code="))?;
+    let code: String = raw
+        .chars()
+        .filter(|c| *c != '-' && *c != ' ')
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    const ALPHABET: &str = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    (code.len() == 8 && code.chars().all(|c| ALPHABET.contains(c))).then_some(code)
+}
+
 fn emit(app: &AppHandle) {
     let view = app.state::<Friends>().view.lock().clone();
     let _ = app.emit("friends-state", view);
@@ -891,6 +936,21 @@ fn save_token(token: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_add_link_carries_a_friend_code() {
+        let code = Some("K7QXM2PD".to_owned());
+        assert_eq!(add_code_from_url("clippiboy://add?code=K7QXM2PD"), code);
+        assert_eq!(add_code_from_url("clippiboy://add/?code=k7qx-m2pd"), code);
+        assert_eq!(add_code_from_url("clippiboy://add?x=1&code=K7QXM2PD"), code);
+        // Not a code: too short, look-alikes, junk, no code at all, another link.
+        assert_eq!(add_code_from_url("clippiboy://add?code=K7QXM2P"), None);
+        assert_eq!(add_code_from_url("clippiboy://add?code=K7QXM2P0"), None);
+        assert_eq!(add_code_from_url("clippiboy://add?code=<script>"), None);
+        assert_eq!(add_code_from_url("clippiboy://add"), None);
+        assert_eq!(add_code_from_url("clippiboy://addfriend?code=K7QXM2PD"), None);
+        assert_eq!(add_code_from_url("clippiboy://auth?code=K7QXM2PD"), None);
+    }
 
     #[test]
     fn a_request_that_comes_back_is_announced_once_a_day() {

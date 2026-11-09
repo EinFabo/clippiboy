@@ -30,6 +30,9 @@ import {
 import { addressKey, readLimited } from "./limits";
 import { departedCutoff, fingerprint } from "./departed";
 import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
+import { NOBODY, requestRule, type RequestOutcome } from "./friendrules";
+import { clearInviteCookie, cookieValue, INVITE_COOKIE, inviteTarget, verifyInvite } from "./invite";
+import { invitePage, inviteSecret, shareInvite } from "./invitepages";
 
 export { Hub } from "./hub";
 
@@ -96,6 +99,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   const reported = path.match(/^\/c\/([a-z0-9]+)\/report$/);
   if (reported && method === "POST") return reportShare(request, env, reported[1]);
+
+  // Invites: someone's own link, and "Add <name> as friend" there and on a share page.
+  const invite = path.match(/^\/i\/([A-Za-z0-9-]{8,9})(\/add)?$/);
+  if (invite && (method === "GET" || method === "HEAD")) return invitePage(request, env, invite[1], !!invite[2]);
+  const shareAdd = path.match(/^\/c\/([a-z0-9]+)\/add$/);
+  if (shareAdd && (method === "GET" || method === "HEAD")) return shareInvite(request, env, shareAdd[1]);
 
   // Anonymous on purpose: a ping never carries the account.
   if (path === "/t/ping" && method === "POST") {
@@ -275,15 +284,50 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
   const banned = await env.DB.prepare("SELECT 1 FROM users WHERE id = ? AND banned_at IS NOT NULL").bind(userId).first();
   if (banned) return page("Account suspended", "This ClippiBoy account has been suspended.");
 
+  const invited = await inviteAtSignIn(request, env, userId);
+
   const oneTime = randomToken(24);
   await env.DB.prepare("UPDATE logins SET code = ?, user_id = ? WHERE state = ?").bind(oneTime, userId, state).run();
   const back = `clippiboy://auth?code=${oneTime}`;
-  return page(
-    "Signed in",
-    "Back to ClippiBoy — you can close this tab.",
-    back,
-    true,
-  );
+  const cookies = [`${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax`];
+  // Spent once read, whatever came of it: one request per invite.
+  if (invited.present) cookies.push(clearInviteCookie());
+  const friend =
+    invited.outcome === "accept"
+      ? `You and ${invited.name} are friends now. `
+      : invited.outcome === "send"
+        ? `Friend request sent to ${invited.name}. `
+        : "";
+  return page("Signed in", `${friend}Back to ClippiBoy — you can close this tab.`, back, cookies);
+}
+
+/**
+ * The friend request an invite cookie asks for (invite.ts): sent at sign-in,
+ * from the one signing in to whoever invited them, by the same rule as the Add
+ * field — blocks, "don't take requests", an existing pair all hold. Counted
+ * against the user's limit like any other request. A forged, expired or
+ * refused invite is dropped without a word; it never fails the sign-in.
+ */
+async function inviteAtSignIn(
+  request: Request,
+  env: Env,
+  me: string,
+): Promise<{ present: boolean; outcome: RequestOutcome["kind"] | null; name: string }> {
+  const token = cookieValue(request.headers.get("Cookie"), INVITE_COOKIE);
+  const none = { present: token !== null, outcome: null, name: "" };
+  if (!token) return none;
+  try {
+    const inviter = inviteTarget(await verifyInvite(inviteSecret(env), token, Date.now()), me);
+    if (!inviter) return none;
+    if (!(await env.USER_LIMIT.limit({ key: me })).success) return none;
+    const target = await userById(env.DB, inviter);
+    if (!target) return none;
+    const outcome = await requestTo(env, me, target, true);
+    return { present: true, outcome: outcome.kind, name: target.display_name };
+  } catch (err) {
+    console.error("invite", err);
+    return none;
+  }
 }
 
 async function authExchange(request: Request, env: Env): Promise<Response> {
@@ -308,7 +352,7 @@ async function authExchange(request: Request, env: Env): Promise<Response> {
   return json({ token, me: await loadMe(env, login.user_id) });
 }
 
-function page(title: string, text: string, redirect?: string, clear = false): Response {
+function page(title: string, text: string, redirect?: string, cookies: string[] = []): Response {
   const link = redirect
     ? `<p><a href="${escapeHtml(redirect)}">Open ClippiBoy</a></p><script>location.href=${JSON.stringify(redirect)}</script>`
     : "";
@@ -317,12 +361,9 @@ function page(title: string, text: string, redirect?: string, clear = false): Re
 main{background:#121215;border:1px solid #26262c;border-radius:20px;padding:32px 36px;max-width:360px;text-align:center}
 h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;margin:0}a{display:inline-block;margin-top:20px;background:#fff;color:#08080a;border-radius:999px;padding:10px 20px;text-decoration:none;font-weight:600}</style></head>
 <body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>${link}</main></body></html>`;
-  return new Response(html, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      ...(clear ? { "Set-Cookie": `${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax` } : {}),
-    },
-  });
+  const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+  for (const cookie of cookies) headers.append("Set-Cookie", cookie);
+  return new Response(html, { headers });
 }
 
 // --- Friends ------------------------------------------------------------------
@@ -388,46 +429,56 @@ async function isBlocked(env: Env, blocker: string, blocked: string): Promise<bo
   return row !== null;
 }
 
-const NOBODY = "Nobody with that name or code uses ClippiBoy.";
-
 async function sendRequest(env: Env, me: string, query: string) {
   const text = query.trim().replace(/^@/, "");
   if (!text) throw new HttpError(400, "Enter a Discord name or a friend code.");
   const code = normalizeCode(text);
   const byCode = code ? await userByCode(env.DB, code) : null;
   const target = byCode ?? (await userByName(env.DB, text.toLowerCase()));
-  // Someone who blocked you looks like someone who does not exist.
-  if (!target || (await isBlocked(env, target.id, me))) {
-    throw new HttpError(404, NOBODY);
-  }
-  if (target.id === me) throw new HttpError(400, "That's you.");
-  if (await isBlocked(env, me, target.id)) throw new HttpError(409, "You blocked them — unblock them first.");
+  if (!target) throw new HttpError(404, NOBODY);
+  const outcome = await requestTo(env, me, target, byCode !== null);
+  if (outcome.kind === "refuse") throw new HttpError(outcome.status, outcome.message);
+  return { status: outcome.kind === "accept" ? ("accepted" as const) : ("sent" as const), user: toUser(target) };
+}
 
+/**
+ * Asks `target` to be friends, or says yes if they asked first — whatever
+ * `requestRule` decides. Writes and tells both sides; a refusal writes nothing.
+ */
+async function requestTo(
+  env: Env,
+  me: string,
+  target: NonNullable<Awaited<ReturnType<typeof userById>>>,
+  handedOut: boolean,
+): Promise<RequestOutcome> {
   const [a, b] = pair(me, target.id);
-  const existing = await env.DB.prepare("SELECT status, requester FROM friendships WHERE user_a = ? AND user_b = ?")
-    .bind(a, b)
-    .first<{ status: string; requester: string }>();
-  if (existing?.status === "accepted") throw new HttpError(409, "You are already friends.");
-  if (existing?.requester === me) throw new HttpError(409, "Request already sent.");
-  if (existing) {
-    // They asked first — asking back is saying yes.
+  const [blockedByTarget, blockedByMe, existing] = await Promise.all([
+    isBlocked(env, target.id, me),
+    isBlocked(env, me, target.id),
+    env.DB.prepare("SELECT status, requester FROM friendships WHERE user_a = ? AND user_b = ?")
+      .bind(a, b)
+      .first<{ status: "pending" | "accepted"; requester: string }>(),
+  ]);
+  const outcome = requestRule({
+    me,
+    target: { id: target.id, allowRequests: target.allow_requests === 1 },
+    blockedByTarget,
+    blockedByMe,
+    existing,
+    handedOut,
+  });
+  if (outcome.kind === "accept") {
     await env.DB.prepare("UPDATE friendships SET status = 'accepted' WHERE user_a = ? AND user_b = ?").bind(a, b).run();
-    await notify(env, me, target.id);
-    return { status: "accepted" as const, user: toUser(target) };
+  } else if (outcome.kind === "send") {
+    // A row that appeared meanwhile stays as it is.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO friendships (user_a, user_b, requester, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+    )
+      .bind(a, b, me, Date.now())
+      .run();
   }
-  if (target.allow_requests !== 1) {
-    // Found by name, someone who takes no requests looks like nobody too; a
-    // friend code was handed out on purpose, so it may say no. A pair that
-    // already has a row never gets here, so accepting back still works.
-    throw byCode ? new HttpError(403, "They don't take friend requests right now.") : new HttpError(404, NOBODY);
-  }
-  await env.DB.prepare(
-    "INSERT INTO friendships (user_a, user_b, requester, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
-  )
-    .bind(a, b, me, Date.now())
-    .run();
-  await notify(env, me, target.id);
-  return { status: "sent" as const, user: toUser(target) };
+  if (outcome.kind !== "refuse") await notify(env, me, target.id);
+  return outcome;
 }
 
 async function acceptRequest(env: Env, me: string, other: string) {
