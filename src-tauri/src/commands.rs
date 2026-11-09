@@ -1103,10 +1103,16 @@ pub(crate) fn trash_clip(
     if !still_wanted(&clip) {
         return Ok(false);
     }
+    let from = PathBuf::from(&clip.path);
+    // A file not found may only be away — a drive unplugged, a share
+    // offline. By hand that erases the clip for good (below); the clean-up
+    // must never do that, whatever `still_wanted` said.
+    if asked == Asked::Automatically && !from.is_file() {
+        return Ok(false);
+    }
     if asked == Asked::Automatically {
         crate::composite::cancel(id);
     }
-    let from = PathBuf::from(&clip.path);
     if from.is_file() {
         // The file first, without the library lock — a player that holds it
         // keeps the clip, record and all, and the notice says why.

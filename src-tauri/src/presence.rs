@@ -52,6 +52,10 @@ const RETRY_FIRST: Duration = Duration::from_secs(10);
 const RETRY_MAX: Duration = Duration::from_secs(60);
 /// How long quitting waits for the status to be cleared.
 const QUIT_WAIT: Duration = Duration::from_millis(500);
+/// How long Discord may take to answer. A pipe that takes the frame and never
+/// answers counts as broken after this — a plain read would wait forever, and
+/// the thread with it, deaf to the setting.
+const ANSWER_WAIT: Duration = Duration::from_secs(3);
 
 const OP_HANDSHAKE: u32 = 0;
 const OP_FRAME: u32 = 1;
@@ -236,24 +240,37 @@ struct Link {
 impl Link {
     fn open() -> std::io::Result<Self> {
         // Discord takes the first free of ten; with PTB or Canary beside it,
-        // it may not be 0.
-        let pipe = (0..10)
-            .find_map(|n| {
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(format!(r"\\.\pipe\discord-ipc-{n}"))
-                    .ok()
-            })
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no Discord pipe"))?;
-        let mut link = Self { pipe, nonce: 0 };
-        link.pipe.write_all(&frame(OP_HANDSHAKE, &json!({ "v": 1, "client_id": CLIENT_ID }))?)?;
-        let (op, ready) = read_frame(&mut link.pipe)?;
+        // it may not be 0 — and a pipe that opens but will not greet us is
+        // passed over for the next.
+        let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no Discord pipe");
+        for n in 0..10 {
+            let Ok(pipe) = OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{n}")) else {
+                continue;
+            };
+            let mut link = Self { pipe, nonce: 0 };
+            match link.greet() {
+                Ok(()) => return Ok(link),
+                Err(err) => last = err,
+            }
+        }
+        Err(last)
+    }
+
+    fn greet(&mut self) -> std::io::Result<()> {
+        self.pipe.write_all(&frame(OP_HANDSHAKE, &json!({ "v": 1, "client_id": CLIENT_ID }))?)?;
+        let (op, ready) = self.receive()?;
         if op == OP_FRAME && ready["evt"] == "READY" {
-            Ok(link)
+            Ok(())
         } else {
             Err(std::io::Error::other(format!("handshake refused (op {op}): {}", ready["message"])))
         }
+    }
+
+    /// One frame from Discord, within [`ANSWER_WAIT`].
+    fn receive(&mut self) -> std::io::Result<(u32, Value)> {
+        let deadline = Instant::now() + ANSWER_WAIT;
+        let pipe = &self.pipe;
+        read_frame(&mut &self.pipe, &mut |bytes| wait_for(pipe, bytes, deadline))
     }
 
     /// Sends the activity (or clears it with `None`) and waits for Discord's answer.
@@ -264,7 +281,7 @@ impl Link {
         self.pipe.write_all(&frame(OP_FRAME, &command)?)?;
         // The answer carries the nonce; a ping in between is answered.
         for _ in 0..8 {
-            let (op, body) = read_frame(&mut self.pipe)?;
+            let (op, body) = self.receive()?;
             match op {
                 OP_PING => self.pipe.write_all(&frame(OP_PONG, &body)?)?,
                 OP_CLOSE => return Err(std::io::Error::other(format!("closed by Discord: {}", body["message"]))),
@@ -292,8 +309,14 @@ fn frame(op: u32, body: &Value) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn read_frame(pipe: &mut impl Read) -> std::io::Result<(u32, Value)> {
+/// Reads one frame. `ready(n)` is asked before each read and returns once `n`
+/// bytes can be read without blocking — or fails, and the read with it.
+fn read_frame(
+    pipe: &mut impl Read,
+    ready: &mut dyn FnMut(usize) -> std::io::Result<()>,
+) -> std::io::Result<(u32, Value)> {
     let mut header = [0u8; 8];
+    ready(header.len())?;
     pipe.read_exact(&mut header)?;
     let op = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     let length = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
@@ -301,8 +324,38 @@ fn read_frame(pipe: &mut impl Read) -> std::io::Result<(u32, Value)> {
         return Err(std::io::Error::other("frame too large"));
     }
     let mut body = vec![0u8; length];
+    if length > 0 {
+        ready(length)?;
+    }
     pipe.read_exact(&mut body)?;
     Ok((op, serde_json::from_slice(&body)?))
+}
+
+/// Returns once `bytes` wait in the pipe, fails once `deadline` passed or the
+/// pipe broke. Looks with `PeekNamedPipe`, which never blocks.
+#[cfg(windows)]
+fn wait_for(pipe: &File, bytes: usize, deadline: Instant) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Pipes::PeekNamedPipe;
+    let handle = HANDLE(pipe.as_raw_handle());
+    loop {
+        let mut available = 0u32;
+        unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available as *mut u32), None) }
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err.to_string()))?;
+        if available as usize >= bytes {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Discord did not answer"));
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_for(_pipe: &File, _bytes: usize, _deadline: Instant) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -352,7 +405,13 @@ mod tests {
         let bytes = frame(OP_FRAME, &body).unwrap();
         assert_eq!(&bytes[..4], &1u32.to_le_bytes());
         assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8);
-        let (op, back) = read_frame(&mut bytes.as_slice()).unwrap();
+        let mut asked = Vec::new();
+        let (op, back) = read_frame(&mut bytes.as_slice(), &mut |n| {
+            asked.push(n);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(asked, vec![8, bytes.len() - 8], "each read waits for its bytes first");
         assert_eq!(op, OP_FRAME);
         assert_eq!(back, body);
     }
@@ -362,6 +421,14 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&OP_FRAME.to_le_bytes());
         bytes.extend_from_slice(&(2u32 << 20).to_le_bytes());
-        assert!(read_frame(&mut bytes.as_slice()).is_err());
+        assert!(read_frame(&mut bytes.as_slice(), &mut |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn a_silent_pipe_breaks_the_read_instead_of_blocking() {
+        let bytes = frame(OP_FRAME, &json!({})).unwrap();
+        let timed_out = || std::io::Error::new(std::io::ErrorKind::TimedOut, "Discord did not answer");
+        let err = read_frame(&mut bytes.as_slice(), &mut |_| Err(timed_out())).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 }

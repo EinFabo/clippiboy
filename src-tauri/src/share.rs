@@ -1215,6 +1215,16 @@ fn bad_hash(connection: &Connection) -> bool {
 
 // --- Bits ----------------------------------------------------------------------
 
+/// Is one of the clip's sends to a friend still under way? The clean-up by
+/// age leaves such a clip for its next round (`cleanup.rs`).
+pub fn sending(app: &AppHandle, clip_id: &str) -> bool {
+    let Some(share) = app.try_state::<Share>() else { return false };
+    let outgoing = share.outgoing.lock();
+    outgoing
+        .values()
+        .any(|o| !o.transfer.stage.over() && o.transfer.clip_id.as_deref() == Some(clip_id))
+}
+
 fn transfers(app: &AppHandle) -> Vec<Transfer> {
     let share = app.state::<Share>();
     let mut all: Vec<Transfer> = share

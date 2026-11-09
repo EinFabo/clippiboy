@@ -112,6 +112,12 @@ static UPLOADS: Mutex<Option<HashMap<String, Upload>>> = Mutex::new(None);
 /// What `link_create` answers for a clip deleted while it went up.
 const DELETED: &str = "The clip was deleted.";
 
+/// Is the clip going up as a share link right now? The clean-up by age
+/// leaves such a clip for its next round (`cleanup.rs`).
+pub fn uploading(id: &str) -> bool {
+    UPLOADS.lock().as_ref().is_some_and(|uploads| uploads.contains_key(id))
+}
+
 /// Holds a clip's place in `UPLOADS` until the upload ends, however it ends.
 struct Uploading {
     id: String,

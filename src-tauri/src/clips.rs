@@ -109,6 +109,11 @@ impl Library {
         // The cam over the clip, its own column: three places rebuild `edit`
         // from scratch and could drop it by accident.
         self.add_column("facecam", "TEXT")?;
+        // When a clip came back from Recently deleted (Unix ms). The clean-up
+        // by age counts from here rather than from `created_at`, or a restored
+        // old clip would go straight back (`cleanup.rs`). Not part of `Clip`:
+        // nothing else needs it.
+        self.add_column("kept_since", "INTEGER")?;
         Ok(())
     }
 
@@ -136,6 +141,11 @@ impl Library {
             .prepare("SELECT tag FROM tags WHERE clip_id = ?1")?
             .query_map(params![clip.id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        // A column `Clip` does not carry would go with the old row too.
+        let kept_since: Option<i64> = tx
+            .query_row("SELECT kept_since FROM clips WHERE id = ?1", params![clip.id], |row| row.get(0))
+            .optional()?
+            .flatten();
         put_row(&tx, "INSERT OR REPLACE", clip)?;
         for tag in kept {
             tx.execute(
@@ -143,7 +153,17 @@ impl Library {
                 params![clip.id, tag],
             )?;
         }
+        if kept_since.is_some() {
+            tx.execute("UPDATE clips SET kept_since = ?2 WHERE id = ?1", params![clip.id, kept_since])?;
+        }
         tx.commit()
+    }
+
+    /// The clips that came back from Recently deleted, and when (Unix ms).
+    pub fn kept_since(&self) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare("SELECT id, kept_since FROM clips WHERE kept_since IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
     }
 
     /// Every clip's id, and nothing else — for telling a store that belongs
@@ -398,6 +418,12 @@ impl Library {
     /// Takes a clip out of Recently deleted and back into the library, tags
     /// and all, its file now at `path`. `None` when it is not in there.
     pub fn restore(&self, id: &str, path: &str) -> rusqlite::Result<Option<Clip>> {
+        self.restore_at(id, path, crate::trash::now_ms())
+    }
+
+    /// [`Self::restore`] at `now` (Unix ms), which the clean-up by age then
+    /// counts from.
+    pub fn restore_at(&self, id: &str, path: &str, now: i64) -> rusqlite::Result<Option<Clip>> {
         let Some(trashed) = self.trashed_one(id)? else {
             return Ok(None);
         };
@@ -411,6 +437,7 @@ impl Library {
                 params![clip.id, tag],
             )?;
         }
+        tx.execute("UPDATE clips SET kept_since = ?2 WHERE id = ?1", params![clip.id, now])?;
         tx.execute("DELETE FROM trash WHERE id = ?1", params![id])?;
         tx.commit()?;
         self.get(id)
@@ -744,6 +771,24 @@ mod tests {
         assert!(back.favorite);
         assert!(lib.trashed().unwrap().is_empty());
         assert!(lib.restore("a", &from).unwrap().is_none(), "only once");
+    }
+
+    #[test]
+    fn a_restored_clip_is_kept_from_its_restore_on() {
+        let lib = Library::in_memory().unwrap();
+        lib.insert(&clip("a", 1)).unwrap();
+        lib.insert(&clip("b", 2)).unwrap();
+        assert!(lib.kept_since().unwrap().is_empty(), "a clip never deleted counts from its creation");
+        let gone = lib.get("a").unwrap().unwrap();
+        lib.trash(&gone, &gone.path, 10).unwrap();
+        lib.restore_at("a", &gone.path, 9_000).unwrap().unwrap();
+        assert_eq!(lib.kept_since().unwrap().get("a"), Some(&9_000));
+        // A save writes the whole row again; the moment stays.
+        let mut renamed = lib.get("a").unwrap().unwrap();
+        renamed.title = Some("ace".into());
+        lib.insert(&renamed).unwrap();
+        assert_eq!(lib.kept_since().unwrap().get("a"), Some(&9_000));
+        assert_eq!(lib.kept_since().unwrap().len(), 1);
     }
 
     #[test]
