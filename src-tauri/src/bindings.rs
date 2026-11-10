@@ -33,6 +33,11 @@ pub const HOLD_MS: u64 = 400;
 /// long for the rest of the combo, as two buttons pressed "together" land a
 /// few milliseconds apart.
 pub const CHORD_MS: u64 = 50;
+/// The same action fired from a controller again within this is the same
+/// press: a remapper (DS4Windows, DualSenseX, reWASD) repeats every press of a
+/// real pad on a virtual Xbox one, and with a type profile the two pads go by
+/// different profiles — both would fire, and a toggle would undo itself.
+pub const PAD_ECHO_MS: u64 = CHORD_MS;
 /// Controllers read at once; more are left out.
 pub const MAX_PADS: usize = 8;
 
@@ -844,6 +849,9 @@ pub struct Table<A> {
     /// Combos that were already held when the table came, or that a bigger
     /// combo took over: they count again only after being let go.
     pad_blocked: Vec<bool>,
+    /// When each action last fired from a controller, against echoes
+    /// ([`PAD_ECHO_MS`]).
+    pad_fired_at: Vec<(A, u64)>,
     primed: bool,
 }
 
@@ -857,12 +865,13 @@ impl<A: Copy> Default for Table<A> {
             mouse_owner: [None; 3],
             mouse_was: [false; 3],
             pad_blocked: Vec::new(),
+            pad_fired_at: Vec::new(),
             primed: false,
         }
     }
 }
 
-impl<A: Copy> Table<A> {
+impl<A: Copy + PartialEq> Table<A> {
     /// A keyboard combination, by the id the shortcut parser gives it, and
     /// the virtual-key code of its key ([`vk_of`]) if there is one.
     pub fn bind_key(&mut self, id: u32, vk: Option<u16>, mode: Mode, action: A) {
@@ -947,6 +956,20 @@ impl<A: Copy> Table<A> {
             .iter()
             .filter(|(_, mask, slot)| {
                 mask.count_ones() > 1
+                    && (slot.tap.as_ref().is_some_and(&of) || slot.hold.as_ref().is_some_and(&of))
+            })
+            .fold(0, |all, (_, mask, _)| all | mask)
+    }
+
+    /// [`Table::pad_combo_buttons`] for a pad of type `ty`: only the combos
+    /// of the profile it goes by.
+    pub fn pad_combo_buttons_for(&self, ty: PadType, of: impl Fn(&A) -> bool) -> u32 {
+        let profile = self.governing(ty);
+        self.pads
+            .iter()
+            .filter(|(by, mask, slot)| {
+                *by == profile
+                    && mask.count_ones() > 1
                     && (slot.tap.as_ref().is_some_and(&of) || slot.hold.as_ref().is_some_and(&of))
             })
             .fold(0, |all, (_, mask, _)| all | mask)
@@ -1135,13 +1158,66 @@ impl<A: Copy> Table<A> {
         for (_, _, slot) in &mut self.pads {
             pad_fired.extend(slot.tick(now));
         }
-        fired.extend(
-            pad_fired
-                .into_iter()
-                .filter(|action| !held_back(action))
-                .map(|action| (action, Source::Pad)),
-        );
+        // One press, one action: the same action from two profiles in this
+        // round, or again within [`PAD_ECHO_MS`], is a remapper's echo.
+        self.pad_fired_at
+            .retain(|(_, at)| now.saturating_sub(*at) < PAD_ECHO_MS);
+        for action in pad_fired {
+            if held_back(&action) || self.pad_fired_at.iter().any(|(known, _)| *known == action) {
+                continue;
+            }
+            self.pad_fired_at.push((action, now));
+            fired.push((action, Source::Pad));
+        }
         fired
+    }
+}
+
+/// A value worth keeping in the config only once it has stood for a while —
+/// the pad last used, which flips on every press with a remapper's virtual
+/// pad beside the real one. [`Settled::note`] says what it is now (cheap, on
+/// every change); [`Settled::due`] says when to write and what.
+#[derive(Clone, Debug)]
+pub struct Settled<T> {
+    now: Option<T>,
+    since: u64,
+    written: Option<T>,
+    settle_ms: u64,
+}
+
+impl<T: Copy + PartialEq> Settled<T> {
+    /// `written`: what the config holds already.
+    pub fn new(written: Option<T>, settle_ms: u64) -> Self {
+        Settled {
+            now: written,
+            since: 0,
+            written,
+            settle_ms,
+        }
+    }
+
+    /// The value at `now_ms`. The same again changes nothing.
+    pub fn note(&mut self, value: T, now_ms: u64) {
+        if self.now != Some(value) {
+            self.now = Some(value);
+            self.since = now_ms;
+        }
+    }
+
+    /// What is to be written at `now_ms` — the value, once it has stood for
+    /// the settle time and differs from what was written — and otherwise how
+    /// long until it might be (`None` when nothing waits).
+    pub fn due(&mut self, now_ms: u64) -> (Option<T>, Option<u64>) {
+        if self.now == self.written {
+            return (None, None);
+        }
+        let ready = self.since + self.settle_ms;
+        if now_ms >= ready {
+            self.written = self.now;
+            (self.now, None)
+        } else {
+            (None, Some(ready - now_ms))
+        }
     }
 }
 
@@ -1857,9 +1933,9 @@ mod tests {
         let switch_guide = typed(&[(0, PadType::Xbox), (pad::GUIDE, PadType::Nintendo), (0, PadType::Other)]);
         assert!(table.poll(70, &switch_guide).is_empty());
         assert!(table.poll(80, &idle).is_empty());
-        // Neither has another pad.
+        // Neither has another pad (pressed later than an echo would come).
         let other_misc = typed(&[(0, PadType::Xbox), (0, PadType::Nintendo), (pad::MISC, PadType::Other)]);
-        assert_eq!(table.poll(90, &other_misc), vec![Act::Clip]);
+        assert_eq!(table.poll(200, &other_misc), vec![Act::Clip]);
     }
 
     #[test]
@@ -1920,5 +1996,57 @@ mod tests {
             keys.poll(&mouse(false, false, true, Mods::NONE)),
             Some("Mouse5".into())
         );
+    }
+
+    #[test]
+    fn a_remappers_echo_fires_once() {
+        // DS4Windows: the DualSense goes by its own profile, the virtual Xbox
+        // 360 pad it repeats every press on by All — both bind Guide.
+        let mut table: Table<Act> = Table::default();
+        table.bind_pad(Profile::All, pad::GUIDE, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::PlayStation, pad::GUIDE, Mode::Tap, Act::Clip);
+        let both = |real: u32, echo: u32| typed(&[(real, PadType::PlayStation), (echo, PadType::Other)]);
+        assert!(table.poll(0, &both(0, 0)).is_empty());
+        // In the same round.
+        assert_eq!(table.poll(10, &both(pad::GUIDE, pad::GUIDE)), vec![Act::Clip]);
+        assert!(table.poll(20, &both(0, 0)).is_empty());
+        // A round later.
+        assert_eq!(table.poll(200, &both(pad::GUIDE, 0)), vec![Act::Clip]);
+        assert!(table.poll(210, &both(pad::GUIDE, pad::GUIDE)).is_empty());
+        assert!(table.poll(220, &both(0, 0)).is_empty());
+        // A real second press, later, counts.
+        assert_eq!(table.poll(400, &both(pad::GUIDE, 0)), vec![Act::Clip]);
+    }
+
+    #[test]
+    fn the_console_waits_only_for_combos_of_the_pads_own_profile() {
+        let mut table: Table<Act> = Table::default();
+        table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::Xbox, pad::START | pad::NORTH, Mode::Tap, Act::Clip);
+        let clip = |action: &Act| *action == Act::Clip;
+        assert_eq!(table.pad_combo_buttons_for(PadType::Xbox, clip), pad::START | pad::NORTH);
+        assert_eq!(table.pad_combo_buttons_for(PadType::PlayStation, clip), pad::BACK | pad::SOUTH);
+        assert_eq!(table.pad_combo_buttons_for(PadType::Other, clip), pad::BACK | pad::SOUTH);
+    }
+
+    #[test]
+    fn the_pad_in_use_is_written_once_it_has_settled() {
+        let mut used = Settled::new(Some(PadType::Xbox), 3_000);
+        // As it is: nothing to write.
+        assert_eq!(used.due(0), (None, None));
+        // A remapper flips it on every press: nothing written meanwhile.
+        used.note(PadType::PlayStation, 1_000);
+        assert_eq!(used.due(1_500), (None, Some(2_500)));
+        used.note(PadType::Other, 2_000);
+        used.note(PadType::PlayStation, 3_000);
+        used.note(PadType::PlayStation, 3_500);
+        assert_eq!(used.due(5_900), (None, Some(100)));
+        // Stood for the settle time: once.
+        assert_eq!(used.due(6_000), (Some(PadType::PlayStation), None));
+        assert_eq!(used.due(9_000), (None, None));
+        // Back to what is written before it settled: nothing.
+        used.note(PadType::Xbox, 10_000);
+        used.note(PadType::PlayStation, 10_500);
+        assert_eq!(used.due(20_000), (None, None));
     }
 }

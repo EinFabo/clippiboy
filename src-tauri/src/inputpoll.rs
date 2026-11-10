@@ -29,7 +29,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tauri::{AppHandle, Emitter};
 
 use crate::bindings::{
-    Capture, CaptureFilter, Family, Input, PadFrame, PadType, Source, Table, MAX_PADS,
+    Capture, CaptureFilter, Family, Input, PadFrame, PadType, Settled, Source, Table, MAX_PADS,
 };
 use crate::consolenav::{swap_confirm, Navigator};
 use crate::sdl::{Gamepad, Sdl};
@@ -53,6 +53,11 @@ impl Action {
         Action::Console,
     ];
 }
+
+/// The pad in use goes into the config once it has stayed the same this long
+/// — with a remapper's virtual pad beside the real one it flips on every
+/// press, and each flip would be a config write.
+const PAD_USED_SETTLE_MS: u64 = 5_000;
 
 /// How often the buttons are read. A physical click lasts longer than this.
 const TICK: Duration = Duration::from_millis(10);
@@ -93,6 +98,10 @@ static WARNED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_SINCE: AtomicU64 = AtomicU64::new(0);
 /// What the recording listens to.
 static CAPTURE_FILTER: Mutex<CaptureFilter> = Mutex::new(CaptureFilter::Any);
+/// Counted up by every start of a recording: a slot switched straight to
+/// another (keyboard to controller) may never show the thread recording off
+/// in between, and must not keep the first one's filter.
+static CAPTURE_GEN: AtomicU64 = AtomicU64::new(0);
 /// Until when a settings page wants the controller list, on [`now_ms`].
 static WATCH_UNTIL: AtomicU64 = AtomicU64::new(0);
 /// The controllers as last seen.
@@ -208,6 +217,7 @@ pub fn capture(on: bool, filter: CaptureFilter) {
         *CAPTURE_FILTER
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = filter;
+        CAPTURE_GEN.fetch_add(1, Ordering::SeqCst);
     }
     CAPTURING.store(on, Ordering::SeqCst);
     nudge();
@@ -288,14 +298,16 @@ pub fn key(app: &AppHandle, id: u32, pressed: bool) {
 }
 
 fn run(app: &AppHandle, inbox: &Receiver<()>) {
-    let mut capture: Option<Capture> = None;
+    // The recording under way, by the start it belongs to (`CAPTURE_GEN`).
+    let mut capture: Option<(u64, Capture)> = None;
     let mut pads = Pads::default();
     let mut elevation = Elevation::default();
     // The console's navigation since it opened, and what all pads held in
     // the last round.
     let mut nav: Option<(Navigator, u32)> = None;
-    // The buttons of the console binding's combos, as of the last round.
-    let mut console_chord = 0u32;
+    // The buttons of the console binding's combos, as of the last round —
+    // per slot, from the profile its pad goes by.
+    let mut console_chord = [0u32; MAX_PADS];
     loop {
         let now = now_ms();
         let capturing = CAPTURING.load(Ordering::SeqCst);
@@ -344,6 +356,9 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             if let Some(left) = pads.idle(app, now) {
                 wait = wait.min(Duration::from_millis(left));
             }
+            if let Some(left) = pads.settle_used(app, now) {
+                wait = wait.min(Duration::from_millis(left));
+            }
             if passive {
                 wait = wait.min(Duration::from_millis(crate::console::PASSIVE_WATCH_MS));
             }
@@ -365,6 +380,7 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             let _ = pads.idle(app, now);
             PadRead::default()
         };
+        let _ = pads.settle_used(app, now);
         let input = Input {
             mouse: if mouse || capturing {
                 read_mouse()
@@ -384,7 +400,12 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             let filter = *CAPTURE_FILTER
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(binding) = capture.get_or_insert_with(|| Capture::new(filter)).poll(&input) {
+            let generation = CAPTURE_GEN.load(Ordering::SeqCst);
+            if capture.as_ref().is_none_or(|(of, _)| *of != generation) {
+                capture = Some((generation, Capture::new(filter)));
+            }
+            let recorder = capture.as_mut().map(|(_, recorder)| recorder);
+            if let Some(binding) = recorder.and_then(|recorder| recorder.poll(&input)) {
                 let _ = app.emit(
                     "input-captured",
                     CapturedEvent {
@@ -411,7 +432,9 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
                     fired.extend(table.poll_holding_back(now, &input, |action| {
                         console && *action != Action::Console
                     }));
-                    console_chord = table.pad_combo_buttons(|action| *action == Action::Console);
+                    for (chord, ty) in console_chord.iter_mut().zip(read.types) {
+                        *chord = table.pad_combo_buttons_for(ty, |action| *action == Action::Console);
+                    }
                     fired
                 })
                 .unwrap_or_default();
@@ -430,11 +453,16 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             // others' once A and B are swapped — and so do the console
             // binding's buttons on it.
             let mut masks = read.masks;
-            let mut chord = console_chord;
-            for (mask, nintendo) in masks.iter_mut().zip(read.nintendo) {
-                if nintendo {
-                    *mask = swap_confirm(*mask);
-                    chord |= swap_confirm(console_chord);
+            let mut chord = 0;
+            for slot in 0..MAX_PADS {
+                if !read.present[slot] {
+                    continue;
+                }
+                if read.nintendo[slot] {
+                    masks[slot] = swap_confirm(masks[slot]);
+                    chord |= swap_confirm(console_chord[slot]);
+                } else {
+                    chord |= console_chord[slot];
                 }
             }
             let (navigator, held) = nav.get_or_insert_with(|| {
@@ -547,6 +575,8 @@ struct PadRead {
     nintendo: [bool; MAX_PADS],
     /// The type of the pad in each slot, for the profile it goes by.
     types: [PadType; MAX_PADS],
+    /// Which slots hold a pad at all.
+    present: [bool; MAX_PADS],
     /// The left stick pushed furthest, read only while the console is open.
     stick: (i16, i16),
 }
@@ -579,6 +609,9 @@ struct Pads {
     seen: bool,
     /// SDL's id of the pad a button was last pressed on.
     pressed_last: Option<u32>,
+    /// The type of the pad in use, kept here on every change and written to
+    /// the config only once it has settled.
+    used: Option<Settled<PadType>>,
 }
 
 impl Pads {
@@ -651,6 +684,7 @@ impl Pads {
             read.masks[open.slot] = held;
             read.nintendo[open.slot] = open.family == Family::Nintendo;
             read.types[open.slot] = open.pad_type;
+            read.present[open.slot] = true;
             if console {
                 let (x, y) = sdl.left_stick(&open.pad);
                 let reach = i32::from(x).abs().max(i32::from(y).abs());
@@ -664,7 +698,8 @@ impl Pads {
             self.pressed_last = pressed;
             self.show_family(app);
             if let Some(open) = self.open.iter().find(|open| Some(open.id) == pressed) {
-                remember_pad(app, None, Some(open.pad_type));
+                let ty = open.pad_type;
+                self.used_mut(app).note(ty, now);
             }
         }
         read
@@ -740,7 +775,7 @@ impl Pads {
         self.seen |= !self.open.is_empty();
         if self.open.len() > before {
             let types: Vec<PadType> = self.open.iter().map(|open| open.pad_type).collect();
-            remember_pad(app, Some(&types), None);
+            remember_pad(app, PadNote::Seen(types));
         }
         sdl.flush();
         self.show_family(app);
@@ -758,6 +793,28 @@ impl Pads {
             list.unavailable = None;
             list.pads = pads;
         });
+    }
+
+    /// The pad-in-use tracker, starting from what the config holds.
+    fn used_mut(&mut self, app: &AppHandle) -> &mut Settled<PadType> {
+        self.used.get_or_insert_with(|| {
+            use tauri::Manager;
+            let written = app
+                .state::<crate::state::AppState>()
+                .config_snapshot()
+                .pad_last_used();
+            Settled::new(written, PAD_USED_SETTLE_MS)
+        })
+    }
+
+    /// Hand the pad in use to the config writer once it has settled; else how
+    /// long until it may have.
+    fn settle_used(&mut self, app: &AppHandle, now: u64) -> Option<u64> {
+        let (due, left) = self.used.as_mut()?.due(now);
+        if let Some(ty) = due {
+            remember_pad(app, PadNote::Used(ty));
+        }
+        left
     }
 
     /// Not needed this round. Shuts SDL down once it has not been needed for
@@ -783,31 +840,53 @@ impl Pads {
     }
 }
 
-/// Keep in the config what the settings and the names of bindings go by: the
-/// pad types connected (`seen`, added to the ones ever seen) and the type of
-/// the pad pressed last (`used`). Written only when that changes it — rarely,
-/// a new type or another pad picked up — and off this thread, which reads the
-/// pads on.
-fn remember_pad(app: &AppHandle, seen: Option<&[PadType]>, used: Option<PadType>) {
-    use tauri::Manager;
-    let config = app.state::<crate::state::AppState>().config_snapshot();
-    let Some(next) = crate::model::remember_pads(&config, seen.unwrap_or(&[]), used) else {
-        return;
-    };
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let state = app.state::<crate::state::AppState>();
-        // Built on the copy read above: what changed meanwhile is merged in
-        // (`config::accept`), and a type seen meanwhile is kept.
-        let written = state.replace_config_with(next, |next, current| {
-            for one in &current.pad_families_seen {
-                if !next.pad_families_seen.contains(one) {
-                    next.pad_families_seen.push(one.clone());
+/// What the config is to keep about the pads.
+enum PadNote {
+    /// These types are connected — added to the ones ever seen.
+    Seen(Vec<PadType>),
+    /// The pad in use, settled ([`PAD_USED_SETTLE_MS`]).
+    Used(PadType),
+}
+
+static NOTES: OnceLock<Sender<PadNote>> = OnceLock::new();
+
+/// Keep in the config what the settings and the names of bindings go by — on
+/// one thread of its own, so the writes keep their order and the poll thread
+/// never waits for the config's lock or the disk.
+fn remember_pad(app: &AppHandle, note: PadNote) {
+    NOTES.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded::<PadNote>();
+        let app = app.clone();
+        let spawned = std::thread::Builder::new()
+            .name("clippiboy-padnotes".into())
+            .spawn(move || {
+                use tauri::Manager;
+                for note in rx {
+                    let state = app.state::<crate::state::AppState>();
+                    let config = state.config_snapshot();
+                    let next = match &note {
+                        PadNote::Seen(types) => crate::model::remember_pads(&config, types, None),
+                        PadNote::Used(ty) => crate::model::remember_pads(&config, &[], Some(*ty)),
+                    };
+                    let Some(next) = next else { continue };
+                    // Built on the copy just read: what changed meanwhile is
+                    // merged in (`config::accept`).
+                    let written = state.replace_config(next);
+                    crate::commands::tell_main(&app, &written);
                 }
-            }
-        });
-        crate::commands::tell_main(&app, &written);
+            });
+        if let Err(err) = spawned {
+            log::warn!("controllers: config writer not started: {err}");
+        }
+        tx
     });
+    send_note(note);
+}
+
+fn send_note(note: PadNote) {
+    if let Some(notes) = NOTES.get() {
+        let _ = notes.send(note);
+    }
 }
 
 /// Change the controller list; tell the settings when that changed it.
