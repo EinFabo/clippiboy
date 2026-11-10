@@ -200,12 +200,20 @@ export interface AppConfig {
   recordHotkey: string;
   /** Open the console over the game. */
   consoleHotkey: string;
-  /** A second binding per action beside the first; empty is none. */
+  /** A second binding per action beside the first; empty is none. Both take
+      keys and mouse buttons only — controllers have {@link padProfiles}. */
   saveClipHotkeyAlt: string;
   toggleBufferHotkeyAlt: string;
   screenshotHotkeyAlt: string;
   recordHotkeyAlt: string;
   consoleHotkeyAlt: string;
+  /** Controller bindings: one set for every pad, and optionally one per pad
+      type standing in for it on those pads. */
+  padProfiles: PadProfiles;
+  /** Pad types ever connected — set by the core, only grows. */
+  padFamiliesSeen: PadType[];
+  /** The type of the pad a button was last pressed on — set by the core. */
+  padLastUsed: PadType | null;
   /** Whether that hotkey does anything at all. */
   consoleEnabled: boolean;
   /** How big the console is drawn, 0.8 to 1.6. */
@@ -776,11 +784,38 @@ export type HotkeyField =
   | "recordHotkeyAlt"
   | "consoleHotkeyAlt";
 
+/** The actions a hotkey can do, as a controller profile names them. */
+export type PadAction = "saveClip" | "toggleBuffer" | "screenshot" | "record" | "console";
+
+/** One controller profile: a `Pad:` binding per action, "" for none. */
+export type PadBindings = Record<PadAction, string>;
+
+/** What a pad is, for the profile it goes by: one of three types, or another
+    pad, which always goes by the profile for all. GameCube counts as Nintendo. */
+export type PadType = "xbox" | "playstation" | "nintendo" | "other";
+
+/** The pad types that can have a profile of their own. */
+export type ProfileType = Exclude<PadType, "other">;
+
+/** A tab of the controller section: every pad, or one type. */
+export type PadProfileKey = "all" | ProfileType;
+
+/** `all` for every pad; a type's profile, once there, replaces it on those
+    pads entirely. `null`: that type goes by `all`. */
+export interface PadProfiles {
+  all: PadBindings;
+  xbox: PadBindings | null;
+  playstation: PadBindings | null;
+  nintendo: PadBindings | null;
+}
+
 /** A controller ClippiBoy sees (`watch_controllers`). */
 export interface Controller {
   name: string;
   /** Whose names its buttons carry. */
   family: "xbox" | "playstation" | "nintendo" | "gamecube";
+  /** Which profile it goes by. */
+  padType: PadType;
 }
 
 /** The controllers for the settings. */
@@ -792,6 +827,8 @@ export interface Controllers {
   pads: Controller[];
   /** Whose names buttons are shown with: the pad pressed last, else the first. */
   family: Controller["family"];
+  /** The type of that same pad; null with none connected. */
+  inUse: PadType | null;
 }
 
 /** Every binding at once, as `set_hotkeys` takes them. */
@@ -806,4 +843,6 @@ export interface HotkeySet {
   screenshotAlt: string;
   recordAlt: string;
   consoleAlt: string;
+  /** The controller profiles, checked together with the keys. */
+  pads: PadProfiles;
 }

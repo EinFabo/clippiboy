@@ -61,6 +61,9 @@ pub fn default_config() -> AppConfig {
         screenshot_hotkey_alt: String::new(),
         record_hotkey_alt: String::new(),
         console_hotkey_alt: String::new(),
+        pad_profiles: Default::default(),
+        pad_families_seen: Vec::new(),
+        pad_last_used: None,
         console_enabled: true,
         console_scale: crate::model::default_console_scale(),
         console_monitor: None,
@@ -200,6 +203,52 @@ fn migrate_sources(config: &mut AppConfig) {
             _ => {}
         }
     }
+}
+
+/// Controller bindings used to sit in the keyboard's two slots per action
+/// (0.9.x). They have a profile of their own now: every `Pad:` binding found
+/// there moves to the profile for all controllers — the first one, when an
+/// action had two — and a keyboard binding left in the second slot moves up
+/// into an emptied first. Written back in the new shape with the next save.
+pub fn migrate_pad_bindings(config: &mut AppConfig) -> bool {
+    use crate::inputpoll::Action;
+
+    let is_pad = |text: &str| {
+        crate::bindings::parse(text)
+            .is_ok_and(|binding| matches!(binding.trigger, crate::bindings::Trigger::Pad(_)))
+    };
+    let mut moved = false;
+    for action in Action::ALL {
+        let (first, second) = match action {
+            Action::SaveClip => (&mut config.save_clip_hotkey, &mut config.save_clip_hotkey_alt),
+            Action::ToggleBuffer => (
+                &mut config.toggle_buffer_hotkey,
+                &mut config.toggle_buffer_hotkey_alt,
+            ),
+            Action::Screenshot => (&mut config.screenshot_hotkey, &mut config.screenshot_hotkey_alt),
+            Action::Record => (&mut config.record_hotkey, &mut config.record_hotkey_alt),
+            Action::Console => (&mut config.console_hotkey, &mut config.console_hotkey_alt),
+        };
+        for slot in [&mut *first, &mut *second] {
+            if !is_pad(slot) {
+                continue;
+            }
+            let text = std::mem::take(slot);
+            let pad = config.pad_profiles.all.get_mut(action);
+            if pad.trim().is_empty() {
+                log::info!("controller binding '{text}' moved to the profile for all controllers");
+                *pad = text;
+            } else {
+                log::info!("controller binding '{text}' dropped: the action has one already");
+            }
+            moved = true;
+        }
+        if first.trim().is_empty() && !second.trim().is_empty() {
+            *first = std::mem::take(second);
+            moved = true;
+        }
+    }
+    moved
 }
 
 /// How the config file came in at start.
@@ -355,6 +404,7 @@ pub fn load() -> (AppConfig, Loaded) {
             // would otherwise still size the memory budget.
             normalize_recording(&mut config.recording);
             migrate_sources(&mut config);
+            migrate_pad_bindings(&mut config);
             config
         }
         None => default_config(),
@@ -439,6 +489,14 @@ pub fn keep_once_flags(next: &mut AppConfig, previous: &AppConfig) {
     next.tray_hint_shown |= previous.tray_hint_shown;
     next.pad_button_hint_shown |= previous.pad_button_hint_shown;
     next.guide_hint_shown |= previous.guide_hint_shown;
+    // The pad types seen and the pad in use are the core's to write: a page
+    // holding an older copy neither forgets a type nor takes back the pad.
+    for seen in &previous.pad_families_seen {
+        if !next.pad_families_seen.contains(seen) {
+            next.pad_families_seen.push(seen.clone());
+        }
+    }
+    next.pad_last_used = previous.pad_last_used.clone();
 }
 
 /// The clip folder and the control token change only through their own
@@ -767,6 +825,118 @@ mod tests {
         assert_eq!(parsed.control.port, crate::model::DEFAULT_CONTROL_PORT);
         // Nothing saved yet — `control::start` replaces it at every start.
         assert!(parsed.control.token.is_empty());
+    }
+
+    fn pad_config(slots: &[(&str, &str)]) -> AppConfig {
+        let mut written = serde_json::to_value(default_config()).unwrap();
+        let object = written.as_object_mut().unwrap();
+        // As 0.9.4 wrote it: no profiles, no seen types.
+        for gone in ["padProfiles", "padFamiliesSeen", "padLastUsed"] {
+            object.remove(gone).expect("named so in JSON");
+        }
+        for (field, value) in slots {
+            object.insert((*field).into(), Value::String((*value).into()));
+        }
+        serde_json::from_value(written).expect("a 0.9.4 config no longer loads")
+    }
+
+    #[test]
+    fn controller_bindings_move_out_of_the_keyboard_slots() {
+        let mut config = pad_config(&[
+            ("saveClipHotkey", "Ctrl+Shift+S"),
+            ("saveClipHotkeyAlt", "Pad:View+A"),
+            ("screenshotHotkey", "Hold:Pad:Misc"),
+            ("screenshotHotkeyAlt", "Mouse5"),
+            ("consoleHotkey", "Pad:Back+North"),
+            ("consoleHotkeyAlt", "Pad:Guide"),
+            ("recordHotkey", ""),
+            ("recordHotkeyAlt", "F9"),
+        ]);
+        assert!(config.pad_profiles.xbox.is_none());
+        assert!(migrate_pad_bindings(&mut config));
+        // A pad in the second slot — the usual place in 0.9.x.
+        assert_eq!(config.save_clip_hotkey, "Ctrl+Shift+S");
+        assert_eq!(config.save_clip_hotkey_alt, "");
+        assert_eq!(config.pad_profiles.all.save_clip, "Pad:View+A");
+        // A pad in the first slot: the mouse button moves up.
+        assert_eq!(config.screenshot_hotkey, "Mouse5");
+        assert_eq!(config.screenshot_hotkey_alt, "");
+        assert_eq!(config.pad_profiles.all.screenshot, "Hold:Pad:Misc");
+        // Two pads on one action: the first is kept.
+        assert_eq!(config.pad_profiles.all.console, "Pad:Back+North");
+        assert_eq!(config.console_hotkey, "");
+        assert_eq!(config.console_hotkey_alt, "");
+        // Only a second keyboard binding: up into the first.
+        assert_eq!(config.record_hotkey, "F9");
+        assert_eq!(config.record_hotkey_alt, "");
+        assert_eq!(config.toggle_buffer_hotkey, "Ctrl+Shift+B");
+        assert!(config.pad_families_seen.is_empty());
+        // Done once: nothing left to move.
+        assert!(!migrate_pad_bindings(&mut config));
+        // And written back in the new shape.
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["padProfiles"]["all"]["saveClip"], "Pad:View+A");
+        assert_eq!(json["padProfiles"]["xbox"], Value::Null);
+    }
+
+    #[test]
+    fn a_keyboard_only_config_is_left_as_it_was() {
+        let mut config = pad_config(&[("saveClipHotkeyAlt", "Mouse4")]);
+        let before = serde_json::to_value(&config).unwrap();
+        assert!(!migrate_pad_bindings(&mut config));
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        assert!(config.pad_profiles.all.is_empty());
+    }
+
+    #[test]
+    fn a_stale_page_neither_forgets_a_pad_type_nor_takes_back_the_pad() {
+        let mut previous = default_config();
+        previous.pad_families_seen = vec!["xbox".into(), "nintendo".into()];
+        previous.pad_last_used = Some("nintendo".into());
+        let mut next = default_config();
+        next.pad_families_seen = vec!["xbox".into()];
+        keep_once_flags(&mut next, &previous);
+        assert_eq!(next.pad_families_seen, vec!["xbox".to_string(), "nintendo".to_string()]);
+        assert_eq!(next.pad_last_used.as_deref(), Some("nintendo"));
+    }
+
+    #[test]
+    fn a_pad_type_is_remembered_once() {
+        use crate::bindings::PadType;
+        let config = default_config();
+        let next = crate::model::remember_pads(&config, &[PadType::Xbox, PadType::Other], None)
+            .expect("two new types");
+        assert_eq!(next.pad_families_seen, vec!["xbox".to_string(), "other".to_string()]);
+        assert_eq!(next.pad_last_used, None);
+        // Nothing new: nothing to write.
+        assert!(crate::model::remember_pads(&next, &[PadType::Xbox], None).is_none());
+        let used = crate::model::remember_pads(&next, &[], Some(PadType::Xbox)).unwrap();
+        assert_eq!(used.pad_last_used.as_deref(), Some("xbox"));
+        assert!(crate::model::remember_pads(&used, &[], Some(PadType::Xbox)).is_none());
+    }
+
+    #[test]
+    fn the_binding_named_follows_the_pad_last_used() {
+        use crate::inputpoll::Action;
+        let mut config = default_config();
+        config.console_hotkey = "Alt+Z".into();
+        config.pad_profiles.all.console = "Pad:Back+North".into();
+        config.pad_profiles.nintendo = Some(crate::model::PadBindings {
+            console: "Pad:Misc".into(),
+            ..Default::default()
+        });
+        // No pad pressed yet: the keyboard's.
+        assert_eq!(config.console_hotkey_shown(), "Alt+Z");
+        config.pad_last_used = Some("xbox".into());
+        assert_eq!(config.console_hotkey_shown(), "Pad:Back+North");
+        config.pad_last_used = Some("nintendo".into());
+        assert_eq!(config.console_hotkey_shown(), "Pad:Misc");
+        // Unbound on the pad: the keyboard's after all.
+        assert_eq!(config.hotkey_shown(Action::SaveClip), "Ctrl+Shift+S");
+        // Nothing on the keyboard: the pad's even before one was pressed.
+        config.pad_last_used = None;
+        config.console_hotkey.clear();
+        assert_eq!(config.console_hotkey_shown(), "Pad:Back+North");
     }
 
     #[test]

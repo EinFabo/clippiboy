@@ -1253,7 +1253,9 @@ pub fn run_hotkey(app: &tauri::AppHandle, action: inputpoll::Action, opener: con
 /// Keyboard combinations go to `RegisterHotKey`, once per combination even
 /// when it is bound tapped and held; mouse buttons and controller combos go to
 /// the poll thread (`inputpoll`). Either way the press lands in one table that
-/// decides between tap and hold (`bindings`).
+/// decides between tap and hold (`bindings`). Controller bindings come from the
+/// profiles (`AppConfig::pad_profiles`), each pad going by its type's or the
+/// one for all.
 pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     use bindings::Trigger;
     use inputpoll::Action;
@@ -1317,7 +1319,33 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
                 }
             },
             Trigger::Mouse(button, mods) => table.bind_mouse(*button, *mods, binding.mode, action),
-            Trigger::Pad(mask) => table.bind_pad(*mask, binding.mode, action),
+            // Controller bindings live in the profiles below; one left here
+            // by hand would go nowhere a pad is read for.
+            Trigger::Pad(_) => log::warn!("hotkey '{text}' ignored: controller bindings go in a profile"),
+        }
+    }
+
+    // The controller profiles, each fed only by the pads that go by it.
+    for (profile, set) in config.pad_profiles.present() {
+        table.add_profile(profile);
+        for action in Action::ALL {
+            if action == Action::Console && !config.console_enabled {
+                continue;
+            }
+            let text = set.get(action);
+            if text.trim().is_empty() {
+                continue;
+            }
+            match bindings::parse(text) {
+                Ok(binding) => match binding.trigger {
+                    Trigger::Pad(mask) => table.bind_pad(profile, mask, binding.mode, action),
+                    _ => log::warn!("controller binding '{text}' ignored: not a controller's"),
+                },
+                Err(err) => {
+                    log::warn!("could not register hotkey '{text}': {err}");
+                    failed.push(text.to_string());
+                }
+            }
         }
     }
 

@@ -1,3 +1,14 @@
+import type {
+  AppConfig,
+  HotkeyField,
+  PadAction,
+  PadBindings,
+  PadProfileKey,
+  PadProfiles,
+  PadType,
+  ProfileType,
+} from "./types.ts";
+
 /**
  * How a hotkey binding reads. The core stores one string per action:
  * `Ctrl+Shift+S`, `Mouse4`, `Ctrl+Mouse5`, `Pad:Back+South`, `Pad:Guide`, any
@@ -240,4 +251,141 @@ export function hotkeyKeys(value: string, family: PadFamily = "xbox"): string[] 
 export function hotkeyLabel(value: string, family: PadFamily = "xbox"): string {
   const keys = hotkeyKeys(value, family).join(" + ");
   return isHold(value) && keys ? `Hold ${keys}` : keys;
+}
+
+// ---------------------------------------------------------------------------
+// Controller profiles: keys and mouse buttons are bound once for everything
+// (two slots per action); a controller binding lives in a profile — `all` for
+// every pad, and per pad type one that replaces `all` on those pads entirely.
+
+/** The actions, in the order the settings list them. */
+export const PAD_ACTIONS: PadAction[] = ["saveClip", "toggleBuffer", "screenshot", "record", "console"];
+
+/** The pad types that can have a profile, in tab order. */
+export const PROFILE_TYPES: ProfileType[] = ["xbox", "playstation", "nintendo"];
+
+/** What a profile's tab says. */
+export const PROFILE_NAMES: Record<PadProfileKey, string> = {
+  all: "All",
+  xbox: "Xbox",
+  playstation: "PlayStation",
+  nintendo: "Nintendo",
+};
+
+/** The keyboard's two config fields for an action. */
+const KEYBOARD_FIELDS: Record<PadAction, [HotkeyField, HotkeyField]> = {
+  saveClip: ["saveClipHotkey", "saveClipHotkeyAlt"],
+  toggleBuffer: ["toggleBufferHotkey", "toggleBufferHotkeyAlt"],
+  screenshot: ["screenshotHotkey", "screenshotHotkeyAlt"],
+  record: ["recordHotkey", "recordHotkeyAlt"],
+  console: ["consoleHotkey", "consoleHotkeyAlt"],
+};
+
+/** Is anything bound in any profile? */
+export function anyPadBinding(profiles: PadProfiles): boolean {
+  return [profiles.all, ...PROFILE_TYPES.map((type) => profiles[type])].some(
+    (set) => set !== null && PAD_ACTIONS.some((action) => triggerOf(set[action]) !== ""),
+  );
+}
+
+/** Does the controller section show? Once a pad was ever seen (or is
+    connected right now), or anything is bound to one — so it never hides
+    bindings, and never shows for someone who has no controller. */
+export function showsControllers(
+  profiles: PadProfiles,
+  seen: PadType[],
+  connected: PadType[],
+): boolean {
+  return (
+    seen.length > 0 ||
+    connected.length > 0 ||
+    anyPadBinding(profiles) ||
+    PROFILE_TYPES.some((type) => profiles[type] !== null)
+  );
+}
+
+/** The profile tabs: `all`, then each type seen, connected or with a profile
+    of its own. `selector` is false — no tabs at all, the section edits `all`
+    — while only one kind of pad is known and no type has a profile. */
+export function profileTabs(
+  profiles: PadProfiles,
+  seen: PadType[],
+  connected: PadType[],
+): { tabs: PadProfileKey[]; selector: boolean } {
+  const known = new Set<PadType>([...seen, ...connected]);
+  const types = PROFILE_TYPES.filter((type) => known.has(type) || profiles[type] !== null);
+  const selector = known.size >= 2 || PROFILE_TYPES.some((type) => profiles[type] !== null);
+  return { tabs: selector ? ["all", ...types] : ["all"], selector };
+}
+
+/** The tab the section opens on: the profile the pad in use goes by — its
+    type's when that has one, else `all`. */
+export function openingTab(
+  profiles: PadProfiles,
+  inUse: PadType | null,
+  tabs: PadProfileKey[],
+): PadProfileKey {
+  if (inUse && inUse !== "other" && profiles[inUse] !== null && tabs.includes(inUse)) return inUse;
+  return "all";
+}
+
+/** What a tab shows: its own bindings, or — a type without a profile —
+    `all`'s, borrowed. */
+export function tabBindings(
+  profiles: PadProfiles,
+  tab: PadProfileKey,
+): { bindings: PadBindings; inherited: boolean } {
+  if (tab === "all") return { bindings: profiles.all, inherited: false };
+  const own = profiles[tab];
+  return own ? { bindings: own, inherited: false } : { bindings: profiles.all, inherited: true };
+}
+
+/** The profiles with `changes` made in `tab`. The first change in a type
+    without a profile of its own copies `all` into it first: from then on that
+    type goes by its own profile only. */
+export function editProfile(
+  profiles: PadProfiles,
+  tab: PadProfileKey,
+  changes: Partial<PadBindings>,
+): PadProfiles {
+  if (tab === "all") return { ...profiles, all: { ...profiles.all, ...changes } };
+  const base = profiles[tab] ?? profiles.all;
+  return { ...profiles, [tab]: { ...base, ...changes } };
+}
+
+/** The profiles without `type`'s own: it goes by `all` again. */
+export function resetProfile(profiles: PadProfiles, type: ProfileType): PadProfiles {
+  return { ...profiles, [type]: null };
+}
+
+/** Can a binding be recorded in `tab` right now? Only with a pad there to
+    press on: any for `all`, one of the type for a type. */
+export function canRecord(tab: PadProfileKey, connected: PadType[]): boolean {
+  return tab === "all" ? connected.length > 0 : connected.includes(tab);
+}
+
+/** Whose names a pad of this type's buttons carry, as far as the type tells. */
+export function familyOfType(type: PadType | null): PadFamily {
+  return type === "playstation" || type === "nintendo" ? type : "xbox";
+}
+
+/** The binding the app names for `action` (dashboard, setup, console
+    settings), with whose button names to say it in: the controller's from
+    the profile of the pad last used, when it binds the action; else the
+    keyboard's first or second; else the controller's anyway. Mirrors
+    `AppConfig::hotkey_shown` in the core. */
+export function shownHotkey(
+  config: Pick<AppConfig, "padProfiles" | "padLastUsed" | HotkeyField>,
+  action: PadAction,
+): { value: string; family: PadFamily } {
+  const used = config.padLastUsed;
+  const profiles = config.padProfiles;
+  const own = used && used !== "other" ? profiles[used] : null;
+  const pad = (own ?? profiles.all)[action];
+  const family = familyOfType(used);
+  const [first, second] = KEYBOARD_FIELDS[action].map((field) => config[field]);
+  if (used && triggerOf(pad)) return { value: pad, family };
+  if (triggerOf(first)) return { value: first, family };
+  if (triggerOf(second)) return { value: second, family };
+  return { value: pad, family };
 }

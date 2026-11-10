@@ -16,7 +16,7 @@ import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
 import { SourceTrouble } from "@/components/SourceTrouble";
 import { cn } from "@/lib/cn";
-import { hotkeyLabel } from "@/lib/hotkeyText";
+import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { LiveDot } from "@/components/ui/LiveDot";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { useCountUp } from "@/lib/useCountUp";
@@ -77,6 +77,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     })),
   );
   const saving = recordingSaving || recordingProgress !== null;
+  // Named as the pad last used goes, else the keyboard's.
+  const saveKey = shownHotkey(config, "saveClip");
+  const recordKey = shownHotkey(config, "record");
   // Recordings only. The player below is the video one, and "Latest clips" says
   // what it shows — screenshots have their own place in the gallery.
   const recent = useMemo(
@@ -158,11 +161,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         {recording && (
           <p className="mt-3 text-xs text-ink-muted tabular-nums">
             ~{formatSize(recordingBytes)}
-            {(config.recordHotkey || config.recordHotkeyAlt) && (
+            {recordKey.value && (
               <>
                 {" "}·{" "}
                 <kbd className="rounded-inner border border-line bg-elevated px-1.5 py-0.5">
-                  {hotkeyLabel(config.recordHotkey || config.recordHotkeyAlt)}
+                  {hotkeyLabel(recordKey.value, recordKey.family)}
                 </kbd>{" "}
                 stops it
               </>
@@ -234,11 +237,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         />
         {recent.length === 0 ? (
           <Card className="grid h-44 place-items-center text-sm text-ink-muted">
-            {config.saveClipHotkey || config.saveClipHotkeyAlt ? (
+            {saveKey.value ? (
               <>
                 No clips yet — start the buffer and press{" "}
                 <kbd className="mx-1 rounded-inner border border-line bg-elevated px-2 py-0.5 text-xs">
-                  {hotkeyLabel(config.saveClipHotkey || config.saveClipHotkeyAlt)}
+                  {hotkeyLabel(saveKey.value, saveKey.family)}
                 </kbd>
               </>
             ) : (

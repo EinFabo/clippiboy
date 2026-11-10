@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tauri::{AppHandle, Emitter};
 
-use crate::bindings::{Capture, Family, Input, PadFrame, Source, Table, MAX_PADS};
+use crate::bindings::{
+    Capture, CaptureFilter, Family, Input, PadFrame, PadType, Source, Table, MAX_PADS,
+};
 use crate::consolenav::{swap_confirm, Navigator};
 use crate::sdl::{Gamepad, Sdl};
 
@@ -40,6 +42,16 @@ pub enum Action {
     Record,
     ToggleBuffer,
     Console,
+}
+
+impl Action {
+    pub const ALL: [Action; 5] = [
+        Action::SaveClip,
+        Action::ToggleBuffer,
+        Action::Screenshot,
+        Action::Record,
+        Action::Console,
+    ];
 }
 
 /// How often the buttons are read. A physical click lasts longer than this.
@@ -79,12 +91,16 @@ static CAPTURING: AtomicBool = AtomicBool::new(false);
 static WARNED: AtomicBool = AtomicBool::new(false);
 /// When recording began, on [`now_ms`].
 static CAPTURE_SINCE: AtomicU64 = AtomicU64::new(0);
+/// What the recording listens to.
+static CAPTURE_FILTER: Mutex<CaptureFilter> = Mutex::new(CaptureFilter::Any);
 /// Until when a settings page wants the controller list, on [`now_ms`].
 static WATCH_UNTIL: AtomicU64 = AtomicU64::new(0);
 /// The controllers as last seen.
 static CONTROLLERS: Mutex<Controllers> = Mutex::new(Controllers::EMPTY);
 /// The [`Family`] of the first controller, for naming its buttons.
 static FAMILY: AtomicU8 = AtomicU8::new(0);
+/// [`FAMILY`] is that of a pad a button was pressed on this session.
+static FAMILY_PRESSED: AtomicBool = AtomicBool::new(false);
 static INBOX: OnceLock<Sender<()>> = OnceLock::new();
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
@@ -111,6 +127,8 @@ pub struct Controllers {
     /// Whose names buttons are shown with: those of the pad pressed last, or
     /// of the first one before any was pressed.
     pub family: &'static str,
+    /// The type of that same pad (`PadType::key`) — `None` with no pad.
+    pub in_use: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -120,6 +138,9 @@ pub struct Controller {
     /// `xbox`, `playstation`, `nintendo` or `gamecube` — whose names its
     /// buttons carry.
     pub family: &'static str,
+    /// `xbox`, `playstation`, `nintendo` or `other` — which profile it goes
+    /// by ([`PadType`]).
+    pub pad_type: &'static str,
 }
 
 impl Controllers {
@@ -128,6 +149,7 @@ impl Controllers {
         unavailable: None,
         pads: Vec::new(),
         family: "xbox",
+        in_use: None,
     };
 }
 
@@ -178,10 +200,14 @@ pub fn suspend() {
     SUSPENDED.store(true, Ordering::SeqCst);
 }
 
-/// The settings start or stop recording a binding.
-pub fn capture(on: bool) {
+/// The settings start or stop recording a binding — listening to what
+/// `filter` lets through.
+pub fn capture(on: bool, filter: CaptureFilter) {
     if on {
         CAPTURE_SINCE.store(now_ms(), Ordering::SeqCst);
+        *CAPTURE_FILTER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = filter;
     }
     CAPTURING.store(on, Ordering::SeqCst);
     nudge();
@@ -211,6 +237,12 @@ pub fn family() -> Family {
         3 => Family::GameCube,
         _ => Family::Xbox,
     }
+}
+
+/// [`family`], once a button was pressed on a pad this session — the names a
+/// binding of the pad last used is said in.
+pub fn family_pressed() -> Option<Family> {
+    FAMILY_PRESSED.load(Ordering::Relaxed).then(family)
 }
 
 /// The console opened or closed (`console::CONSOLE_SHOWN`): wake the thread,
@@ -345,10 +377,14 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
                 Default::default()
             },
             pads: read.masks,
+            pad_types: read.types,
         };
         let mut console_fired = false;
         if capturing {
-            if let Some(binding) = capture.get_or_insert_with(Capture::default).poll(&input) {
+            let filter = *CAPTURE_FILTER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(binding) = capture.get_or_insert_with(|| Capture::new(filter)).poll(&input) {
                 let _ = app.emit(
                     "input-captured",
                     CapturedEvent {
@@ -509,6 +545,8 @@ struct PadRead {
     /// Which slots hold a Nintendo pad — confirm and back sit the other way
     /// round there.
     nintendo: [bool; MAX_PADS],
+    /// The type of the pad in each slot, for the profile it goes by.
+    types: [PadType; MAX_PADS],
     /// The left stick pushed furthest, read only while the console is open.
     stick: (i16, i16),
 }
@@ -520,6 +558,7 @@ struct Open {
     slot: usize,
     name: String,
     family: Family,
+    pad_type: PadType,
     /// What it held in the last round — a button newly down makes it the pad
     /// in use.
     held: u32,
@@ -611,6 +650,7 @@ impl Pads {
             open.held = held;
             read.masks[open.slot] = held;
             read.nintendo[open.slot] = open.family == Family::Nintendo;
+            read.types[open.slot] = open.pad_type;
             if console {
                 let (x, y) = sdl.left_stick(&open.pad);
                 let reach = i32::from(x).abs().max(i32::from(y).abs());
@@ -623,6 +663,9 @@ impl Pads {
         if pressed.is_some() && pressed != self.pressed_last {
             self.pressed_last = pressed;
             self.show_family(app);
+            if let Some(open) = self.open.iter().find(|open| Some(open.id) == pressed) {
+                remember_pad(app, None, Some(open.pad_type));
+            }
         }
         read
     }
@@ -631,6 +674,11 @@ impl Pads {
     fn show_family(&self, app: &AppHandle) {
         let pads: Vec<(u32, Family)> = self.open.iter().map(|o| (o.id, o.family)).collect();
         let family = crate::bindings::family_in_use(&pads, self.pressed_last);
+        let in_use = self
+            .pressed_last
+            .and_then(|last| self.open.iter().find(|open| open.id == last))
+            .or(self.open.first())
+            .map(|open| open.pad_type.key());
         FAMILY.store(
             match family {
                 Family::Xbox => 0,
@@ -640,13 +688,18 @@ impl Pads {
             },
             Ordering::Relaxed,
         );
-        publish(app, |list| list.family = family.key());
+        FAMILY_PRESSED.store(self.pressed_last.is_some(), Ordering::Relaxed);
+        publish(app, |list| {
+            list.family = family.key();
+            list.in_use = in_use;
+        });
     }
 
     /// Open the pads that came, close the ones that went, and tell the
     /// settings when the list changed.
     fn scan(&mut self, app: &AppHandle, sdl: &Sdl) {
         let ids = sdl.gamepad_ids();
+        let before = self.open.len();
         let mut index = 0;
         while index < self.open.len() {
             let open = &self.open[index];
@@ -671,18 +724,24 @@ impl Pads {
             };
             let name = sdl.name(&pad);
             let family = sdl.family(&pad);
-            log::info!("controllers: {name} ({})", family.key());
+            let pad_type = sdl.pad_type(&pad);
+            log::info!("controllers: {name} ({}, {})", family.key(), pad_type.key());
             self.open.push(Open {
                 id,
                 pad,
                 slot,
                 name,
                 family,
+                pad_type,
                 held: 0,
             });
         }
         self.open.sort_by_key(|open| open.slot);
         self.seen |= !self.open.is_empty();
+        if self.open.len() > before {
+            let types: Vec<PadType> = self.open.iter().map(|open| open.pad_type).collect();
+            remember_pad(app, Some(&types), None);
+        }
         sdl.flush();
         self.show_family(app);
         let pads: Vec<Controller> = self
@@ -691,6 +750,7 @@ impl Pads {
             .map(|open| Controller {
                 name: open.name.clone(),
                 family: open.family.key(),
+                pad_type: open.pad_type.key(),
             })
             .collect();
         publish(app, |list| {
@@ -721,6 +781,33 @@ impl Pads {
         publish(app, |list| *list = Controllers::EMPTY);
         None
     }
+}
+
+/// Keep in the config what the settings and the names of bindings go by: the
+/// pad types connected (`seen`, added to the ones ever seen) and the type of
+/// the pad pressed last (`used`). Written only when that changes it — rarely,
+/// a new type or another pad picked up — and off this thread, which reads the
+/// pads on.
+fn remember_pad(app: &AppHandle, seen: Option<&[PadType]>, used: Option<PadType>) {
+    use tauri::Manager;
+    let config = app.state::<crate::state::AppState>().config_snapshot();
+    let Some(next) = crate::model::remember_pads(&config, seen.unwrap_or(&[]), used) else {
+        return;
+    };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<crate::state::AppState>();
+        // Built on the copy read above: what changed meanwhile is merged in
+        // (`config::accept`), and a type seen meanwhile is kept.
+        let written = state.replace_config_with(next, |next, current| {
+            for one in &current.pad_families_seen {
+                if !next.pad_families_seen.contains(one) {
+                    next.pad_families_seen.push(one.clone());
+                }
+            }
+        });
+        crate::commands::tell_main(&app, &written);
+    });
 }
 
 /// Change the controller list; tell the settings when that changed it.

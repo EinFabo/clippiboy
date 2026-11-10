@@ -11,7 +11,7 @@ import { api, inTauri } from "@/lib/ipc";
 import { TargetCard } from "@/routes/Recording";
 import { QuickSetup } from "@/routes/AudioMixer";
 import { Hotkeys } from "@/routes/settings/Hotkeys";
-import { hotkeyLabel } from "@/lib/hotkeyText";
+import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { Row, screenChoice, USAGE_HINT } from "@/routes/settings/shared";
 
 const STEPS = ["welcome", "heard", "screen", "audio", "hotkeys", "ready"] as const;
@@ -193,7 +193,8 @@ export function Setup() {
           follow: false,
         }).value
       : null;
-  const saveKey = hotkeyLabel(config.saveClipHotkey || config.saveClipHotkeyAlt) || null;
+  const shownSave = shownHotkey(config, "saveClip");
+  const saveKey = hotkeyLabel(shownSave.value, shownSave.family) || null;
 
   return createPortal(
     <div data-fullview className="fixed inset-x-0 bottom-0 top-10 z-[45] overflow-y-auto bg-base">

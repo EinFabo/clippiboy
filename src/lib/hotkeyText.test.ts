@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { AppConfig, PadBindings, PadProfiles } from "./types.ts";
 import {
+  anyPadBinding,
+  canRecord,
+  editProfile,
+  openingTab,
+  profileTabs,
+  resetProfile,
+  shownHotkey,
+  showsControllers,
+  tabBindings,
   hotkeyKeys,
   hotkeyLabel,
   isHold,
@@ -146,4 +156,131 @@ test("switching tap and hold swaps with the action sharing the input", () => {
   // Alone on its input: only itself; already that way: nothing.
   assert.deepEqual(switchMode(bound({ record: "F9" }), "record", true), { record: "Hold:F9" });
   assert.deepEqual(switchMode(pair, "saveClip", false), {});
+});
+
+const none: PadBindings = { saveClip: "", toggleBuffer: "", screenshot: "", record: "", console: "" };
+const profiles = (over: Partial<PadProfiles> = {}): PadProfiles => ({
+  all: none,
+  xbox: null,
+  playstation: null,
+  nintendo: null,
+  ...over,
+});
+
+test("without a controller there is no controller section", () => {
+  assert.equal(showsControllers(profiles(), [], []), false);
+  // Seen once, plugged in now, or something bound: it shows, and stays.
+  assert.equal(showsControllers(profiles(), ["xbox"], []), true);
+  assert.equal(showsControllers(profiles(), [], ["other"]), true);
+  const bound = profiles({ all: { ...none, saveClip: "Pad:Guide" } });
+  assert.equal(anyPadBinding(bound), true);
+  assert.equal(showsControllers(bound, [], []), true);
+});
+
+test("the profile tabs show only once there is more than one kind of pad", () => {
+  // One Xbox pad: no tabs, the section edits All.
+  assert.deepEqual(profileTabs(profiles(), ["xbox"], ["xbox"]), { tabs: ["all"], selector: false });
+  // Xbox and PlayStation seen: a tab each, never one for a type never seen.
+  assert.deepEqual(profileTabs(profiles(), ["xbox", "playstation"], []), {
+    tabs: ["all", "xbox", "playstation"],
+    selector: true,
+  });
+  // Another pad beside an Xbox one has no tab, but makes the tabs show.
+  assert.deepEqual(profileTabs(profiles(), ["xbox"], ["other"]).tabs, ["all", "xbox"]);
+  // A type with a profile of its own always has its tab.
+  assert.deepEqual(profileTabs(profiles({ nintendo: none }), ["xbox"], []), {
+    tabs: ["all", "xbox", "nintendo"],
+    selector: true,
+  });
+});
+
+test("the section opens on the profile the pad in use goes by", () => {
+  const tabs = ["all", "xbox", "playstation"] as const;
+  assert.equal(openingTab(profiles(), "xbox", [...tabs]), "all");
+  assert.equal(openingTab(profiles({ xbox: none }), "xbox", [...tabs]), "xbox");
+  assert.equal(openingTab(profiles({ xbox: none }), "playstation", [...tabs]), "all");
+  assert.equal(openingTab(profiles({ xbox: none }), null, [...tabs]), "all");
+  assert.equal(openingTab(profiles(), "other", [...tabs]), "all");
+});
+
+test("a type without a profile of its own shows All's bindings, borrowed", () => {
+  const all = { ...none, screenshot: "Pad:Guide" };
+  const shown = tabBindings(profiles({ all }), "playstation");
+  assert.equal(shown.inherited, true);
+  assert.equal(shown.bindings.screenshot, "Pad:Guide");
+  // In that type's names.
+  assert.deepEqual(hotkeyKeys(shown.bindings.screenshot, "playstation"), ["PS"]);
+  assert.equal(tabBindings(profiles({ all }), "all").inherited, false);
+  assert.equal(tabBindings(profiles({ all, playstation: none }), "playstation").inherited, false);
+});
+
+test("the first change in a type copies All into its own profile", () => {
+  const all = { ...none, saveClip: "Pad:Back+South", screenshot: "Pad:Misc" };
+  const next = editProfile(profiles({ all }), "nintendo", { screenshot: "Pad:Guide" });
+  assert.deepEqual(next.nintendo, { ...all, screenshot: "Pad:Guide" });
+  // All itself stays, and so do the other types.
+  assert.deepEqual(next.all, all);
+  assert.equal(next.xbox, null);
+  // From then on edits go to the type's own.
+  const again = editProfile({ ...next, all: { ...all, saveClip: "" } }, "nintendo", { record: "Pad:Start" });
+  assert.equal(again.nintendo?.saveClip, "Pad:Back+South");
+  assert.equal(again.nintendo?.record, "Pad:Start");
+  // Changing All touches All only.
+  assert.equal(editProfile(next, "all", { console: "Pad:LB" }).nintendo?.console, "");
+});
+
+test("a reset drops the type's own profile, back to All", () => {
+  const own = profiles({ xbox: { ...none, screenshot: "Pad:Guide" } });
+  const reset = resetProfile(own, "xbox");
+  assert.equal(reset.xbox, null);
+  assert.equal(tabBindings(reset, "xbox").inherited, true);
+});
+
+test("a binding is placed against the bindings of its own profile only", () => {
+  const xbox = { ...none, saveClip: "Pad:Guide" };
+  // Guide is tapped in Xbox's profile: recorded for the screenshot it is held.
+  assert.deepEqual(placeBinding(xbox, "screenshot", "Pad:Xbox"), { screenshot: "Hold:Pad:Xbox" });
+  // In another profile that has nothing on Guide it stays tapped.
+  assert.deepEqual(placeBinding(none, "screenshot", "Pad:PS"), { screenshot: "Pad:PS" });
+});
+
+test("recording in a tab needs a pad that tab listens to", () => {
+  assert.equal(canRecord("all", []), false);
+  assert.equal(canRecord("all", ["other"]), true);
+  assert.equal(canRecord("playstation", ["xbox"]), false);
+  assert.equal(canRecord("playstation", ["xbox", "playstation"]), true);
+});
+
+test("what the app names follows the pad last used, else the keyboard", () => {
+  const config = {
+    saveClipHotkey: "Ctrl+Shift+S",
+    saveClipHotkeyAlt: "",
+    toggleBufferHotkey: "",
+    toggleBufferHotkeyAlt: "",
+    screenshotHotkey: "",
+    screenshotHotkeyAlt: "Mouse5",
+    recordHotkey: "",
+    recordHotkeyAlt: "",
+    consoleHotkey: "Alt+C",
+    consoleHotkeyAlt: "",
+    padProfiles: profiles({
+      all: { ...none, saveClip: "Pad:Back+South", record: "Pad:Start" },
+      nintendo: { ...none, saveClip: "Pad:Misc" },
+    }),
+    padLastUsed: null,
+  } satisfies Partial<AppConfig>;
+  // No pad used yet: the keyboard's, the second when the first is empty.
+  assert.deepEqual(shownHotkey(config, "saveClip"), { value: "Ctrl+Shift+S", family: "xbox" });
+  assert.equal(shownHotkey(config, "screenshot").value, "Mouse5");
+  // Nothing on the keyboard: the pad's anyway.
+  assert.equal(shownHotkey(config, "record").value, "Pad:Start");
+  assert.equal(shownHotkey(config, "toggleBuffer").value, "");
+  // A PlayStation pad, going by All.
+  const ps = { ...config, padLastUsed: "playstation" as const };
+  assert.deepEqual(shownHotkey(ps, "saveClip"), { value: "Pad:Back+South", family: "playstation" });
+  assert.equal(hotkeyLabel(shownHotkey(ps, "saveClip").value, "playstation"), "Share + Cross");
+  // A Switch pad, going by Nintendo's own — which leaves the console unbound.
+  const switchPad = { ...config, padLastUsed: "nintendo" as const };
+  assert.equal(shownHotkey(switchPad, "saveClip").value, "Pad:Misc");
+  assert.equal(shownHotkey(switchPad, "console").value, "Alt+C");
 });

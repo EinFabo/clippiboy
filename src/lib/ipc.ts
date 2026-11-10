@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   HotkeySet,
+  PadProfileKey,
   Controllers,
   CameraDevice,
   FacecamEdit,
@@ -79,8 +80,10 @@ export const api = {
   suspendHotkeys: () => invoke<void>("suspend_hotkeys"),
   resumeHotkeys: () => invoke<void>("resume_hotkeys"),
   /** While recording a binding: the core reports the next mouse button or
-   *  controller combo as `input-captured`. */
-  captureInput: (on: boolean) => invoke<void>("capture_input", { on }),
+   *  controller combo as `input-captured` — `keys` listens to mouse buttons
+   *  only, `all` to any pad, a type to a pad of that type. */
+  captureInput: (on: boolean, filter?: "keys" | PadProfileKey) =>
+    invoke<void>("capture_input", { on, filter }),
   /** The controllers ClippiBoy sees. Ask again every few seconds while they
    *  are shown — the core reads them only as long as someone looks; changes
    *  in between come as `controllers-changed`. */

@@ -2,7 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Segmented, Select, Slider, Toggle } from "@/components/ui/Controls";
-import { hotkeyLabel } from "@/lib/hotkeyText";
+import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { FOLLOW, Row, UNKNOWN, screenChoice } from "./shared";
 
 export function ConsoleTab() {
@@ -15,6 +15,7 @@ export function ConsoleTab() {
     })),
   );
   const monitors = targets.filter((t) => t.kind === "monitor");
+  const consoleKey = shownHotkey(config, "console");
 
   // Asked the same way as the banner's screen — see `screenChoice`.
   const consoleScreen = screenChoice(monitors, {
@@ -30,8 +31,8 @@ export function ConsoleTab() {
         <Row
           label="Open with the hotkey"
           hint={
-            config.consoleHotkey || config.consoleHotkeyAlt
-              ? `${hotkeyLabel(config.consoleHotkey || config.consoleHotkeyAlt)} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`
+            consoleKey.value
+              ? `${hotkeyLabel(consoleKey.value, consoleKey.family)} brings up the dock over the game — clips, recording, screenshot. Not over games in exclusive fullscreen.`
               : "No hotkey set — assign one under Hotkeys, the console only opens with it."
           }
         >

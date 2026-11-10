@@ -7,6 +7,7 @@ import { toast } from "./lib/toastBus";
 import * as mock from "./lib/mock";
 import type {
   HotkeyField,
+  PadProfiles,
   AppConfig,
   AudioDevice,
   CameraDevice,
@@ -117,8 +118,12 @@ interface EngineState {
   refreshSources: () => Promise<void>;
   refreshTargets: () => Promise<void>;
   patchConfig: (patch: Partial<AppConfig>) => Promise<void>;
-  /** Change some hotkeys; all ten go to the core together, it only accepts them so. */
-  setHotkeys: (changes: Partial<Pick<AppConfig, HotkeyField>>) => Promise<void>;
+  /** Change some hotkeys and, with `pads`, the controller profiles; all go to
+      the core together, it only accepts them so. */
+  setHotkeys: (
+    changes: Partial<Pick<AppConfig, HotkeyField>>,
+    pads?: PadProfiles,
+  ) => Promise<void>;
   setClipDir: (dir: string) => Promise<void>;
   /** New token for the Stream Deck port; the old one stops working at once. */
   regenerateControlToken: () => Promise<void>;
@@ -526,9 +531,11 @@ export const useEngine = create<EngineState>((set, get) => ({
     });
   },
 
-  async setHotkeys(changes) {
+  async setHotkeys(changes, pads) {
     if (!inTauri) {
-      set((st) => ({ config: { ...st.config, ...changes } }));
+      set((st) => ({
+        config: { ...st.config, ...changes, padProfiles: pads ?? st.config.padProfiles },
+      }));
       return;
     }
     if (!(await settingsReadable(set))) {
@@ -550,6 +557,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         screenshotAlt: next.screenshotHotkeyAlt,
         recordAlt: next.recordHotkeyAlt,
         consoleAlt: next.consoleHotkeyAlt,
+        pads: pads ?? next.padProfiles,
       }),
     );
   },

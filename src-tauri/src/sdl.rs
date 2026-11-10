@@ -70,6 +70,24 @@ pub fn family_of(kind: i32, south: i32, east: i32) -> Family {
     }
 }
 
+/// A pad as a [`PadType`], for the profile it goes by: Xbox pads (360, One,
+/// Series), PlayStation, Nintendo (Switch, Joy-Con, GameCube) — by SDL's type,
+/// and where that says nothing, by its face buttons as in [`family_of`]. An
+/// unknown pad with Xbox's labels is not taken for an Xbox pad: it is another
+/// pad, and goes by the profile for all.
+pub fn pad_type_of(kind: i32, south: i32, east: i32) -> PadType {
+    match kind {
+        2 | 3 => PadType::Xbox,
+        _ => match family_of(kind, south, east) {
+            Family::PlayStation => PadType::PlayStation,
+            Family::Nintendo | Family::GameCube => PadType::Nintendo,
+            Family::Xbox => PadType::Other,
+        },
+    }
+}
+
+pub use crate::bindings::PadType;
+
 #[cfg(windows)]
 pub use imp::{Gamepad, Sdl};
 
@@ -331,6 +349,18 @@ mod imp {
                 )
             }
         }
+
+        /// Which profile type it goes by (`pad_type_of`).
+        pub fn pad_type(&self, pad: &Gamepad) -> super::PadType {
+            let ptr = pad.0.as_ptr();
+            unsafe {
+                super::pad_type_of(
+                    (self.kind)(ptr),
+                    (self.label)(ptr, BUTTON_SOUTH),
+                    (self.label)(ptr, BUTTON_EAST),
+                )
+            }
+        }
     }
 
     fn cstring(text: &str) -> CString {
@@ -446,6 +476,9 @@ mod stub {
         pub fn family(&self, _pad: &Gamepad) -> Family {
             Family::Xbox
         }
+        pub fn pad_type(&self, _pad: &Gamepad) -> super::PadType {
+            super::PadType::Other
+        }
     }
 }
 
@@ -463,6 +496,21 @@ mod tests {
         assert_eq!(family_of(10, LABEL_B, LABEL_A), Family::Nintendo); // Joy-Con pair
         assert_eq!(family_of(11, LABEL_A, LABEL_X), Family::GameCube);
         assert_eq!(family_of(12, ab.0, ab.1), Family::Xbox); // Steam
+    }
+
+    #[test]
+    fn a_pad_goes_by_the_profile_of_its_type_or_by_all() {
+        let ab = (LABEL_A, LABEL_B);
+        assert_eq!(pad_type_of(2, ab.0, ab.1), PadType::Xbox); // 360
+        assert_eq!(pad_type_of(3, ab.0, ab.1), PadType::Xbox); // One / Series
+        assert_eq!(pad_type_of(6, LABEL_CROSS, 6), PadType::PlayStation);
+        assert_eq!(pad_type_of(7, LABEL_B, LABEL_A), PadType::Nintendo);
+        // GameCube folds into Nintendo.
+        assert_eq!(pad_type_of(11, LABEL_A, LABEL_X), PadType::Nintendo);
+        // Unknown and generic pads go by All.
+        assert_eq!(pad_type_of(0, ab.0, ab.1), PadType::Other);
+        assert_eq!(pad_type_of(1, 0, 0), PadType::Other);
+        assert_eq!(pad_type_of(1, LABEL_CROSS, 6), PadType::PlayStation);
     }
 
     #[test]

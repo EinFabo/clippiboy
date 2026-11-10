@@ -1,9 +1,10 @@
 //! Hotkeys beyond the keyboard: the mouse's middle and side buttons,
 //! controller buttons and combos, and tapping versus holding — the pure part.
 //!
-//! A binding is still one string in the config, as before, so an old config
-//! loads unchanged; each action has a second one beside it (`…_hotkey_alt`),
-//! so a mouse button or a controller combo can come on top of the keyboard:
+//! A binding is still one string in the config, as before. Each action has
+//! two for keys and mouse buttons (`…_hotkey`, `…_hotkey_alt`), and one per
+//! controller profile (`pad_profiles`: one for every pad, and optionally one
+//! per pad type that stands in for it on those pads — [`Profile`]):
 //! - `Ctrl+Shift+S` — a keyboard combination, as `tauri_plugin_global_shortcut`
 //!   spells it;
 //! - `Mouse3` (middle), `Mouse4`, `Mouse5`, optionally behind `Ctrl`, `Alt`,
@@ -309,6 +310,92 @@ impl Family {
     }
 }
 
+/// What a controller is, for the profile it goes by (`PadProfiles` in the
+/// config): one of the three kinds that can have a profile of their own, or
+/// any other pad — which always goes by the profile for all controllers.
+/// A GameCube pad counts as Nintendo's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PadType {
+    Xbox,
+    PlayStation,
+    Nintendo,
+    #[default]
+    Other,
+}
+
+impl PadType {
+    /// As the config and the settings write it.
+    pub fn key(self) -> &'static str {
+        match self {
+            PadType::Xbox => "xbox",
+            PadType::PlayStation => "playstation",
+            PadType::Nintendo => "nintendo",
+            PadType::Other => "other",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<PadType> {
+        [PadType::Xbox, PadType::PlayStation, PadType::Nintendo, PadType::Other]
+            .into_iter()
+            .find(|ty| ty.key() == key)
+    }
+
+    /// The profile of its own a pad of this type could have; `All` for
+    /// another pad.
+    pub fn profile(self) -> Profile {
+        match self {
+            PadType::Xbox => Profile::Xbox,
+            PadType::PlayStation => Profile::PlayStation,
+            PadType::Nintendo => Profile::Nintendo,
+            PadType::Other => Profile::All,
+        }
+    }
+
+    /// Whose names its buttons carry when nothing better is known — a
+    /// GameCube pad is told apart only while it is connected.
+    pub fn family(self) -> Family {
+        match self {
+            PadType::PlayStation => Family::PlayStation,
+            PadType::Nintendo => Family::Nintendo,
+            PadType::Xbox | PadType::Other => Family::Xbox,
+        }
+    }
+}
+
+/// A set of controller bindings: the one for every controller, or one for
+/// the pads of one type. A type's profile, once it exists, stands in for
+/// `All` on those pads entirely — it does not add to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Profile {
+    #[default]
+    All,
+    Xbox,
+    PlayStation,
+    Nintendo,
+}
+
+impl Profile {
+    pub fn key(self) -> &'static str {
+        match self {
+            Profile::All => "all",
+            Profile::Xbox => "xbox",
+            Profile::PlayStation => "playstation",
+            Profile::Nintendo => "nintendo",
+        }
+    }
+}
+
+/// The profile a pad of type `ty` goes by: its type's own when that exists
+/// (`typed` lists the type profiles there are), else the one for all.
+pub fn governing(ty: PadType, typed: &[Profile]) -> Profile {
+    let own = ty.profile();
+    if own != Profile::All && typed.contains(&own) {
+        own
+    } else {
+        Profile::All
+    }
+}
+
 /// Whose names buttons are shown with when several pads are connected: the
 /// pad a button was pressed on last (by SDL's id), or — before any was, or
 /// when that one is gone — the first; Xbox's with none.
@@ -530,14 +617,10 @@ impl fmt::Display for Binding {
     }
 }
 
-/// A binding as a banner says it: "Alt+C", "Mouse 4", "Hold View+A" — the
-/// controller's buttons as printed on the pad in use (`inputpoll::family`).
-/// Text the parser does not know comes back as it is.
-pub fn spoken(text: &str) -> String {
-    spoken_for(text, crate::inputpoll::family())
-}
-
-/// [`spoken`], with the buttons named as on a pad of `family`.
+/// A binding as a banner says it: "Alt+C", "Mouse 4", "Hold View+A" — a
+/// controller's buttons as printed on a pad of `family` (the pad last used,
+/// `AppConfig::console_hotkey_spoken`). Text the parser does not know comes
+/// back as it is.
 pub fn spoken_for(text: &str, family: Family) -> String {
     let Ok(binding) = parse(text) else {
         return text.trim().to_string();
@@ -701,6 +784,8 @@ pub struct Input {
     pub mods: Mods,
     /// One mask per controller slot, 0 for an empty one.
     pub pads: [u32; MAX_PADS],
+    /// The type of the pad in each slot — which profile its buttons go to.
+    pub pad_types: [PadType; MAX_PADS],
 }
 
 /// What the controllers did in one round of the poll, all pads together —
@@ -746,7 +831,12 @@ pub struct Table<A> {
     /// hold time into a hold.
     keys: Vec<(u32, Option<u16>, Slot<A>)>,
     mouse: Vec<(MouseButton, Mods, Slot<A>)>,
-    pads: Vec<(u32, Slot<A>)>,
+    /// By profile and buttons: the same combo in two profiles is two slots,
+    /// each fed only by the pads that go by its profile.
+    pads: Vec<(Profile, u32, Slot<A>)>,
+    /// The type profiles there are — each stands in for `All` on its pads,
+    /// even with nothing bound in it.
+    typed: Vec<Profile>,
     /// Which mouse slot the press of each button went to, so its release
     /// goes there too — whatever happened to the modifiers meanwhile.
     mouse_owner: [Option<usize>; 3],
@@ -763,6 +853,7 @@ impl<A: Copy> Default for Table<A> {
             keys: Vec::new(),
             mouse: Vec::new(),
             pads: Vec::new(),
+            typed: Vec::new(),
             mouse_owner: [None; 3],
             mouse_was: [false; 3],
             pad_blocked: Vec::new(),
@@ -800,25 +891,44 @@ impl<A: Copy> Table<A> {
         self.mouse[at].2.set(mode, action);
     }
 
-    pub fn bind_pad(&mut self, mask: u32, mode: Mode, action: A) {
-        let at = match self.pads.iter().position(|(known, _)| *known == mask) {
+    /// A type profile exists — from now on it stands in for `All` on the
+    /// pads of its type, bound or not. `All` itself always exists.
+    pub fn add_profile(&mut self, profile: Profile) {
+        if profile != Profile::All && !self.typed.contains(&profile) {
+            self.typed.push(profile);
+        }
+    }
+
+    /// A controller binding in `profile` (which then exists).
+    pub fn bind_pad(&mut self, profile: Profile, mask: u32, mode: Mode, action: A) {
+        self.add_profile(profile);
+        let at = match self
+            .pads
+            .iter()
+            .position(|(known_profile, known, _)| *known_profile == profile && *known == mask)
+        {
             Some(at) => at,
             None => {
-                self.pads.push((mask, Slot::new(0, HOLD_MS)));
+                self.pads.push((profile, mask, Slot::new(0, HOLD_MS)));
                 self.pad_blocked.push(false);
                 self.pads.len() - 1
             }
         };
-        self.pads[at].1.set(mode, action);
-        // Part of a bigger combo now bound? Then its tap waits a moment for
-        // the rest of it.
-        let masks: Vec<u32> = self.pads.iter().map(|(mask, _)| *mask).collect();
-        for (mask, slot) in &mut self.pads {
-            let inside = masks
-                .iter()
-                .any(|bigger| bigger & *mask == *mask && *bigger != *mask);
+        self.pads[at].2.set(mode, action);
+        // Part of a bigger combo now bound in the same profile? Then its tap
+        // waits a moment for the rest of it.
+        let masks: Vec<(Profile, u32)> = self.pads.iter().map(|(p, mask, _)| (*p, *mask)).collect();
+        for (profile, mask, slot) in &mut self.pads {
+            let inside = masks.iter().any(|(other, bigger)| {
+                other == profile && bigger & *mask == *mask && *bigger != *mask
+            });
             slot.wait_ms = if inside { CHORD_MS } else { 0 };
         }
+    }
+
+    /// The profile a pad of type `ty` goes by in this table.
+    pub fn governing(&self, ty: PadType) -> Profile {
+        governing(ty, &self.typed)
     }
 
     pub fn wants_mouse(&self) -> bool {
@@ -835,11 +945,11 @@ impl<A: Copy> Table<A> {
     pub fn pad_combo_buttons(&self, of: impl Fn(&A) -> bool) -> u32 {
         self.pads
             .iter()
-            .filter(|(mask, slot)| {
+            .filter(|(_, mask, slot)| {
                 mask.count_ones() > 1
                     && (slot.tap.as_ref().is_some_and(&of) || slot.hold.as_ref().is_some_and(&of))
             })
-            .fold(0, |all, (mask, _)| all | mask)
+            .fold(0, |all, (_, mask, _)| all | mask)
     }
 
     /// Is a key held whose hold still has to be timed? Only then does the
@@ -923,16 +1033,24 @@ impl<A: Copy> Table<A> {
         input: &Input,
         held_back: impl Fn(&A) -> bool,
     ) -> Vec<(A, Source)> {
+        // Each pad feeds the slots of the profile it goes by, and no others.
+        let profiles: Vec<Profile> = input.pad_types.iter().map(|ty| self.governing(*ty)).collect();
         let satisfied: Vec<bool> = self
             .pads
             .iter()
-            .map(|(mask, _)| input.pads.iter().any(|pad| pad & mask == *mask))
+            .map(|(profile, mask, _)| {
+                input
+                    .pads
+                    .iter()
+                    .zip(&profiles)
+                    .any(|(pad, by)| by == profile && pad & mask == *mask)
+            })
             .collect();
         // A slot all of whose actions are held back is out for now.
         let out: Vec<bool> = self
             .pads
             .iter()
-            .map(|(_, slot)| {
+            .map(|(_, _, slot)| {
                 let any = slot.tap.is_some() || slot.hold.is_some();
                 any && slot.tap.as_ref().is_none_or(&held_back)
                     && slot.hold.as_ref().is_none_or(&held_back)
@@ -975,23 +1093,27 @@ impl<A: Copy> Table<A> {
         let live: Vec<bool> = satisfied.iter().zip(&out).map(|(s, o)| *s && !*o).collect();
         let mut pad_fired = Vec::new();
         for at in 0..self.pads.len() {
-            let mask = self.pads[at].0;
+            let (profile, mask) = (self.pads[at].0, self.pads[at].1);
             if !satisfied[at] {
                 self.pad_blocked[at] = false;
             }
             if out[at] {
                 // Held back: gone without counting, and blocked until let go.
-                self.pads[at].1.cancel();
+                self.pads[at].2.cancel();
                 if satisfied[at] {
                     self.pad_blocked[at] = true;
                 }
                 continue;
             }
-            let outdone = self.pads.iter().enumerate().any(|(other, (bigger, _))| {
-                other != at && live[other] && bigger & mask == mask && *bigger != mask
+            let outdone = self.pads.iter().enumerate().any(|(other, (by, bigger, _))| {
+                other != at
+                    && live[other]
+                    && *by == profile
+                    && bigger & mask == mask
+                    && *bigger != mask
             });
             let active = satisfied[at] && !outdone && !self.pad_blocked[at];
-            let slot = &mut self.pads[at].1;
+            let slot = &mut self.pads[at].2;
             if active && !slot.is_down() {
                 pad_fired.extend(slot.press(now));
             } else if !active && slot.is_down() {
@@ -1010,7 +1132,7 @@ impl<A: Copy> Table<A> {
         for (_, _, slot) in &mut self.mouse {
             fired.extend(slot.tick(now).map(|a| (a, Source::Mouse)));
         }
-        for (_, slot) in &mut self.pads {
+        for (_, _, slot) in &mut self.pads {
             pad_fired.extend(slot.tick(now));
         }
         fired.extend(
@@ -1032,15 +1154,65 @@ impl<A: Copy> Table<A> {
 /// Back, then South, let go: `Pad:Back+South`; Guide alone: `Pad:Guide`. What
 /// was already held when recording began is left out until it has been let
 /// go.
+///
+/// What it listens to depends on where the settings record: the keyboard's
+/// slots take a mouse button, the controller profiles a pad — any pad for
+/// `All`, only one of its type for a type's profile.
 #[derive(Clone, Debug, Default)]
 pub struct Capture {
+    filter: CaptureFilter,
     mouse_was: [bool; 3],
     pad_ignored: [u32; MAX_PADS],
     pad_combo: [u32; MAX_PADS],
     primed: bool,
 }
 
+/// Which input a recording in the settings takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureFilter {
+    /// Mouse buttons and every pad — what a page that does not say gets.
+    #[default]
+    Any,
+    /// Mouse buttons only (the keyboard itself the page reads).
+    Mouse,
+    /// A pad going by this profile's type: any pad for `All`.
+    Pad(Profile),
+}
+
+impl CaptureFilter {
+    /// From the settings: `keys`, `all`, `xbox`, `playstation`, `nintendo`.
+    pub fn from_key(key: Option<&str>) -> CaptureFilter {
+        match key {
+            Some("keys") => CaptureFilter::Mouse,
+            Some("all") => CaptureFilter::Pad(Profile::All),
+            Some("xbox") => CaptureFilter::Pad(Profile::Xbox),
+            Some("playstation") => CaptureFilter::Pad(Profile::PlayStation),
+            Some("nintendo") => CaptureFilter::Pad(Profile::Nintendo),
+            _ => CaptureFilter::Any,
+        }
+    }
+
+    fn mouse(self) -> bool {
+        matches!(self, CaptureFilter::Any | CaptureFilter::Mouse)
+    }
+
+    fn pad(self, ty: PadType) -> bool {
+        match self {
+            CaptureFilter::Any | CaptureFilter::Pad(Profile::All) => true,
+            CaptureFilter::Mouse => false,
+            CaptureFilter::Pad(profile) => ty.profile() == profile,
+        }
+    }
+}
+
 impl Capture {
+    pub fn new(filter: CaptureFilter) -> Capture {
+        Capture {
+            filter,
+            ..Capture::default()
+        }
+    }
+
     pub fn poll(&mut self, input: &Input) -> Option<String> {
         if !self.primed {
             self.primed = true;
@@ -1051,12 +1223,17 @@ impl Capture {
         let mut got = None;
         for button in MouseButton::ALL {
             let at = button.index();
-            if input.mouse[at] && !self.mouse_was[at] && got.is_none() {
+            if self.filter.mouse() && input.mouse[at] && !self.mouse_was[at] && got.is_none() {
                 got = Some(Trigger::Mouse(button, input.mods).to_string());
             }
         }
         self.mouse_was = input.mouse;
         for slot in 0..MAX_PADS {
+            // A pad of another type is not listened to at all.
+            if !self.filter.pad(input.pad_types[slot]) {
+                self.pad_combo[slot] = 0;
+                continue;
+            }
             self.pad_ignored[slot] &= input.pads[slot];
             let live = input.pads[slot] & !self.pad_ignored[slot];
             self.pad_combo[slot] |= live;
@@ -1329,6 +1506,7 @@ mod tests {
             mouse: [middle, x1, x2],
             mods,
             pads: [0; MAX_PADS],
+            pad_types: [PadType::Other; MAX_PADS],
         }
     }
 
@@ -1396,8 +1574,8 @@ mod tests {
     #[test]
     fn a_controller_tap_fires_on_the_press() {
         let mut table = Table::default();
-        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
-        table.bind_pad(pad::GUIDE, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::All, pad::GUIDE, Mode::Tap, Act::Shot);
         table.poll(0, &pads(0, 0));
         assert_eq!(
             table.poll(10, &pads(pad::BACK | pad::SOUTH | pad::RT, 0)),
@@ -1416,8 +1594,8 @@ mod tests {
     #[test]
     fn a_controller_binding_waits_only_when_it_has_a_hold_too() {
         let mut table = Table::default();
-        table.bind_pad(pad::MISC, Mode::Tap, Act::Clip);
-        table.bind_pad(pad::MISC, Mode::Hold, Act::Shot);
+        table.bind_pad(Profile::All, pad::MISC, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::All, pad::MISC, Mode::Hold, Act::Shot);
         table.poll(0, &pads(0, 0));
         assert!(table.poll(10, &pads(pad::MISC, 0)).is_empty());
         assert_eq!(table.poll(150, &pads(0, 0)), vec![Act::Clip]);
@@ -1430,8 +1608,8 @@ mod tests {
     #[test]
     fn a_single_button_inside_a_bound_combo_gives_way_to_it() {
         let mut table = Table::default();
-        table.bind_pad(pad::SOUTH, Mode::Tap, Act::Clip);
-        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Shot);
         table.poll(0, &pads(0, 0));
         // South a few ms before Back: the combo, not South on its own.
         assert!(table.poll(10, &pads(pad::SOUTH, 0)).is_empty());
@@ -1451,8 +1629,8 @@ mod tests {
     #[test]
     fn a_bigger_combo_takes_over_from_the_smaller_one() {
         let mut table = Table::default();
-        table.bind_pad(pad::LB | pad::SOUTH, Mode::Tap, Act::Clip);
-        table.bind_pad(pad::LB | pad::RB | pad::SOUTH, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::LB | pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::All, pad::LB | pad::RB | pad::SOUTH, Mode::Tap, Act::Shot);
         table.poll(0, &pads(0, 0));
         assert!(table.poll(10, &pads(pad::LB | pad::SOUTH, 0)).is_empty());
         assert_eq!(
@@ -1480,8 +1658,8 @@ mod tests {
     fn while_held_back_only_the_kept_pad_binding_fires() {
         // Clip on South, Shot (the console, say) on Back.
         let mut table = Table::default();
-        table.bind_pad(pad::SOUTH, Mode::Tap, Act::Clip);
-        table.bind_pad(pad::BACK, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::All, pad::BACK, Mode::Tap, Act::Shot);
         table.bind_mouse(MouseButton::X2, Mods::NONE, Mode::Tap, Act::Clip);
         let back = |a: &Act| *a == Act::Clip;
         assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
@@ -1506,10 +1684,10 @@ mod tests {
     #[test]
     fn the_buttons_of_an_actions_combos() {
         let mut table = Table::default();
-        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Shot);
-        table.bind_pad(pad::GUIDE, Mode::Tap, Act::Shot);
-        table.bind_pad(pad::LB | pad::RB, Mode::Hold, Act::Shot);
-        table.bind_pad(pad::START | pad::NORTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::GUIDE, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::LB | pad::RB, Mode::Hold, Act::Shot);
+        table.bind_pad(Profile::All, pad::START | pad::NORTH, Mode::Tap, Act::Clip);
         assert_eq!(
             table.pad_combo_buttons(|a| *a == Act::Shot),
             pad::BACK | pad::SOUTH | pad::LB | pad::RB
@@ -1520,8 +1698,8 @@ mod tests {
     #[test]
     fn a_held_back_combo_outdoes_no_smaller_one() {
         let mut table = Table::default();
-        table.bind_pad(pad::BACK, Mode::Tap, Act::Shot);
-        table.bind_pad(pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::All, pad::BACK, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
         let back = |a: &Act| *a == Act::Clip;
         assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
         assert!(table.poll_holding_back(10, &pads(pad::SOUTH, 0), back).is_empty());
@@ -1537,8 +1715,8 @@ mod tests {
     #[test]
     fn a_hold_held_back_beside_a_kept_tap_is_dropped() {
         let mut table = Table::default();
-        table.bind_pad(pad::BACK, Mode::Tap, Act::Shot);
-        table.bind_pad(pad::BACK, Mode::Hold, Act::Clip);
+        table.bind_pad(Profile::All, pad::BACK, Mode::Tap, Act::Shot);
+        table.bind_pad(Profile::All, pad::BACK, Mode::Hold, Act::Clip);
         let back = |a: &Act| *a == Act::Clip;
         assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
         assert!(table.poll_holding_back(10, &pads(pad::BACK, 0), back).is_empty());
@@ -1633,5 +1811,114 @@ mod tests {
         // One button alone is a binding too — Guide, say.
         assert_eq!(capture.poll(&pads(0, pad::GUIDE)), None);
         assert_eq!(capture.poll(&pads(0, 0)), Some("Pad:Guide".into()));
+    }
+
+    fn typed(slots: &[(u32, PadType)]) -> Input {
+        let mut input = Input::default();
+        for (at, (mask, ty)) in slots.iter().enumerate() {
+            input.pads[at] = *mask;
+            input.pad_types[at] = *ty;
+        }
+        input
+    }
+
+    #[test]
+    fn a_pad_goes_by_its_types_profile_and_else_by_all() {
+        assert_eq!(governing(PadType::Xbox, &[]), Profile::All);
+        assert_eq!(governing(PadType::Xbox, &[Profile::Xbox]), Profile::Xbox);
+        assert_eq!(governing(PadType::PlayStation, &[Profile::Xbox]), Profile::All);
+        // Another pad has no profile of its own.
+        assert_eq!(governing(PadType::Other, &[Profile::Xbox]), Profile::All);
+        assert_eq!(PadType::from_key("nintendo"), Some(PadType::Nintendo));
+        assert_eq!(PadType::from_key("gamecube"), None);
+    }
+
+    #[test]
+    fn a_type_profile_stands_in_for_all_on_its_pads_only() {
+        let mut table: Table<Act> = Table::default();
+        // All: Misc saves a clip. Xbox: Guide takes a screenshot, and Misc
+        // does nothing there — the profile replaces All, it does not add.
+        table.bind_pad(Profile::All, pad::MISC, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::Xbox, pad::GUIDE, Mode::Tap, Act::Shot);
+        let idle = typed(&[(0, PadType::Xbox), (0, PadType::Nintendo), (0, PadType::Other)]);
+        assert!(table.poll(0, &idle).is_empty());
+
+        let xbox_misc = typed(&[(pad::MISC, PadType::Xbox), (0, PadType::Nintendo), (0, PadType::Other)]);
+        assert!(table.poll(10, &xbox_misc).is_empty());
+        assert!(table.poll(20, &idle).is_empty());
+        let xbox_guide = typed(&[(pad::GUIDE, PadType::Xbox), (0, PadType::Nintendo), (0, PadType::Other)]);
+        assert_eq!(table.poll(30, &xbox_guide), vec![Act::Shot]);
+        assert!(table.poll(40, &idle).is_empty());
+
+        // The Switch pad has no profile of its own: All's Misc (Capture).
+        let switch_misc = typed(&[(0, PadType::Xbox), (pad::MISC, PadType::Nintendo), (0, PadType::Other)]);
+        assert_eq!(table.poll(50, &switch_misc), vec![Act::Clip]);
+        assert!(table.poll(60, &idle).is_empty());
+        let switch_guide = typed(&[(0, PadType::Xbox), (pad::GUIDE, PadType::Nintendo), (0, PadType::Other)]);
+        assert!(table.poll(70, &switch_guide).is_empty());
+        assert!(table.poll(80, &idle).is_empty());
+        // Neither has another pad.
+        let other_misc = typed(&[(0, PadType::Xbox), (0, PadType::Nintendo), (pad::MISC, PadType::Other)]);
+        assert_eq!(table.poll(90, &other_misc), vec![Act::Clip]);
+    }
+
+    #[test]
+    fn an_empty_type_profile_still_replaces_all() {
+        let mut table: Table<Act> = Table::default();
+        table.bind_pad(Profile::All, pad::SOUTH, Mode::Tap, Act::Clip);
+        table.add_profile(Profile::PlayStation);
+        let idle = typed(&[(0, PadType::PlayStation)]);
+        assert!(table.poll(0, &idle).is_empty());
+        assert!(table.poll(10, &typed(&[(pad::SOUTH, PadType::PlayStation)])).is_empty());
+        assert_eq!(table.governing(PadType::PlayStation), Profile::PlayStation);
+        assert_eq!(table.governing(PadType::Xbox), Profile::All);
+    }
+
+    #[test]
+    fn a_combo_waits_only_for_bigger_combos_in_its_own_profile() {
+        let mut table: Table<Act> = Table::default();
+        // Back+South in All does not make Xbox's lone South wait.
+        table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
+        table.bind_pad(Profile::Xbox, pad::SOUTH, Mode::Tap, Act::Shot);
+        assert!(table.poll(0, &typed(&[(0, PadType::Xbox)])).is_empty());
+        assert_eq!(
+            table.poll(10, &typed(&[(pad::SOUTH, PadType::Xbox)])),
+            vec![Act::Shot]
+        );
+    }
+
+    #[test]
+    fn recording_for_a_type_takes_only_a_pad_of_that_type() {
+        let mut capture = Capture::new(CaptureFilter::from_key(Some("playstation")));
+        let xbox_then_ps = |xbox: u32, ps: u32| typed(&[(xbox, PadType::Xbox), (ps, PadType::PlayStation)]);
+        assert_eq!(capture.poll(&xbox_then_ps(0, 0)), None);
+        // The Xbox pad is not listened to.
+        assert_eq!(capture.poll(&xbox_then_ps(pad::GUIDE, 0)), None);
+        assert_eq!(capture.poll(&xbox_then_ps(0, 0)), None);
+        assert_eq!(capture.poll(&xbox_then_ps(0, pad::GUIDE)), None);
+        assert_eq!(capture.poll(&xbox_then_ps(0, 0)), Some("Pad:Guide".into()));
+        // Nor is the mouse.
+        let mut capture = Capture::new(CaptureFilter::Pad(Profile::Nintendo));
+        assert_eq!(capture.poll(&mouse(false, false, false, Mods::NONE)), None);
+        assert_eq!(capture.poll(&mouse(false, true, false, Mods::NONE)), None);
+    }
+
+    #[test]
+    fn recording_for_all_takes_any_pad_and_the_keyboard_only_the_mouse() {
+        let mut all = Capture::new(CaptureFilter::from_key(Some("all")));
+        assert_eq!(all.poll(&typed(&[(0, PadType::Other)])), None);
+        assert_eq!(all.poll(&typed(&[(pad::NORTH, PadType::Other)])), None);
+        assert_eq!(all.poll(&typed(&[(0, PadType::Other)])), Some("Pad:North".into()));
+        assert_eq!(all.poll(&mouse(false, true, false, Mods::NONE)), None);
+        assert_eq!(all.poll(&mouse(false, false, false, Mods::NONE)), None);
+
+        let mut keys = Capture::new(CaptureFilter::from_key(Some("keys")));
+        assert_eq!(keys.poll(&typed(&[(0, PadType::Xbox)])), None);
+        assert_eq!(keys.poll(&typed(&[(pad::SOUTH, PadType::Xbox)])), None);
+        assert_eq!(keys.poll(&typed(&[(0, PadType::Xbox)])), None);
+        assert_eq!(
+            keys.poll(&mouse(false, false, true, Mods::NONE)),
+            Some("Mouse5".into())
+        );
     }
 }

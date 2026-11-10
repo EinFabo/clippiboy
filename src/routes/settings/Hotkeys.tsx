@@ -6,13 +6,29 @@ import { IconClose } from "@/components/icons";
 import { Segmented } from "@/components/ui/Controls";
 import { api, events, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
-import type { AppConfig, Controllers, HotkeyField } from "@/lib/types";
+import type {
+  AppConfig,
+  Controllers,
+  HotkeyField,
+  PadAction,
+  PadProfileKey,
+  PadProfiles,
+  PadType,
+} from "@/lib/types";
 import {
+  canRecord,
+  editProfile,
   hotkeyKeys,
   isHold,
   isPad,
+  openingTab,
   placeBinding,
+  PROFILE_NAMES,
+  profileTabs,
+  resetProfile,
+  showsControllers,
   switchMode,
+  tabBindings,
   triggerOf,
   withHold,
   type PadFamily,
@@ -115,25 +131,40 @@ function risky(value: string): boolean {
   return !HARMLESS.test(keys[0] ?? "");
 }
 
-/** One row per action: the label, its first binding and its second. */
-const ROWS: Array<{ label: string; hint?: string; first: HotkeyField; second: HotkeyField }> = [
-  { label: "Save clip", first: "saveClipHotkey", second: "saveClipHotkeyAlt" },
-  { label: "Buffer on/off", first: "toggleBufferHotkey", second: "toggleBufferHotkeyAlt" },
+/** One row per action: the label, its first binding and its second, and its
+    name in a controller profile. */
+const ROWS: Array<{
+  label: string;
+  hint?: string;
+  action: PadAction;
+  first: HotkeyField;
+  second: HotkeyField;
+}> = [
+  { label: "Save clip", action: "saveClip", first: "saveClipHotkey", second: "saveClipHotkeyAlt" },
+  {
+    label: "Buffer on/off",
+    action: "toggleBuffer",
+    first: "toggleBufferHotkey",
+    second: "toggleBufferHotkeyAlt",
+  },
   {
     label: "Screenshot",
     hint: "Info: Works without a running buffer",
+    action: "screenshot",
     first: "screenshotHotkey",
     second: "screenshotHotkeyAlt",
   },
   {
     label: "Recording start/stop",
     hint: "Info: Brings the capture up by itself",
+    action: "record",
     first: "recordHotkey",
     second: "recordHotkeyAlt",
   },
   {
     label: "Console over the game",
     hint: "Does not work over games in exclusive fullscreen",
+    action: "console",
     first: "consoleHotkey",
     second: "consoleHotkeyAlt",
   },
@@ -150,7 +181,7 @@ const GUIDE_NOTE =
     asks while the window is hidden (in the tray, minimised). */
 function useControllers(): Controllers | null {
   const [controllers, setControllers] = useState<Controllers | null>(
-    inTauri ? null : { ready: true, unavailable: null, pads: [], family: "xbox" },
+    inTauri ? null : { ready: true, unavailable: null, pads: [], family: "xbox", inUse: null },
   );
   useEffect(() => {
     if (!inTauri) return;
@@ -187,18 +218,22 @@ function useControllers(): Controllers | null {
   return controllers;
 }
 
+/** Where a change was made — its error shows under that card. */
+type Where = "keys" | "pads";
+
 export function Hotkeys() {
   const { config, setHotkeys } = useEngine(
     useShallow((s) => ({ config: s.config, setHotkeys: s.setHotkeys })),
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ at: Where; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
-  // One field records at a time — starting another ends the first.
-  const [recording, setRecording] = useState<HotkeyField | null>(null);
+  // One slot records at a time, across both cards — starting another ends
+  // the first. A keyboard slot by its field, a controller slot by its action.
+  const [recording, setRecording] = useState<string | null>(null);
   const warn = ROWS.some(({ first, second }) => risky(config[first]) || risky(config[second]));
   const controllers = useControllers();
-  // Buttons named as on the pad in use — the one pressed last, if several.
-  const family: PadFamily = controllers?.family ?? "xbox";
+  const connected: PadType[] = controllers?.pads.map((pad) => pad.padType) ?? [];
+  const pads = showsControllers(config.padProfiles, config.padFamiliesSeen, connected);
 
   // The once-notes: shown when a save from this page turns their flag on.
   const [notes, setNotes] = useState<string[]>([]);
@@ -214,7 +249,8 @@ export function Hotkeys() {
     if (said.length) setNotes(said);
   }, [config.padButtonHintShown, config.guideHintShown]);
 
-  // Every binding by field, for working out what a change does to the others.
+  // Every keyboard binding by field, for working out what a change does to
+  // the others.
   const bindings = Object.fromEntries(
     ROWS.flatMap(({ first, second }) => [
       [first, config[first]],
@@ -223,16 +259,21 @@ export function Hotkeys() {
   ) as Record<HotkeyField, string>;
 
   // One call for all it changes: a swap of tap and hold between two actions
-  // reaches the core whole, never half done and a clash.
-  const apply = async (changes: Partial<Pick<AppConfig, HotkeyField>>) => {
-    if (Object.keys(changes).length === 0) return;
+  // reaches the core whole, never half done and a clash — keys and profiles
+  // alike.
+  const apply = async (
+    at: Where,
+    changes: Partial<Pick<AppConfig, HotkeyField>>,
+    profiles?: PadProfiles,
+  ) => {
+    if (Object.keys(changes).length === 0 && !profiles) return;
     applied.current = true;
     setSaving(true);
     setError(null);
     try {
-      await setHotkeys(changes);
+      await setHotkeys(changes, profiles);
     } catch (err) {
-      setError(String(err));
+      setError({ at, text: String(err) });
       // The core puts the hotkeys back itself after a rejected set; this is
       // for a call that never got there.
       if (inTauri) void api.resumeHotkeys();
@@ -244,13 +285,16 @@ export function Hotkeys() {
   const input = (field: HotkeyField, second: boolean) => (
     <HotkeyInput
       value={config[field]}
-      family={family}
+      family="xbox"
+      listen="keys"
       second={second}
       busy={saving}
       recording={recording === field}
       onRecording={(on) => setRecording((now) => (on ? field : now === field ? null : now))}
-      onChange={(value) => apply(value ? placeBinding(bindings, field, value) : { [field]: "" })}
-      onMode={(hold) => apply(switchMode(bindings, field, hold))}
+      onChange={(value) =>
+        apply("keys", value ? placeBinding(bindings, field, value) : { [field]: "" })
+      }
+      onMode={(hold) => apply("keys", switchMode(bindings, field, hold))}
     />
   );
 
@@ -265,27 +309,209 @@ export function Hotkeys() {
             </div>
           </Row>
         ))}
-        <Row label="Controllers">
-          <ControllerList controllers={controllers} />
-        </Row>
+        {!pads && (
+          <Row label="Controllers">
+            <ControllerList controllers={controllers} />
+          </Row>
+        )}
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
-        Click, then press a key, a mouse button (middle or side) or controller
-        buttons. Escape cancels, × unbinds.
+        Click, then press a key or a mouse button. Escape cancels, × unbinds.
       </p>
-      {notes.map((note) => (
-        <p key={note} className="mt-2 text-xs text-ink-muted">
-          {note}
-        </p>
-      ))}
       {warn && (
         <p className="mt-2 text-xs text-ink-muted">
           A single key you can also type with applies everywhere: it fires in the
           middle of a chat message. F keys and PrtSc are the quieter spots.
         </p>
       )}
-      {error && <p className="mt-2 text-xs text-live">{error}</p>}
+      {error?.at === "keys" && <p className="mt-2 text-xs text-live">{error.text}</p>}
+
+      {pads && (
+        <div className="mt-8">
+          <SectionTitle title="Controller" />
+          <ControllerSection
+            profiles={config.padProfiles}
+            seen={config.padFamiliesSeen}
+            lastUsed={config.padLastUsed}
+            controllers={controllers}
+            connected={connected}
+            busy={saving}
+            recording={recording}
+            onRecording={setRecording}
+            onApply={(profiles) => apply("pads", {}, profiles)}
+          />
+          {notes.map((note) => (
+            <p key={note} className="mt-2 text-xs text-ink-muted">
+              {note}
+            </p>
+          ))}
+          {error?.at === "pads" && <p className="mt-2 text-xs text-live">{error.text}</p>}
+        </div>
+      )}
     </>
+  );
+}
+
+/** The controller bindings: one slot per action in the profile of the tab
+    open — All, or a pad type's own. Tabs only once more than one kind of pad
+    is known or a type has a profile of its own. */
+function ControllerSection({
+  profiles,
+  seen,
+  lastUsed,
+  controllers,
+  connected,
+  busy,
+  recording,
+  onRecording,
+  onApply,
+}: {
+  profiles: PadProfiles;
+  seen: PadType[];
+  lastUsed: PadType | null;
+  controllers: Controllers | null;
+  connected: PadType[];
+  busy: boolean;
+  recording: string | null;
+  onRecording: (next: string | null | ((now: string | null) => string | null)) => void;
+  onApply: (profiles: PadProfiles) => void;
+}) {
+  const { tabs, selector } = profileTabs(profiles, seen, connected);
+  // Picked once, when the pads are known — the profile the pad in use goes
+  // by — and never switched under the user's hands afterwards.
+  const [picked, setPicked] = useState<PadProfileKey | null>(null);
+  const ready = controllers?.ready ?? false;
+  useEffect(() => {
+    if (picked === null && ready) {
+      setPicked(openingTab(profiles, controllers?.inUse ?? lastUsed, tabs));
+    }
+  }, [picked, ready, profiles, controllers?.inUse, lastUsed, tabs]);
+  const wanted = picked ?? openingTab(profiles, lastUsed, tabs);
+  const tab: PadProfileKey = selector && tabs.includes(wanted) ? wanted : "all";
+
+  const { bindings, inherited } = tabBindings(profiles, tab);
+  // A type's tab names buttons as on that type; All as on the pad in use.
+  const family: PadFamily = tab === "all" ? (controllers?.family ?? "xbox") : tab;
+  const recordable = canRecord(tab, connected);
+  const name = tab === "all" ? "" : PROFILE_NAMES[tab];
+
+  const pick = (next: PadProfileKey) => {
+    // A recording belongs to the tab it began in.
+    onRecording((now) => (now?.startsWith("pad:") ? null : now));
+    setPicked(next);
+  };
+
+  return (
+    <Card className="divide-y divide-line">
+      {selector && (
+        <div className="flex items-center justify-between gap-4 px-5 py-3">
+          <Segmented
+            value={tab}
+            options={tabs.map((key) => ({
+              key,
+              label: (
+                <span className="flex items-center gap-1.5">
+                  {PROFILE_NAMES[key]}
+                  {key !== "all" && profiles[key] && (
+                    <span aria-label="Own profile" className="size-1.5 rounded-full bg-accent" />
+                  )}
+                </span>
+              ),
+            }))}
+            onChange={pick}
+          />
+          {tab !== "all" && profiles[tab] && (
+            <ResetProfile
+              key={tab}
+              name={name}
+              disabled={busy}
+              onReset={() => {
+                onRecording((now) => (now?.startsWith("pad:") ? null : now));
+                onApply(resetProfile(profiles, tab));
+              }}
+            />
+          )}
+        </div>
+      )}
+      {ROWS.map(({ label, action }) => {
+        const slot = `pad:${action}`;
+        return (
+          <Row key={action} label={label}>
+            <HotkeyInput
+              value={bindings[action]}
+              family={family}
+              listen={tab}
+              ghost={inherited}
+              busy={busy}
+              unavailable={
+                recordable
+                  ? undefined
+                  : tab === "all"
+                    ? "Connect a controller"
+                    : `Connect a ${name} controller`
+              }
+              prompt={
+                tab === "all" ? "Press a controller button …" : `Press on a ${name} controller …`
+              }
+              recording={recording === slot}
+              onRecording={(on) => onRecording((now) => (on ? slot : now === slot ? null : now))}
+              onChange={(value) =>
+                onApply(
+                  editProfile(
+                    profiles,
+                    tab,
+                    value ? placeBinding(bindings, action, value) : { [action]: "" },
+                  ),
+                )
+              }
+              onMode={(hold) => onApply(editProfile(profiles, tab, switchMode(bindings, action, hold)))}
+            />
+          </Row>
+        );
+      })}
+      <Row label="Connected">
+        <ControllerList controllers={controllers} />
+      </Row>
+    </Card>
+  );
+}
+
+/** "Reset", then "Reset Xbox?" for a moment: the type's own profile goes,
+    and it follows All again. */
+function ResetProfile({
+  name,
+  disabled,
+  onReset,
+}: {
+  name: string;
+  disabled?: boolean;
+  onReset: () => void;
+}) {
+  const [asking, setAsking] = useState(false);
+  useEffect(() => {
+    if (!asking) return;
+    const timer = window.setTimeout(() => setAsking(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [asking]);
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title="Use All controllers"
+      onClick={() => {
+        if (asking) {
+          setAsking(false);
+          onReset();
+        } else setAsking(true);
+      }}
+      className={cn(
+        "rounded-pill px-2 py-1 text-xs transition-colors duration-150",
+        "disabled:pointer-events-none disabled:opacity-40",
+        asking ? "text-live hover:bg-elevated" : "text-ink-faint hover:bg-elevated hover:text-ink",
+      )}
+    >
+      {asking ? `Reset ${name}?` : "Reset"}
+    </button>
   );
 }
 
@@ -311,14 +537,19 @@ function ControllerList({ controllers }: { controllers: Controllers | null }) {
   );
 }
 
-/** Shows a combination and records a new one on click — a key, a mouse
-    button or controller buttons. Tap or hold sits beside it; the × unbinds:
-    an empty value is an action without a hotkey. */
+/** Shows a combination and records a new one on click — keys and mouse
+    buttons in the keyboard's slots, a controller's buttons in a profile's.
+    Tap or hold sits beside it; the × unbinds: an empty value is an action
+    without a hotkey. */
 function HotkeyInput({
   value,
   family,
+  listen,
   second,
+  ghost,
   busy,
+  unavailable,
+  prompt,
   recording,
   onRecording,
   onChange,
@@ -327,9 +558,19 @@ function HotkeyInput({
   value: string;
   /** Whose names controller buttons are shown with. */
   family: PadFamily;
+  /** What recording takes: keys and mouse buttons, or a pad of a profile —
+      any for `all`, one of the type for a type. */
+  listen: "keys" | PadProfileKey;
   /** The second binding: smaller, and "Add" while empty. */
   second?: boolean;
+  /** Borrowed from All: shown faint, without Tap/Hold and ×. */
+  ghost?: boolean;
   busy?: boolean;
+  /** Why nothing can be recorded here right now — the slot is off then (and
+      a recording running ends unsaved). Tap/Hold and × still work. */
+  unavailable?: string;
+  /** What the slot says while recording. */
+  prompt?: string;
   recording: boolean;
   onRecording: (on: boolean) => void;
   /** A new binding, or "" to unbind. */
@@ -346,15 +587,23 @@ function HotkeyInput({
   const hold = isHold(value);
   const holdRef = useRef(hold);
   holdRef.current = hold;
+  const listenRef = useRef(listen);
+  listenRef.current = listen;
   // Did recording end with a new combination? Then the core re-registers the
   // hotkeys itself, and a `resume` here would get in its way.
   const committed = useRef(false);
 
   const stop = useCallback(() => onRecordingRef.current(false), []);
 
+  // The pad it listens for went away mid-recording: end it, unsaved.
+  useEffect(() => {
+    if (recording && unavailable) stop();
+  }, [recording, unavailable, stop]);
+
   useEffect(() => {
     if (!recording) return;
     committed.current = false;
+    const keys = listenRef.current === "keys";
     const commit = (next: string) => {
       // Even an unchanged combination goes through the core: that re-registers
       // the suspended hotkeys along the way.
@@ -364,7 +613,7 @@ function HotkeyInput({
     };
     if (inTauri) {
       void api.suspendHotkeys();
-      void api.captureInput(true);
+      void api.captureInput(true, listenRef.current);
     }
     // Mouse buttons and controllers come from the core: the page sees a
     // controller not at all, and a mouse button only over the window.
@@ -395,6 +644,8 @@ function HotkeyInput({
         stop();
         return;
       }
+      // A controller's slot takes nothing from the keyboard but Escape.
+      if (!keys) return;
       const next = accelerator(event);
       if (next) commit(next);
     };
@@ -421,9 +672,11 @@ function HotkeyInput({
     };
   }, [recording, stop]);
 
+  const controls = Boolean(value) && !recording && !ghost;
+  const off = Boolean(unavailable) && !recording;
   return (
     <div className="flex items-center gap-1">
-      {value && !recording && (
+      {controls && (
         <Segmented
           value={hold ? "hold" : "tap"}
           options={[
@@ -440,10 +693,13 @@ function HotkeyInput({
       <button
         type="button"
         disabled={busy}
+        // Off without `disabled`, so its title still shows on hovering.
+        aria-disabled={off || undefined}
+        title={unavailable}
         onMouseDown={(event) => {
           // Without this our own click would end recording again immediately.
           event.stopPropagation();
-          if (event.button === 0) onRecording(!recording);
+          if (event.button === 0 && !off) onRecording(!recording);
         }}
         className={cn(
           "flex items-center gap-1.5 rounded-pill border transition-colors duration-150",
@@ -451,20 +707,26 @@ function HotkeyInput({
           "disabled:pointer-events-none disabled:opacity-40",
           recording
             ? "border-accent bg-accent/10"
-            : "border-transparent hover:border-line hover:bg-elevated",
+            : off
+              ? "cursor-default border-transparent opacity-40"
+              : "border-transparent hover:border-line hover:bg-elevated",
         )}
       >
         {recording ? (
-          <span className="px-1.5 text-[13px] text-accent">Press a key or button …</span>
+          <span className="px-1.5 text-[13px] text-accent">
+            {prompt ?? "Press a key or mouse button …"}
+          </span>
         ) : value ? (
-          <Hotkey value={value} family={family} small={second} />
+          <Hotkey value={value} family={family} small={second} ghost={ghost} />
         ) : second ? (
           <span className="px-1 text-xs text-ink-faint">+ Add</span>
         ) : (
-          <span className="px-1.5 text-[13px] text-ink-faint">Not set</span>
+          <span className={cn("px-1.5 text-[13px] text-ink-faint", ghost && "opacity-60")}>
+            Not set
+          </span>
         )}
       </button>
-      {value && !recording && (
+      {controls && (
         <button
           type="button"
           disabled={busy}
@@ -488,22 +750,30 @@ function Hotkey({
   value,
   family,
   small,
+  ghost,
 }: {
   value: string;
   family: PadFamily;
   small?: boolean;
+  /** Borrowed from All: dashed and faint. */
+  ghost?: boolean;
 }) {
   const pad = isPad(value);
   return (
     <div className="flex items-center gap-1.5">
-      {pad && <span className="text-[11px] uppercase tracking-wide text-ink-faint">Pad</span>}
+      {ghost && isHold(value) && (
+        <span className="text-[11px] uppercase tracking-wide text-ink-faint">Hold</span>
+      )}
       {hotkeyKeys(value, family).map((key) => (
         <kbd
           key={key}
           className={cn(
-            "border border-line bg-elevated font-mono text-ink-muted",
+            "border font-mono",
             small ? "px-2 py-0.5 text-[11px]" : "px-2.5 py-1 text-xs",
             pad ? "rounded-pill" : "rounded-inner",
+            ghost
+              ? "border-dashed border-line bg-transparent text-ink-faint"
+              : "border-line bg-elevated text-ink-muted",
           )}
         >
           {key}

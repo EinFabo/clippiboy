@@ -173,6 +173,7 @@ pub fn set_config(
         || previous.screenshot_hotkey_alt != next.screenshot_hotkey_alt
         || previous.record_hotkey_alt != next.record_hotkey_alt
         || previous.console_hotkey_alt != next.console_hotkey_alt
+        || previous.pad_profiles != next.pad_profiles
         || previous.console_enabled != next.console_enabled
     {
         if let Err(err) = crate::register_hotkeys(&app) {
@@ -210,7 +211,8 @@ pub fn set_config(
 }
 
 /// Every hotkey at once: the first binding of each action and the second
-/// beside it. A second one left out is none.
+/// beside it — keys and mouse buttons — and the controller profiles. A second
+/// one left out is none; profiles left out stay as they are.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HotkeySet {
@@ -229,6 +231,8 @@ pub struct HotkeySet {
     pub record_alt: String,
     #[serde(default)]
     pub console_alt: String,
+    #[serde(default)]
+    pub pads: Option<crate::model::PadProfiles>,
 }
 
 /// Reassign the global hotkeys.
@@ -270,6 +274,7 @@ fn apply_hotkeys(
         screenshot_alt,
         record_alt,
         console_alt,
+        pads,
     } = hotkeys;
     let mut written = [
         save_clip,
@@ -291,6 +296,9 @@ fn apply_hotkeys(
             continue;
         }
         let binding = crate::bindings::parse(text)?;
+        if matches!(binding.trigger, crate::bindings::Trigger::Pad(_)) {
+            return Err("Controller buttons go in the Controller section.".into());
+        }
         *one = binding.to_string();
         parsed.push(binding);
     }
@@ -309,6 +317,17 @@ fn apply_hotkeys(
     if crate::bindings::clashes(&keyed) {
         return Err("Two hotkeys are on the same key combination.".into());
     }
+    let previous = state.config_snapshot();
+    let pads = match pads {
+        Some(pads) => clean_pad_profiles(pads)?,
+        None => previous.pad_profiles.clone(),
+    };
+    let pad_bindings: Vec<crate::bindings::Binding> = pads
+        .present()
+        .iter()
+        .flat_map(|(_, set)| crate::inputpoll::Action::ALL.map(|action| set.get(action).to_string()))
+        .filter_map(|text| crate::bindings::parse(&text).ok())
+        .collect();
     let [
         save_clip,
         toggle_buffer,
@@ -322,16 +341,16 @@ fn apply_hotkeys(
         console_alt,
     ] = written;
 
-    let previous = state.config_snapshot();
     let mut config = previous.clone();
     // The first lone game button and the first Guide binding come with a
     // line in the settings, once: the page sees these go from false to true.
-    if keyed.iter().any(|(binding, _)| binding.is_lone_game_button()) {
+    if pad_bindings.iter().any(|binding| binding.is_lone_game_button()) {
         config.pad_button_hint_shown = true;
     }
-    if keyed.iter().any(|(binding, _)| binding.has_guide()) {
+    if pad_bindings.iter().any(|binding| binding.has_guide()) {
         config.guide_hint_shown = true;
     }
+    config.pad_profiles = pads;
     config.save_clip_hotkey = save_clip;
     config.toggle_buffer_hotkey = toggle_buffer;
     config.screenshot_hotkey = screenshot;
@@ -358,11 +377,53 @@ fn apply_hotkeys(
             rollback.screenshot_hotkey_alt = previous.screenshot_hotkey_alt;
             rollback.record_hotkey_alt = previous.record_hotkey_alt;
             rollback.console_hotkey_alt = previous.console_hotkey_alt;
+            rollback.pad_profiles = previous.pad_profiles;
             state.replace_config(rollback);
             let _ = crate::register_hotkeys(app);
             Err(err)
         }
     }
+}
+
+/// The controller profiles as the core writes them: every binding a
+/// controller one in the core's spelling (`hold:pad:view+a` →
+/// `Hold:Pad:Back+South`), empty for none — and no two in one profile on the
+/// same buttons the same way. Profiles do not clash with each other or with
+/// the keyboard: a pad goes by one profile only.
+pub fn clean_pad_profiles(
+    mut pads: crate::model::PadProfiles,
+) -> std::result::Result<crate::model::PadProfiles, String> {
+    use crate::inputpoll::Action;
+    let crate::model::PadProfiles {
+        all,
+        xbox,
+        playstation,
+        nintendo,
+    } = &mut pads;
+    for set in [Some(all), xbox.as_mut(), playstation.as_mut(), nintendo.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        let mut keyed = Vec::new();
+        for action in Action::ALL {
+            let one = set.get_mut(action);
+            let text = one.trim();
+            if text.is_empty() {
+                one.clear();
+                continue;
+            }
+            let binding = crate::bindings::parse(text)?;
+            if !matches!(binding.trigger, crate::bindings::Trigger::Pad(_)) {
+                return Err("Only controller buttons go in the Controller section.".into());
+            }
+            *one = binding.to_string();
+            keyed.push((binding, None));
+        }
+        if crate::bindings::clashes(&keyed) {
+            return Err("Two hotkeys are on the same controller buttons.".into());
+        }
+    }
+    Ok(pads)
 }
 
 /// Suspend the global hotkeys while a new combination is being recorded in the
@@ -389,10 +450,15 @@ pub fn resume_hotkeys(app: tauri::AppHandle) {
 /// While the settings record a binding: the next mouse button (middle or
 /// side) or controller combo comes back as `input-captured` — the page sees
 /// neither itself, a controller not at all and a mouse button only over the
-/// window.
+/// window. `filter` says what to listen to: `keys` (mouse buttons beside the
+/// keyboard), `all` (any pad), or a pad type (`xbox`, `playstation`,
+/// `nintendo`) for that type's profile; none, everything.
 #[tauri::command]
-pub fn capture_input(on: bool) {
-    crate::inputpoll::capture(on);
+pub fn capture_input(on: bool, filter: Option<String>) {
+    crate::inputpoll::capture(
+        on,
+        crate::bindings::CaptureFilter::from_key(filter.as_deref()),
+    );
 }
 
 /// The controllers ClippiBoy sees, for the settings — asked again every few
@@ -2878,6 +2944,54 @@ pub fn retry_ffmpeg() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pad_set(save_clip: &str, screenshot: &str) -> crate::model::PadBindings {
+        crate::model::PadBindings {
+            save_clip: save_clip.into(),
+            screenshot: screenshot.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Clashes are looked for inside one profile: the keyboard, All and each
+    /// type never meet on one pad press.
+    #[test]
+    fn a_clash_is_only_one_within_a_profile() {
+        let pads = crate::model::PadProfiles {
+            all: pad_set("pad:view+a", "Pad:Guide"),
+            xbox: Some(pad_set("Pad:Guide", "Hold:Pad:Guide")),
+            ..Default::default()
+        };
+        let clean = clean_pad_profiles(pads).expect("no clash within a profile");
+        // In the core's spelling.
+        assert_eq!(clean.all.save_clip, "Pad:Back+South");
+        assert_eq!(clean.xbox.as_ref().unwrap().screenshot, "Hold:Pad:Guide");
+
+        let twice = crate::model::PadProfiles {
+            all: pad_set("Pad:Guide", "Pad:Home"),
+            ..Default::default()
+        };
+        assert!(clean_pad_profiles(twice).is_err());
+        let in_a_type = crate::model::PadProfiles {
+            nintendo: Some(pad_set("Pad:Misc", "Pad:Capture")),
+            ..Default::default()
+        };
+        assert!(clean_pad_profiles(in_a_type).is_err());
+    }
+
+    #[test]
+    fn a_profile_takes_controller_buttons_only() {
+        let keys = crate::model::PadProfiles {
+            all: pad_set("Ctrl+S", ""),
+            ..Default::default()
+        };
+        assert!(clean_pad_profiles(keys).is_err());
+        let mouse = crate::model::PadProfiles {
+            playstation: Some(pad_set("", "Mouse5")),
+            ..Default::default()
+        };
+        assert!(clean_pad_profiles(mouse).is_err());
+    }
 
     /// The console is never throttled while hidden, so the core refuses as well
     /// as the page stopping.

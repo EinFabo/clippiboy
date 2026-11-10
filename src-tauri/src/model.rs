@@ -656,8 +656,10 @@ pub struct AppConfig {
     #[serde(default = "default_console_hotkey")]
     pub console_hotkey: String,
     /// A second binding for each action, beside the one above — a mouse
-    /// button or a controller combo on top of the keyboard. Empty is none; a
-    /// config from before has none.
+    /// button or another key. Empty is none; a config from before has none.
+    /// Both slots take keys and mouse buttons only: controller bindings live
+    /// in [`Self::pad_profiles`] (those written here before are moved there
+    /// on loading, `config::migrate_pad_bindings`).
     #[serde(default)]
     pub save_clip_hotkey_alt: String,
     #[serde(default)]
@@ -668,6 +670,19 @@ pub struct AppConfig {
     pub record_hotkey_alt: String,
     #[serde(default)]
     pub console_hotkey_alt: String,
+    /// The controller bindings: one set for every pad, and optionally one per
+    /// pad type standing in for it on those pads.
+    #[serde(default)]
+    pub pad_profiles: PadProfiles,
+    /// The pad types ever connected (`PadType::key`: `xbox`, `playstation`,
+    /// `nintendo`, `other`) — the settings show the controller section and
+    /// the profile tabs by it. Only grows, set by the core.
+    #[serde(default)]
+    pub pad_families_seen: Vec<String>,
+    /// The type of the pad a button was last pressed on — whose bindings the
+    /// app names where it names one (dashboard, banners). Set by the core.
+    #[serde(default)]
+    pub pad_last_used: Option<String>,
     /// Whether that hotkey does anything at all. For whoever wants nothing but
     /// the banner over their game.
     #[serde(default = "yes")]
@@ -886,15 +901,165 @@ impl SoundConfig {
     }
 }
 
-impl AppConfig {
-    /// The console's binding as a banner names it: the first one, or the
-    /// second when only that is set. Empty when neither is.
-    pub fn console_hotkey_shown(&self) -> &str {
-        if self.console_hotkey.trim().is_empty() {
-            &self.console_hotkey_alt
-        } else {
-            &self.console_hotkey
+/// One controller profile: a binding per action, empty for none — always a
+/// `Pad:` binding, optionally behind `Hold:`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PadBindings {
+    #[serde(default)]
+    pub save_clip: String,
+    #[serde(default)]
+    pub toggle_buffer: String,
+    #[serde(default)]
+    pub screenshot: String,
+    #[serde(default)]
+    pub record: String,
+    #[serde(default)]
+    pub console: String,
+}
+
+impl PadBindings {
+    pub fn get(&self, action: crate::inputpoll::Action) -> &str {
+        use crate::inputpoll::Action;
+        match action {
+            Action::SaveClip => &self.save_clip,
+            Action::ToggleBuffer => &self.toggle_buffer,
+            Action::Screenshot => &self.screenshot,
+            Action::Record => &self.record,
+            Action::Console => &self.console,
         }
+    }
+
+    pub fn get_mut(&mut self, action: crate::inputpoll::Action) -> &mut String {
+        use crate::inputpoll::Action;
+        match action {
+            Action::SaveClip => &mut self.save_clip,
+            Action::ToggleBuffer => &mut self.toggle_buffer,
+            Action::Screenshot => &mut self.screenshot,
+            Action::Record => &mut self.record,
+            Action::Console => &mut self.console,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        crate::inputpoll::Action::ALL
+            .iter()
+            .all(|action| self.get(*action).trim().is_empty())
+    }
+}
+
+/// The controller bindings: `all` for every pad, and a profile per pad type
+/// that, once there (`Some`), stands in for `all` on those pads entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PadProfiles {
+    #[serde(default)]
+    pub all: PadBindings,
+    #[serde(default)]
+    pub xbox: Option<PadBindings>,
+    #[serde(default)]
+    pub playstation: Option<PadBindings>,
+    #[serde(default)]
+    pub nintendo: Option<PadBindings>,
+}
+
+impl PadProfiles {
+    /// The profile, `None` for a type without one of its own.
+    pub fn get(&self, profile: crate::bindings::Profile) -> Option<&PadBindings> {
+        use crate::bindings::Profile;
+        match profile {
+            Profile::All => Some(&self.all),
+            Profile::Xbox => self.xbox.as_ref(),
+            Profile::PlayStation => self.playstation.as_ref(),
+            Profile::Nintendo => self.nintendo.as_ref(),
+        }
+    }
+
+    /// Every profile there is, `all` first.
+    pub fn present(&self) -> Vec<(crate::bindings::Profile, &PadBindings)> {
+        use crate::bindings::Profile;
+        [Profile::All, Profile::Xbox, Profile::PlayStation, Profile::Nintendo]
+            .into_iter()
+            .filter_map(|profile| self.get(profile).map(|set| (profile, set)))
+            .collect()
+    }
+
+    /// The bindings a pad of type `ty` goes by: its type's own, else `all`.
+    pub fn governing(&self, ty: crate::bindings::PadType) -> &PadBindings {
+        self.get(ty.profile()).unwrap_or(&self.all)
+    }
+}
+
+/// `config` with the pad types in `seen` among the ones ever seen and `used`
+/// as the pad last used — `None` when it has all that already.
+pub fn remember_pads(
+    config: &AppConfig,
+    seen: &[crate::bindings::PadType],
+    used: Option<crate::bindings::PadType>,
+) -> Option<AppConfig> {
+    let mut next = config.clone();
+    for ty in seen.iter().chain(used.iter()) {
+        if !next.pad_families_seen.iter().any(|known| known == ty.key()) {
+            next.pad_families_seen.push(ty.key().to_string());
+        }
+    }
+    if let Some(used) = used {
+        next.pad_last_used = Some(used.key().to_string());
+    }
+    (next.pad_families_seen != config.pad_families_seen
+        || next.pad_last_used != config.pad_last_used)
+        .then_some(next)
+}
+
+impl AppConfig {
+    /// The pad type a button was last pressed on, if any ever was.
+    pub fn pad_last_used(&self) -> Option<crate::bindings::PadType> {
+        self.pad_last_used
+            .as_deref()
+            .and_then(crate::bindings::PadType::from_key)
+    }
+
+    /// The binding the app names for `action`: the controller's, from the
+    /// profile of the pad last used, when there is one and it binds the
+    /// action; else the keyboard's first or second; else the controller's
+    /// anyway. Empty when nothing is bound.
+    pub fn hotkey_shown(&self, action: crate::inputpoll::Action) -> &str {
+        use crate::inputpoll::Action;
+        let pad = self
+            .pad_profiles
+            .governing(self.pad_last_used().unwrap_or_default())
+            .get(action);
+        let (first, second) = match action {
+            Action::SaveClip => (&self.save_clip_hotkey, &self.save_clip_hotkey_alt),
+            Action::ToggleBuffer => (&self.toggle_buffer_hotkey, &self.toggle_buffer_hotkey_alt),
+            Action::Screenshot => (&self.screenshot_hotkey, &self.screenshot_hotkey_alt),
+            Action::Record => (&self.record_hotkey, &self.record_hotkey_alt),
+            Action::Console => (&self.console_hotkey, &self.console_hotkey_alt),
+        };
+        if self.pad_last_used().is_some() && !pad.trim().is_empty() {
+            pad
+        } else if !first.trim().is_empty() {
+            first
+        } else if !second.trim().is_empty() {
+            second
+        } else {
+            pad
+        }
+    }
+
+    /// The console's binding as a banner names it ([`Self::hotkey_shown`]).
+    /// Empty when there is none.
+    pub fn console_hotkey_shown(&self) -> &str {
+        self.hotkey_shown(crate::inputpoll::Action::Console)
+    }
+
+    /// [`Self::console_hotkey_shown`] as a banner says it — a controller's
+    /// buttons named as on the pad last used, this session or before.
+    pub fn console_hotkey_spoken(&self) -> String {
+        let family = crate::inputpoll::family_pressed()
+            .or(self.pad_last_used().map(crate::bindings::PadType::family))
+            .unwrap_or_else(crate::inputpoll::family);
+        crate::bindings::spoken_for(self.console_hotkey_shown(), family)
     }
 
     pub fn accent(&self) -> Accent {
