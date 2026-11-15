@@ -346,6 +346,9 @@ pub struct FriendsConfig {
     pub tag_friends: bool,
     /// Your Discord name and picture on the page of a share link.
     pub name_on_links: bool,
+    /// "Add <name> as friend" under that name on a share link's page. Only
+    /// with `name_on_links`; links keep what was set when they went up.
+    pub friend_on_links: bool,
     /// "Using ClippiBoy" in your Discord status, through the Discord app on
     /// this PC (`presence.rs`).
     pub discord_status: bool,
@@ -366,6 +369,7 @@ impl Default for FriendsConfig {
             accept_clips: AcceptClips::All,
             tag_friends: true,
             name_on_links: true,
+            friend_on_links: true,
             discord_status: true,
         }
     }

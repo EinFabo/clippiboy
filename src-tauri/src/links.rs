@@ -572,6 +572,17 @@ async fn upload(
 /// The arguments of the link copy: the first picture and the first sound (the
 /// mix; a clip's raw source tracks come after it), no metadata or chapters,
 /// the index at the front. Nothing is re-encoded.
+/// What a link's page shows of the uploader: `name=1` for the name, and
+/// `friend=0` when "Add <name> as friend" is not wanted under it — the server
+/// keeps the button when nothing is said, for apps from before the setting.
+fn link_identity(name: bool, friend: bool) -> Vec<(&'static str, String)> {
+    match (name, friend) {
+        (false, _) => Vec::new(),
+        (true, true) => vec![("name", "1".into())],
+        (true, false) => vec![("name", "1".into()), ("friend", "0".into())],
+    }
+}
+
 fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = ["-y", "-hide_banner", "-loglevel", "error", "-i"]
         .iter()
@@ -640,12 +651,7 @@ async fn send(
     file: &std::path::Path,
     report: &Reporter,
 ) -> Result<Link, String> {
-    let name_on_links = report
-        .app
-        .state::<AppState>()
-        .config_snapshot()
-        .friends
-        .name_on_links;
+    let friends = report.app.state::<AppState>().config_snapshot().friends;
     let source = tokio::fs::File::open(file)
         .await
         .map_err(|err| format!("Could not read the clip: {err}"))?;
@@ -667,9 +673,7 @@ async fn send(
     for tag in clip.tags.iter().filter(|tag| !crate::clips::is_friend_tag(tag)) {
         params.push(("tag", tag.clone()));
     }
-    if name_on_links {
-        params.push(("name", "1".into()));
-    }
+    params.extend(link_identity(friends.name_on_links, friends.friend_on_links));
     let url = reqwest::Url::parse_with_params(&format!("{}/shares", crate::friends::SERVER), &params)
         .map_err(|err| err.to_string())?;
 
@@ -791,6 +795,15 @@ async fn delete_remote(app: &AppHandle, token: &str, link_id: &str) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_link_offers_the_friend_button_only_under_a_shown_name() {
+        let pairs = |name, friend| super::link_identity(name, friend);
+        assert!(pairs(false, true).is_empty());
+        assert!(pairs(false, false).is_empty());
+        assert_eq!(pairs(true, true), vec![("name", "1".to_string())]);
+        assert_eq!(pairs(true, false), vec![("name", "1".to_string()), ("friend", "0".to_string())]);
+    }
+
     use super::*;
     use std::path::Path;
 

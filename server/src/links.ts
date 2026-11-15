@@ -16,6 +16,7 @@ import {
   cleanTags,
   MAX_OPEN_REPORTS,
   expiresIn,
+  friendOffer,
   ID_PATTERN,
   LIFETIME_MS,
   looksLikeJpeg,
@@ -23,6 +24,7 @@ import {
   MAX_POSTER_BYTES,
   Mp4Boxes,
   newId,
+  offersFriend,
   PENDING_MS,
   quota,
   REPORT_KEEP_MS,
@@ -48,6 +50,8 @@ interface ShareRow {
   deleted_at: number | null;
   tags: string;
   show_name: number;
+  /** "Add <name> as friend" offered on this link (Settings → Friends). */
+  offer_friend: number;
   pending: number;
 }
 
@@ -164,7 +168,7 @@ async function owned(env: Env, me: string, id: string): Promise<ShareRow> {
 
 // A deleted or run-out share keeps only what counts against the week and the
 // bucket — not what the clip was called, its game or its tags.
-const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0 WHERE id = ?";
+const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0, offer_friend = 0 WHERE id = ?";
 
 // --- For the app (signed in) --------------------------------------------------
 
@@ -213,9 +217,10 @@ export async function createShare(request: Request, env: Env, me: string): Promi
   // above alone would let two uploads at once both slip through.
   const tags = JSON.stringify(cleanTags(url.searchParams.getAll("tag")));
   const showName = url.searchParams.get("name") === "1" ? 1 : 0;
+  const offerFriend = friendOffer(url.searchParams.get("friend"));
   const inserted = await env.DB.prepare(
-    `INSERT INTO shares (id, owner, bytes, title, game, width, height, created_at, expires_at, tags, show_name, pending)
-     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+    `INSERT INTO shares (id, owner, bytes, title, game, width, height, created_at, expires_at, tags, show_name, offer_friend, pending)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
      WHERE (${RECENT}) < ? AND (${LIVE_BYTES}) + ? <= ?`,
   )
     .bind(
@@ -230,6 +235,7 @@ export async function createShare(request: Request, env: Env, me: string): Promi
       expiresAt,
       tags,
       showName,
+      offerFriend,
       me,
       weekStart(now, standing.resetAt),
       now - PENDING_MS,
@@ -364,10 +370,12 @@ async function uploaderOf(env: Env, row: ShareRow): Promise<Uploader | null> {
     .first<Uploader>();
 }
 
-/** The uploader of a live link, for "Add <name> as friend" — null for a gone link or a hidden name. */
+/** The uploader of a live link, for "Add <name> as friend" — null for a gone link, a hidden name or no button offered. */
 export async function shareUploader(env: Env, id: string): Promise<Uploader | null> {
   const row = await live(env, id, Date.now());
-  return row ? uploaderOf(env, row) : null;
+  if (!row) return null;
+  const uploader = await uploaderOf(env, row);
+  return uploader && offersFriend(row, uploader.allow_requests) ? uploader : null;
 }
 
 export async function sharePage(env: Env, id: string): Promise<Response> {
@@ -392,7 +400,7 @@ export async function sharePage(env: Env, id: string): Promise<Response> {
     tags,
     uploader: uploader ? { name: uploader.display_name, avatar: uploader.avatar } : null,
     addFriend:
-      uploader?.allow_requests === 1 && inviteKey(env.INVITE_SECRET, env.DISCORD_CLIENT_SECRET)
+      uploader && offersFriend(row, uploader.allow_requests) && inviteKey(env.INVITE_SECRET, env.DISCORD_CLIENT_SECRET)
         ? `${PAGE_ORIGIN}/c/${id}/add`
         : null,
     expires: expiresIn(row.expires_at, now),

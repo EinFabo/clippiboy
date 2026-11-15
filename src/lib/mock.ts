@@ -150,6 +150,7 @@ export const mockConfig: AppConfig = {
     invisible: false,
     shareGame: true,
     nameOnLinks: true,
+    friendOnLinks: true,
     notifyRequests: true,
     notifyOnline: false,
     notifyGames: true,

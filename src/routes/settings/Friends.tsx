@@ -43,6 +43,13 @@ export function FriendsTab() {
           <Row label="Show my name on share links" hint="Your Discord name and picture under clips you share as a link">
             <Toggle checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
           </Row>
+          <Row label="Friend requests from share links">
+            <Toggle
+              checked={friends.friendOnLinks ?? true}
+              disabled={!friends.nameOnLinks}
+              onChange={(friendOnLinks) => patch({ friendOnLinks })}
+            />
+          </Row>
           <Row label="Show ClippiBoy in Discord status">
             <Toggle
               checked={friends.discordStatus ?? true}

@@ -413,6 +413,8 @@ export interface FriendsConfig {
   shareGame: boolean;
   /** Discord name and picture on the page of a share link. */
   nameOnLinks: boolean;
+  /** "Add <name> as friend" under that name on a share link's page. */
+  friendOnLinks: boolean;
   notifyRequests: boolean;
   notifyOnline: boolean;
   notifyGames: boolean;

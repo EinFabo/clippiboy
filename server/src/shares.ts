@@ -220,3 +220,16 @@ export class Mp4Boxes {
 export function looksLikeJpeg(head: Uint8Array): boolean {
   return head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
 }
+
+/** The upload's `friend` parameter: only an explicit "0" turns the button off — older apps send nothing. */
+export function friendOffer(param: string | null): 0 | 1 {
+  return param === "0" ? 0 : 1;
+}
+
+/**
+ * "Add <name> as friend" on a share page: the name is shown, the uploader
+ * offered it on this link, and takes requests at all.
+ */
+export function offersFriend(share: { show_name: number; offer_friend: number }, allowRequests: number): boolean {
+  return share.show_name === 1 && share.offer_friend === 1 && allowRequests === 1;
+}

@@ -6,11 +6,13 @@ import {
   cleanReport,
   cleanTags,
   expiresIn,
+  friendOffer,
   ID_PATTERN,
   looksLikeJpeg,
   Mp4Boxes,
   MAX_BYTES,
   newId,
+  offersFriend,
   quota,
   TOTAL_BYTES,
   WEEK_MS,
@@ -127,4 +129,18 @@ test("a report needs a known reason and keeps a short note at most", () => {
   assert.equal(cleanReport({ reason: "boring" }), null);
   assert.equal(cleanReport({ reason: 5 }), null);
   assert.equal(cleanReport(null), null);
+});
+
+test("only an explicit friend=0 turns the friend button off", () => {
+  assert.equal(friendOffer("0"), 0);
+  assert.equal(friendOffer(null), 1);
+  assert.equal(friendOffer("1"), 1);
+  assert.equal(friendOffer(""), 1);
+});
+
+test("the friend button needs the name, the link's offer and open requests", () => {
+  assert.equal(offersFriend({ show_name: 1, offer_friend: 1 }, 1), true);
+  assert.equal(offersFriend({ show_name: 1, offer_friend: 0 }, 1), false);
+  assert.equal(offersFriend({ show_name: 0, offer_friend: 1 }, 1), false);
+  assert.equal(offersFriend({ show_name: 1, offer_friend: 1 }, 0), false);
 });
