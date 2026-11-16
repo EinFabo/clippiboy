@@ -150,16 +150,29 @@ pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<(u32, 
 /// had it all along — this is it for the applications picked by hand, which
 /// until now stayed dead until somebody deleted and re-added them.
 ///
-/// Where several processes share the name, the lowest pid wins: it is the
-/// oldest, and with `INCLUDE_TARGET_PROCESS_TREE` a tap on it covers the
-/// children anyway.
+/// Always the application's root, never one of its children: Discord plays
+/// from utility children of one `Discord.exe`, and only a tap on their common
+/// parent (with `INCLUDE_TARGET_PROCESS_TREE`) has all of its sessions. The
+/// picker stores the pid of a session, which is such a child, so even a living
+/// pid goes up to its root.
+///
+/// Where several processes share the name, only the roots among them count.
+/// Pids say nothing about age on Windows, and taking the lowest one often
+/// landed on a child without the voice session — a silent Discord track after
+/// every restart. The lowest pid only breaks the tie between several roots.
 fn live_pid(pid: u32, exe: Option<&str>, tree: &HashMap<u32, (u32, String)>) -> Option<u32> {
+    // "PID 1234" is what the picker stored where it could not read the name —
+    // a game behind anti-cheat. No process is called that, so searching by it
+    // dropped the source even while the application ran.
+    let exe = exe.filter(|name| !is_pid_placeholder(name));
     let matches_exe = |name: &str| {
         exe.is_some_and(|want| name.eq_ignore_ascii_case(want))
     };
     match tree.get(&pid) {
+        // Nothing to compare the name with: the pid as it stands.
+        Some(_) if exe.is_none() => return Some(pid),
         // Still there and still itself.
-        Some((_, name)) if exe.is_none() || matches_exe(name) => return Some(pid),
+        Some((_, name)) if matches_exe(name) => return Some(app_root(pid, tree)),
         // The pid is taken by something else, or gone. Fall through.
         _ => {}
     }
@@ -173,11 +186,19 @@ fn live_pid(pid: u32, exe: Option<&str>, tree: &HashMap<u32, (u32, String)>) -> 
         .iter()
         .filter(|(_, (_, name))| name.eq_ignore_ascii_case(exe))
         .map(|(pid, _)| *pid)
+        .filter(|pid| app_root(*pid, tree) == *pid)
         .min();
     if let Some(now) = found {
         log::info!("'{exe}' is {now} now (was {pid}) — the source follows it");
     }
     found
+}
+
+/// The stand-in `devices::list_processes` gives an application whose name it
+/// cannot read — what older versions stored for every game behind anti-cheat.
+fn is_pid_placeholder(exe: &str) -> bool {
+    exe.strip_prefix("PID ")
+        .is_some_and(|rest| rest.parse::<u32>().is_ok())
 }
 
 /// Decides which leftovers source each application belongs to.
@@ -605,14 +626,77 @@ mod tests {
         assert_eq!(pid_of(&streams, "chat"), Some(4321));
     }
 
-    /// Several of the same name: the oldest wins, and a tap on it covers the
-    /// children anyway.
+    /// Several of the same name: the root wins, not the lowest pid — pids say
+    /// nothing about age on Windows.
     #[test]
-    fn the_oldest_of_several_namesakes_wins() {
+    fn of_several_namesakes_the_root_wins() {
+        let sources = vec![app_source("chat", 1, Some("Discord.exe"))];
+        let tree = tree(&[
+            (700, 12800, "Discord.exe"),
+            (300, 700, "Discord.exe"),
+            (12800, 0, "explorer.exe"),
+        ]);
+        let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(700));
+    }
+
+    /// Two separate roots of the same name: the lowest pid breaks the tie.
+    #[test]
+    fn between_several_roots_the_lowest_pid_wins() {
         let sources = vec![app_source("chat", 1, Some("Discord.exe"))];
         let tree = tree(&[(700, 1, "Discord.exe"), (300, 1, "Discord.exe")]);
         let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
         assert_eq!(pid_of(&streams, "chat"), Some(300));
+    }
+
+    /// The real Discord after a restart: the lowest pid is a utility child, and
+    /// tapping it recorded a child without the voice session — a silent track.
+    #[test]
+    fn a_restarted_discord_is_tapped_at_its_root() {
+        let sources = vec![app_source("chat", 4321, Some("Discord.exe"))];
+        let streams = resolve(&sources, None, &nothing(), &discord(), &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(5556));
+    }
+
+    /// The picker stores the pid of a session, which for Discord is a utility
+    /// child. Alive as it is, the tap still goes on the root that has both
+    /// sessions.
+    #[test]
+    fn a_living_child_goes_up_to_its_root() {
+        let sources = vec![app_source("chat", 30988, Some("Discord.exe"))];
+        let streams = resolve(&sources, None, &nothing(), &discord(), &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(5556));
+    }
+
+    /// The Discord source and an output device's leftovers side by side: the
+    /// sessions sit in the children, and neither may land in the device too.
+    #[test]
+    fn a_discord_source_keeps_its_children_out_of_the_leftovers() {
+        let sources = vec![
+            app_source("chat", 4321, Some("Discord.exe")),
+            of_kind("system", output("dev-1")),
+        ];
+        let playing: HashMap<String, Vec<(u32, bool)>> =
+            [("dev-1".to_string(), vec![(2584, true), (30988, true)])]
+                .into_iter()
+                .collect();
+        let streams = resolve(&sources, None, &playing, &discord(), &ledger("dev-1"));
+        assert_eq!(pid_of(&streams, "chat"), Some(5556));
+        assert_eq!(pids_of(&streams, "system"), Vec::<u32>::new());
+    }
+
+    /// A game behind anti-cheat could not be named, and the picker stored
+    /// "PID 1234" as its exe. No process is called that: searching by it took
+    /// the source out while the game was running.
+    #[test]
+    fn a_placeholder_exe_keeps_the_living_pid() {
+        let sources = vec![app_source("game", 4321, Some("PID 4321"))];
+        let tree = tree(&[(4321, 1, "VALORANT-Win64-Shipping.exe")]);
+        let streams = resolve(&sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "game"), Some(4321));
+        assert!(is_pid_placeholder("PID 4321"));
+        assert!(!is_pid_placeholder("PID.exe"));
+        assert!(!is_pid_placeholder("Discord.exe"));
     }
 
     /// A rebound source must still be excluded from the leftovers, or it lands

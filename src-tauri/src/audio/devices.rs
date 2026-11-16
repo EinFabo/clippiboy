@@ -237,15 +237,46 @@ mod win {
         }
     }
 
-    /// Every process holding an audio session on the default output device.
+    /// Every process holding an audio session on any active output device.
+    ///
+    /// Not only the default one: Discord is often set to a headset or a chat
+    /// channel of its own (a GoXLR's "Chat"), and an application that plays
+    /// there would otherwise be missing from the picker altogether.
     pub fn list_processes() -> Vec<AudioProcess> {
-        let Some(sessions) = sessions_of("") else {
-            return Vec::new();
-        };
+        ensure_com();
+        let mut devices: Vec<String> = collect(eRender, DeviceKind::Output)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|device| device.id)
+            .filter(|id| !id.is_empty())
+            .collect();
+        if devices.is_empty() {
+            devices.push(String::new());
+        }
+        // The snapshot names what `process_name` cannot open — a game behind
+        // anti-cheat. Its "PID 1234" stand-in was stored as the exe and could
+        // never be found again.
+        let tree = process_tree();
+        let mut seen: Vec<u32> = Vec::new();
+        let mut out = Vec::new();
+        for device in &devices {
+            let Some(sessions) = sessions_of(device) else {
+                continue;
+            };
+            collect_processes(&sessions, &tree, &mut seen, &mut out);
+        }
+        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out
+    }
+
+    fn collect_processes(
+        sessions: &IAudioSessionEnumerator,
+        tree: &HashMap<u32, (u32, String)>,
+        seen: &mut Vec<u32>,
+        out: &mut Vec<AudioProcess>,
+    ) {
         unsafe {
             let count = sessions.GetCount().unwrap_or(0);
-            let mut seen: Vec<u32> = Vec::new();
-            let mut out = Vec::new();
             for index in 0..count {
                 let Ok(control) = sessions.GetSession(index) else {
                     continue;
@@ -261,7 +292,9 @@ mod win {
                 }
                 seen.push(pid);
 
-                let exe = process_name(pid).unwrap_or_else(|| format!("PID {pid}"));
+                let exe = process_name(pid)
+                    .or_else(|| tree.get(&pid).map(|(_, name)| name.clone()))
+                    .unwrap_or_else(|| format!("PID {pid}"));
                 let display = control2
                     .GetDisplayName()
                     .ok()
@@ -275,8 +308,6 @@ mod win {
                     exe,
                 });
             }
-            out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-            out
         }
     }
 }
