@@ -136,6 +136,7 @@ export const mockConfig: AppConfig = {
   trayHintShown: false,
   padButtonHintShown: false,
   guideHintShown: false,
+  discordHintShown: false,
   watermark: true,
   setupDone: true,
   usageStats: true,

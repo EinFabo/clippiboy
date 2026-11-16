@@ -79,6 +79,7 @@ pub fn default_config() -> AppConfig {
         tray_hint_shown: false,
         pad_button_hint_shown: false,
         guide_hint_shown: false,
+        discord_hint_shown: false,
         watermark: true,
         setup_done: false,
         usage_stats: true,
@@ -489,6 +490,7 @@ pub fn keep_once_flags(next: &mut AppConfig, previous: &AppConfig) {
     next.tray_hint_shown |= previous.tray_hint_shown;
     next.pad_button_hint_shown |= previous.pad_button_hint_shown;
     next.guide_hint_shown |= previous.guide_hint_shown;
+    next.discord_hint_shown |= previous.discord_hint_shown;
     // The pad types seen and the pad in use are the core's to write: a page
     // holding an older copy neither forgets a type nor takes back the pad.
     for seen in &previous.pad_families_seen {
@@ -766,10 +768,12 @@ mod tests {
         let mut previous = default_config();
         previous.usage_stats_asked = true;
         previous.tray_hint_shown = true;
+        previous.discord_hint_shown = true;
         let mut next = default_config();
         keep_once_flags(&mut next, &previous);
         assert!(next.usage_stats_asked);
         assert!(next.tray_hint_shown);
+        assert!(next.discord_hint_shown);
 
         // And a page that knows better still gets its way going forward.
         let mut next = default_config();

@@ -744,6 +744,11 @@ pub struct AppConfig {
     /// `set_hotkeys` with the first binding on Guide.
     #[serde(default)]
     pub guide_hint_shown: bool,
+    /// Has the note after the first clip been shown — Discord onto a track of
+    /// its own, or turned down where it has one? Set by the main window, and
+    /// only once there was Discord to speak of.
+    #[serde(default)]
+    pub discord_hint_shown: bool,
     /// The "ClippiBoy" mark in the bottom-left corner of clips and screenshots.
     /// On for configs written before it existed, too.
     #[serde(default = "yes")]

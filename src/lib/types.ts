@@ -244,6 +244,8 @@ export interface AppConfig {
   padButtonHintShown: boolean;
   /** Said once: Guide may open Xbox Game Bar as well. */
   guideHintShown: boolean;
+  /** Said once, after a clip: Discord onto a track of its own, or turned down. */
+  discordHintShown: boolean;
   /** The "ClippiBoy" mark in the bottom-left corner of clips and screenshots. */
   watermark: boolean;
   /** The setup on first start was gone through or skipped. */

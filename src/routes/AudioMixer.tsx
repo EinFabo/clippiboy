@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
@@ -17,7 +17,8 @@ import {
 import { cn } from "@/lib/cn";
 import { labelToSave } from "@/lib/draft";
 import { useFlip } from "@/lib/useFlip";
-import type { AudioSource, SourceKind } from "@/lib/types";
+import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
+import type { AudioProcess, AudioSource, SourceKind } from "@/lib/types";
 
 /**
  * Does the source get a track of its own by default?
@@ -89,6 +90,14 @@ function newSource(label: string, kind: SourceKind): AudioSource {
     solo: false,
     separateTrack: wantsOwnTrack(kind),
   };
+}
+
+/**
+ * Discord on a track of its own, so friends' voices can be turned down in the
+ * clip. Quick setup and the note after the first clip add the same source.
+ */
+export function discordSource(process: AudioProcess): AudioSource {
+  return newSource("Discord", discordKind(process));
 }
 
 /**
@@ -545,6 +554,14 @@ export function QuickSetup({
 }) {
   const devices = useEngine((s) => s.devices);
   const sources = useEngine((s) => s.config.sources);
+  const processes = useEngine((s) => s.processes);
+  const refreshSources = useEngine((s) => s.refreshSources);
+  // A Discord started since the lists were read still gets its row.
+  useEffect(() => {
+    void refreshSources();
+  }, [refreshSources]);
+  const discord = runningDiscord(processes);
+  const discordAdded = hasDiscordSource(sources);
   const output = devices.find((d) => d.kind === "output" && d.isDefault);
   const input = devices.find((d) => d.kind === "input" && d.isDefault);
   // The setup shows this with sources already there too: what is in the list
@@ -556,6 +573,7 @@ export function QuickSetup({
   const inputAdded = has("inputDevice", input?.id);
   const [withOutput, setWithOutput] = useState(true);
   const [withInput, setWithInput] = useState(true);
+  const [withDiscord, setWithDiscord] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const add = async () => {
@@ -567,6 +585,9 @@ export function QuickSetup({
       }
       if (withInput && input && !inputAdded) {
         await onAdd(newSource(input.name, { type: "inputDevice", deviceId: input.id }));
+      }
+      if (withDiscord && discord && !discordAdded) {
+        await onAdd(discordSource(discord));
       }
     } finally {
       setBusy(false);
@@ -601,8 +622,20 @@ export function QuickSetup({
       device: input.name,
     });
   }
+  if (discord || discordAdded) {
+    rows.push({
+      on: withDiscord,
+      set: setWithDiscord,
+      added: discordAdded,
+      icon: <IconApp className="h-4 w-4" />,
+      title: "Discord",
+      device: "Friends' voices on their own track",
+    });
+  }
   const nothing =
-    !(withOutput && output && !outputAdded) && !(withInput && input && !inputAdded);
+    !(withOutput && output && !outputAdded) &&
+    !(withInput && input && !inputAdded) &&
+    !(withDiscord && discord && !discordAdded);
   const allAdded = rows.length > 0 && rows.every((row) => row.added);
 
   return (
@@ -613,7 +646,7 @@ export function QuickSetup({
           ? "No audio source yet, so your clips would be silent. "
           : ""}
         Add what you hear and your microphone — the devices Windows uses right now. You can
-        change either later.
+        change them later.
       </p>
       <div className="mt-4 grid gap-2">
         {rows.map((row) => (
