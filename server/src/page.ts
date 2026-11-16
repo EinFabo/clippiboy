@@ -66,7 +66,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .btn:hover{background:rgb(255 255 255/.88)}
 .btn.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}.btn.alt:hover{background:var(--hover)}
 .cta{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;margin-top:32px;padding:20px 22px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,rgb(139 92 246/.12),transparent 60%),var(--surface)}
-.cta p{margin:0;color:var(--muted);font-size:14px;max-width:560px}.cta strong{color:var(--ink)}
+.cta p{margin:0;color:var(--muted);font-size:14px;max-width:560px}.cta .go{display:flex;flex-wrap:wrap;gap:10px}.cta strong{color:var(--ink)}
 footer{margin-top:22px;font-size:12px;color:var(--faint)}footer a{color:var(--muted)}`;
 }
 
@@ -82,7 +82,12 @@ function head(site: string, title: string): string {
 }
 
 const CTA_TEXT =
-  "<strong>Clipped with ClippiBoy</strong> — it keeps the last minutes of your game, so you can save the best moment after it happened. Free for Windows.";
+  "<strong>Clipped with ClippiBoy</strong> — one key saves the last minutes of your game, with your friends' Discord voices on a slider of their own. Free for Windows, no ads, no account needed.";
+
+/** Under a clip: the setup itself, counted as "clip" (DOWNLOAD_REFS in site-proxy), and the site for a closer look. */
+function cta(site: string): string {
+  return `<div class="cta"><p>${CTA_TEXT}</p><div class="go"><a class="btn" href="${site}/get/clip">Download for Windows</a><a class="btn alt" href="${site}">Learn more</a></div></div>`;
+}
 
 /**
  * A link that ran out or was deleted: the clip's frame, empty, in the same look.
@@ -112,7 +117,7 @@ ${baseCss(site)}
 </style></head><body><div class="hero"></div><main>
 <header><a class="brand" href="${site}">${logo("mark", false)}ClippiBoy</a><a class="btn" href="${site}">Get ClippiBoy</a></header>
 <div class="gone"><div>${logo("faded", false)}<h1>This clip has expired</h1><p>Links from ClippiBoy last five days, or less if the clip was deleted. Ask whoever sent it for a new one.</p></div></div>
-<div class="cta"><p>${CTA_TEXT}</p><a class="btn" href="${site}">Get ClippiBoy</a></div>
+${cta(site)}
 </main></body></html>`;
 }
 
@@ -300,7 +305,7 @@ button.btn{border:0;font:inherit;font-size:14px;font-weight:600;cursor:pointer}b
 </div></div>
 <div class="info"><div><h1>${title}</h1>${pills ? `<div class="pills">${pills}</div>` : ""}${uploader}</div>
 <span class="expires"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Expires ${escapeHtml(d.expires)}</span></div>
-<div class="cta"><p>${CTA_TEXT}</p><a class="btn" href="${d.site}">Get ClippiBoy</a></div>
+${cta(d.site)}
 <footer>This clip deletes itself ${escapeHtml(d.expires)}. Something wrong with it? <button class="linkish" id="report" type="button">Report it</button>.</footer>
 </main>
 <dialog id="reporting"><form id="report-form">
