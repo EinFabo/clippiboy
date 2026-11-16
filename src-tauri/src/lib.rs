@@ -1054,6 +1054,7 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     // Raised here, lowered by the thread's end on any exit.
     let starting = (action == state::AutoAction::Start)
         .then(|| state::FlagGuard::raise(&AUTO_STARTING));
+    let reason = if signals.woke { "awake again" } else { "the display is back on" };
     std::thread::spawn(move || match action {
         state::AutoAction::Start => {
             let _starting = starting;
@@ -1062,10 +1063,11 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
         state::AutoAction::Stop => stop_buffer_and_notify(&app),
         state::AutoAction::Restart => {
             let state = app.state::<AppState>();
-            // A recording running across the sleep keeps its file whole; the
-            // buffer behind it starts over once it has stopped.
+            // A recording running across the sleep or the dark screen keeps
+            // its file whole; the buffer behind it starts over once it has
+            // stopped.
             if state.is_buffering() && !state.is_recording() {
-                log::info!("awake again \u{2014} the capture starts over");
+                log::info!("{reason} \u{2014} the capture starts over");
                 state.stop_pipeline();
                 if let Err(err) = state.start_pipeline() {
                     notify(&app, "error", err.clone());
@@ -1121,7 +1123,23 @@ fn lock_signals() -> state::LockSignals {
     if woke {
         log::info!("the checks paused for over 30 s \u{2014} the machine slept");
     }
-    state::LockSignals { session: session == Some(true), secure_desktop: desktop.is_err(), woke }
+    // Off and on again are counted where Windows reports them, so a display
+    // back between two checks still shows here as a moved count.
+    let display = capture::display_state();
+    let display_back = {
+        static LAST_BACK: Mutex<Option<u32>> = Mutex::new(None);
+        let mut last = LAST_BACK.lock().unwrap_or_else(|e| e.into_inner());
+        let moved = last.is_some_and(|before| before != display.back);
+        *last = Some(display.back);
+        moved
+    };
+    state::LockSignals {
+        session: session == Some(true),
+        secure_desktop: desktop.is_err(),
+        woke,
+        display_off: display.off,
+        display_back,
+    }
 }
 
 /// Clear away leftovers nobody needs any more.
@@ -2027,6 +2045,9 @@ pub fn run() {
             if let Err(err) = register_hotkeys(handle) {
                 log::warn!("{err}");
             }
+            // Before the buffer: the display going off and on again restarts
+            // its capture (`AutoBuffer::poll_lock`).
+            capture::watch_display();
             start_buffer_if_configured(handle);
             updater::watch(handle);
             telemetry::start(handle);

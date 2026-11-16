@@ -408,6 +408,124 @@ pub fn screen_unrecordable() -> bool {
     session_locked() == Some(true) || secure_desktop()
 }
 
+/// The console display state as Windows last reported it: 0 off, 1 on,
+/// 2 dimmed; [`DISPLAY_UNKNOWN`] before the first report.
+static DISPLAY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(DISPLAY_UNKNOWN);
+/// How often the display has come back on after being off.
+static DISPLAY_BACK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const DISPLAY_UNKNOWN: u32 = u32::MAX;
+const DISPLAY_OFF: u32 = 0;
+
+/// What [`display_state`] knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayState {
+    /// Windows has the display switched off right now.
+    pub off: bool,
+    /// How often it has come back on so far — a count, so that off and on
+    /// between two looks is not missed.
+    pub back: u32,
+}
+
+/// The display as [`watch_display`] last heard of it. Never "off" without the
+/// watch (other systems, or a registration Windows refused).
+pub fn display_state() -> DisplayState {
+    use std::sync::atomic::Ordering::SeqCst;
+    DisplayState {
+        off: DISPLAY.load(SeqCst) == DISPLAY_OFF,
+        back: DISPLAY_BACK.load(SeqCst),
+    }
+}
+
+/// Take in one report of the display state, logging each change once.
+fn note_display(value: u32) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let before = DISPLAY.swap(value, SeqCst);
+    if before == value {
+        return;
+    }
+    match value {
+        0 => log::info!("display: off"),
+        1 => log::info!("display: on"),
+        2 => log::info!("display: dimmed"),
+        other => log::info!("display: state {other}"),
+    }
+    if before == DISPLAY_OFF {
+        DISPLAY_BACK.fetch_add(1, SeqCst);
+    }
+}
+
+/// Have Windows tell us whenever the display goes off, dims or comes back on.
+///
+/// The idle timeout switching the display off is neither a lock nor a sleep,
+/// and yet Windows.Graphics.Capture has been seen to deliver nothing after the
+/// display came back — no frame, no `Closed`, for ten hours of black clips.
+/// The buffer automation restarts the capture on it (`AutoBuffer::poll_lock`).
+///
+/// `PowerSettingRegisterNotification` takes a callback rather than a window,
+/// so this needs no hidden window and no message pump. Windows calls it once
+/// right away with the current state, then on every change. The registration
+/// lasts as long as the program.
+#[cfg(windows)]
+pub fn watch_display() {
+    use core::ffi::c_void;
+    use windows::core::GUID;
+    use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+    use windows::Win32::System::Power::{
+        PowerSettingRegisterNotification, DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS,
+        POWERBROADCAST_SETTING,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{DEVICE_NOTIFY_CALLBACK, PBT_POWERSETTINGCHANGE};
+
+    // Lives in `Win32_System_SystemServices`, a whole feature for one GUID.
+    const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
+
+    unsafe extern "system" fn changed(_context: *const c_void, kind: u32, setting: *const c_void) -> u32 {
+        if kind != PBT_POWERSETTINGCHANGE || setting.is_null() {
+            return 0;
+        }
+        // SAFETY: for this notification Windows hands over a
+        // POWERBROADCAST_SETTING followed by `DataLength` bytes of data; the
+        // value is read only when it is there, through the raw pointer.
+        let setting = setting as *const POWERBROADCAST_SETTING;
+        if (*setting).PowerSetting == GUID_CONSOLE_DISPLAY_STATE && (*setting).DataLength >= 4 {
+            let data = std::ptr::addr_of!((*setting).Data) as *const u32;
+            note_display(std::ptr::read_unaligned(data));
+        }
+        0
+    }
+
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Windows may hold on to the parameters for the registration's life,
+        // which is the program's.
+        let params: &'static mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS =
+            Box::leak(Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+                Callback: Some(changed),
+                Context: std::ptr::null_mut(),
+            }));
+        let mut registration: *mut c_void = std::ptr::null_mut();
+        // SAFETY: the GUID and the parameters outlive the registration, the
+        // handle is written once and never freed.
+        let err = unsafe {
+            PowerSettingRegisterNotification(
+                &GUID_CONSOLE_DISPLAY_STATE,
+                DEVICE_NOTIFY_CALLBACK,
+                HANDLE(params as *mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS as *mut c_void),
+                &mut registration,
+            )
+        };
+        if err != ERROR_SUCCESS {
+            log::warn!(
+                "display: cannot watch the display state (error {}) \u{2014} the capture will not restart when it comes back on",
+                err.0
+            );
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn watch_display() {}
+
 // The foreground window is evaluated in `game.rs` — what matters there is not
 // just the title but the process behind it.
 
@@ -718,6 +836,25 @@ pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each time the display comes back from off counts once, whether it
+    /// comes back dimmed or on, and repeated reports change nothing.
+    #[test]
+    fn the_display_counts_its_returns_from_off() {
+        note_display(1);
+        let start = display_state().back;
+        note_display(0);
+        note_display(0);
+        assert_eq!(display_state(), DisplayState { off: true, back: start });
+        note_display(2);
+        assert_eq!(display_state(), DisplayState { off: false, back: start + 1 });
+        note_display(1);
+        note_display(1);
+        assert_eq!(display_state().back, start + 1, "dimmed to on is no return");
+        note_display(0);
+        note_display(1);
+        assert_eq!(display_state(), DisplayState { off: false, back: start + 2 });
+    }
 
     /// Three screens of identical size, as on the machine this was found on:
     /// telling them apart by anything but their identity is impossible.

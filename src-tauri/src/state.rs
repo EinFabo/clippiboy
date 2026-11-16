@@ -383,6 +383,11 @@ pub struct AutoBuffer {
     /// Was the buffer stopped because the screen locked? Then it comes back on
     /// unlock — whoever had started it.
     for_lock: std::sync::atomic::AtomicBool,
+    /// The display was off since the capture last started: a running buffer
+    /// starts over once it has been back for [`DISPLAY_SETTLE_POLLS`].
+    display_pending: std::sync::atomic::AtomicBool,
+    /// Checks the display has been back on while a restart is pending.
+    display_settled: std::sync::atomic::AtomicU32,
     /// Automatic starts that failed in a row.
     failures: std::sync::atomic::AtomicU32,
     /// Checks still to sit out before the next automatic start.
@@ -414,6 +419,12 @@ pub struct LockSignals {
     pub secure_desktop: bool,
     /// The machine slept since the last check.
     pub woke: bool,
+    /// Windows has the display switched off right now
+    /// (`capture::display_state`, the console display state).
+    pub display_off: bool,
+    /// The display went off and came back on since the last check — also when
+    /// both happened between two checks.
+    pub display_back: bool,
 }
 
 impl LockSignals {
@@ -445,6 +456,14 @@ const GRACE_POLLS: u32 = 15;
 /// a half of history over a dialog. A real lock lasts longer than this by a wide
 /// margin, and the few frozen frames a prompt leaves behind cost nothing.
 const LOCK_POLLS: u32 = 5;
+
+/// Checks the display has to be back on before a running buffer starts over —
+/// two to four seconds at the two-second cadence.
+///
+/// Not the first check: a monitor, a DisplayPort one in particular, can drop
+/// out of the desktop while it is off and take a moment to come back, and a
+/// capture started against a screen that is not there yet fails.
+const DISPLAY_SETTLE_POLLS: u32 = 2;
 
 impl AutoBuffer {
     /// One round of the automation. Called at the cadence of game detection,
@@ -492,6 +511,14 @@ impl AutoBuffer {
     /// lock stopped comes back fresh at the unlock — however short the lock
     /// was. Waking from sleep restarts a running buffer for the same reason:
     /// the lock may have come and gone between two checks.
+    ///
+    /// A display that went off and came back on (the idle timeout, without a
+    /// lock or a sleep) restarts a running buffer too, a few checks after it
+    /// is back: Windows.Graphics.Capture has been seen to deliver nothing ever
+    /// again after that, without reporting anything. The display going off
+    /// does not stop the buffer — the capture sometimes survives it, nothing
+    /// is lost while the screen is dark, and what came before stays in the
+    /// ring until the restart.
     pub fn poll_lock(&self, signals: LockSignals, buffer_active: bool) -> AutoAction {
         use std::sync::atomic::Ordering::SeqCst;
         self.session_locked.store(signals.session, SeqCst);
@@ -500,6 +527,8 @@ impl AutoBuffer {
             if !signals.session && seen < LOCK_POLLS {
                 return AutoAction::Nothing;
             }
+            // Whatever the display did, the unlock decides what comes next.
+            self.display_pending.store(false, SeqCst);
             if buffer_active {
                 self.for_lock.store(true, SeqCst);
                 return AutoAction::Stop;
@@ -510,15 +539,44 @@ impl AutoBuffer {
         self.locked.store(0, SeqCst);
         if self.for_lock.load(SeqCst) && (buffer_active || self.may_try()) {
             self.for_lock.store(false, SeqCst);
+            self.display_pending.store(false, SeqCst);
             if !buffer_active {
                 return AutoAction::Start;
             }
             return AutoAction::Nothing;
         }
         if signals.woke && buffer_active {
+            // A sleep turns the display off and on as well; this restart is
+            // that one too. Still dark, one more is owed once it is back.
+            self.display_pending.store(signals.display_off, SeqCst);
+            self.display_settled.store(0, SeqCst);
             return AutoAction::Restart;
         }
-        AutoAction::Nothing
+        self.poll_display(signals, buffer_active)
+    }
+
+    /// The display part of [`poll_lock`](Self::poll_lock), once the screen is
+    /// known not to be locked.
+    fn poll_display(&self, signals: LockSignals, buffer_active: bool) -> AutoAction {
+        use std::sync::atomic::Ordering::SeqCst;
+        if signals.display_off || signals.display_back {
+            self.display_pending.store(true, SeqCst);
+            self.display_settled.store(0, SeqCst);
+        }
+        if signals.display_off || !self.display_pending.load(SeqCst) {
+            return AutoAction::Nothing;
+        }
+        if !buffer_active {
+            // Nothing to restart, and a buffer that starts from here on starts
+            // after the display came back.
+            self.display_pending.store(false, SeqCst);
+            return AutoAction::Nothing;
+        }
+        if self.display_settled.fetch_add(1, SeqCst) + 1 < DISPLAY_SETTLE_POLLS {
+            return AutoAction::Nothing;
+        }
+        self.display_pending.store(false, SeqCst);
+        AutoAction::Restart
     }
 
     /// Has the secure desktop been up for the buffer's ten seconds? Also while
@@ -2451,6 +2509,121 @@ mod tests {
         let woke_locked = LockSignals { session: true, woke: true, ..LockSignals::default() };
         assert_eq!(auto.poll_lock(woke_locked, true), AutoAction::Stop);
         assert_eq!(auto.poll_lock(LockSignals::default(), false), AutoAction::Start);
+    }
+
+    fn display(off: bool, back: bool) -> LockSignals {
+        LockSignals { display_off: off, display_back: back, ..LockSignals::default() }
+    }
+
+    /// 2026-11-15: the display went off on the idle timeout, no lock, no
+    /// sleep, and the capture delivered nothing for ten hours after it came
+    /// back. Once it is back, a running buffer starts over — after the settle
+    /// checks, and once. While it is dark, nothing is stopped.
+    #[test]
+    fn the_display_coming_back_restarts_a_running_buffer() {
+        let auto = AutoBuffer::default();
+        for _ in 0..30 {
+            assert_eq!(auto.poll_lock(display(true, false), true), AutoAction::Nothing, "dark: no stop");
+        }
+        let mut actions = vec![auto.poll_lock(display(false, true), true)];
+        for _ in 1..DISPLAY_SETTLE_POLLS {
+            actions.push(auto.poll_lock(display(false, false), true));
+        }
+        assert_eq!(actions.last(), Some(&AutoAction::Restart));
+        assert!(actions[..actions.len() - 1].iter().all(|a| *a == AutoAction::Nothing), "{actions:?}");
+        for _ in 0..10 {
+            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing, "only once");
+        }
+    }
+
+    /// Off and on again between two checks: only the count saw it.
+    #[test]
+    fn a_display_off_between_two_checks_still_restarts() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(display(false, false), true), AutoAction::Restart);
+    }
+
+    /// Off again during the settle checks: the wait starts over once it is
+    /// back.
+    #[test]
+    fn a_flickering_display_waits_for_it_to_stay_on() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(display(true, false), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(display(false, false), true), AutoAction::Restart);
+    }
+
+    /// No buffer, nothing to restart — and a buffer started after the display
+    /// came back is not restarted later either.
+    #[test]
+    fn the_display_coming_back_leaves_a_stopped_buffer_alone() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_lock(display(true, false), false), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(display(false, true), false), AutoAction::Nothing);
+        for _ in 0..5 {
+            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+        }
+    }
+
+    /// Idle timeout with a lock: the lock stops the buffer, the unlock starts
+    /// it fresh, and the display coming back adds no second restart.
+    #[test]
+    fn a_lock_with_the_display_off_starts_once_at_the_unlock() {
+        let auto = AutoBuffer::default();
+        let dark_locked = LockSignals { session: true, display_off: true, ..LockSignals::default() };
+        assert_eq!(auto.poll_lock(dark_locked, true), AutoAction::Stop);
+        let back_locked = LockSignals { session: true, display_back: true, ..LockSignals::default() };
+        assert_eq!(auto.poll_lock(back_locked, false), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(LockSignals::default(), false), AutoAction::Start);
+        for _ in 0..5 {
+            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+        }
+    }
+
+    /// The display back in the very check that sees the unlock: the fresh
+    /// start is all it takes.
+    #[test]
+    fn an_unlock_together_with_the_display_starts_once() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_lock(LockSignals::session(true), true), AutoAction::Stop);
+        assert_eq!(auto.poll_lock(display(false, true), false), AutoAction::Start);
+        for _ in 0..5 {
+            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+        }
+    }
+
+    /// A sleep turns the display off and on too: one restart, not two.
+    #[test]
+    fn waking_with_the_display_back_restarts_once() {
+        let auto = AutoBuffer::default();
+        let woke = LockSignals { woke: true, display_back: true, ..LockSignals::default() };
+        assert_eq!(auto.poll_lock(woke, true), AutoAction::Restart);
+        for _ in 0..5 {
+            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+        }
+    }
+
+    /// Woken with the screen still dark: restarted now, and once more after
+    /// it is back.
+    #[test]
+    fn waking_in_the_dark_restarts_again_when_the_display_is_back() {
+        let auto = AutoBuffer::default();
+        let woke_dark = LockSignals { woke: true, display_off: true, ..LockSignals::default() };
+        assert_eq!(auto.poll_lock(woke_dark, true), AutoAction::Restart);
+        assert_eq!(auto.poll_lock(display(true, false), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(display(false, false), true), AutoAction::Restart);
+    }
+
+    /// A UAC prompt during the settle checks does not cost the restart.
+    #[test]
+    fn a_brief_secure_desktop_keeps_the_display_restart() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(LockSignals::desktop(true), true), AutoAction::Nothing);
+        assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Restart);
     }
 
     /// Hold the secure desktop up for a whole lock's worth of checks.
