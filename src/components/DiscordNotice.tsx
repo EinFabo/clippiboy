@@ -37,14 +37,15 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
           const processes = await api
             .listAudioProcesses()
             .catch(() => useEngine.getState().processes);
-          const { config: now, patchConfig } = useEngine.getState();
+          const { config: now } = useEngine.getState();
           if (cancelled || now.discordHintShown) return;
           const kind = discordHint(now.sources, processes);
           const discord = runningDiscord(processes);
+          // Not marked as said here: clips are saved in the game, with this
+          // window hidden. The note stays until it is answered; a restart
+          // before that brings it back with the next clip.
           if (kind === "add" && discord) setHint({ kind, discord });
           else if (kind === "turnDown") setHint({ kind });
-          else return;
-          await patchConfig({ discordHintShown: true });
         } finally {
           deciding = false;
         }
@@ -60,11 +61,16 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
   }, []);
 
   if (!hint) return null;
+
+  const answered = () => {
+    setHint(null);
+    void useEngine.getState().patchConfig({ discordHintShown: true });
+  };
   // Added by hand on the Audio page in the meantime: nothing left to offer.
   if (hint.kind === "add" && hasDiscordSource(sources)) return null;
 
   const add = async (discord: AudioProcess) => {
-    setHint(null);
+    answered();
     await upsertSource(discordSource(discord));
     toast("ok", "Discord is on its own track now");
   };
@@ -76,7 +82,7 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
           ? "Friends too loud in your clips? Put Discord on its own track."
           : "Discord too loud in your clips?"}
       </p>
-      <Button size="sm" variant="ghost" onClick={() => setHint(null)}>
+      <Button size="sm" variant="ghost" onClick={answered}>
         Not now
       </Button>
       {hint.kind === "add" ? (
@@ -88,7 +94,7 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
           size="sm"
           variant="primary"
           onClick={() => {
-            setHint(null);
+            answered();
             onNavigate("audio");
           }}
         >
