@@ -22,7 +22,9 @@ interface ShareState {
   transfers: Transfer[];
   /** The clip whose "Send to a friend" picker is open. */
   picking: Clip | null;
-  pick: (clip: Clip | null) => void;
+  /** More clips going to the same friend, picked together with `picking`. */
+  pickingMore: Clip[];
+  pick: (clip: Clip | null, more?: Clip[]) => void;
   /** The friend whose "Send a clip" picker is open — the same, the other way round. */
   choosingFor: FriendUser | null;
   chooseFor: (friend: FriendUser | null) => void;
@@ -31,7 +33,8 @@ interface ShareState {
 export const useShare = create<ShareState>((set) => ({
   transfers: [],
   picking: null,
-  pick: (clip) => set({ picking: clip }),
+  pickingMore: [],
+  pick: (clip, more = []) => set({ picking: clip, pickingMore: more }),
   choosingFor: null,
   chooseFor: (friend) => set({ choosingFor: friend }),
 }));

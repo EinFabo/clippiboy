@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
@@ -21,6 +22,7 @@ import {
   IconRecord,
   IconScissors,
   IconSearch,
+  IconSend,
   IconTrash,
 } from "@/components/icons";
 import type { Route } from "@/components/NavBar";
@@ -32,6 +34,11 @@ import { isTextField } from "@/lib/dom";
 import { useFlip } from "@/lib/useFlip";
 import { usePresence } from "@/lib/usePresence";
 import { useCountUp } from "@/lib/useCountUp";
+import { useClipSelection, type SelectMods } from "@/lib/useClipSelection";
+import { favoriteTarget } from "@/lib/clipSelect";
+import { toast } from "@/lib/toastBus";
+import { useFriends } from "@/lib/friends";
+import { useShare } from "@/lib/share";
 import {
   NO_FILTER,
   filterClips,
@@ -155,8 +162,6 @@ export function Clips({
   const [asking, setAsking] = useState<{ id: string; what: Asking } | null>(null);
   /** Clips with a live share link — a pill on the tile says so. */
   const links = useLinks((s) => s.links);
-  // The clip whose export dialog is open, if any.
-  const [exporting, setExporting] = useState<Clip | null>(null);
   const clipMenu = useClipMenu();
   const grid = useRef<HTMLDivElement>(null);
   /**
@@ -219,6 +224,36 @@ export function Clips({
   );
 
   const filtered = isFiltered(filter);
+
+  const order = useMemo(() => visible.map((clip) => clip.id), [visible]);
+  const selection = useClipSelection(order);
+  const selecting = selection.count > 0;
+  // The clip whose export dialog is open, if any.
+  const [exporting, setExporting] = useState<Clip | null>(null);
+  const picking = useShare((s) => s.picking);
+
+  // Ctrl+A and Escape belong to the gallery only while nothing else is up: not
+  // in a text field, not over the player, a dialog, the friend picker or a
+  // question of its own.
+  const confirmingSelection = useRef(false);
+  useEffect(() => {
+    if (open !== null || exporting || picking || inTrash) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isTextField(event.target)) return;
+      if (event.key === "Escape") {
+        if (!confirmingSelection.current) selection.clear();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+        const target = event.target;
+        const onGrid =
+          target === document.body || (target instanceof Node && !!grid.current?.contains(target));
+        if (!onGrid) return;
+        event.preventDefault();
+        selection.all();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, exporting, picking, inTrash, selection]);
 
   const clipIds = useMemo(() => new Set(clips.map((c) => c.id)), [clips]);
 
@@ -457,6 +492,9 @@ export function Clips({
                         if (node) thumbs.current.set(clip.id, node);
                         else thumbs.current.delete(clip.id);
                       }}
+                      selected={selection.selected.has(clip.id)}
+                      selecting={selecting}
+                      onSelect={(mods) => selection.select(clip.id, mods)}
                       onOpen={() => openAt(index)}
                       onExport={() => setExporting(clip)}
                       onFavorite={() => void toggleFavorite(clip)}
@@ -517,6 +555,30 @@ export function Clips({
         </ErrorBoundary>
       )}
 
+      {selecting && open === null && !inTrash && (
+        <SelectionBar
+          clips={clips.filter((clip) => selection.selected.has(clip.id))}
+          links={links}
+          onClear={selection.clear}
+          onConfirming={(on) => (confirmingSelection.current = on)}
+          onFavorite={async (clips, favorite) => {
+            for (const clip of clips) {
+              if (clip.favorite !== favorite) await toggleFavorite(clip);
+            }
+          }}
+          onDelete={async (clips) => {
+            selection.clear();
+            for (const clip of clips) await deleteClip(clip.id);
+            toast(
+              "ok",
+              clips.length === 1
+                ? "1 clip moved to Recently deleted"
+                : `${clips.length} clips moved to Recently deleted`,
+            );
+          }}
+        />
+      )}
+
       {exporting && (
         <ExportDialog clip={exporting} onClose={() => setExporting(null)} />
       )}
@@ -558,6 +620,9 @@ function ClipCard({
   renaming,
   onRenaming,
   thumbRef,
+  selected,
+  selecting,
+  onSelect,
   onOpen,
   onExport,
   onFavorite,
@@ -579,6 +644,13 @@ function ClipCard({
   renaming: boolean;
   onRenaming: (on: boolean) => void;
   thumbRef: (node: HTMLButtonElement | null) => void;
+  /** In the selection — a ring and a filled check. */
+  selected: boolean;
+  /** Something is selected somewhere: a click picks instead of opening. */
+  selecting: boolean;
+  /** Ctrl-click and Shift-click anywhere on the tile, any click on the picture
+   *  while a selection exists. */
+  onSelect: (mods: SelectMods) => void;
   onOpen: () => void;
   onExport: () => void;
   onFavorite: () => void;
@@ -590,14 +662,31 @@ function ClipCard({
     <Card
       data-flip={flipKey}
       interactive={!leaving}
-      className={cn("group overflow-hidden", leaving ? "cb-tile-out" : arriving && "cb-tile-in")}
+      className={cn(
+        "group overflow-hidden",
+        leaving ? "cb-tile-out" : arriving && "cb-tile-in",
+        selected && "border-accent shadow-[0_0_0_1px_var(--color-accent)] hover:border-accent",
+      )}
       style={delay !== null ? { animationDelay: `${delay}ms` } : undefined}
       onContextMenu={onContextMenu}
+      // Before the buttons inside see it, so Ctrl-click on Open or Share picks
+      // the tile too instead of acting.
+      onClickCapture={(event) => {
+        if (leaving || !(event.ctrlKey || event.metaKey || event.shiftKey)) return;
+        if (isTextField(event.target)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onSelect({ shift: event.shiftKey, toggle: true });
+      }}
+      // Shift-click would start a text selection across the tiles.
+      onMouseDown={(event) => {
+        if (event.shiftKey && !isTextField(event.target)) event.preventDefault();
+      }}
     >
       <div className="relative">
         <button
           ref={thumbRef}
-          onClick={onOpen}
+          onClick={() => (selecting ? onSelect({}) : onOpen())}
           aria-label={`${clip.screenshot ? "Open" : "Play"} ${
             clip.game ??
             (clip.screenshot ? "screenshot" : clip.recording ? "recording" : "clip")
@@ -702,9 +791,24 @@ function ClipCard({
         >
           <HeartBurst favorite={clip.favorite} />
         </button>
+        {selecting && !leaving && (
+          // Ring while nothing is picked, filled once it is. Not a button: the
+          // click goes to the picture and the tile, which already toggle.
+          <span
+            aria-hidden
+            className={cn(
+              "pointer-events-none absolute top-3 right-3 grid h-[26px] w-[26px] place-items-center",
+              "rounded-pill border-2 text-white",
+              selected ? "border-accent bg-accent" : "border-white/75 bg-black/35",
+            )}
+          >
+            {selected && <IconCheck className="h-3.5 w-3.5" />}
+          </span>
+        )}
         <div
           className={cn(
             "absolute top-3 right-3 flex gap-1.5 transition-opacity",
+            selecting && "hidden",
             // While the question stands it has to stay up, even once
             // the cursor has wandered off the tile.
             asking ? "opacity-100" : "opacity-0 group-hover:opacity-100",
@@ -770,6 +874,97 @@ function ClipCard({
         </div>
       </div>
     </Card>
+  );
+}
+
+/**
+ * What the selected clips can do together: heart them, send them to a friend,
+ * delete them. The navigation's glass pill, floating at the bottom — centred,
+ * so it stays clear of the toasts and transfers in the right-hand corner.
+ */
+function SelectionBar({
+  clips,
+  links,
+  onClear,
+  onConfirming,
+  onFavorite,
+  onDelete,
+}: {
+  clips: Clip[];
+  links: Record<string, Link>;
+  onClear: () => void;
+  /** Tells the gallery a question is up, so Escape answers it and nothing else. */
+  onConfirming: (on: boolean) => void;
+  onFavorite: (clips: Clip[], favorite: boolean) => Promise<void>;
+  onDelete: (clips: Clip[]) => Promise<void>;
+}) {
+  const signedIn = useFriends((s) => s.signedIn);
+  const pickFriend = useShare((s) => s.pick);
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => {
+    onConfirming(confirming);
+    return () => onConfirming(false);
+  }, [confirming, onConfirming]);
+
+  const count = clips.length;
+  const heart = favoriteTarget(clips);
+  const withLinks = clips.some((clip) => links[clip.id]);
+
+  // In the body: the page sits in a layer that scrolls and moves, and a bar
+  // fixed inside it would scroll away with the clips.
+  return createPortal(
+    <div
+      role="toolbar"
+      aria-label="Selected clips"
+      className="fixed bottom-7 left-1/2 z-[45] flex -translate-x-1/2 items-center gap-1.5 rounded-pill
+        border border-white/10 py-1.5 pr-2 pl-[18px] shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
+      style={{ background: "var(--glass)", backdropFilter: "blur(20px)" }}
+    >
+      <b className="mr-2 text-[13px] font-semibold tabular-nums">{count} selected</b>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="text-white"
+        onClick={() => void onFavorite(clips, heart)}
+        title={heart ? "Add to favorites" : "Remove from favorites"}
+      >
+        <IconHeart filled={!heart} className="mr-1.5 h-3.5 w-3.5" />
+        Favorite
+      </Button>
+      {signedIn && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-white"
+          onClick={() => pickFriend(clips[0], clips.slice(1))}
+        >
+          <IconSend className="mr-1.5 h-3.5 w-3.5" />
+          Send to a friend
+        </Button>
+      )}
+      {confirming ? (
+        <ConfirmDelete
+          origin="left"
+          question={withLinks ? `Delete ${count} with links?` : `Delete ${count}?`}
+          confirmTitle="Delete — they stay in Recently deleted for 30 days"
+          cancelLabel="Keep the clips"
+          onConfirm={() => {
+            setConfirming(false);
+            void onDelete(clips);
+          }}
+          onCancel={() => setConfirming(false)}
+        />
+      ) : (
+        <Button variant="ghost" size="sm" className="text-live" onClick={() => setConfirming(true)}>
+          Delete
+        </Button>
+      )}
+      <span aria-hidden className="mx-1 h-5 w-px bg-white/10" />
+      <Button variant="ghost" size="sm" aria-label="Clear selection" title="Clear selection (Escape)" onClick={onClear}>
+        <IconClose className="h-3.5 w-3.5" />
+      </Button>
+    </div>,
+    document.body,
   );
 }
 
