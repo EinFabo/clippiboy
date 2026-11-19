@@ -98,6 +98,7 @@ export function Slider({
   onCommit,
   onRelease,
   label,
+  disabled,
 }: {
   value: number;
   min: number;
@@ -118,6 +119,7 @@ export function Slider({
    */
   onRelease?: () => void;
   label?: string;
+  disabled?: boolean;
 }) {
   const pct = ((value - min) / (max - min)) * 100;
   const input = useRef<HTMLInputElement>(null);
@@ -169,12 +171,14 @@ export function Slider({
       ref={input}
       type="range"
       aria-label={label}
+      disabled={disabled}
       value={value}
       min={min}
       max={max}
       step={step}
       onChange={(e) => onChange(Number(e.target.value))}
       className="h-1.5 w-full cursor-pointer appearance-none rounded-pill outline-none
+        disabled:cursor-default disabled:opacity-40
         [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5
         [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-pill
         [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow"

@@ -48,7 +48,7 @@ export function TitleBar() {
         {streamer && (
           <span
             data-tauri-drag-region
-            className="ml-1 rounded-pill border border-live/40 bg-live/10 px-2 py-0.5 text-[11px] text-live"
+            className="ml-1 rounded-pill border border-live/40 bg-live/10 px-2 py-0.5 text-xs text-live"
           >
             Streamer mode
           </span>

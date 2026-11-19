@@ -189,7 +189,7 @@ function Profile({ connected }: { connected: boolean }) {
             onClick={() => void patchConfig({ friends: { ...config, busy: !config.busy } })}
             title={config.busy ? "Busy: no notices, clips are turned down" : "Set yourself busy"}
             className={cn(
-              "shrink-0 rounded-pill border px-2 py-0.5 text-[11px] transition-colors",
+              "shrink-0 rounded-pill border px-2 py-0.5 text-xs transition-colors",
               config.busy ? "border-live/50 bg-live/10 text-live" : "border-line text-ink-muted hover:bg-hover",
             )}
           >

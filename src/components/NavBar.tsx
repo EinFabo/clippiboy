@@ -70,7 +70,7 @@ export function NavBar({
             {id === "friends" && requests > 0 && (
               <span
                 title={`${requests} friend request${requests === 1 ? "" : "s"}`}
-                className="grid h-4.5 min-w-4.5 place-items-center rounded-pill bg-accent px-1 text-[10px] font-semibold text-white tabular-nums"
+                className="grid h-4.5 min-w-4.5 place-items-center rounded-pill bg-accent px-1 text-[11px] font-semibold text-white tabular-nums"
               >
                 {requests}
               </span>

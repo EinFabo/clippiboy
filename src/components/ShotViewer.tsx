@@ -1552,7 +1552,7 @@ function Disclosure({
         </svg>
         {title}
         {badge && (
-          <span className="rounded-pill bg-accent/25 px-2 py-0.5 text-[10px] text-accent-bright">
+          <span className="rounded-pill bg-accent/25 px-2 py-0.5 text-xs text-accent-bright">
             {badge}
           </span>
         )}

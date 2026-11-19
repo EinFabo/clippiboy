@@ -228,7 +228,7 @@ export function ClipPicker() {
                         className="h-full w-full object-cover"
                       />
                     )}
-                    <span className="absolute right-1.5 bottom-1.5 rounded-pill bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold">
+                    <span className="absolute right-1.5 bottom-1.5 rounded-pill bg-black/60 px-1.5 py-0.5 text-[11px] font-semibold">
                       {clip.screenshot ? "Screenshot" : formatDuration(clip.durationMs)}
                     </span>
                     <span className="absolute inset-0 grid place-items-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">

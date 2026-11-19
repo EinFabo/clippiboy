@@ -418,20 +418,20 @@ function BufferExplainer({ clip, buffer }: { clip: number; buffer: number }) {
         a clip, so the moment you just saw is never lost. Older footage simply rolls off.
       </p>
       <div className="mt-4">
-        <div className="mb-1.5 flex justify-between text-[11px] text-ink-faint tabular-nums">
+        <div className="mb-1.5 flex justify-between text-xs text-ink-faint tabular-nums">
           <span>{clock(buffer)} ago</span>
           <span>now</span>
         </div>
         <div className="flex h-7 overflow-hidden rounded-inner border border-line bg-elevated">
           <div className="h-full" style={{ width: `${(1 - share) * 100}%` }} />
           <div
-            className="grid h-full place-items-center bg-accent/30 text-[11px] font-medium text-ink transition-[width] duration-300"
+            className="grid h-full place-items-center bg-accent/30 text-xs font-medium text-ink transition-[width] duration-300"
             style={{ width: `${share * 100}%` }}
           >
             your clip · {clock(clip)}
           </div>
         </div>
-        <p className="mt-2 text-[11px] text-ink-faint">
+        <p className="mt-2 text-xs text-ink-faint">
           The buffer length itself can be changed later on the Video page.
         </p>
       </div>

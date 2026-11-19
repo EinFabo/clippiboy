@@ -377,7 +377,7 @@ export function AudioMixer() {
                         event.preventDefault();
                         nudge(source.id, delta);
                       }}
-                      className="-mr-1 -ml-1 shrink-0 cursor-grab text-ink-faint transition-colors
+                      className="relative -mr-1 -ml-1 shrink-0 cursor-grab text-ink-faint transition-colors after:absolute after:-inset-0.5 after:content-['']
                         hover:text-ink focus-visible:text-ink active:cursor-grabbing"
                     >
                       <IconGrip className="h-5 w-5" />
@@ -394,7 +394,7 @@ export function AudioMixer() {
                         onSave={(label) => upsertSource({ ...source, label })}
                       />
                       {source.separateTrack && (
-                        <span className="rounded-pill bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent-bright">
+                        <span className="rounded-pill bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent-bright">
                           own track
                         </span>
                       )}
@@ -404,7 +404,7 @@ export function AudioMixer() {
                       {source.kind.type === "game" && (
                         <span
                           title="Recording per application is new. If something ends up missing or doubled, this is where to look first."
-                          className="rounded-pill bg-warn/15 px-2 py-0.5 text-[11px] font-medium text-warn"
+                          className="rounded-pill bg-warn/15 px-2 py-0.5 text-xs font-medium text-warn"
                         >
                           experimental
                         </span>
@@ -662,7 +662,7 @@ export function QuickSetup({
               </div>
             </div>
             {row.added ? (
-              <span className="shrink-0 rounded-pill bg-ok/15 px-2.5 py-0.5 text-[11px] font-medium text-ok">
+              <span className="shrink-0 rounded-pill bg-ok/15 px-2.5 py-0.5 text-xs font-medium text-ok">
                 Added
               </span>
             ) : (
@@ -807,11 +807,11 @@ function PickOne({
       <span className="min-w-0">
         <span className="flex items-center gap-2 text-sm font-medium">
           {title}
-          <span className="rounded-pill bg-warn/15 px-2 py-0.5 text-[11px] font-medium text-warn">
+          <span className="rounded-pill bg-warn/15 px-2 py-0.5 text-xs font-medium text-warn">
             experimental
           </span>
         </span>
-        <span className="block truncate text-[11px] text-ink-faint">{sub}</span>
+        <span className="block truncate text-xs text-ink-faint">{sub}</span>
       </span>
     </button>
   );
@@ -944,7 +944,7 @@ function SourceColumn({
           >
             <p className="truncate text-sm">{e.label}</p>
             {e.sub && (
-              <p className="truncate text-[11px] text-ink-faint">{e.sub}</p>
+              <p className="truncate text-xs text-ink-faint">{e.sub}</p>
             )}
           </button>
         ))}

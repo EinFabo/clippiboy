@@ -257,7 +257,7 @@ function TrimHandle({
       onClick={(event) => event.stopPropagation()}
       // Die Trefferfläche ist so hoch wie der Balken; sichtbar ist nur der Griff
       // in der Mitte. Ein 5-Pixel-Ziel trifft niemand zweimal.
-      className="group/handle absolute inset-y-0 w-4 -translate-x-1/2 cursor-ew-resize"
+      className="group/handle absolute inset-y-0 w-6 -translate-x-1/2 cursor-ew-resize"
       style={{ left: `${at}%` }}
     >
       <span

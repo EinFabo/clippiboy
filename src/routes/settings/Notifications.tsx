@@ -168,8 +168,9 @@ export function NotificationsTab() {
                   )
                 }
               />
-              <div className={cn("w-32", !sounds.enabled && "pointer-events-none opacity-40")}>
+              <div className="w-32">
                 <Slider
+                  disabled={!sounds.enabled}
                   label="Volume of all sounds"
                   value={Math.round(sounds.volume * 100)}
                   min={0}
@@ -225,8 +226,9 @@ export function NotificationsTab() {
                 <p className="min-w-0 text-sm font-medium">{label}</p>
                 {sound && setting ? (
                   <>
-                    <div className={cn("min-w-0", off && "opacity-40", !sounds.enabled && "pointer-events-none")}>
+                    <div className={cn("min-w-0", off && sounds.enabled && "opacity-40")}>
                       <Slider
+                        disabled={!sounds.enabled}
                         label={`Volume of ${label}`}
                         value={Math.round(setting.volume * 100)}
                         min={0}

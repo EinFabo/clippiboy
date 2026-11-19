@@ -525,7 +525,7 @@ export function TargetCard({
       {picked && (
         <span
           className="absolute top-3 right-3 rounded-pill bg-accent px-2.5 py-0.5
-            text-[11px] font-medium text-white"
+            text-xs font-medium text-white"
         >
           Selected
         </span>

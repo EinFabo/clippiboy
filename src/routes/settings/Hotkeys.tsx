@@ -764,14 +764,14 @@ function Hotkey({
   return (
     <div className="flex items-center gap-1.5">
       {ghost && isHold(value) && (
-        <span className="text-[11px] uppercase tracking-wide text-ink-faint">Hold</span>
+        <span className="text-xs uppercase tracking-wide text-ink-faint">Hold</span>
       )}
       {hotkeyKeys(value, family).map((key) => (
         <kbd
           key={key}
           className={cn(
             "border font-mono",
-            small ? "px-2 py-0.5 text-[11px]" : "px-2.5 py-1 text-xs",
+            small ? "px-2 py-0.5 text-xs" : "px-2.5 py-1 text-xs",
             pad ? "rounded-pill" : "rounded-inner",
             ghost
               ? "border-dashed border-line bg-transparent text-ink-faint"

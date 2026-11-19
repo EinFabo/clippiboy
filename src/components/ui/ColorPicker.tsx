@@ -218,7 +218,7 @@ export function ColorPicker({
             />
             {(["R", "G", "B"] as const).map((label, at) => (
               <label key={label} className="flex min-w-0 flex-1 items-center gap-1">
-                <span className="text-[10px] text-ink-faint">{label}</span>
+                <span className="text-xs text-ink-faint">{label}</span>
                 <input
                   type="number"
                   min={0}

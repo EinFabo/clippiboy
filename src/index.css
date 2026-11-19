@@ -62,8 +62,13 @@ button {
 
 /* Focus ring visible only for keyboard use */
 :focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--color-accent-bright);
   outline-offset: 2px;
+}
+
+/* Where the ring has no room outside — a picture that fills its card. */
+[data-ring-inset]:focus-visible {
+  outline-offset: -2px;
 }
 
 /* Horizontally scrolling bars guide by their own fade edges — a scrollbar below

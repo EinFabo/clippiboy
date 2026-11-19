@@ -185,7 +185,7 @@ function Tags({ clip }: { clip: Clip }) {
                 aria-label={`Remove the tag "${tag}"`}
                 title="Remove tag"
                 onClick={() => remove(tag)}
-                className="grid h-4 w-4 place-items-center rounded-pill transition hover:bg-hover hover:text-live"
+                className="relative grid h-4 w-4 place-items-center rounded-pill transition after:absolute after:-inset-1 after:content-[''] hover:bg-hover hover:text-live"
               >
                 <IconClose className="h-2.5 w-2.5" />
               </button>

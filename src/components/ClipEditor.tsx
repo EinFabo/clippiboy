@@ -530,7 +530,7 @@ function TrackRow({
           aria-pressed={state.solo}
           onClick={() => onChange({ solo: !state.solo })}
           className={cn(
-            "shrink-0 rounded-pill px-2.5 py-1 text-[11px] font-medium transition-colors",
+            "shrink-0 rounded-pill px-2.5 py-1 text-xs font-medium transition-colors",
             state.solo
               ? "bg-accent text-white"
               : "bg-white/10 text-ink-faint hover:text-ink",

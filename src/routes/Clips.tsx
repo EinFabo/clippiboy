@@ -35,6 +35,7 @@ import { useFlip } from "@/lib/useFlip";
 import { usePresence } from "@/lib/usePresence";
 import { useCountUp } from "@/lib/useCountUp";
 import { useClipSelection, type SelectMods } from "@/lib/useClipSelection";
+import { moveInGrid, NAV_KEYS, type NavKey } from "@/lib/gridNav";
 import { favoriteTarget } from "@/lib/clipSelect";
 import { toast } from "@/lib/toastBus";
 import { useFriends } from "@/lib/friends";
@@ -84,6 +85,31 @@ const SORTS: Array<{ key: ClipSort; label: string }> = [
 
 /** Has to match the length of `cb-tile-out` in styles/motion.css. */
 const LEAVE_MS = 200;
+/** The gallery's columns — the arrow keys count rows in them. */
+const GRID_COLUMNS = 3;
+
+/**
+ * Makes the grid one tab stop: every control of every tile but the resting one
+ * leaves the tab order. Only what this sets is taken back, so a control with a
+ * `tabIndex` of its own is left alone.
+ */
+function applyRoving(grid: HTMLElement, resting: string | null) {
+  const controls = "button, a[href], input, select, textarea, [tabindex], [data-roving]";
+  for (const tile of grid.querySelectorAll<HTMLElement>("[data-flip]")) {
+    const here = tile.dataset.flip === resting;
+    for (const control of tile.querySelectorAll<HTMLElement>(controls)) {
+      if (here) {
+        if (control.dataset.roving) {
+          control.removeAttribute("tabindex");
+          delete control.dataset.roving;
+        }
+      } else if (!control.hasAttribute("tabindex")) {
+        control.tabIndex = -1;
+        control.dataset.roving = "1";
+      }
+    }
+  }
+}
 
 /**
  * Whether the gallery has already introduced itself in this session.
@@ -244,9 +270,8 @@ export function Clips({
         if (!confirmingSelection.current) selection.clear();
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
         const target = event.target;
-        const onGrid =
-          target === document.body || (target instanceof Node && !!grid.current?.contains(target));
-        if (!onGrid) return;
+        // Only with the focus in the grid — the page itself is not "the gallery".
+        if (!(target instanceof Node) || !grid.current?.contains(target)) return;
         event.preventDefault();
         selection.all();
       }
@@ -268,6 +293,44 @@ export function Clips({
   /** The tiles under their day headings — one group without a heading for the
       sorts that have no days. */
   const groups = groupByDay(tiles, (tile) => tile.item.createdAt, sort, Date.now());
+
+  // The grid is one tab stop: only the tile the focus last rested on is
+  // reachable with Tab, the arrow keys move between the tiles.
+  const [resting, setResting] = useState<string | null>(null);
+  const restingId = resting !== null && order.includes(resting) ? resting : (order[0] ?? null);
+  const restingRef = useRef(restingId);
+  restingRef.current = restingId;
+  useLayoutEffect(() => {
+    const node = grid.current;
+    if (!node) return;
+    applyRoving(node, restingId);
+    // Tools that appear later (a question, the selection) are tiles' own
+    // buttons again.
+    const watch = new MutationObserver(() => applyRoving(node, restingId));
+    watch.observe(node, { childList: true, subtree: true });
+    return () => watch.disconnect();
+  });
+  const onGridKeyDown = (event: React.KeyboardEvent) => {
+    const target = event.target as HTMLElement;
+    if (!target.matches("[data-tile-open]")) return;
+    const id = target.closest<HTMLElement>("[data-flip]")?.dataset.flip;
+    if (!id) return;
+    if (event.key === " ") {
+      // Space picks the tile; the button's own click would open it.
+      event.preventDefault();
+      selection.select(id, { shift: event.shiftKey });
+      return;
+    }
+    if (!NAV_KEYS.includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) return;
+    const next = moveInGrid(
+      groups.map((group) => group.items.filter((tile) => !tile.leaving).map((tile) => tile.item.id)),
+      GRID_COLUMNS,
+      id,
+      event.key as NavKey,
+    );
+    event.preventDefault();
+    if (next) thumbs.current.get(next)?.focus();
+  };
 
   /** Where a tile stands in the live list — the player counts in those. */
   const positions = new Map(visible.map((clip, index) => [clip.id, index]));
@@ -353,6 +416,11 @@ export function Clips({
       files of the clips that were viewed into their folder. */
   const closePlayer = () => {
     setOpen(null);
+    // Back to the tile the keyboard left — the gallery was out of reach meanwhile.
+    requestAnimationFrame(() => {
+      const id = restingRef.current;
+      if (id) thumbs.current.get(id)?.focus({ preventScroll: true });
+    });
     shownId.current = null;
     coming.current = null;
     const seen = [...touched.current];
@@ -410,11 +478,12 @@ export function Clips({
 
   return (
     <div className="space-y-6">
-      <header className="pt-10">
+      {/* While the viewer is up the gallery behind it is out of the tab order. */}
+      <header className="pt-10" inert={open !== null}>
         <h1 className="display text-4xl">Clips</h1>
       </header>
 
-      <div className="space-y-3">
+      <div className="space-y-3" inert={open !== null}>
         <div className="flex items-center gap-3">
           {/* Not `setFilter`: the search also narrows Recently deleted, and
               typing must not close it. */}
@@ -460,7 +529,21 @@ export function Clips({
       ) : (
         // One wrapper around every day, so a tile that changes day on a new
         // sort still travels instead of jumping.
-        <div ref={grid} className="space-y-7 pb-10">
+        <div
+          ref={grid}
+          className="space-y-7 pb-10"
+          inert={open !== null}
+          onKeyDown={onGridKeyDown}
+          // Space on a button acts when it is let go.
+          onKeyUp={(event) => {
+            if (event.key === " " && (event.target as HTMLElement).matches("[data-tile-open]"))
+              event.preventDefault();
+          }}
+          onFocus={(event) => {
+            const id = (event.target as HTMLElement).closest<HTMLElement>("[data-flip]")?.dataset.flip;
+            if (id) setResting(id);
+          }}
+        >
           {groups.map((group) => (
             <section key={group.key}>
               {group.label && (
@@ -676,7 +759,10 @@ function ClipCard({
       onClickCapture={(event) => {
         // With a selection, any plain click on the tile picks it too — Open,
         // Share and the heart included — like a file manager in selection mode.
-        if (leaving || !(selecting || event.ctrlKey || event.metaKey || event.shiftKey)) return;
+        // Enter on a focused button arrives as a click without a pointer
+        // (detail 0): that one acts, Space is what picks from the keyboard.
+        const keyboard = event.detail === 0 && !(event.ctrlKey || event.metaKey || event.shiftKey);
+        if (leaving || keyboard || !(selecting || event.ctrlKey || event.metaKey || event.shiftKey)) return;
         if (isTextField(event.target)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -690,6 +776,8 @@ function ClipCard({
       <div className="relative">
         <button
           ref={thumbRef}
+          data-tile-open
+          data-ring-inset
           onClick={onOpen}
           aria-label={`${clip.screenshot ? "Open" : "Play"} ${
             clip.game ??
@@ -790,7 +878,7 @@ function ClipCard({
             "bg-black/50 backdrop-blur-md transition",
             clip.favorite
               ? "text-live"
-              : "text-white/70 opacity-0 group-hover:opacity-100 hover:text-white",
+              : "text-white/70 opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100 hover:text-white",
           )}
         >
           <HeartBurst favorite={clip.favorite} />
@@ -815,7 +903,9 @@ function ClipCard({
             selecting && "hidden",
             // While the question stands it has to stay up, even once
             // the cursor has wandered off the tile.
-            asking ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+            asking
+              ? "opacity-100"
+              : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100",
           )}
         >
           {asking === "delete" ? (
