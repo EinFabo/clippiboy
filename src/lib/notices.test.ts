@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { current, neighbour, queue } from "./notices.ts";
+import { current, neighbour, pickAfterWant, queue } from "./notices.ts";
 
 test("nothing wants to show", () => {
   assert.deepEqual(queue({}), []);
@@ -36,4 +36,10 @@ test("the pager wraps at both ends", () => {
   assert.equal(neighbour(w, null, -1), "usage");
   assert.equal(neighbour(w, "usage", 1), "ffmpeg");
   assert.equal(neighbour(w, "update", 1), "usage");
+});
+test("a notice that ranks above the picked one takes the place back when it starts wanting", () => {
+  assert.equal(pickAfterWant("discord", "update"), null);
+  assert.equal(pickAfterWant("update", "usage"), "update");
+  assert.equal(pickAfterWant("update", "update"), "update");
+  assert.equal(pickAfterWant(null, "ffmpeg"), null);
 });

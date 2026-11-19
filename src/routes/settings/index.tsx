@@ -111,6 +111,7 @@ export function Settings() {
                   key={key}
                   {...{ [SLIDE]: key }}
                   onClick={() => setTab(key)}
+                  aria-current={tab === key ? "page" : undefined}
                   className={cn(
                     "relative flex h-9 items-center gap-2.5 rounded-pill px-3.5 text-[13px] font-medium",
                     "transition-colors duration-150 ease-[var(--ease-out-soft)]",

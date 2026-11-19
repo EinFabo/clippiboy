@@ -601,10 +601,10 @@ export function ClipPlayer({
         // looking for.
         ArrowRight: () => seek(event.shiftKey ? 1 : 5),
         ArrowLeft: () => seek(event.shiftKey ? -1 : -5),
-        // Single frames, to set start and end precisely.
         // As on YouTube: ten seconds either way.
         j: () => seek(-10),
         l: () => seek(10),
+        // Single frames, to set start and end precisely.
         ".": () => seek(FRAME),
         ",": () => seek(-FRAME),
         ArrowUp: () => setVolume((v) => Math.min(1, v + 0.1)),

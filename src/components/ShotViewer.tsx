@@ -861,7 +861,7 @@ export function ShotViewer({
             )}
           </div>
           <div className="flex shrink-0 items-center gap-3">
-            <ShareMenuButton clip={clip} disabled={busy} />
+            <ShareMenuButton clip={clip} disabled={busy || mode !== "view"} />
             <button
               aria-label="Close viewer"
               onClick={requestClose}

@@ -202,19 +202,23 @@ export function NotificationsTab() {
             <span className="text-center">Banner</span>
             <span className="text-center">Sound</span>
           </div>
-          {NOTIFY_EVENTS.map(({ label, banner: field, sound }) => {
+          {NOTIFY_EVENTS.map(({ label, banner: field, sound, soundNeedsBanner }) => {
             const setting = sound ? sounds[sound] : null;
-            const off = !sounds.enabled || !setting?.on;
+            const gated = !!soundNeedsBanner && !!field && !bannerOn(field);
+            const locked = !sounds.enabled || gated;
+            const off = locked || !setting?.on;
             return (
               <div key={label} className={`${GRID} py-3.5`}>
                 {sound ? (
                   <button
                     type="button"
                     aria-label={`Listen to ${label}`}
-                    title="Listen"
+                    title={gated ? "Turn the banner on to hear this one" : "Listen"}
                     onClick={() => listen(sound)}
+                    disabled={gated}
                     className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
-                      bg-elevated text-ink-muted transition-colors hover:bg-hover hover:text-ink"
+                      bg-elevated text-ink-muted transition-colors hover:bg-hover hover:text-ink
+                      disabled:pointer-events-none disabled:opacity-40"
                   >
                     <svg viewBox="0 0 12 12" className="ml-0.5 h-3 w-3" fill="currentColor">
                       <path d="M3 1.8v8.4L10 6z" />
@@ -226,9 +230,9 @@ export function NotificationsTab() {
                 <p className="min-w-0 text-sm font-medium">{label}</p>
                 {sound && setting ? (
                   <>
-                    <div className={cn("min-w-0", off && sounds.enabled && "opacity-40")}>
+                    <div className={cn("min-w-0", off && !!sounds.enabled && "opacity-40")}>
                       <Slider
-                        disabled={!sounds.enabled}
+                        disabled={locked}
                         label={`Volume of ${label}`}
                         value={Math.round(setting.volume * 100)}
                         min={0}
@@ -259,7 +263,7 @@ export function NotificationsTab() {
                   {sound && setting && (
                     <Toggle
                       checked={setting.on}
-                      disabled={!sounds.enabled}
+                      disabled={locked}
                       onChange={(on) => patchSound(sound, { on })}
                     />
                   )}

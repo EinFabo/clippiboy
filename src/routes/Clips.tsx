@@ -316,6 +316,7 @@ export function Clips({
     const id = target.closest<HTMLElement>("[data-flip]")?.dataset.flip;
     if (!id) return;
     if (event.key === " ") {
+      if (event.repeat) return;
       // Space picks the tile; the button's own click would open it.
       event.preventDefault();
       selection.select(id, { shift: event.shiftKey });
@@ -764,6 +765,8 @@ function ClipCard({
         const keyboard = event.detail === 0 && !(event.ctrlKey || event.metaKey || event.shiftKey);
         if (leaving || keyboard || !(selecting || event.ctrlKey || event.metaKey || event.shiftKey)) return;
         if (isTextField(event.target)) return;
+        // The delete question's own buttons act, even in selection mode.
+        if (asking && (event.target as HTMLElement).closest("[data-tile-tools]")) return;
         event.preventDefault();
         event.stopPropagation();
         onSelect({ shift: event.shiftKey, toggle: true });
@@ -898,9 +901,10 @@ function ClipCard({
           </span>
         )}
         <div
+          data-tile-tools
           className={cn(
             "absolute top-3 right-3 flex gap-1.5 transition-opacity",
-            selecting && "hidden",
+            selecting && (asking ? "right-12" : "hidden"),
             // While the question stands it has to stay up, even once
             // the cursor has wandered off the tile.
             asking
@@ -1000,6 +1004,20 @@ function SelectionBar({
     return () => onConfirming(false);
   }, [confirming, onConfirming]);
 
+  // The transfer cards (z 55) stand bottom right; on a narrow window the
+  // centred bar would run under them, so it lifts clear — as the toasts do.
+  const [lift, setLift] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const cards = document.querySelector("[data-transfers]");
+      const next = cards ? Math.round(window.innerHeight - cards.getBoundingClientRect().top + 8) : null;
+      setLift((now) => (now === next ? now : next));
+    };
+    measure();
+    const timer = window.setInterval(measure, 300);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const count = clips.length;
   const heart = favoriteTarget(clips);
   const withLinks = clips.some((clip) => links[clip.id]);
@@ -1012,7 +1030,11 @@ function SelectionBar({
       aria-label="Selected clips"
       className="fixed bottom-7 left-1/2 z-[45] flex -translate-x-1/2 items-center gap-1.5 rounded-pill
         border border-white/10 py-1.5 pr-2 pl-[18px] shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
-      style={{ background: "var(--glass)", backdropFilter: "blur(20px)" }}
+      style={{
+        background: "var(--glass)",
+        backdropFilter: "blur(20px)",
+        ...(lift !== null && window.innerWidth < 1400 ? { bottom: Math.max(28, lift) } : null),
+      }}
     >
       <b className="mr-2 text-[13px] font-semibold tabular-nums">{count} selected</b>
       <Button
@@ -1030,7 +1052,9 @@ function SelectionBar({
           variant="ghost"
           size="sm"
           className="text-white"
-          onClick={() => pickFriend(clips[0], clips.slice(1))}
+          disabled={count !== 1}
+          title={count === 1 ? undefined : "Send one clip at a time"}
+          onClick={() => pickFriend(clips[0])}
         >
           <IconSend className="mr-1.5 h-3.5 w-3.5" />
           Send to a friend

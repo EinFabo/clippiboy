@@ -21,6 +21,13 @@ export function current(
   return { id: ids[index]!, index, count: ids.length };
 }
 
+/** The pick that stays once `id` starts wanting: a notice that ranks above the
+    picked one takes the place back, the pick is dropped. */
+export function pickAfterWant(picked: NoticeId | null, id: NoticeId): NoticeId | null {
+  if (picked && NOTICE_ORDER.indexOf(id) < NOTICE_ORDER.indexOf(picked)) return null;
+  return picked;
+}
+
 /** The neighbour in the queue, wrapping round at both ends. */
 export function neighbour(wants: Wants, picked: NoticeId | null, dir: 1 | -1): NoticeId | null {
   const now = current(wants, picked);

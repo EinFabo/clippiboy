@@ -20,7 +20,6 @@ import { IconCheck, IconClose, IconGamepad, IconHeart, IconSend } from "@/compon
  */
 export function SharePicker() {
   const clip = useShare((s) => s.picking);
-  const more = useShare((s) => s.pickingMore);
   const pick = useShare((s) => s.pick);
   const { friends } = useFriends((s) => s.lists);
   const presence = useFriends((s) => s.presence);
@@ -52,10 +51,8 @@ export function SharePicker() {
   const send = (friendId: string) => {
     setSending(friendId);
     setError(null);
-    // Several clips from the selection go one after another, each one its own
-    // offer — the friend answers them like any other.
-    [clip, ...more]
-      .reduce((done, c) => done.then(() => shareApi.send(c.id, friendId)), Promise.resolve())
+    shareApi
+      .send(clip.id, friendId)
       .then(() => pick(null))
       .catch((err) => {
         setError(String(err));

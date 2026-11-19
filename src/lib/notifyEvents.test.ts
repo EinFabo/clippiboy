@@ -33,3 +33,17 @@ test("shared banner fields appear on exactly the rows that share them", () => {
   assert.deepEqual(shared("onRecording"), ["Recording started", "Recording saved"]);
   assert.deepEqual(shared("onBufferToggle"), ["Buffer on", "Buffer off"]);
 });
+
+test("only the friend-online sound hangs on its banner, and the friend rows bind their fields", () => {
+  assert.deepEqual(
+    NOTIFY_EVENTS.filter((e) => e.soundNeedsBanner).map((e) => e.label),
+    ["A friend comes online"],
+  );
+  const key = (label: string) => {
+    const b = NOTIFY_EVENTS.find((e) => e.label === label)?.banner;
+    return b && b.scope === "friends" ? b.key : null;
+  };
+  assert.equal(key("A friend comes online"), "notifyOnline");
+  assert.equal(key("A friend starts a game"), "notifyGames");
+  assert.equal(key("Friend requests"), "notifyRequests");
+});

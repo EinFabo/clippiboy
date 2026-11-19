@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { neighbour, type NoticeId, type Wants } from "./notices";
+import { neighbour, pickAfterWant, type NoticeId, type Wants } from "./notices";
 
 interface Board {
   wants: Wants;
@@ -13,7 +13,11 @@ export const useNoticeBoard = create<Board>((set) => ({
   wants: {},
   picked: null,
   set: (id, wants) =>
-    set((s) => (!!s.wants[id] === wants ? s : { wants: { ...s.wants, [id]: wants } })),
+    set((s) =>
+      !!s.wants[id] === wants
+        ? s
+        : { wants: { ...s.wants, [id]: wants }, picked: wants ? pickAfterWant(s.picked, id) : s.picked },
+    ),
   step: (dir) =>
     set((s) => {
       const next = neighbour(s.wants, s.picked, dir);
