@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { discordSource } from "@/routes/AudioMixer";
 import type { Route } from "./NavBar";
+import { useNoticeSlot } from "./NoticePager";
 
 type Hint = { kind: "add"; discord: AudioProcess } | { kind: "turnDown" };
 
@@ -60,15 +61,15 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
     };
   }, []);
 
-  if (!hint) return null;
+  // Added by hand on the Audio page in the meantime: nothing left to offer.
+  const wants = hint !== null && !(hint.kind === "add" && hasDiscordSource(sources));
+  const { shown, pager } = useNoticeSlot("discord", wants);
+  if (!hint || !shown) return null;
 
   const answered = () => {
     setHint(null);
     void useEngine.getState().patchConfig({ discordHintShown: true });
   };
-  // Added by hand on the Audio page in the meantime: nothing left to offer.
-  if (hint.kind === "add" && hasDiscordSource(sources)) return null;
-
   const add = async (discord: AudioProcess) => {
     answered();
     await upsertSource(discordSource(discord));
@@ -77,6 +78,7 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
 
   return (
     <Card className="mb-6 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
+      {pager}
       <p className="min-w-0 flex-1 text-sm font-medium text-ink">
         {hint.kind === "add"
           ? "Friends too loud in your clips? Put Discord on its own track."

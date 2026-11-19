@@ -221,7 +221,7 @@ function useControllers(): Controllers | null {
 /** Where a change was made — its error shows under that card. */
 type Where = "keys" | "pads";
 
-export function Hotkeys() {
+export function Hotkeys({ only }: { only?: PadAction } = {}) {
   const { config, setHotkeys } = useEngine(
     useShallow((s) => ({ config: s.config, setHotkeys: s.setHotkeys })),
   );
@@ -230,10 +230,12 @@ export function Hotkeys() {
   // One slot records at a time, across both cards — starting another ends
   // the first. A keyboard slot by its field, a controller slot by its action.
   const [recording, setRecording] = useState<string | null>(null);
-  const warn = ROWS.some(({ first, second }) => risky(config[first]) || risky(config[second]));
+  const rows = only ? ROWS.filter((row) => row.action === only) : ROWS;
+  const warn = rows.some(({ first, second }) => risky(config[first]) || risky(config[second]));
   const controllers = useControllers();
   const connected: PadType[] = controllers?.pads.map((pad) => pad.padType) ?? [];
-  const pads = showsControllers(config.padProfiles, config.padFamiliesSeen, connected);
+  // One binding on its own (the setup) leaves the controllers to Settings.
+  const pads = !only && showsControllers(config.padProfiles, config.padFamiliesSeen, connected);
 
   // The once-notes: shown when a save from this page turns their flag on.
   const [notes, setNotes] = useState<string[]>([]);
@@ -301,7 +303,7 @@ export function Hotkeys() {
   return (
     <>
       <Card className="divide-y divide-line">
-        {ROWS.map(({ label, hint, first, second }) => (
+        {rows.map(({ label, hint, first, second }) => (
           <Row key={first} label={label} hint={hint}>
             <div className="flex flex-col items-end gap-1">
               {input(first, false)}
@@ -309,7 +311,7 @@ export function Hotkeys() {
             </div>
           </Row>
         ))}
-        {!pads && (
+        {!pads && !only && (
           <Row label="Controllers">
             <ControllerList controllers={controllers} />
           </Row>

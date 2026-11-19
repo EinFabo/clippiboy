@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useEngine } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { useNoticeSlot } from "./NoticePager";
 import { UpdateProgressBar, updateProgressText } from "./UpdateProgress";
 
 /**
@@ -22,7 +23,9 @@ export function UpdateNotice() {
   const [error, setError] = useState<string | null>(null);
   const installing = progress !== null;
 
-  if (!update || dismissed === update.version) return null;
+  const wants = !!update && dismissed !== update.version;
+  const { shown, pager } = useNoticeSlot("update", wants);
+  if (!update || !shown) return null;
 
   const install = async () => {
     setError(null);
@@ -36,6 +39,7 @@ export function UpdateNotice() {
 
   return (
     <Card className="mb-6 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
+      {pager}
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink">
           ClippiBoy {update.version} is available

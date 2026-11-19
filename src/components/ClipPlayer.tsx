@@ -602,6 +602,9 @@ export function ClipPlayer({
         ArrowRight: () => seek(event.shiftKey ? 1 : 5),
         ArrowLeft: () => seek(event.shiftKey ? -1 : -5),
         // Single frames, to set start and end precisely.
+        // As on YouTube: ten seconds either way.
+        j: () => seek(-10),
+        l: () => seek(10),
         ".": () => seek(FRAME),
         ",": () => seek(-FRAME),
         ArrowUp: () => setVolume((v) => Math.min(1, v + 0.1)),
@@ -1300,7 +1303,7 @@ export function ClipPlayer({
           )}
 
           <span className="ml-auto text-xs text-ink-faint">
-            Space · ←/→ 5 s, 1 s with shift · ,/. single frame · I/O start
+            Space · ←/→ 5 s, 1 s with shift · J/L 10 s · ,/. single frame · I/O start
             &amp; end · M mute · F fullscreen
           </span>
 

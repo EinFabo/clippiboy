@@ -315,8 +315,9 @@ export function Setup() {
           )}
 
           {name === "hotkeys" && (
-            <Step title="Your hotkeys" hint="They work everywhere, also in-game. Change any of them now or later.">
-              <Hotkeys />
+            <Step title="Your hotkeys" hint="It works everywhere, also in-game. Change it now or later.">
+              <Hotkeys only="saveClip" />
+              <p className="mt-3 text-xs text-ink-faint">More hotkeys in Settings</p>
             </Step>
           )}
 
@@ -431,7 +432,7 @@ function BufferExplainer({ clip, buffer }: { clip: number; buffer: number }) {
           </div>
         </div>
         <p className="mt-2 text-[11px] text-ink-faint">
-          The buffer length itself can be changed later on the Recording page.
+          The buffer length itself can be changed later on the Video page.
         </p>
       </div>
     </Card>

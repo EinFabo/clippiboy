@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
@@ -20,10 +20,14 @@ let nextId = 1;
 
 /** Has to match the length of `cb-toast-out` in styles/motion.css. */
 const LEAVE_MS = 200;
+const MAX_SHOWN = 3;
 
 export function Toasts() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const stack = useRef<HTMLDivElement>(null);
+  // Bottom offset that clears the transfer cards (same corner), or null when
+  // there are none and the usual corner spot is right.
+  const [lift, setLift] = useState<number | null>(null);
 
   // Once one toast goes, the ones below it have to move up. Without this they
   // would jump the height of the gone one in a single frame.
@@ -33,11 +37,28 @@ export function Toasts() {
     200,
   );
 
+  // The transfer cards come and go and move up over a full view; looked at
+  // while a toast is up, which is the only time it matters.
+  useLayoutEffect(() => {
+    const measure = () => {
+      const cards = document.querySelector("[data-transfers]");
+      const next = cards ? Math.round(window.innerHeight - cards.getBoundingClientRect().top + 8) : null;
+      setLift((now) => (now === next ? now : next));
+    };
+    measure();
+    if (entries.length === 0) return;
+    const timer = window.setInterval(measure, 300);
+    return () => window.clearInterval(timer);
+  }, [entries.length]);
+
   useEffect(() => {
     const timers: number[] = [];
     const push = (notice: Notice) => {
       const entry: Entry = { ...notice, id: nextId++ };
-      setEntries((current) => [...current, entry]);
+      // At most three at once: the oldest drop off first.
+      setEntries((current) => [...current.filter((e) => !e.leaving), entry].slice(-MAX_SHOWN));
+      // Errors stay until clicked away.
+      if (entry.kind === "error") return;
       // Two steps: first the entry is marked as going and plays its exit, then
       // it actually falls out of the list.
       timers.push(
@@ -53,7 +74,7 @@ export function Toasts() {
               ),
             );
           },
-          entry.kind === "error" ? 6000 : 3000,
+          3000,
         ),
       );
     };
@@ -87,13 +108,16 @@ export function Toasts() {
   return (
     <div
       ref={stack}
-      className="pointer-events-none fixed bottom-6 left-1/2 z-[65] flex -translate-x-1/2 flex-col items-center gap-2"
+      className="pointer-events-none fixed right-6 bottom-6 z-[65] flex flex-col items-end gap-2 [body:has([data-fullview])_&]:bottom-36"
+      style={lift === null ? undefined : { bottom: lift }}
     >
       {entries.map((entry) => (
         <div
           key={entry.id}
           data-flip={entry.id}
+          onClick={() => setEntries((current) => current.filter((e) => e.id !== entry.id))}
           className={cn(
+            entry.kind === "error" && "pointer-events-auto cursor-pointer",
             "rounded-pill border px-5 py-2.5 text-sm font-medium shadow-[0_8px_32px_rgba(0,0,0,0.5)]",
             "backdrop-blur-xl",
             entry.leaving ? "cb-toast-out" : "cb-toast-in",

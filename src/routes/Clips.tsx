@@ -24,6 +24,7 @@ import type { Route } from "@/components/NavBar";
 import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, fileName, formatAgo, formatDuration, formatSize } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { isTextField } from "@/lib/dom";
 import { useFlip } from "@/lib/useFlip";
 import { usePresence } from "@/lib/usePresence";
@@ -430,9 +431,13 @@ export function Clips({
       {filter.kind === "deleted" ? (
         <TrashList trash={trash} query={query} />
       ) : tiles.length === 0 ? (
-        <Card className="grid h-56 place-items-center text-sm text-ink-muted">
-          No clips found.
-        </Card>
+        <EmptyCard
+          total={clips.length}
+          onClear={() => {
+            setQuery("");
+            setFilter(ALL);
+          }}
+        />
       ) : (
         <div ref={grid} className="grid grid-cols-3 gap-4 pb-10">
           {tiles.map(({ item: clip, key, leaving }, slot) => {
@@ -1082,6 +1087,36 @@ function daysLeft(expiresAt: number): number {
   return Math.max(1, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
 }
 
+/** Empty gallery or nothing matching: the library is empty, or search and filters cut it to nothing. */
+function EmptyCard({ total, onClear }: { total: number; onClear: () => void }) {
+  const config = useEngine((s) => s.config);
+  const saveKey = shownHotkey(config, "saveClip");
+  if (total > 0) {
+    return (
+      <Card className="flex h-56 flex-col items-center justify-center gap-3 text-sm text-ink-muted">
+        Nothing matches
+        <Button size="sm" variant="ghost" onClick={onClear}>
+          Clear
+        </Button>
+      </Card>
+    );
+  }
+  return (
+    <Card className="flex h-56 items-center justify-center text-sm text-ink-muted">
+      {saveKey.value ? (
+        <>
+          No clips yet — start the buffer and press{" "}
+          <kbd className="mx-1 rounded-inner border border-line bg-elevated px-2 py-0.5 text-xs">
+            {hotkeyLabel(saveKey.value, saveKey.family)}
+          </kbd>
+        </>
+      ) : (
+        "No clips yet — start the buffer, then save one"
+      )}
+    </Card>
+  );
+}
+
 /**
  * Recently deleted: each clip with the days it has left, Restore and Delete
  * forever, and Empty all above them.
@@ -1135,7 +1170,9 @@ function TrashList({ trash, query }: { trash: Trashed[]; query: string }) {
       </div>
 
       {shown.length === 0 ? (
-        <Card className="grid h-56 place-items-center text-sm text-ink-muted">No clips found.</Card>
+        <Card className="grid h-56 place-items-center text-sm text-ink-muted">
+          {trash.length === 0 ? "Nothing deleted" : "Nothing matches"}
+        </Card>
       ) : (
         <div className="grid grid-cols-3 gap-4">
           {shown.map(({ clip, expiresAt }) => {

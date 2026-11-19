@@ -4,6 +4,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { mb } from "./UpdateProgress";
+import { useNoticeSlot } from "./NoticePager";
 
 /**
  * ffmpeg is fetched once on first start instead of riding along in every
@@ -14,7 +15,9 @@ export function FfmpegNotice() {
   const ffmpeg = useEngine((s) => s.ffmpeg);
 
   // Looking takes a split second; showing a card for it would only flicker.
-  if (ffmpeg.state === "ready" || ffmpeg.state === "checking") return null;
+  const wants = ffmpeg.state !== "ready" && ffmpeg.state !== "checking";
+  const { shown, pager } = useNoticeSlot("ffmpeg", wants);
+  if (!shown) return null;
 
   let text = "";
   let share = 0;
@@ -38,6 +41,7 @@ export function FfmpegNotice() {
           : "mb-6 flex items-center gap-4 border-accent/40 bg-accent/10 p-4"
       }
     >
+      {pager}
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink">
           {ffmpeg.state === "failed"

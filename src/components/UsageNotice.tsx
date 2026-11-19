@@ -2,6 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { useNoticeSlot } from "./NoticePager";
 
 /**
  * Asks once whether the anonymous usage stats may go out: someone who skipped
@@ -13,12 +14,15 @@ export function UsageNotice() {
   const { config, patchConfig } = useEngine(
     useShallow((s) => ({ config: s.config, patchConfig: s.patchConfig })),
   );
-  if (!config.setupDone || !config.usageStats || config.usageStatsAsked) return null;
+  const wants = config.setupDone && config.usageStats && !config.usageStatsAsked;
+  const { shown, pager } = useNoticeSlot("usage", wants);
+  if (!shown) return null;
 
   const choose = (usageStats: boolean) => void patchConfig({ usageStats, usageStatsAsked: true });
 
   return (
     <Card className="mb-6 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
+      {pager}
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink">Send anonymous usage stats?</p>
         <p className="mt-0.5 text-xs text-ink-muted">

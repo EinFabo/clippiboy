@@ -269,7 +269,7 @@ export function Transfers() {
   // Over a full view (player, screenshot, setup) it moves up, clear of the
   // controls those keep in their bottom-right corner.
   return (
-    <div className="fixed right-6 bottom-6 z-[55] flex w-[340px] flex-col gap-2 [body:has([data-fullview])_&]:bottom-36">
+    <div data-transfers className="fixed right-6 bottom-6 z-[55] flex w-[340px] flex-col gap-2 [body:has([data-fullview])_&]:bottom-36">
       {uploads.map((upload) => (
         <UploadCard key={`link-${upload.clipId}`} upload={upload} />
       ))}
