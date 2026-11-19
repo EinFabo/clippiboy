@@ -193,6 +193,14 @@ export const IconLink = ({ className = base }: P) => (
   </svg>
 );
 
+/** An arrow rising out of a tray — share. */
+export const IconShare = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 15V3M7 8l5-5 5 5" />
+    <path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" />
+  </svg>
+);
+
 /** Clipboard — paste. */
 export const IconPaste = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">

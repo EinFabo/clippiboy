@@ -9,7 +9,7 @@ import { CamStage } from "@/components/CamStage";
 import { usePictureBox, useStageSize } from "@/lib/pictureBox";
 import { RectLayer } from "@/components/ui/RectLayer";
 import { camBox, layoutFromRect, sameFacecam, snapLayout, type FacecamDraft } from "@/lib/camGeometry";
-import { useClipMenu } from "@/components/clipMenu";
+import { ShareMenuButton, useClipMenu } from "@/components/clipMenu";
 import { useLinks } from "@/lib/links";
 import { IconTrash } from "@/components/icons";
 import { HeartBurst } from "@/components/ui/HeartBurst";
@@ -923,16 +923,19 @@ export function ClipPlayer({
             onCancel={() => setAskingDiscard(false)}
           />
         ) : (
-          <button
-            aria-label="Close player"
-            onClick={requestClose}
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
-              text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
-          >
-            <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth="1.4">
-              <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
-            </svg>
-          </button>
+          <div className="flex shrink-0 items-center gap-3">
+            <ShareMenuButton clip={clip} onExport={() => setExporting(true)} />
+            <button
+              aria-label="Close player"
+              onClick={requestClose}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
+                text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
+            >
+              <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth="1.4">
+                <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
+              </svg>
+            </button>
+          </div>
         )}
       </header>
 

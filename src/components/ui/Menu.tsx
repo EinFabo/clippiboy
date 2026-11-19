@@ -40,12 +40,20 @@ export interface MenuTrigger {
   stopPropagation: () => void;
 }
 
+/** How a menu looks and sits, beyond its entries. */
+export interface MenuOptions {
+  /** The surface of the nav bar pill instead of the context menu's. */
+  glass?: boolean;
+  /** The trigger's x is the menu's right edge, not its left. */
+  alignRight?: boolean;
+}
+
 interface MenuApi {
   /**
    * Open the menu at the event's position. Swallows the event — that keeps the
    * WebView's built-in menu shut.
    */
-  open: (trigger: MenuTrigger, entries: MenuEntry[]) => void;
+  open: (trigger: MenuTrigger, entries: MenuEntry[], options?: MenuOptions) => void;
   close: () => void;
 }
 
@@ -58,7 +66,7 @@ export function useMenu(): MenuApi {
   return api;
 }
 
-interface Open {
+interface Open extends MenuOptions {
   x: number;
   y: number;
   entries: MenuEntry[];
@@ -78,7 +86,7 @@ export function MenuProvider({ children }: { children: ReactNode }) {
   // hang a new object off it and every caller would re-render along.
   const api = useMemo<MenuApi>(
     () => ({
-      open: (trigger, entries) => {
+      open: (trigger, entries, options) => {
         trigger.preventDefault();
         trigger.stopPropagation();
         if (entries.length === 0) return;
@@ -86,6 +94,7 @@ export function MenuProvider({ children }: { children: ReactNode }) {
           x: trigger.clientX,
           y: trigger.clientY,
           entries,
+          ...options,
           host: document.fullscreenElement ?? document.body,
         });
       },
@@ -109,6 +118,8 @@ function Surface({
   x,
   y,
   entries,
+  glass,
+  alignRight,
   onClose,
 }: Open & { onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null);
@@ -124,11 +135,11 @@ function Surface({
     if (!el) return;
     const { width, height } = el.getBoundingClientRect();
     setAt({
-      x: Math.max(EDGE, Math.min(x, window.innerWidth - width - EDGE)),
+      x: Math.max(EDGE, Math.min(alignRight ? x - width : x, window.innerWidth - width - EDGE)),
       y: Math.max(EDGE, Math.min(y, window.innerHeight - height - EDGE)),
     });
     setShown(true);
-  }, [x, y]);
+  }, [x, y, alignRight]);
 
   const selectable = entries
     .map((entry, index) => ({ entry, index }))
@@ -204,11 +215,16 @@ function Surface({
       // otherwise lose its selection — and the editor would save on blur.
       onMouseDown={(event) => event.preventDefault()}
       onContextMenu={(event) => event.preventDefault()}
-      style={{ left: at.x, top: at.y }}
+      style={{
+        left: at.x,
+        top: at.y,
+        ...(glass && { background: "var(--glass)", backdropFilter: "blur(20px)" }),
+      }}
       className={cn(
         "fixed z-[75] min-w-[224px] py-1.5",
-        "rounded-inner border border-line bg-elevated/95 backdrop-blur-xl",
-        "shadow-[0_16px_48px_rgba(0,0,0,0.55)]",
+        glass
+          ? "rounded-inner border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
+          : "rounded-inner border border-line bg-elevated/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.55)]",
         "origin-top-left transition-[opacity,transform] duration-100 ease-[var(--ease-out-soft)]",
         shown ? "scale-100 opacity-100" : "scale-[0.97] opacity-0",
       )}

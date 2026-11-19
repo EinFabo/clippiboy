@@ -11,9 +11,11 @@ import {
   IconPencil,
   IconPlay,
   IconScissors,
+  IconShare,
   IconSend,
   IconTrash,
 } from "@/components/icons";
+import { Button } from "@/components/ui/Button";
 import { useMenu, type MenuEntry, type MenuTrigger } from "@/components/ui/Menu";
 import { useEngine } from "@/store";
 import { api, inTauri } from "@/lib/ipc";
@@ -120,6 +122,93 @@ function linkEntries(clip: Clip): MenuEntry[] {
 }
 
 /**
+ * The entries that send a clip somewhere — shared by the right-click menu and
+ * the "Share" button in the player, so the two cannot drift apart. Read when a
+ * menu opens, like {@link linkEntries}.
+ */
+export function shareEntries(
+  clip: Clip,
+  {
+    onExport,
+    onSend,
+    dividerBeforeExport = false,
+  }: {
+    onExport?: () => void;
+    onSend: (clip: Clip) => void;
+    /** The Share button sets the export apart; the right-click menu does not. */
+    dividerBeforeExport?: boolean;
+  },
+): MenuEntry[] {
+  const entries: MenuEntry[] = [];
+  // The picture first: on a screenshot that is the one you actually want —
+  // in a chat window a pasted file is an attachment, a pasted picture is a
+  // picture.
+  if (clip.screenshot) {
+    entries.push({
+      kind: "item",
+      label: "Copy picture",
+      icon: <IconCamera className={icon} />,
+      disabled: !inTauri,
+      onSelect: () => void run(api.copyClipImage(clip.id), "Picture copied"),
+    });
+  }
+  entries.push({
+    kind: "item",
+    label: clip.screenshot ? "Copy file" : "Copy clip",
+    // The one entry you find nowhere else: the file itself on the clipboard,
+    // ready for Ctrl+V in Discord.
+    icon: <IconCopy className={icon} />,
+    disabled: !inTauri,
+    onSelect: () => void run(api.copyClipFile(clip.id), "Clip copied"),
+  });
+  if (clip.screenshot) {
+    entries.push({
+      kind: "item",
+      label: "Copy for Discord",
+      shortcut: `Under ${discordTarget()} MB`,
+      icon: <IconCopy className={icon} />,
+      disabled: !inTauri,
+      onSelect: () =>
+        void run(api.exportShotForDiscord(clip.id, discordTarget()), "Copied · Ctrl+V in Discord"),
+    });
+  }
+  entries.push({
+    kind: "item",
+    label: "Send to a friend…",
+    // Straight to their PC, full quality — see `share.rs`.
+    icon: <IconFriends className={icon} />,
+    disabled: !inTauri,
+    onSelect: () => onSend(clip),
+  });
+  // A link for anyone, five days long — clips only, the page is a player.
+  if (!clip.screenshot) entries.push(...linkEntries(clip));
+  // The Discord channel connected in Settings → Behaviour → Sharing.
+  const webhook = useWebhook.getState();
+  if (webhook.connected) {
+    entries.push({
+      kind: "item",
+      label: postLabel(webhook, clip.id),
+      icon: <IconSend className={icon} />,
+      disabled: !inTauri || webhook.posting.includes(clip.id),
+      onSelect: () => void run(webhookApi.post(clip.id), `Posting to ${webhook.guild ?? "Discord"}…`),
+    });
+  }
+  // Recordings only: a still is small already, and the arithmetic here is all
+  // about length.
+  if (!clip.screenshot && onExport) {
+    if (dividerBeforeExport) entries.push({ kind: "separator" });
+    entries.push({
+      kind: "item",
+      label: "Export a copy…",
+      icon: <IconExport className={icon} />,
+      disabled: !inTauri,
+      onSelect: onExport,
+    });
+  }
+  return entries;
+}
+
+/**
  * A clip's right-click menu — the same entries in the gallery as in the player,
  * except that "Open" and "Rename" are missing there.
  *
@@ -177,70 +266,7 @@ export function useClipMenu() {
     });
 
     entries.push({ kind: "separator" });
-    // The picture first: on a screenshot that is the one you actually want —
-    // in a chat window a pasted file is an attachment, a pasted picture is a
-    // picture.
-    if (clip.screenshot) {
-      entries.push({
-        kind: "item",
-        label: "Copy picture",
-        icon: <IconCamera className={icon} />,
-        disabled: !inTauri,
-        onSelect: () => void run(api.copyClipImage(clip.id), "Picture copied"),
-      });
-    }
-    entries.push({
-      kind: "item",
-      label: clip.screenshot ? "Copy file" : "Copy clip",
-      // The one entry you find nowhere else: the file itself on the clipboard,
-      // ready for Ctrl+V in Discord.
-      icon: <IconCopy className={icon} />,
-      disabled: !inTauri,
-      onSelect: () => void run(api.copyClipFile(clip.id), "Clip copied"),
-    });
-    if (clip.screenshot) {
-      entries.push({
-        kind: "item",
-        label: "Copy for Discord",
-        icon: <IconCopy className={icon} />,
-        disabled: !inTauri,
-        onSelect: () =>
-          void run(api.exportShotForDiscord(clip.id, discordTarget()), "Copied · Ctrl+V in Discord"),
-      });
-    }
-    entries.push({
-      kind: "item",
-      label: "Send to a friend…",
-      // Straight to their PC, full quality — see `share.rs`.
-      icon: <IconFriends className={icon} />,
-      disabled: !inTauri,
-      onSelect: () => pickFriend(clip),
-    });
-    // A link for anyone, five days long — clips only, the page is a player.
-    if (!clip.screenshot) entries.push(...linkEntries(clip));
-    // The Discord channel connected in Settings → Behaviour → Sharing.
-    const webhook = useWebhook.getState();
-    if (webhook.connected) {
-      entries.push({
-        kind: "item",
-        label: postLabel(webhook, clip.id),
-        icon: <IconSend className={icon} />,
-        disabled: !inTauri || webhook.posting.includes(clip.id),
-        onSelect: () => void run(webhookApi.post(clip.id), `Posting to ${webhook.guild ?? "Discord"}…`),
-      });
-    }
-    // Recordings only: a still is small already, and the arithmetic here is all
-    // about length.
-    if (!clip.screenshot && options.onExport) {
-      const onExport = options.onExport;
-      entries.push({
-        kind: "item",
-        label: "Export a copy…",
-        icon: <IconExport className={icon} />,
-        disabled: !inTauri,
-        onSelect: onExport,
-      });
-    }
+    entries.push(...shareEntries(clip, { onExport: options.onExport, onSend: pickFriend }));
     if (clip.recording && clip.facecam?.state === "failed") {
       entries.push({
         kind: "item",
@@ -297,4 +323,58 @@ export function useClipMenu() {
 
     menu.open(trigger, entries);
   };
+}
+
+/**
+ * A white "Share" button that opens the clip's share entries in a glass menu
+ * under it — the player, the screenshot viewer and the clip cards all use it.
+ */
+export function ShareMenuButton({
+  clip,
+  onExport,
+  size = "sm",
+  disabled,
+  className,
+}: {
+  clip: Clip;
+  /** Opens the export dialog; recordings only, see {@link shareEntries}. */
+  onExport?: () => void;
+  size?: "sm" | "md";
+  disabled?: boolean;
+  className?: string;
+}) {
+  const menu = useMenu();
+  const pickFriend = useShare((state) => state.pick);
+  return (
+    <Button
+      variant="primary"
+      size={size}
+      disabled={disabled}
+      className={className}
+      icon={<IconShare className="h-4 w-4" />}
+      aria-haspopup="menu"
+      onClick={(event) => {
+        // Not the card or backdrop underneath: a click here is not "open" or "close".
+        event.stopPropagation();
+        const box = event.currentTarget.getBoundingClientRect();
+        const entries = shareEntries(clip, {
+          onExport,
+          onSend: pickFriend,
+          dividerBeforeExport: true,
+        });
+        menu.open(
+          {
+            clientX: box.right,
+            clientY: box.bottom + 8,
+            preventDefault: () => {},
+            stopPropagation: () => {},
+          },
+          entries,
+          { glass: true, alignRight: true },
+        );
+      }}
+    >
+      Share
+    </Button>
+  );
 }
