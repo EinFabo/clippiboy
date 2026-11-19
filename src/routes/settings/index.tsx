@@ -1,12 +1,25 @@
-import { useRef } from "react";
+import { Fragment, useRef } from "react";
 
 import { useEngine, type SettingsTab } from "@/store";
 import { Card } from "@/components/ui/Card";
-import { Segmented } from "@/components/ui/Controls";
+import { cn } from "@/lib/cn";
+import { SLIDE, SlidingIndicator } from "@/components/ui/SlidingIndicator";
+import {
+  IconBell,
+  IconCamera,
+  IconConsole,
+  IconDisk,
+  IconFriends,
+  IconInfo,
+  IconKey,
+  IconPalette,
+  IconShare,
+  IconSliders,
+} from "@/components/icons";
 import { HotkeysTab } from "./Hotkeys";
-import { BehaviourTab } from "./Behaviour";
-import { BannerTab } from "./Banner";
-import { SoundsTab } from "./Sounds";
+import { GeneralTab } from "./General";
+import { NotificationsTab } from "./Notifications";
+import { SharingTab } from "./Sharing";
 import { ConsoleTab } from "./Console";
 import { FacecamTab } from "./Facecam";
 import { StorageTab } from "./Storage";
@@ -14,20 +27,33 @@ import { FriendsTab } from "./Friends";
 import { AboutTab } from "./About";
 import { ColorsTab } from "./Colors";
 
-/** In order of how often someone comes looking. */
-const tabs: Array<{ key: SettingsTab; label: string; page: () => React.ReactNode }> = [
-  { key: "hotkeys", label: "Hotkeys", page: HotkeysTab },
-  { key: "behaviour", label: "Behaviour", page: BehaviourTab },
-  { key: "banner", label: "Banner", page: BannerTab },
-  { key: "sounds", label: "Sounds", page: SoundsTab },
-  { key: "console", label: "Console", page: ConsoleTab },
-  { key: "facecam", label: "Camera", page: FacecamTab },
-  { key: "storage", label: "Storage", page: StorageTab },
-  { key: "friends", label: "Friends", page: FriendsTab },
-  { key: "about", label: "About", page: AboutTab },
+type Entry = {
+  key: SettingsTab;
+  label: string;
+  icon: typeof IconKey;
+  page: () => React.ReactNode;
+};
+
+/** In order of how often someone comes looking; the gaps are the dividers. */
+const groups: Entry[][] = [
+  [
+    { key: "hotkeys", label: "Hotkeys", icon: IconKey, page: HotkeysTab },
+    { key: "general", label: "General", icon: IconSliders, page: GeneralTab },
+    { key: "notifications", label: "Notifications", icon: IconBell, page: NotificationsTab },
+    { key: "console", label: "Console", icon: IconConsole, page: ConsoleTab },
+    { key: "facecam", label: "Camera", icon: IconCamera, page: FacecamTab },
+  ],
+  [
+    { key: "sharing", label: "Sharing", icon: IconShare, page: SharingTab },
+    { key: "friends", label: "Friends", icon: IconFriends, page: FriendsTab },
+  ],
+  [
+    { key: "storage", label: "Storage", icon: IconDisk, page: StorageTab },
+    { key: "about", label: "About", icon: IconInfo, page: AboutTab },
+  ],
 ];
 
-const extra = { key: "colors" as const, label: "Colors", page: ColorsTab };
+const extra: Entry = { key: "colors", label: "Colors", icon: IconPalette, page: ColorsTab };
 
 const MARK = "99d15a6e77987125bbd2c42bb6ce0c70fd692cf9e6ce9d915a0cca157fc7d0c4";
 
@@ -43,8 +69,8 @@ export function Settings() {
   const dismissError = useEngine((s) => s.dismissError);
   const unlocked = useEngine((s) => s.config.colorsUnlocked);
   const patchConfig = useEngine((s) => s.patchConfig);
-  const shown = unlocked ? [...tabs, extra] : tabs;
-  const Page = shown.find(({ key }) => key === tab)?.page ?? HotkeysTab;
+  const shown = unlocked ? [...groups, [extra]] : groups;
+  const Page = shown.flat().find(({ key }) => key === tab)?.page ?? HotkeysTab;
   const taps = useRef<number[]>([]);
 
   const tap = (at: number) => {
@@ -60,7 +86,7 @@ export function Settings() {
 
   return (
     <div className="space-y-8 pb-12">
-      <header className="space-y-6 pt-10">
+      <header className="pt-10">
         <h1 className="display select-none text-4xl">
           {[..."Settings"].map((letter, at) => (
             <span key={at} onClick={() => tap(at)}>
@@ -68,15 +94,40 @@ export function Settings() {
             </span>
           ))}
         </h1>
-        <Segmented
-          className="w-fit"
-          value={tab}
-          options={shown.map(({ key, label }) => ({ key, label }))}
-          onChange={setTab}
-        />
       </header>
 
-      <Page />
+      <div className="grid grid-cols-[210px_minmax(0,1fr)] items-start gap-8">
+        {/* The segmented control turned 90 degrees. */}
+        <nav
+          aria-label="Settings"
+          className="relative flex flex-col gap-0.5 rounded-[20px] border border-line bg-elevated p-1"
+        >
+          <SlidingIndicator activeKey={tab} className="rounded-pill bg-white" />
+          {shown.map((group, at) => (
+            <Fragment key={at}>
+              {at > 0 && <hr className="mx-2.5 my-1 border-0 border-t border-line" />}
+              {group.map(({ key, label, icon: Icon }) => (
+                <button
+                  key={key}
+                  {...{ [SLIDE]: key }}
+                  onClick={() => setTab(key)}
+                  className={cn(
+                    "relative flex h-9 items-center gap-2.5 rounded-pill px-3.5 text-[13px] font-medium",
+                    "transition-colors duration-150 ease-[var(--ease-out-soft)]",
+                    tab === key ? "text-black" : "text-ink-muted hover:text-ink",
+                  )}
+                >
+                  <Icon className="h-[15px] w-[15px] shrink-0" />
+                  {label}
+                </button>
+              ))}
+            </Fragment>
+          ))}
+        </nav>
+        <div className="min-w-0 space-y-8">
+          <Page />
+        </div>
+      </div>
 
       {/* Under every tab: a setting that failed to apply may have been made on
           another one. */}

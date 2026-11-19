@@ -34,12 +34,12 @@ import type {
 
 export type SettingsTab =
   | "hotkeys"
-  | "behaviour"
-  | "banner"
-  | "sounds"
+  | "general"
+  | "notifications"
   | "console"
   | "facecam"
   | "storage"
+  | "sharing"
   | "friends"
   | "about"
   | "colors";

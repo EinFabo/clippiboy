@@ -47,7 +47,7 @@ export function screenChoice(
   };
 }
 
-/** Under the usage stats switch, in the setup and in Behaviour. */
+/** Under the usage stats switch, in the setup and in General. */
 export const USAGE_HINT =
   "Counts, never content: version, how many clips, which features. No account, your IP is not stored. Details on clippiboy.com/privacy.html";
 

@@ -182,7 +182,7 @@ export function shareEntries(
   });
   // A link for anyone, five days long — clips only, the page is a player.
   if (!clip.screenshot) entries.push(...linkEntries(clip));
-  // The Discord channel connected in Settings → Behaviour → Sharing.
+  // The Discord channel connected in Settings → Sharing.
   const webhook = useWebhook.getState();
   if (webhook.connected) {
     entries.push({

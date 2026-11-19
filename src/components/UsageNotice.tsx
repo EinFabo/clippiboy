@@ -3,6 +3,7 @@ import { useEngine } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { useNoticeSlot } from "./NoticePager";
+import { openSettings } from "@/lib/settingsLink";
 
 /**
  * Asks once whether the anonymous usage stats may go out: someone who skipped
@@ -27,7 +28,15 @@ export function UsageNotice() {
         <p className="text-sm font-medium text-ink">Send anonymous usage stats?</p>
         <p className="mt-0.5 text-xs text-ink-muted">
           Once a day: the version, how many clips, which features. No content, no account, your IP
-          is not stored. You can change it in Settings → Behaviour.
+          is not stored. You can change it in{" "}
+          <button
+            type="button"
+            className="underline underline-offset-2 hover:text-ink"
+            onClick={() => openSettings("general")}
+          >
+            Settings → General
+          </button>
+          .
         </p>
       </div>
       <Button size="sm" variant="ghost" onClick={() => choose(false)}>

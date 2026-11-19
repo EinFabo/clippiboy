@@ -24,6 +24,7 @@ import { AudioMixer } from "./routes/AudioMixer";
 import { Recording } from "./routes/Recording";
 import { Friends } from "./routes/Friends";
 import { Settings } from "./routes/settings";
+import { OPEN_SETTINGS_EVENT } from "./lib/settingsLink";
 
 export default function App() {
   const [route, setRoute] = useState<Route>("dashboard");
@@ -35,6 +36,13 @@ export default function App() {
   useEffect(() => {
     void init();
   }, [init]);
+
+  // `openSettings` from a link anywhere in the window.
+  useEffect(() => {
+    const open = () => setRoute("settings");
+    window.addEventListener(OPEN_SETTINGS_EVENT, open);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, open);
+  }, []);
 
   // "Open ClippiBoy" after "Add <name> as friend" on the website: the core
   // brings the window up, the Friends page puts the code into its Add field.
