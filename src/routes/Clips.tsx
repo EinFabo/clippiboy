@@ -569,12 +569,14 @@ export function Clips({
           onDelete={async (clips) => {
             selection.clear();
             for (const clip of clips) await deleteClip(clip.id);
-            toast(
-              "ok",
-              clips.length === 1
-                ? "1 clip moved to Recently deleted"
-                : `${clips.length} clips moved to Recently deleted`,
-            );
+            // The store swallows a refused delete and puts the clip back, so
+            // count what is really gone.
+            const left = new Set(useEngine.getState().clips.map((c) => c.id));
+            const moved = clips.filter((clip) => !left.has(clip.id)).length;
+            const what = moved === 1 ? "1 clip" : `${moved} clips`;
+            if (moved === clips.length) toast("ok", `${what} moved to Recently deleted`);
+            else if (moved === 0) toast("error", "Could not delete the selected clips");
+            else toast("error", `Only ${moved} of ${clips.length} clips moved to Recently deleted`);
           }}
         />
       )}
@@ -672,7 +674,9 @@ function ClipCard({
       // Before the buttons inside see it, so Ctrl-click on Open or Share picks
       // the tile too instead of acting.
       onClickCapture={(event) => {
-        if (leaving || !(event.ctrlKey || event.metaKey || event.shiftKey)) return;
+        // With a selection, any plain click on the tile picks it too — Open,
+        // Share and the heart included — like a file manager in selection mode.
+        if (leaving || !(selecting || event.ctrlKey || event.metaKey || event.shiftKey)) return;
         if (isTextField(event.target)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -686,7 +690,7 @@ function ClipCard({
       <div className="relative">
         <button
           ref={thumbRef}
-          onClick={() => (selecting ? onSelect({}) : onOpen())}
+          onClick={onOpen}
           aria-label={`${clip.screenshot ? "Open" : "Play"} ${
             clip.game ??
             (clip.screenshot ? "screenshot" : clip.recording ? "recording" : "clip")
