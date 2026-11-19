@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, Pill } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Segmented } from "@/components/ui/Controls";
+import { useMenu, type MenuEntry } from "@/components/ui/Menu";
 import { ClipPlayer } from "@/components/ClipPlayer";
 import { ShotViewer } from "@/components/ShotViewer";
-import { useClipMenu } from "@/components/clipMenu";
-import { timeLeft, useLinks } from "@/lib/links";
+import { ShareMenuButton, useClipMenu } from "@/components/clipMenu";
+import { timeLeft, useLinks, type Link } from "@/lib/links";
 import {
   IconCamera,
   IconCheck,
@@ -29,6 +32,21 @@ import { isTextField } from "@/lib/dom";
 import { useFlip } from "@/lib/useFlip";
 import { usePresence } from "@/lib/usePresence";
 import { useCountUp } from "@/lib/useCountUp";
+import {
+  NO_FILTER,
+  filterClips,
+  fitChips,
+  groupByDay,
+  isFiltered,
+  kindCounts,
+  kindOf,
+  pruneFilter,
+  sortClips,
+  toggled,
+  type ClipFilter,
+  type ClipKind,
+  type ClipSort,
+} from "@/lib/clipFilter";
 import { HeartBurst } from "@/components/ui/HeartBurst";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
 import { ExportDialog } from "@/components/ExportDialog";
@@ -36,27 +54,25 @@ import { animate, EASE_SPRING } from "@/lib/motion";
 import type { Clip, FocusClip, Trashed } from "@/lib/types";
 
 /**
- * What the gallery is filtering by right now.
+ * What the gallery shows: the filters, the sort, and whether Recently deleted
+ * is open instead.
  *
- * A type of its own instead of a game name with magic values: "favorites" and
- * "no game" are not games, and a game that happened to be called that should not
- * throw the filter off.
+ * Outside the component, so it outlives a trip to another page — the routes
+ * unmount on every switch. Never written anywhere, so a restart starts afresh.
  */
-type Filter =
-  /** Clips cut out of the buffer. Stills and recordings have chips of their
-      own — see `screenshots` and `recordings`. */
-  | { kind: "all" }
-  | { kind: "favorites" }
-  | { kind: "screenshots" }
-  | { kind: "recordings" }
-  | { kind: "untagged" }
-  | { kind: "game"; name: string }
-  /** Everything carrying this tag — clips, stills and recordings alike. */
-  | { kind: "tag"; name: string }
-  /** Recently deleted — not a filter over the gallery but a list of its own. */
-  | { kind: "deleted" };
+const useGallery = create<{ filter: ClipFilter; sort: ClipSort; inTrash: boolean }>(() => ({
+  filter: NO_FILTER,
+  sort: "newest",
+  inTrash: false,
+}));
+const setFilter = (filter: ClipFilter) => useGallery.setState({ filter, inTrash: false });
 
-const ALL: Filter = { kind: "all" };
+const SORTS: Array<{ key: ClipSort; label: string }> = [
+  { key: "newest", label: "Newest" },
+  { key: "oldest", label: "Oldest" },
+  { key: "longest", label: "Longest" },
+  { key: "largest", label: "Largest" },
+];
 
 /** Has to match the length of `cb-tile-out` in styles/motion.css. */
 const LEAVE_MS = 200;
@@ -96,8 +112,7 @@ export function Clips({
         fileClip: s.fileClip,
       })),
     );
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<Filter>(ALL);
+  const { filter, sort, inTrash } = useGallery();
   /** Which clip is in the player. Editing always happens there. */
   const [open, setOpen] = useState<number | null>(null);
   /** Sekunde, an der ein aus der Konsole übergebener Clip anfangen soll. Gilt
@@ -128,16 +143,14 @@ export function Clips({
       the right-click menu land here. */
   const [renaming, setRenaming] = useState<string | null>(null);
   /**
-   * Which clip has been asked about. Deleting takes the file off the disk and
-   * there is no way back, so the bin does not delete — it asks, in its own
-   * place on the tile.
+   * Which clip has been asked about, and what. Deleting takes the file off the
+   * disk and there is no way back, so the bin does not delete — it asks, in its
+   * own place on the tile. Throwing the untouched recording away cannot be
+   * undone either, so it asks in the same place and the same way.
    */
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const [asking, setAsking] = useState<{ id: string; what: Asking } | null>(null);
   /** Clips with a live share link — a pill on the tile says so. */
   const links = useLinks((s) => s.links);
-  // Throwing the untouched recording away cannot be undone either, so it asks
-  // in the same place and the same way as deleting does.
-  const [discarding, setDiscarding] = useState<string | null>(null);
   // The clip whose export dialog is open, if any.
   const [exporting, setExporting] = useState<Clip | null>(null);
   const clipMenu = useClipMenu();
@@ -177,64 +190,31 @@ export function Clips({
 
   const untagged = useMemo(() => clips.filter((c) => !c.game).length, [clips]);
   const favorites = useMemo(() => clips.filter((c) => c.favorite).length, [clips]);
-  const shots = useMemo(() => clips.filter((c) => c.screenshot).length, [clips]);
-  const recordings = useMemo(() => clips.filter((c) => c.recording).length, [clips]);
-  const cut = clips.length - shots - recordings;
+  const kinds = useMemo(() => kindCounts(clips), [clips]);
 
-  // If a clip's game is renamed or removed, its filter disappears — without
-  // this the gallery would stay empty and nobody would know why. Not while the
-  // player is open, though: that is where the change is being made, and the
-  // filter behind it should stay put.
+  // If a clip's game is renamed or removed, its chip disappears and so must
+  // the choice — without this the gallery would stay empty and nobody would
+  // know why. Not while the player is open, though: that is where the change
+  // is being made, and the filter behind it should stay put.
   useEffect(() => {
-    if (filter.kind === "all" || open !== null) return;
-    const gone =
-      filter.kind === "deleted"
-        ? trash.length === 0
-        : filter.kind === "untagged"
-        ? untagged === 0
-        : filter.kind === "favorites"
-          ? favorites === 0
-          : filter.kind === "screenshots"
-            ? shots === 0
-            : filter.kind === "recordings"
-              ? recordings === 0
-              : filter.kind === "tag"
-                ? !tags.some((t) => t.name === filter.name)
-                : !games.some((g) => g.name === filter.name);
-    if (gone) setFilter(ALL);
-  }, [filter, games, tags, untagged, favorites, shots, recordings, open, trash.length]);
+    if (open !== null) return;
+    const next = pruneFilter(filter, {
+      games: games.map((g) => g.name),
+      tags: tags.map((t) => t.name),
+      favorites,
+      untagged,
+    });
+    if (next !== filter) useGallery.setState({ filter: next });
+    if (inTrash && trash.length === 0) useGallery.setState({ inTrash: false });
+  }, [filter, games, tags, untagged, favorites, open, inTrash, trash.length]);
 
-  const visible = clips.filter((c) => {
-    const haystack = [
-      fileName(c.path),
-      c.title ?? "",
-      c.description ?? "",
-      c.game ?? "",
-      ...c.tags,
-    ]
-      .join(" ")
-      .toLowerCase();
-    const matchesQuery = !query || haystack.includes(query.toLowerCase());
-    const matchesFilter =
-      filter.kind === "deleted"
-        ? false
-        : filter.kind === "all"
-        ? !c.screenshot && !c.recording
-        : filter.kind === "favorites"
-          ? c.favorite
-          : filter.kind === "screenshots"
-            ? c.screenshot
-            : filter.kind === "recordings"
-              ? c.recording
-              : filter.kind === "untagged"
-              ? !c.game
-              : filter.kind === "tag"
-                ? c.tags.includes(filter.name)
-                : c.game === filter.name;
-    return matchesQuery && matchesFilter;
-  });
+  /** The gallery in the order it is shown — the player pages through the same. */
+  const visible = useMemo(
+    () => (inTrash ? [] : sortClips(filterClips(clips, filter), sort)),
+    [clips, filter, sort, inTrash],
+  );
 
-  const filtered = query !== "" || filter.kind !== "all";
+  const filtered = isFiltered(filter);
 
   const clipIds = useMemo(() => new Set(clips.map((c) => c.id)), [clips]);
 
@@ -246,8 +226,14 @@ export function Clips({
    */
   const tiles = usePresence(visible, (clip) => clip.id, LEAVE_MS, (id) => !clipIds.has(id));
 
+  /** The tiles under their day headings — one group without a heading for the
+      sorts that have no days. */
+  const groups = groupByDay(tiles, (tile) => tile.item.createdAt, sort, Date.now());
+
   /** Where a tile stands in the live list — the player counts in those. */
   const positions = new Map(visible.map((clip, index) => [clip.id, index]));
+  /** Where it stands among all tiles — the arrival is staggered by it. */
+  const slots = new Map(tiles.map((tile, slot) => [tile.key, slot]));
 
   // Deleting one tile and filtering the rest are the same thing to the grid:
   // whatever stays has to travel to its new place instead of appearing there.
@@ -295,22 +281,14 @@ export function Clips({
 
   // A clip handed over from the console. The filter has to go first: the clip
   // may not be in whatever was on screen, and the player counts in the list it
-  // is given.
+  // is given. The gallery then shows that clip's type, in the current order.
   useEffect(() => {
     if (!focus) return;
     const clip = clips.find((c) => c.id === focus.id);
     if (!clip) return;
-    setQuery("");
-    setFilter(
-      clip.screenshot
-        ? { kind: "screenshots" }
-        : clip.recording
-          ? { kind: "recordings" }
-          : ALL,
-    );
-    const list = clips.filter((c) =>
-      clip.screenshot ? c.screenshot : clip.recording ? c.recording : !c.screenshot && !c.recording,
-    );
+    const next: ClipFilter = { ...NO_FILTER, kind: kindOf(clip) };
+    setFilter(next);
+    const list = sortClips(filterClips(clips, next), useGallery.getState().sort);
     setPlaylist(list.map((c) => c.id));
     // Wie beim Öffnen aus der Galerie: was angesehen wurde, wird beim Schließen
     // in seinen Spielordner einsortiert. Ohne diese Zeile wäre der Weg über die
@@ -399,7 +377,12 @@ export function Clips({
 
       <div className="space-y-3">
         <div className="flex items-center gap-3">
-          <SearchField value={query} onChange={setQuery} />
+          {/* Not `setFilter`: the search also narrows Recently deleted, and
+              typing must not close it. */}
+          <SearchField
+            value={filter.query}
+            onChange={(query) => useGallery.setState({ filter: { ...filter, query } })}
+          />
           <span className="ml-auto shrink-0 text-xs text-ink-faint tabular-nums">
             {filtered ? (
               <>
@@ -411,263 +394,90 @@ export function Clips({
               </>
             )}
           </span>
+          {!inTrash && (
+            <SortButton sort={sort} onChange={(next) => useGallery.setState({ sort: next })} />
+          )}
         </div>
 
-        <GameFilters
+        <FilterBar
           games={games}
           tags={tags}
           untagged={untagged}
           favorites={favorites}
-          shots={shots}
-          recordings={recordings}
-          total={cut}
+          kinds={kinds}
           deleted={trash.length}
-          active={filter}
-          onSelect={setFilter}
+          filter={filter}
+          inTrash={inTrash}
+          onChange={setFilter}
+          onTrash={() => useGallery.setState({ inTrash: !inTrash })}
           onRemove={clearGame}
         />
       </div>
 
-      {filter.kind === "deleted" ? (
-        <TrashList trash={trash} query={query} />
+      {inTrash ? (
+        <TrashList trash={trash} query={filter.query} />
       ) : tiles.length === 0 ? (
-        <EmptyCard
-          total={clips.length}
-          onClear={() => {
-            setQuery("");
-            setFilter(ALL);
-          }}
-        />
+        <EmptyCard total={clips.length} onClear={() => setFilter(NO_FILTER)} />
       ) : (
-        <div ref={grid} className="grid grid-cols-3 gap-4 pb-10">
-          {tiles.map(({ item: clip, key, leaving }, slot) => {
-            const index = positions.get(clip.id) ?? 0;
-            // Capped, so a gallery of eighty clips does not crawl in.
-            const wait = greeting.current?.has(key) ? Math.min(slot, 11) * 30 : null;
-            return (
-            <Card
-              key={key}
-              data-flip={key}
-              interactive={!leaving}
-              className={cn(
-                "group overflow-hidden",
-                leaving
-                  ? "cb-tile-out"
-                  : (wait !== null || arrived.current.has(key)) && "cb-tile-in",
-              )}
-              style={wait !== null ? { animationDelay: `${wait}ms` } : undefined}
-              onContextMenu={(event) => {
-                // If the cursor is in the name field the menu belongs to the
-                // text — `TextMenu` takes care of that on its own.
-                if (isTextField(event.target)) return;
-                clipMenu(event, clip, {
-                  onOpen: () => openAt(index),
-                  onRename: () => setRenaming(clip.id),
-                  onDelete: () => setConfirming(clip.id),
-                  onDiscardOriginal: () => setDiscarding(clip.id),
-                  onExport: () => setExporting(clip),
-                });
-              }}
-            >
-              <div className="relative">
-                <button
-                  ref={(node) => {
-                    if (node) thumbs.current.set(clip.id, node);
-                    else thumbs.current.delete(clip.id);
-                  }}
-                  onClick={() => openAt(index)}
-                  aria-label={`${clip.screenshot ? "Open" : "Play"} ${
-                    clip.game ??
-                    (clip.screenshot ? "screenshot" : clip.recording ? "recording" : "clip")
-                  }`}
-                  className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
-                >
-                  {clip.thumbPath && (
-                    <img
-                      // After a trim there is a new picture under the same path.
-                      // Without the suffix the WebView would keep showing the one
-                      // from its cache — a moment that no longer appears in the
-                      // clip at all.
-                      src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
-                      alt=""
-                      // Die Galerie hält alle Clips auf einmal, und jedes
-                      // dekodierte Bild ist ein halbes Megabyte im Speicher —
-                      // bei über hundert Kacheln war das der größte Posten in
-                      // einem WebView, das Chromium wegen der Overlay-Flags
-                      // ohnehin nie aufräumt. `lazy` dekodiert erst, was in die
-                      // Nähe des Sichtfensters kommt.
-                      loading="lazy"
-                      decoding="async"
-                      className="h-full w-full object-cover"
-                    />
-                  )}
-                  {/* Sign on hover only — it covers the picture otherwise. And
-                      no play symbol over a still: there is nothing to play. */}
-                  <span
-                    className="absolute inset-0 grid place-items-center bg-black/30 opacity-0
-                      transition-opacity duration-200 group-hover:opacity-100"
-                  >
-                    <span className="grid h-12 w-12 place-items-center rounded-pill bg-white/90 text-black">
-                      {clip.screenshot ? (
-                        <IconCamera className="h-5 w-5" />
-                      ) : (
-                        <svg viewBox="0 0 24 24" className="h-5 w-5 translate-x-[1px]" fill="currentColor">
-                          <path d="M7.5 5.2 19 12 7.5 18.8V5.2Z" />
-                        </svg>
-                      )}
-                    </span>
-                  </span>
-                  {/* Both pills on one row: a long game name would otherwise
-                      slide under the duration instead of truncating. */}
-                  <span className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
-                    <Pill className="min-w-0">
-                      <span className="min-w-0 truncate">{clip.game ?? "Unknown"}</span>
-                    </Pill>
-                    <span className="flex shrink-0 items-center gap-1.5">
-                      {/* Only on a real trim: you cannot see a changed mix on a
-                          clip, but you can see its length — and that the original
-                          still sits beside it is the fact that counts here. */}
-                      {clip.facecam?.state === "pending" && (
-                        <Pill title="The cam is being added to this clip">Adding cam</Pill>
-                      )}
-                      {clip.original && (
-                        <Pill title="Trimmed — the original sits beside it">
-                          <IconScissors className="h-3 w-3" />
-                        </Pill>
-                      )}
-                      {links[clip.id] && (
-                        <Pill title={`Shared as a link · ${timeLeft(links[clip.id])}`}>
-                          <IconLink className="h-3 w-3" />
-                        </Pill>
-                      )}
-                      {/* A still has no length. The camera says what the
-                          duration would have said on a clip. */}
-                      {clip.screenshot ? (
-                        <Pill title="Screenshot">
-                          <IconCamera className="h-3 w-3" />
-                        </Pill>
-                      ) : clip.recording ? (
-                        // The red mark tells a recording from a clip at a
-                        // glance, before the length does.
-                        <Pill title="Recording">
-                          <IconRecord className="h-3 w-3 text-live" />
-                          {formatDuration(clip.durationMs)}
-                        </Pill>
-                      ) : (
-                        <Pill>{formatDuration(clip.durationMs)}</Pill>
-                      )}
-                    </span>
-                  </span>
-                </button>
-                {/* The heart stays visible once set — otherwise you would have
-                    to hover every tile to see your favorites. */}
-                <button
-                  aria-label={
-                    clip.favorite ? "Remove from favorites" : "Add to favorites"
-                  }
-                  aria-pressed={clip.favorite}
-                  title={
-                    clip.favorite
-                      ? 'Favorite — the file lives in the "Favorites" folder'
-                      : "Add to favorites"
-                  }
-                  onClick={() => void toggleFavorite(clip)}
-                  className={cn(
-                    "absolute top-3 left-3 grid h-8 w-8 place-items-center rounded-pill",
-                    "bg-black/50 backdrop-blur-md transition",
-                    clip.favorite
-                      ? "text-live"
-                      : "text-white/70 opacity-0 group-hover:opacity-100 hover:text-white",
-                  )}
-                >
-                  <HeartBurst favorite={clip.favorite} />
-                </button>
-                <div
-                  className={cn(
-                    "absolute top-3 right-3 flex gap-1.5 transition-opacity",
-                    // While the question stands it has to stay up, even once
-                    // the cursor has wandered off the tile.
-                    confirming === clip.id || discarding === clip.id
-                      ? "opacity-100"
-                      : "opacity-0 group-hover:opacity-100",
-                  )}
-                >
-                  {confirming === clip.id ? (
-                    <ConfirmDelete
-                      origin="right"
-                      // Its share link goes along — worth saying before, not after.
-                      question={links[clip.id] ? "Delete with its link?" : undefined}
-                      onConfirm={() => {
-                        setConfirming(null);
-                        void deleteClip(clip.id);
-                      }}
-                      onCancel={() => setConfirming(null)}
-                    />
-                  ) : discarding === clip.id ? (
-                    <ConfirmDelete
-                      origin="right"
-                      question={
-                        clip.originalAvailable ? "Throw the recording away?" : "Bake the cam into the clip?"
-                      }
-                      confirmLabel={clip.originalAvailable ? "Throw away" : "Bake"}
-                      confirmTitle={freeSpaceTitle(clip)}
-                      onConfirm={() => {
-                        setDiscarding(null);
-                        void (clip.originalAvailable ? discardClipOriginal(clip.id) : bakeClipCam(clip.id));
-                      }}
-                      onCancel={() => setDiscarding(null)}
-                    />
-                  ) : (
-                    <>
-                      <IconAction
-                        label="Show in folder"
-                        onClick={() => inTauri && api.revealClip(clip.id)}
-                      >
-                        <IconFolder className="h-4 w-4" />
-                      </IconAction>
-                      <IconAction
-                        label="Delete clip"
-                        danger
-                        onClick={() => setConfirming(clip.id)}
-                      >
-                        <IconTrash className="h-4 w-4" />
-                      </IconAction>
-                    </>
-                  )}
-                </div>
-              </div>
-              <div className="p-4">
-                <NameField
-                  clip={clip}
-                  editing={renaming === clip.id}
-                  onEditing={(on) => setRenaming(on ? clip.id : null)}
+        // One wrapper around every day, so a tile that changes day on a new
+        // sort still travels instead of jumping.
+        <div ref={grid} className="space-y-7 pb-10">
+          {groups.map((group) => (
+            <section key={group.key}>
+              {group.label && (
+                <DayHeading
+                  label={group.label}
+                  count={group.items.filter((tile) => !tile.leaving).length}
                 />
-                <p className="mt-1 truncate text-xs text-ink-muted">
-                  {clip.game ? `${clip.game} · ` : ""}
-                  {formatAgo(clip.createdAt)} ·{" "}
-                  {/* A still is measured by its edges, not by "1080p" — that is
-                      a word about video. */}
-                  {clip.screenshot
-                    ? `${clip.width} × ${clip.height}`
-                    : `${clip.height}p`}{" "}
-                  · {formatSize(clip.sizeBytes)}
-                </p>
-                {clip.description && (
-                  <p className="mt-1 truncate text-xs text-ink-faint">
-                    {clip.description}
-                  </p>
-                )}
-                {/* Only one button: viewing and editing have become the same
-                    screen. */}
-                <div className="mt-3">
-                  <Button size="sm" onClick={() => openAt(index)}>
-                    Open
-                  </Button>
-                </div>
+              )}
+              <div className="grid grid-cols-3 gap-4">
+                {group.items.map(({ item: clip, key, leaving }) => {
+                  const index = positions.get(clip.id) ?? 0;
+                  const slot = slots.get(key) ?? 0;
+                  // Capped, so a gallery of eighty clips does not crawl in.
+                  const wait = greeting.current?.has(key) ? Math.min(slot, 11) * 30 : null;
+                  return (
+                    <ClipCard
+                      key={key}
+                      clip={clip}
+                      flipKey={key}
+                      leaving={leaving}
+                      arriving={wait !== null || arrived.current.has(key)}
+                      delay={wait}
+                      link={links[clip.id]}
+                      asking={asking?.id === clip.id ? asking.what : null}
+                      onAsk={(what) => setAsking(what ? { id: clip.id, what } : null)}
+                      renaming={renaming === clip.id}
+                      onRenaming={(on) => setRenaming(on ? clip.id : null)}
+                      thumbRef={(node) => {
+                        if (node) thumbs.current.set(clip.id, node);
+                        else thumbs.current.delete(clip.id);
+                      }}
+                      onOpen={() => openAt(index)}
+                      onExport={() => setExporting(clip)}
+                      onFavorite={() => void toggleFavorite(clip)}
+                      onDelete={() => void deleteClip(clip.id)}
+                      onDiscard={() =>
+                        void (clip.originalAvailable ? discardClipOriginal(clip.id) : bakeClipCam(clip.id))
+                      }
+                      onContextMenu={(event) => {
+                        // If the cursor is in the name field the menu belongs to the
+                        // text — `TextMenu` takes care of that on its own.
+                        if (isTextField(event.target)) return;
+                        clipMenu(event, clip, {
+                          onOpen: () => openAt(index),
+                          onRename: () => setRenaming(clip.id),
+                          onDelete: () => setAsking({ id: clip.id, what: "delete" }),
+                          onDiscardOriginal: () => setAsking({ id: clip.id, what: "discard" }),
+                          onExport: () => setExporting(clip),
+                        });
+                      }}
+                    />
+                  );
+                })}
               </div>
-            </Card>
-            );
-          })}
+            </section>
+          ))}
         </div>
       )}
 
@@ -707,6 +517,288 @@ export function Clips({
         <ExportDialog clip={exporting} onClose={() => setExporting(null)} />
       )}
     </div>
+  );
+}
+
+/** "Today · 3 clips" over a day's tiles. */
+function DayHeading({ label, count }: { label: string; count: number }) {
+  return (
+    <h2 className="mb-3 flex items-baseline gap-2.5 text-[15px] font-semibold text-ink/80">
+      {label}
+      <span className="text-[13px] font-normal text-ink-faint tabular-nums">
+        {count === 1 ? "1 clip" : `${count} clips`}
+      </span>
+    </h2>
+  );
+}
+
+/** What a tile is asking about, in its own place over the thumbnail. */
+type Asking = "delete" | "discard";
+
+/**
+ * One tile of the gallery: thumbnail with its pills, the heart, folder and bin
+ * on hover, the name to rename in place, and Open and Share.
+ *
+ * Everything it changes goes through its props, so the gallery stays the one
+ * place that knows which tile is asking, renaming or open.
+ */
+function ClipCard({
+  clip,
+  flipKey,
+  leaving,
+  arriving,
+  delay,
+  link,
+  asking,
+  onAsk,
+  renaming,
+  onRenaming,
+  thumbRef,
+  onOpen,
+  onExport,
+  onFavorite,
+  onDelete,
+  onDiscard,
+  onContextMenu,
+}: {
+  clip: Clip;
+  /** The tile's key for `useFlip` — the presence key, the clip id. */
+  flipKey: string;
+  leaving: boolean;
+  /** Plays the arrival — the first greeting or a clip saved just now. */
+  arriving: boolean;
+  /** How long the arrival waits, for the staggered greeting. */
+  delay: number | null;
+  link: Link | undefined;
+  asking: Asking | null;
+  onAsk: (what: Asking | null) => void;
+  renaming: boolean;
+  onRenaming: (on: boolean) => void;
+  thumbRef: (node: HTMLButtonElement | null) => void;
+  onOpen: () => void;
+  onExport: () => void;
+  onFavorite: () => void;
+  onDelete: () => void;
+  onDiscard: () => void;
+  onContextMenu: (event: React.MouseEvent) => void;
+}) {
+  return (
+    <Card
+      data-flip={flipKey}
+      interactive={!leaving}
+      className={cn("group overflow-hidden", leaving ? "cb-tile-out" : arriving && "cb-tile-in")}
+      style={delay !== null ? { animationDelay: `${delay}ms` } : undefined}
+      onContextMenu={onContextMenu}
+    >
+      <div className="relative">
+        <button
+          ref={thumbRef}
+          onClick={onOpen}
+          aria-label={`${clip.screenshot ? "Open" : "Play"} ${
+            clip.game ??
+            (clip.screenshot ? "screenshot" : clip.recording ? "recording" : "clip")
+          }`}
+          className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
+        >
+          {clip.thumbPath && (
+            <img
+              // After a trim there is a new picture under the same path.
+              // Without the suffix the WebView would keep showing the one
+              // from its cache — a moment that no longer appears in the
+              // clip at all.
+              src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
+              alt=""
+              // Die Galerie hält alle Clips auf einmal, und jedes
+              // dekodierte Bild ist ein halbes Megabyte im Speicher —
+              // bei über hundert Kacheln war das der größte Posten in
+              // einem WebView, das Chromium wegen der Overlay-Flags
+              // ohnehin nie aufräumt. `lazy` dekodiert erst, was in die
+              // Nähe des Sichtfensters kommt.
+              loading="lazy"
+              decoding="async"
+              className="h-full w-full object-cover"
+            />
+          )}
+          {/* Sign on hover only — it covers the picture otherwise. And
+              no play symbol over a still: there is nothing to play. */}
+          <span
+            className="absolute inset-0 grid place-items-center bg-black/30 opacity-0
+              transition-opacity duration-200 group-hover:opacity-100"
+          >
+            <span className="grid h-12 w-12 place-items-center rounded-pill bg-white/90 text-black">
+              {clip.screenshot ? (
+                <IconCamera className="h-5 w-5" />
+              ) : (
+                <svg viewBox="0 0 24 24" className="h-5 w-5 translate-x-[1px]" fill="currentColor">
+                  <path d="M7.5 5.2 19 12 7.5 18.8V5.2Z" />
+                </svg>
+              )}
+            </span>
+          </span>
+          {/* Both pills on one row: a long game name would otherwise
+              slide under the duration instead of truncating. */}
+          <span className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
+            <Pill className="min-w-0">
+              <span className="min-w-0 truncate">{clip.game ?? "Unknown"}</span>
+            </Pill>
+            <span className="flex shrink-0 items-center gap-1.5">
+              {/* Only on a real trim: you cannot see a changed mix on a
+                  clip, but you can see its length — and that the original
+                  still sits beside it is the fact that counts here. */}
+              {clip.facecam?.state === "pending" && (
+                <Pill title="The cam is being added to this clip">Adding cam</Pill>
+              )}
+              {clip.original && (
+                <Pill title="Trimmed — the original sits beside it">
+                  <IconScissors className="h-3 w-3" />
+                </Pill>
+              )}
+              {link && (
+                <Pill title={`Shared as a link · ${timeLeft(link)}`}>
+                  <IconLink className="h-3 w-3" />
+                </Pill>
+              )}
+              {/* A still has no length. The camera says what the
+                  duration would have said on a clip. */}
+              {clip.screenshot ? (
+                <Pill title="Screenshot">
+                  <IconCamera className="h-3 w-3" />
+                </Pill>
+              ) : clip.recording ? (
+                // The red mark tells a recording from a clip at a
+                // glance, before the length does.
+                <Pill title="Recording">
+                  <IconRecord className="h-3 w-3 text-live" />
+                  {formatDuration(clip.durationMs)}
+                </Pill>
+              ) : (
+                <Pill>{formatDuration(clip.durationMs)}</Pill>
+              )}
+            </span>
+          </span>
+        </button>
+        {/* The heart stays visible once set — otherwise you would have
+            to hover every tile to see your favorites. */}
+        <button
+          aria-label={clip.favorite ? "Remove from favorites" : "Add to favorites"}
+          aria-pressed={clip.favorite}
+          title={
+            clip.favorite
+              ? 'Favorite — the file lives in the "Favorites" folder'
+              : "Add to favorites"
+          }
+          onClick={onFavorite}
+          className={cn(
+            "absolute top-3 left-3 grid h-8 w-8 place-items-center rounded-pill",
+            "bg-black/50 backdrop-blur-md transition",
+            clip.favorite
+              ? "text-live"
+              : "text-white/70 opacity-0 group-hover:opacity-100 hover:text-white",
+          )}
+        >
+          <HeartBurst favorite={clip.favorite} />
+        </button>
+        <div
+          className={cn(
+            "absolute top-3 right-3 flex gap-1.5 transition-opacity",
+            // While the question stands it has to stay up, even once
+            // the cursor has wandered off the tile.
+            asking ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+          )}
+        >
+          {asking === "delete" ? (
+            <ConfirmDelete
+              origin="right"
+              // Its share link goes along — worth saying before, not after.
+              question={link ? "Delete with its link?" : undefined}
+              onConfirm={() => {
+                onAsk(null);
+                onDelete();
+              }}
+              onCancel={() => onAsk(null)}
+            />
+          ) : asking === "discard" ? (
+            <ConfirmDelete
+              origin="right"
+              question={
+                clip.originalAvailable ? "Throw the recording away?" : "Bake the cam into the clip?"
+              }
+              confirmLabel={clip.originalAvailable ? "Throw away" : "Bake"}
+              confirmTitle={freeSpaceTitle(clip)}
+              onConfirm={() => {
+                onAsk(null);
+                onDiscard();
+              }}
+              onCancel={() => onAsk(null)}
+            />
+          ) : (
+            <>
+              <IconAction label="Show in folder" onClick={() => inTauri && api.revealClip(clip.id)}>
+                <IconFolder className="h-4 w-4" />
+              </IconAction>
+              <IconAction label="Delete clip" danger onClick={() => onAsk("delete")}>
+                <IconTrash className="h-4 w-4" />
+              </IconAction>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="p-4">
+        <NameField clip={clip} editing={renaming} onEditing={onRenaming} />
+        <p className="mt-1 truncate text-xs text-ink-muted">
+          {clip.game ? `${clip.game} · ` : ""}
+          {formatAgo(clip.createdAt)} ·{" "}
+          {/* A still is measured by its edges, not by "1080p" — that is
+              a word about video. */}
+          {clip.screenshot ? `${clip.width} × ${clip.height}` : `${clip.height}p`} ·{" "}
+          {formatSize(clip.sizeBytes)}
+        </p>
+        {clip.description && (
+          <p className="mt-1 truncate text-xs text-ink-faint">{clip.description}</p>
+        )}
+        {/* Viewing and editing are one screen; everything that sends the
+            clip somewhere is one menu beside it. */}
+        <div className="mt-3 flex gap-2">
+          <Button size="sm" onClick={onOpen}>
+            Open
+          </Button>
+          <ShareMenuButton clip={clip} variant="secondary" onExport={onExport} />
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/** Newest ▾ — the order of the gallery, in the context menu's look. */
+function SortButton({ sort, onChange }: { sort: ClipSort; onChange: (sort: ClipSort) => void }) {
+  const menu = useMenu();
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      aria-haspopup="menu"
+      className="shrink-0"
+      onClick={(event) => {
+        const box = event.currentTarget.getBoundingClientRect();
+        menu.open(
+          {
+            clientX: box.right,
+            clientY: box.bottom + 6,
+            preventDefault: () => {},
+            stopPropagation: () => {},
+          },
+          SORTS.map(({ key, label }) => ({
+            kind: "item",
+            label,
+            icon: key === sort ? <IconCheck className="h-3.5 w-3.5" /> : undefined,
+            onSelect: () => onChange(key),
+          })),
+          { alignRight: true },
+        );
+      }}
+    >
+      {SORTS.find((s) => s.key === sort)?.label} ▾
+    </Button>
   );
 }
 
@@ -830,72 +922,181 @@ function SearchField({
   );
 }
 
+const KINDS: Array<{ key: ClipKind; label: string }> = [
+  { key: "all", label: "All" },
+  { key: "clips", label: "Clips" },
+  { key: "recordings", label: "Recordings" },
+  { key: "screenshots", label: "Screenshots" },
+];
+
+/** At most this many lines of chips — whatever does not fit goes into "+N more". */
+const CHIP_LINES = 2;
+/** `gap-2` of the row, in pixels. */
+const CHIP_GAP = 8;
+
+/** One toggle in the chip row. */
+interface ChipSpec {
+  /** Prefixed by kind, so a game called "Favorites" stays apart from the chip. */
+  id: string;
+  label: string;
+  /** How it reads in the "+N more" menu, where there is no room for an icon. */
+  menuLabel: string;
+  count: number;
+  selected: boolean;
+  icon?: (selected: boolean) => React.ReactNode;
+  /** The filter with this chip on or off. */
+  set: (filter: ClipFilter, on: boolean) => ClipFilter;
+  /** Games only: the name the hover-× would detach. */
+  game?: string;
+}
+
 /**
- * The game filters as a single horizontally scrolling row.
+ * The type segment and the chips that combine with it.
  *
- * The bar used to grow out of the window to the right, and long window titles
- * wrapped inside their pill. Now: one row, fixed height, long names truncate —
- * and whatever is not a game at all can be cleared away with the ×, instead of
- * standing there forever.
+ * The chips wrap onto at most two lines; what does not fit collapses into a
+ * last chip "+N more" with a menu, and chosen chips are the last to go there.
+ * Recently deleted sits at the end of the row, or at the end of that menu once
+ * it exists. A game chip keeps its hover-× that detaches the name from its
+ * clips — on a chosen chip the × means "off" instead, and the whole chip is
+ * the button for it.
  */
-function GameFilters({
+function FilterBar({
   games,
   tags,
   untagged,
   favorites,
-  shots,
-  recordings,
-  total,
+  kinds,
   deleted,
-  active,
-  onSelect,
+  filter,
+  inTrash,
+  onChange,
+  onTrash,
   onRemove,
 }: {
   games: Array<{ name: string; count: number }>;
   tags: Array<{ name: string; count: number }>;
   untagged: number;
   favorites: number;
-  shots: number;
-  recordings: number;
-  total: number;
+  kinds: Record<ClipKind, number>;
   deleted: number;
-  active: Filter;
-  onSelect: (filter: Filter) => void;
+  filter: ClipFilter;
+  /** Recently deleted is open: nothing in the segment or the chips is lit. */
+  inTrash: boolean;
+  onChange: (filter: ClipFilter) => void;
+  onTrash: () => void;
   onRemove: (game: string) => void;
 }) {
-  const strip = useRef<HTMLDivElement>(null);
-  const [fade, setFade] = useState({ left: false, right: false });
+  const menu = useMenu();
+  const row = useRef<HTMLDivElement>(null);
+  const lead = useRef<HTMLDivElement>(null);
+  const mirror = useRef<HTMLDivElement>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [fit, setFit] = useState<{ hidden: string[]; overflow: boolean }>({
+    hidden: [],
+    overflow: false,
+  });
 
-  const measure = useCallback(() => {
-    const el = strip.current;
-    if (!el) return;
-    const max = el.scrollWidth - el.clientWidth;
-    setFade({ left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 });
-  }, []);
+  const specs: ChipSpec[] = [
+    ...(favorites > 0
+      ? [
+          {
+            id: "fav",
+            label: "Favorites",
+            menuLabel: "Favorites",
+            count: favorites,
+            selected: filter.favorites,
+            icon: (on: boolean) => (
+              <IconHeart filled className={cn("h-3.5 w-3.5", on ? "text-black/70" : "text-live")} />
+            ),
+            set: (f: ClipFilter, on: boolean) => ({ ...f, favorites: on }),
+          },
+        ]
+      : []),
+    ...games.map(({ name, count }) => ({
+      id: `game:${name}`,
+      label: name,
+      menuLabel: name,
+      count,
+      selected: filter.games.includes(name),
+      set: (f: ClipFilter, on: boolean) => ({
+        ...f,
+        games: on === f.games.includes(name) ? f.games : toggled(f.games, name),
+      }),
+      game: name,
+    })),
+    ...(untagged > 0
+      ? [
+          {
+            id: "nogame",
+            label: "No game",
+            menuLabel: "No game",
+            count: untagged,
+            selected: filter.noGame,
+            set: (f: ClipFilter, on: boolean) => ({ ...f, noGame: on }),
+          },
+        ]
+      : []),
+    // Tags come after the games: a game every clip has, a tag only some.
+    ...tags.map(({ name, count }) => ({
+      id: `tag:${name}`,
+      label: name,
+      menuLabel: `#${name}`,
+      count,
+      selected: filter.tags.includes(name),
+      icon: (on: boolean) => <span className={on ? "text-black/45" : "text-ink-faint"}>#</span>,
+      set: (f: ClipFilter, on: boolean) => ({
+        ...f,
+        tags: on === f.tags.includes(name) ? f.tags : toggled(f.tags, name),
+      }),
+    })),
+  ];
+  // Recently deleted shows a list of its own; the filters wait behind it,
+  // unlit, and a chip picked from there brings the gallery back with it on.
+  const lit = (spec: ChipSpec) => !inTrash && spec.selected;
+  const pick = (spec: ChipSpec) => onChange(spec.set(filter, inTrash || !spec.selected));
 
-  useLayoutEffect(measure, [measure, games, tags, untagged, favorites, shots, recordings, deleted]);
+  // Everything a chip's width depends on — the widths are measured again
+  // whenever it changes, and when the row itself changes size.
+  const signature = [
+    ...specs.map((s) => `${s.id}:${s.count}:${lit(s)}:${confirming === s.game}`),
+    `trash:${deleted}:${inTrash}`,
+  ].join("|");
+  const latest = useRef({ specs, lit });
+  latest.current = { specs, lit };
 
-  // Tip the mouse wheel over: there is nothing in the bar that could scroll
-  // vertically, so the wheel should move it horizontally. Only when it really
-  // overflows — otherwise it would take scrolling away from the gallery for no
-  // reason.
-  useEffect(() => {
-    const el = strip.current;
-    if (!el) return;
-    const onWheel = (event: WheelEvent) => {
-      if (event.deltaY === 0 || el.scrollWidth <= el.clientWidth) return;
-      event.preventDefault();
-      el.scrollLeft += event.deltaY;
+  useLayoutEffect(() => {
+    const measure = () => {
+      const box = mirror.current;
+      if (!row.current || !lead.current || !box) return;
+      const width = (id: string) =>
+        box.querySelector<HTMLElement>(`[data-measure="${CSS.escape(id)}"]`)?.offsetWidth ?? 0;
+      const next = fitChips({
+        lead: lead.current.offsetWidth,
+        chips: latest.current.specs.map((s) => ({
+          id: s.id,
+          width: width(s.id),
+          selected: latest.current.lit(s),
+        })),
+        tail: width("trash"),
+        more: width("more"),
+        row: row.current.clientWidth,
+        gap: CHIP_GAP,
+        lines: CHIP_LINES,
+      });
+      // With nothing left to hide there is no "+0 more": the trash stays a button.
+      const settled = next.hidden.length > 0 ? next : { hidden: [], overflow: false };
+      setFit((was) =>
+        was.overflow === settled.overflow && was.hidden.join("|") === settled.hidden.join("|")
+          ? was
+          : settled,
+      );
     };
-    el.addEventListener("wheel", onWheel, { passive: false });
+    measure();
     const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => {
-      el.removeEventListener("wheel", onWheel);
-      observer.disconnect();
-    };
-  }, [measure]);
+    if (row.current) observer.observe(row.current);
+    if (mirror.current) observer.observe(mirror.current);
+    return () => observer.disconnect();
+  }, [signature]);
 
   // The confirmation must not stay up when you carry on elsewhere.
   useEffect(() => {
@@ -905,180 +1106,179 @@ function GameFilters({
     return () => window.removeEventListener("keydown", onKey);
   }, [confirming]);
 
+  const hidden = new Set(fit.hidden);
+  const shown = specs.filter((s) => !hidden.has(s.id));
+  const overflow = fit.overflow && fit.hidden.length > 0;
+
   // Chips are sorted by how often a game turns up, and the confirmation takes
   // the place of the chip it belongs to. Both shift everything to the right of
   // them, and that should be a slide rather than a jump.
   useFlip(
-    strip,
+    row,
     [
-      "all",
-      favorites > 0 && "favorites",
-      recordings > 0 && "recordings",
-      shots > 0 && "screenshots",
-      ...games.map(({ name }) => (confirming === name ? `${name}?` : name)),
-      untagged > 0 && "untagged",
-      ...tags.map(({ name }) => `#${name}`),
-      deleted > 0 && "deleted",
+      ...shown.map((s) => (confirming !== null && confirming === s.game ? `${s.id}?` : s.id)),
+      overflow ? "more" : deleted > 0 && "trash",
     ]
       .filter(Boolean)
       .join(),
   );
 
-  const edge = (on: boolean) => (on ? "36px" : "0px");
-  const mask = `linear-gradient(to right, transparent, #000 ${edge(fade.left)},
-    #000 calc(100% - ${edge(fade.right)}), transparent)`;
+  const chipFor = (spec: ChipSpec, measuring = false) =>
+    spec.game !== undefined && confirming === spec.game ? (
+      <ConfirmChip
+        key={spec.id}
+        id={spec.id}
+        name={spec.label}
+        autoFocus={!measuring}
+        onConfirm={() => {
+          onRemove(spec.label);
+          setConfirming(null);
+        }}
+        onCancel={() => setConfirming(null)}
+      />
+    ) : (
+      <Chip
+        key={spec.id}
+        id={spec.id}
+        active={lit(spec)}
+        count={spec.count}
+        icon={spec.icon?.(lit(spec))}
+        onClick={() => pick(spec)}
+        onRemove={spec.game !== undefined ? () => setConfirming(spec.game ?? null) : undefined}
+      >
+        {spec.label}
+      </Chip>
+    );
+
+  const trashButton = (
+    <Button
+      variant={inTrash ? "primary" : "ghost"}
+      size="sm"
+      aria-pressed={inTrash}
+      icon={<IconTrash className="h-3.5 w-3.5" />}
+      onClick={onTrash}
+    >
+      Recently deleted
+      <span className={cn("tabular-nums", inTrash ? "text-black/45" : "text-ink-faint")}>
+        {deleted}
+      </span>
+    </Button>
+  );
+
+  const openMore = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const entries: MenuEntry[] = specs
+      .filter((s) => hidden.has(s.id))
+      .map((s) => ({
+        kind: "item",
+        label: s.menuLabel,
+        icon: lit(s) ? <IconCheck className="h-3.5 w-3.5" /> : undefined,
+        shortcut: String(s.count),
+        onSelect: () => pick(s),
+      }));
+    if (deleted > 0) {
+      entries.push(
+        { kind: "separator" },
+        {
+          kind: "item",
+          label: "Recently deleted",
+          icon: inTrash ? <IconCheck className="h-3.5 w-3.5" /> : <IconTrash className="h-3.5 w-3.5" />,
+          shortcut: String(deleted),
+          onSelect: onTrash,
+        },
+      );
+    }
+    menu.open(
+      {
+        clientX: box.left,
+        clientY: box.bottom + 6,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      },
+      entries,
+    );
+  };
 
   return (
-    <div
-      ref={strip}
-      onScroll={measure}
-      className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5"
-      style={{ maskImage: mask, WebkitMaskImage: mask }}
-    >
-      {/* Was called "All" while there was only one kind of thing in here.
-          Now it names what it shows, and the stills sit beside it. */}
-      <Chip
-        id="all"
-        active={active.kind === "all"}
-        onClick={() => onSelect({ kind: "all" })}
-        count={total}
-      >
-        Clips
-      </Chip>
+    <div className="relative">
+      {/* Every chip once more, out of sight and in one line: this is where
+          their widths come from. Clipped to nothing, so it cannot widen the
+          page. */}
+      <div aria-hidden inert className="invisible absolute inset-x-0 top-0 h-0 overflow-hidden">
+        <div ref={mirror} className="flex w-max items-center gap-2">
+          {specs.map((spec) => (
+            <div key={spec.id} data-measure={spec.id} className="shrink-0">
+              {chipFor(spec, true)}
+            </div>
+          ))}
+          {deleted > 0 && (
+            <div data-measure="trash" className="shrink-0">
+              {trashButton}
+            </div>
+          )}
+          <div data-measure="more" className="shrink-0">
+            <MoreChip count={88} />
+          </div>
+        </div>
+      </div>
 
-      {favorites > 0 && (
-        <Chip
-          id="favorites"
-          active={active.kind === "favorites"}
-          count={favorites}
-          onClick={() => onSelect({ kind: "favorites" })}
-          icon={
-            <IconHeart
-              filled
-              className={cn(
-                "h-3.5 w-3.5",
-                active.kind === "favorites" ? "text-black/70" : "text-live",
-              )}
-            />
-          }
-        >
-          Favorites
-        </Chip>
-      )}
-
-      {recordings > 0 && (
-        <Chip
-          id="recordings"
-          active={active.kind === "recordings"}
-          count={recordings}
-          onClick={() => onSelect({ kind: "recordings" })}
-          icon={
-            <IconRecord
-              className={cn(
-                "h-3.5 w-3.5",
-                active.kind === "recordings" ? "text-black/70" : "text-live",
-              )}
-            />
-          }
-        >
-          Recordings
-        </Chip>
-      )}
-
-      {shots > 0 && (
-        <Chip
-          id="screenshots"
-          active={active.kind === "screenshots"}
-          count={shots}
-          onClick={() => onSelect({ kind: "screenshots" })}
-          icon={
-            <IconCamera
-              className={cn(
-                "h-3.5 w-3.5",
-                active.kind === "screenshots" ? "text-black/70" : "text-ink-muted",
-              )}
-            />
-          }
-        >
-          Screenshots
-        </Chip>
-      )}
-
-      {games.map(({ name, count }) =>
-        confirming === name ? (
-          <ConfirmChip
-            key={name}
-            id={name}
-            name={name}
-            onConfirm={() => {
-              onRemove(name);
-              setConfirming(null);
-            }}
-            onCancel={() => setConfirming(null)}
+      <div ref={row} className="flex flex-wrap items-center gap-2 py-0.5">
+        <div ref={lead} className="pr-1.5">
+          <Segmented
+            value={inTrash ? null : filter.kind}
+            onChange={(kind) => onChange({ ...filter, kind })}
+            options={KINDS.map(({ key, label }) => ({
+              key,
+              label: (
+                <>
+                  {label}
+                  <span
+                    className={cn(
+                      "ml-1.5 text-xs",
+                      !inTrash && filter.kind === key ? "text-black/45" : "text-ink-faint",
+                    )}
+                  >
+                    {kinds[key]}
+                  </span>
+                </>
+              ),
+            }))}
           />
+        </div>
+        {shown.map((spec) => chipFor(spec))}
+        {overflow ? (
+          <MoreChip count={fit.hidden.length} onClick={openMore} />
         ) : (
-          <Chip
-            key={name}
-            id={name}
-            active={active.kind === "game" && active.name === name}
-            count={count}
-            onClick={() => onSelect({ kind: "game", name })}
-            onRemove={() => setConfirming(name)}
-          >
-            {name}
-          </Chip>
-        ),
-      )}
-
-      {untagged > 0 && (
-        <Chip
-          id="untagged"
-          active={active.kind === "untagged"}
-          count={untagged}
-          onClick={() => onSelect({ kind: "untagged" })}
-        >
-          No game
-        </Chip>
-      )}
-
-      {/* Tags come after the games: a game every clip has, a tag only some.
-          The `#` in the id keeps a tag apart from a game of the same name. */}
-      {tags.map(({ name, count }) => {
-        const on = active.kind === "tag" && active.name === name;
-        return (
-          <Chip
-            key={`#${name}`}
-            id={`#${name}`}
-            active={on}
-            count={count}
-            onClick={() => onSelect({ kind: "tag", name })}
-            icon={<span className={on ? "text-black/45" : "text-ink-faint"}>#</span>}
-          >
-            {name}
-          </Chip>
-        );
-      })}
-
-      {/* Last, and only while something is in it. */}
-      {deleted > 0 && (
-        <Chip
-          id="deleted"
-          active={active.kind === "deleted"}
-          count={deleted}
-          onClick={() => onSelect({ kind: "deleted" })}
-          icon={
-            <IconTrash
-              className={cn(
-                "h-3.5 w-3.5",
-                active.kind === "deleted" ? "text-black/70" : "text-ink-muted",
-              )}
-            />
-          }
-        >
-          Recently deleted
-        </Chip>
-      )}
+          deleted > 0 && (
+            <div data-flip="trash" className="shrink-0">
+              {trashButton}
+            </div>
+          )
+        )}
+      </div>
     </div>
+  );
+}
+
+/** The last chip of a full row: the ones that did not fit, as a menu. */
+function MoreChip({
+  count,
+  onClick,
+}: {
+  count: number;
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      data-flip="more"
+      aria-haspopup="menu"
+      onClick={onClick}
+      className="flex h-8 shrink-0 items-center rounded-pill border border-dashed border-line bg-surface
+        px-4 text-[13px] font-medium text-ink-muted transition-colors duration-150
+        hover:border-line-strong hover:text-ink"
+    >
+      +{count} more
+    </button>
   );
 }
 
@@ -1239,9 +1439,14 @@ function TrashList({ trash, query }: { trash: Trashed[]; query: string }) {
 }
 
 /**
- * One filter pill. The × button holds its place in the layout and only becomes
- * visible on hover — if it did not, every following pill would jump sideways as
- * you moved across.
+ * One filter pill, on or off. A chosen one is white with a × — the whole pill is
+ * the button that switches it off again.
+ *
+ * A game's pill also has the × that detaches the name from its clips, only
+ * while it is not chosen, so the two never sit in the same place at once. It
+ * holds its place in the layout and only becomes visible on hover — if it did
+ * not, every following pill would jump sideways as you moved across. The ×
+ * of a chosen pill takes exactly that place.
  */
 function Chip({
   id,
@@ -1294,10 +1499,11 @@ function Chip({
     >
       <button
         onClick={onClick}
-        title={children}
+        aria-pressed={active}
+        title={active ? `${children} — click to turn off` : children}
         className={cn(
           "flex h-full min-w-0 items-center gap-1.5 rounded-pill pl-4 text-[13px] font-medium",
-          onRemove ? "pr-1.5" : "pr-4",
+          active ? "pr-1" : onRemove ? "pr-1.5" : "pr-4",
         )}
       >
         {icon}
@@ -1305,16 +1511,20 @@ function Chip({
         <span className={cn("tabular-nums", active ? "text-black/45" : "text-ink-faint")}>
           {count}
         </span>
+        {active && (
+          <span aria-hidden className="grid h-6 w-6 shrink-0 place-items-center text-black/70">
+            <IconClose className="h-3 w-3" />
+          </span>
+        )}
       </button>
-      {onRemove && (
+      {onRemove && !active && (
         <button
           aria-label={`Remove the "${children}" filter`}
           title="Remove filter — the game name is detached from these clips"
           onClick={onRemove}
           className={cn(
             "mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-pill opacity-0 transition",
-            "group-hover/chip:opacity-100 focus-visible:opacity-100",
-            active ? "hover:bg-black/10 hover:text-black" : "hover:bg-hover hover:text-live",
+            "group-hover/chip:opacity-100 focus-visible:opacity-100 hover:bg-hover hover:text-live",
           )}
         >
           <IconClose className="h-3 w-3" />
@@ -1328,11 +1538,14 @@ function Chip({
 function ConfirmChip({
   id,
   name,
+  autoFocus = true,
   onConfirm,
   onCancel,
 }: {
   id: string;
   name: string;
+  /** Off for the copy that is only there to be measured. */
+  autoFocus?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -1349,7 +1562,7 @@ function ConfirmChip({
       <button
         aria-label="Confirm removal"
         onClick={onConfirm}
-        autoFocus
+        autoFocus={autoFocus}
         className="ml-1 grid h-6 w-6 place-items-center rounded-pill hover:bg-live/25"
       >
         <IconCheck className="h-3.5 w-3.5" />

@@ -326,13 +326,15 @@ export function useClipMenu() {
 }
 
 /**
- * A white "Share" button that opens the clip's share entries in a glass menu
- * under it — the player, the screenshot viewer and the clip cards all use it.
+ * A "Share" button that opens the clip's share entries in a glass menu under
+ * it — the player, the screenshot viewer and the clip cards all use it. White
+ * in the viewers; on a card it sits beside "Open" and matches it.
  */
 export function ShareMenuButton({
   clip,
   onExport,
   size = "sm",
+  variant = "primary",
   disabled,
   className,
 }: {
@@ -340,6 +342,7 @@ export function ShareMenuButton({
   /** Opens the export dialog; recordings only, see {@link shareEntries}. */
   onExport?: () => void;
   size?: "sm" | "md";
+  variant?: "primary" | "secondary";
   disabled?: boolean;
   className?: string;
 }) {
@@ -347,7 +350,7 @@ export function ShareMenuButton({
   const pickFriend = useShare((state) => state.pick);
   return (
     <Button
-      variant="primary"
+      variant={variant}
       size={size}
       disabled={disabled}
       className={className}

@@ -9,6 +9,7 @@ import type {
   Clip,
   ClipTrack,
   EncoderInfo,
+  Trashed,
 } from "./types";
 
 export const mockDevices: AudioDevice[] = [
@@ -343,7 +344,68 @@ export const mockClips: Clip[] = [
     recording: false,
     tags: [],
   })),
+  // More days, games, tags and two recordings: enough for the day headings
+  // ("Today", a weekday, a date, last year) and for a chip row that overflows.
+  ...(
+    [
+      ["r1", "Counter-Strike 2", 4 * 60, 1_082_000, 2_100_000_000, true, ["ranked"], "Premier evening"],
+      ["c8", "Valorant", 2 * 24 * 60, 41_000, 210_000_000, false, ["clutch", "funny"], null],
+      ["r2", "Valorant", 3 * 24 * 60, 2_700_000, 3_400_000_000, true, ["ranked"], null],
+      ["c9", "Rocket League", 5 * 24 * 60, 28_000, 120_000_000, false, ["funny"], "Ceiling shot"],
+      ["c10", "Minecraft", 12 * 24 * 60, 55_000, 260_000_000, false, [], null],
+      ["c11", "Valorant", 400 * 24 * 60, 33_000, 150_000_000, false, ["ace"], "First ace"],
+    ] as const
+  ).map(([id, game, minutesAgo, durationMs, sizeBytes, recording, tags, title]) => ({
+    id,
+    path: `C:\\Users\\user\\Videos\\ClippiBoy\\${id}.mp4`,
+    createdAt: Date.now() - 1000 * 60 * minutesAgo,
+    durationMs,
+    game,
+    width: 2560,
+    height: 1440,
+    sizeBytes,
+    thumbPath: null,
+    title,
+    description: null,
+    favorite: id === "c11",
+    edit: null,
+    original: null,
+    originalAvailable: false,
+    facecam: null,
+    screenshot: false,
+    recording,
+    tags: [...tags],
+  })),
+  {
+    id: "s3",
+    path: "C:\\Users\\user\\Videos\\ClippiBoy\\shot_elden.png",
+    createdAt: Date.now() - 1000 * 60 * 60 * 24 * 9,
+    durationMs: 0,
+    game: "Elden Ring",
+    width: 3840,
+    height: 2160,
+    sizeBytes: 8_100_000,
+    thumbPath: null,
+    title: null,
+    description: null,
+    favorite: false,
+    edit: null,
+    original: null,
+    originalAvailable: false,
+    facecam: null,
+    screenshot: true,
+    recording: false,
+    tags: [],
+  },
 ];
+
+/** Recently deleted, so the trash button and its view show without a backend. */
+export const mockTrash: Trashed[] = [mockClips[2], mockClips[3]].map((clip, i) => ({
+  clip: { ...clip, id: `t${i + 1}` },
+  deletedAt: Date.now() - 1000 * 60 * 60 * 24 * (i + 1),
+  expiresAt: Date.now() + 1000 * 60 * 60 * 24 * (29 - i * 26),
+  fromPath: clip.path,
+}));
 
 /** Without a backend there are no real audio tracks — the mixer should still be there. */
 export const mockTracks: ClipTrack[] = [

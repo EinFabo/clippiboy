@@ -333,6 +333,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         targets: mock.mockTargets,
         encoders: mock.mockEncoders,
         clips: mock.mockClips,
+        trash: mock.mockTrash,
       });
       setInterval(() => {
         const levels: LevelMap = {};
