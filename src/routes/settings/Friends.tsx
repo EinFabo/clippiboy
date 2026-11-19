@@ -98,30 +98,6 @@ export function FriendsTab() {
         </Card>
       </section>
 
-      <section>
-        <SectionTitle title="Notifications" />
-        <Card className="divide-y divide-line">
-          <Row label="Friend requests" hint="New requests, and when someone accepts yours">
-            <Toggle checked={friends.notifyRequests} onChange={(notifyRequests) => patch({ notifyRequests })} />
-          </Row>
-          <Row label="A friend comes online">
-            <Toggle checked={friends.notifyOnline} onChange={(notifyOnline) => patch({ notifyOnline })} />
-          </Row>
-          <Row label="A friend starts a game">
-            <Toggle checked={friends.notifyGames} onChange={(notifyGames) => patch({ notifyGames })} />
-          </Row>
-          <Row
-            label="Notify me while I'm playing"
-            hint="On: a small ClippiBoy banner over the game. Off: nothing pops up — the console (Alt+C) still shows it all"
-          >
-            <Toggle
-              checked={friends.notifyWhilePlaying}
-              onChange={(notifyWhilePlaying) => patch({ notifyWhilePlaying })}
-            />
-          </Row>
-        </Card>
-      </section>
-
       {signedIn && (
         <section>
           <SectionTitle title="Blocked" />
