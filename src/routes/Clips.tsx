@@ -57,8 +57,9 @@ import type { Clip, FocusClip, Trashed } from "@/lib/types";
  * What the gallery shows: the filters, the sort, and whether Recently deleted
  * is open instead.
  *
- * Outside the component, so it outlives a trip to another page — the routes
- * unmount on every switch. Never written anywhere, so a restart starts afresh.
+ * Outside the component, so filters and sort outlive a trip to another page —
+ * the routes unmount on every switch. Recently deleted is closed on the way
+ * out. Never written anywhere, so a restart starts afresh.
  */
 const useGallery = create<{ filter: ClipFilter; sort: ClipSort; inTrash: boolean }>(() => ({
   filter: NO_FILTER,
@@ -113,6 +114,9 @@ export function Clips({
       })),
     );
   const { filter, sort, inTrash } = useGallery();
+  // Filters and sort wait for the way back; Recently deleted does not —
+  // coming back to Clips shows the library.
+  useEffect(() => () => useGallery.setState({ inTrash: false }), []);
   /** Which clip is in the player. Editing always happens there. */
   const [open, setOpen] = useState<number | null>(null);
   /** Sekunde, an der ein aus der Konsole übergebener Clip anfangen soll. Gilt
