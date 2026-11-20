@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/Button";
 import { Toggle } from "@/components/ui/Controls";
 import { api, inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
-import { Row } from "./shared";
+import { streamDeckSummary } from "@/lib/settingsSummary";
+import { Row, SettingsGroup } from "./shared";
 
 /**
  * The local port the Stream Deck plugin presses the buttons through.
@@ -68,57 +69,63 @@ export function StreamDeck() {
   return (
     <>
       <Card className="divide-y divide-line">
-        <Row
-          label="Allow the Stream Deck"
-          hint="Save a clip, take a screenshot and switch the buffer from a key — with the buffer level on it"
+        <SettingsGroup
+          title="Stream Deck"
+          storageKey="hotkeys.streamdeck"
+          summary={streamDeckSummary(control.enabled, control.port)}
         >
-          <Toggle
-            checked={control.enabled}
-            onChange={(enabled) => patchConfig({ control: { ...control, enabled } })}
-          />
-        </Row>
-        <Row
-          label="Port"
-          hint="Only worth changing when something else already holds this one"
-        >
-          <input
-            aria-label="Port"
-            value={port}
-            disabled={!control.enabled}
-            inputMode="numeric"
-            onChange={(e) => setPort(e.target.value)}
-            onBlur={commitPort}
-            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-            className={cn(
-              "w-24 rounded-inner border border-line bg-transparent px-2 py-1.5 text-right font-mono text-sm outline-none",
-              "transition-colors hover:border-line-strong focus:border-line-strong focus:bg-elevated",
-              "disabled:opacity-40",
-            )}
-          />
-        </Row>
-        <Row
-          label="Token"
-          hint="Changes every time ClippiBoy starts — the plugin picks it up by itself"
-        >
-          <div className="flex items-center gap-2">
-            <code className="max-w-[15rem] truncate font-mono text-xs text-ink-muted">
-              {shown ? token : "•".repeat(18)}
-            </code>
-            <Button size="sm" variant="ghost" onClick={() => setShown(!shown)}>
-              {shown ? "Hide" : "Show"}
-            </Button>
-            <Button size="sm" onClick={copy} disabled={!token}>
-              {copied ? "Copied" : "Copy"}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={regenerateControlToken}
-            >
-              New
-            </Button>
-          </div>
-        </Row>
+          <Row
+            label="Allow the Stream Deck"
+            hint="Save a clip, take a screenshot and switch the buffer from a key — with the buffer level on it"
+          >
+            <Toggle
+              checked={control.enabled}
+              onChange={(enabled) => patchConfig({ control: { ...control, enabled } })}
+            />
+          </Row>
+          <Row
+            label="Port"
+            hint="Only worth changing when something else already holds this one"
+          >
+            <input
+              aria-label="Port"
+              value={port}
+              disabled={!control.enabled}
+              inputMode="numeric"
+              onChange={(e) => setPort(e.target.value)}
+              onBlur={commitPort}
+              onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+              className={cn(
+                "w-24 rounded-inner border border-line bg-transparent px-2 py-1.5 text-right font-mono text-sm outline-none",
+                "transition-colors hover:border-line-strong focus:border-line-strong focus:bg-elevated",
+                "disabled:opacity-40",
+              )}
+            />
+          </Row>
+          <Row
+            label="Token"
+            hint="Changes every time ClippiBoy starts — the plugin picks it up by itself"
+          >
+            <div className="flex items-center gap-2">
+              <code className="max-w-[15rem] truncate font-mono text-xs text-ink-muted">
+                {shown ? token : "•".repeat(18)}
+              </code>
+              <Button size="sm" variant="ghost" onClick={() => setShown(!shown)}>
+                {shown ? "Hide" : "Show"}
+              </Button>
+              <Button size="sm" onClick={copy} disabled={!token}>
+                {copied ? "Copied" : "Copy"}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={regenerateControlToken}
+              >
+                New
+              </Button>
+            </div>
+          </Row>
+        </SettingsGroup>
       </Card>
       <p className="mt-3 text-xs text-ink-faint">
         The port listens on this machine only and answers nothing without the

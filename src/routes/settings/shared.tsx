@@ -1,5 +1,8 @@
+import { useId, useState } from "react";
 import type { CaptureTarget, OverlayCorner } from "@/lib/types";
 import { cn } from "@/lib/cn";
+import { readOpen, writeOpen } from "@/lib/groupState";
+import { Toggle } from "@/components/ui/Controls";
 
 /**
  * The four corners in reading order: value, what it is called, and where the
@@ -68,6 +71,101 @@ export function Row({
       </div>
       <div className="shrink-0">{children}</div>
     </div>
+  );
+}
+
+/**
+ * A collapsible group of rows inside a `Card`: a header row (title, status
+ * summary, optional master switch, round chevron) and, when open, its rows below
+ * with the card's dividers. Render it as a direct child of a `divide-y` card.
+ * One level only; the open state is remembered per `storageKey`.
+ */
+export function SettingsGroup({
+  title,
+  summary,
+  storageKey,
+  defaultOpen = false,
+  master,
+  children,
+}: {
+  title: string;
+  /** A status, shown muted on one line (not a hint). */
+  summary?: React.ReactNode;
+  /** Names the group in localStorage (`cb.settings.group.<key>`). */
+  storageKey: string;
+  defaultOpen?: boolean;
+  /** Switch in the header; off dims the rows inside and makes them inert. */
+  master?: { checked: boolean; onChange: (checked: boolean) => void; label?: string };
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(() => readOpen(storageKey, defaultOpen));
+  const id = useId();
+  const toggle = () =>
+    setOpen((now) => {
+      writeOpen(storageKey, !now);
+      return !now;
+    });
+  const off = master !== undefined && !master.checked;
+  return (
+    <>
+      {/* The whole header toggles; the switch keeps its click to itself. */}
+      <div
+        onClick={toggle}
+        className="flex cursor-pointer items-center justify-between gap-6 px-5 py-3.5"
+      >
+        <p className="text-sm font-medium">{title}</p>
+        <div className="flex min-w-0 items-center gap-3.5">
+          {summary != null && (
+            <span className="min-w-0 truncate text-[13px] text-ink-muted">{summary}</span>
+          )}
+          {master && (
+            <span onClick={(e) => e.stopPropagation()}>
+              <Toggle
+                checked={master.checked}
+                label={master.label ?? title}
+                onChange={master.onChange}
+              />
+            </span>
+          )}
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={id}
+            aria-label={open ? `Collapse ${title}` : `Expand ${title}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggle();
+            }}
+            className="grid size-7 shrink-0 place-items-center rounded-pill border border-line
+              bg-elevated text-ink-muted transition-colors hover:bg-hover hover:text-ink"
+          >
+            <svg
+              viewBox="0 0 12 12"
+              aria-hidden
+              className={cn(
+                "size-3 transition-transform duration-200 ease-[var(--ease-out-soft)] motion-reduce:transition-none",
+                open && "rotate-180",
+              )}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M2.5 4.5 6 8l3.5-3.5" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div
+        id={id}
+        hidden={!open}
+        inert={off ? true : undefined}
+        className={cn("divide-y divide-line", off && "opacity-40")}
+      >
+        {children}
+      </div>
+    </>
   );
 }
 

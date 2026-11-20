@@ -33,7 +33,8 @@ import {
   withHold,
   type PadFamily,
 } from "@/lib/hotkeyText";
-import { Row } from "./shared";
+import { controllerSummary } from "@/lib/settingsSummary";
+import { Row, SettingsGroup } from "./shared";
 import { StreamDeck } from "./StreamDeck";
 
 /**
@@ -49,7 +50,6 @@ export function HotkeysTab() {
       </section>
 
       <section>
-        <SectionTitle title="Stream Deck" />
         <StreamDeck />
       </section>
     </>
@@ -304,12 +304,18 @@ export function Hotkeys({ only }: { only?: PadAction } = {}) {
     <>
       <Card className="divide-y divide-line">
         {rows.map(({ label, hint, first, second }) => (
-          <Row key={first} label={label} hint={hint}>
-            <div className="flex flex-col items-end gap-1">
-              {input(first, false)}
-              {input(second, true)}
+          <div key={first} className="flex items-center justify-between gap-6 px-5 py-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">{label}</p>
+              {hint && <p className="mt-1 text-xs text-ink-muted">{hint}</p>}
             </div>
-          </Row>
+            {/* One fixed column per slot, so Tap/Hold and the bindings line up from row to row.
+                In a narrow window a set second slot wraps under the first. */}
+            <div className="flex w-[366px] shrink-0 flex-wrap items-center gap-x-3 gap-y-1 min-[1280px]:w-[596px]">
+              <div className="flex w-[310px] shrink-0 justify-start">{input(first, false)}</div>
+              <div className="flex shrink-0 justify-start">{input(second, true)}</div>
+            </div>
+          </div>
         ))}
         {!pads && !only && (
           <Row label="Controllers">
@@ -329,26 +335,33 @@ export function Hotkeys({ only }: { only?: PadAction } = {}) {
       {error?.at === "keys" && <p className="mt-2 text-xs text-live">{error.text}</p>}
 
       {pads && (
-        <div className="mt-8">
-          <SectionTitle title="Controller" />
-          <ControllerSection
-            profiles={config.padProfiles}
-            seen={config.padFamiliesSeen}
-            lastUsed={config.padLastUsed}
-            controllers={controllers}
-            connected={connected}
-            busy={saving}
-            recording={recording}
-            onRecording={setRecording}
-            onApply={(profiles) => apply("pads", {}, profiles)}
-          />
+        <>
+          <Card className="mt-4 divide-y divide-line">
+            <SettingsGroup
+              title="Controller"
+              storageKey="hotkeys.controller"
+              summary={controllerSummary(config.padProfiles, config.padFamiliesSeen, connected, config.padLastUsed)}
+            >
+              <ControllerSection
+                profiles={config.padProfiles}
+                seen={config.padFamiliesSeen}
+                lastUsed={config.padLastUsed}
+                controllers={controllers}
+                connected={connected}
+                busy={saving}
+                recording={recording}
+                onRecording={setRecording}
+                onApply={(profiles) => apply("pads", {}, profiles)}
+              />
+            </SettingsGroup>
+          </Card>
           {notes.map((note) => (
             <p key={note} className="mt-2 text-xs text-ink-muted">
               {note}
             </p>
           ))}
           {error?.at === "pads" && <p className="mt-2 text-xs text-live">{error.text}</p>}
-        </div>
+        </>
       )}
     </>
   );
@@ -404,7 +417,7 @@ function ControllerSection({
   };
 
   return (
-    <Card className="divide-y divide-line">
+    <>
       {selector && (
         <div className="flex items-center justify-between gap-4 px-5 py-3">
           <Segmented
@@ -474,7 +487,7 @@ function ControllerSection({
       <Row label="Connected">
         <ControllerList controllers={controllers} />
       </Row>
-    </Card>
+    </>
   );
 }
 
@@ -721,7 +734,14 @@ function HotkeyInput({
         ) : value ? (
           <Hotkey value={value} family={family} small={second} ghost={ghost} />
         ) : second ? (
-          <span className="px-1 text-xs text-ink-faint">+ Add</span>
+          <span
+            className="grid size-[26px] place-items-center rounded-pill border border-dashed border-line-strong text-ink-faint"
+          >
+            <svg viewBox="0 0 12 12" aria-hidden className="size-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+              <path d="M6 2.5v7M2.5 6h7" />
+            </svg>
+            <span className="sr-only">Add a second binding</span>
+          </span>
         ) : (
           <span className={cn("px-1.5 text-[13px] text-ink-faint", ghost && "opacity-60")}>
             Not set

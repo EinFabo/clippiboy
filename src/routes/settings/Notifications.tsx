@@ -7,7 +7,8 @@ import { NOTIFY_EVENTS, type BannerField } from "@/lib/notifyEvents";
 import type { SoundConfig, SoundKind, SoundSetting } from "@/lib/types";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Segmented, Select, Slider, Toggle } from "@/components/ui/Controls";
-import { CornerPad, FOLLOW, Row, UNKNOWN, screenChoice } from "./shared";
+import { bannerSummary, soundsSummary } from "@/lib/settingsSummary";
+import { CornerPad, FOLLOW, Row, SettingsGroup, UNKNOWN, screenChoice } from "./shared";
 
 const percent = (value: number) => `${Math.round(value * 100)} %`;
 
@@ -16,7 +17,7 @@ const DEFAULT = "";
 
 /** Play button, name, volume, Banner, Sound — the header row uses the same columns. */
 const GRID =
-  "grid grid-cols-[36px_minmax(120px,190px)_minmax(0,1fr)_46px_64px_64px] items-center gap-3.5 px-5";
+  "grid grid-cols-[30px_minmax(120px,190px)_minmax(0,1fr)_46px_64px_64px] items-center gap-3.5 px-5";
 
 /** Banner, sounds and the friends' notices as one list: a few general rows, then one row per event. */
 export function NotificationsTab() {
@@ -66,6 +67,26 @@ export function NotificationsTab() {
     });
   }
 
+  const screenOptions = [
+    // Only there while nothing matches, so the dropdown never shows
+    // a screen that is not the one actually in use.
+    ...(banner.value === null
+      ? [
+          {
+            value: UNKNOWN,
+            label: banner.unplugged ? `${overlay.monitor} · not connected` : "Primary screen",
+          },
+        ]
+      : []),
+    ...monitors.map((monitor) => ({
+      value: monitor.id,
+      label: monitor.isPrimary ? `${monitor.title} · primary` : monitor.title,
+    })),
+    { value: FOLLOW, label: "Follows the game" },
+  ];
+  const screenLabel =
+    screenOptions.find((o) => o.value === (banner.value ?? UNKNOWN))?.label ?? "Primary screen";
+
   const bannerOn = (field: BannerField) =>
     field.scope === "overlay" ? overlay[field.key] : friends[field.key];
   const setBanner = (field: BannerField, value: boolean) =>
@@ -78,110 +99,106 @@ export function NotificationsTab() {
       <section>
         <SectionTitle title="Notifications" />
         <Card className="divide-y divide-line">
-          <Row label="Banner over the game">
-            <Toggle checked={overlay.enabled} onChange={(enabled) => patchOverlay({ enabled })} />
-          </Row>
-          <Row
-            label="Banner position"
-            hint={banner.unplugged ? "That screen is not connected — the banner goes to the primary one" : undefined}
+          <SettingsGroup
+            title="Banner over the game"
+            storageKey="notifications.banner"
+            summary={bannerSummary(screenLabel, overlay.corner, overlay.durationMs)}
+            master={{ checked: overlay.enabled, onChange: (enabled) => patchOverlay({ enabled }) }}
           >
-            <div className="flex items-center gap-3.5">
-              <Select
-                label="Screen"
-                disabled={!overlay.enabled}
-                value={banner.value ?? UNKNOWN}
-                options={[
-                  // Only there while nothing matches, so the dropdown never shows
-                  // a screen that is not the one actually in use.
-                  ...(banner.value === null
-                    ? [
-                        {
-                          value: UNKNOWN,
-                          label: banner.unplugged ? `${overlay.monitor} · not connected` : "Primary screen",
-                        },
-                      ]
-                    : []),
-                  ...monitors.map((monitor) => ({
-                    value: monitor.id,
-                    label: monitor.isPrimary ? `${monitor.title} · primary` : monitor.title,
-                  })),
-                  { value: FOLLOW, label: "Follows the game" },
-                ]}
-                onChange={(value) => {
-                  if (value === UNKNOWN) return;
-                  patchOverlay(
-                    value === FOLLOW
-                      ? { followActiveScreen: true }
-                      : {
-                          monitor: value,
-                          // Both halves, so the banner still finds this screen
-                          // after the device names have been reshuffled.
-                          monitorStableId: monitors.find((m) => m.id === value)?.stableId ?? null,
-                          followActiveScreen: false,
-                        },
-                  );
-                }}
-              />
-              <CornerPad
-                value={overlay.corner}
-                disabled={!overlay.enabled}
-                onChange={(corner) => patchOverlay({ corner })}
-              />
-            </div>
-          </Row>
-          <Row label="Duration">
-            <Segmented
-              disabled={!overlay.enabled}
-              value={String(overlay.durationMs)}
-              options={[2000, 3500, 5000, 8000].map((ms) => ({
-                key: String(ms),
-                label: `${ms / 1000} s`,
-              }))}
-              onChange={(key) => patchOverlay({ durationMs: Number(key) })}
-            />
-          </Row>
-          <Row label="REC badge while recording">
-            <Toggle
-              checked={overlay.recBadge}
-              disabled={!overlay.enabled}
-              onChange={(recBadge) => patchOverlay({ recBadge })}
-            />
-          </Row>
-          <Row label="Play sounds">
-            <Toggle checked={sounds.enabled} onChange={(enabled) => patch({ enabled })} />
-          </Row>
-          <Row label="Sound output">
-            <div className="flex items-center gap-4">
-              <Select
-                label="Output device"
-                value={sounds.device ?? DEFAULT}
-                options={deviceOptions}
-                disabled={!sounds.enabled}
-                onChange={(id) =>
-                  patch(
-                    id === DEFAULT
-                      ? { device: null, deviceName: null }
-                      : {
-                          device: id,
-                          deviceName: outputs.find((d) => d.id === id)?.name ?? sounds.deviceName,
-                        },
-                  )
-                }
-              />
-              <div className="w-32">
-                <Slider
-                  disabled={!sounds.enabled}
-                  label="Volume of all sounds"
-                  value={Math.round(sounds.volume * 100)}
-                  min={0}
-                  max={100}
-                  onChange={(value) => patch({ volume: value / 100 })}
+            <Row
+              label="Banner position"
+              hint={banner.unplugged ? "That screen is not connected — the banner goes to the primary one" : undefined}
+            >
+              <div className="flex items-center gap-3.5">
+                <Select
+                  label="Screen"
+                  value={banner.value ?? UNKNOWN}
+                  options={screenOptions}
+                  onChange={(value) => {
+                    if (value === UNKNOWN) return;
+                    patchOverlay(
+                      value === FOLLOW
+                        ? { followActiveScreen: true }
+                        : {
+                            monitor: value,
+                            // Both halves, so the banner still finds this screen
+                            // after the device names have been reshuffled.
+                            monitorStableId: monitors.find((m) => m.id === value)?.stableId ?? null,
+                            followActiveScreen: false,
+                          },
+                    );
+                  }}
                 />
+                <CornerPad value={overlay.corner} onChange={(corner) => patchOverlay({ corner })} />
               </div>
-              <span className="w-12 shrink-0 text-right font-mono text-sm text-ink-muted tabular-nums">
-                {percent(sounds.volume)}
-              </span>
-            </div>
+            </Row>
+            <Row label="Duration">
+              <Segmented
+                value={String(overlay.durationMs)}
+                options={[2000, 3500, 5000, 8000].map((ms) => ({
+                  key: String(ms),
+                  label: `${ms / 1000} s`,
+                }))}
+                onChange={(key) => patchOverlay({ durationMs: Number(key) })}
+              />
+            </Row>
+            <Row label="REC badge while recording">
+              <Toggle checked={overlay.recBadge} onChange={(recBadge) => patchOverlay({ recBadge })} />
+            </Row>
+          </SettingsGroup>
+          <SettingsGroup
+            title="Sounds"
+            storageKey="notifications.sounds"
+            summary={soundsSummary(
+              sounds.device === null ? null : (sounds.deviceName ?? "Unknown device"),
+              sounds.volume,
+            )}
+            master={{
+              checked: sounds.enabled,
+              onChange: (enabled) => patch({ enabled }),
+              label: "Play sounds",
+            }}
+          >
+            <Row label="Sound output">
+              <div className="flex items-center gap-4">
+                <Select
+                  label="Output device"
+                  value={sounds.device ?? DEFAULT}
+                  options={deviceOptions}
+                  onChange={(id) =>
+                    patch(
+                      id === DEFAULT
+                        ? { device: null, deviceName: null }
+                        : {
+                            device: id,
+                            deviceName: outputs.find((d) => d.id === id)?.name ?? sounds.deviceName,
+                          },
+                    )
+                  }
+                />
+                <div className="w-32">
+                  <Slider
+                    label="Volume of all sounds"
+                    value={Math.round(sounds.volume * 100)}
+                    min={0}
+                    max={100}
+                    onChange={(value) => patch({ volume: value / 100 })}
+                  />
+                </div>
+                <span className="w-12 shrink-0 text-right font-mono text-sm text-ink-muted tabular-nums">
+                  {percent(sounds.volume)}
+                </span>
+              </div>
+            </Row>
+          </SettingsGroup>
+          <Row
+            label="Notify me while I'm playing"
+            hint="On: a small ClippiBoy banner over the game. Off: nothing pops up — the console (Alt+C) still shows it all"
+          >
+            <Toggle
+              checked={friends.notifyWhilePlaying}
+              onChange={(notifyWhilePlaying) => patchConfig({ friends: { ...friends, notifyWhilePlaying } })}
+            />
           </Row>
         </Card>
         <p className="mt-3 text-xs text-ink-faint">
@@ -194,7 +211,7 @@ export function NotificationsTab() {
       <section>
         <SectionTitle title="Per event" />
         <Card className="divide-y divide-line">
-          <div className={`${GRID} py-3 text-xs font-medium text-ink-muted`}>
+          <div className={`${GRID} py-2.5 text-xs font-medium text-ink-muted`}>
             <span />
             <span>Event</span>
             <span>Volume</span>
@@ -208,7 +225,7 @@ export function NotificationsTab() {
             const locked = !sounds.enabled || gated;
             const off = locked || !setting?.on;
             return (
-              <div key={label} className={`${GRID} py-3.5`}>
+              <div key={label} className={`${GRID} py-2`}>
                 {sound ? (
                   <button
                     type="button"
@@ -216,7 +233,7 @@ export function NotificationsTab() {
                     title={gated ? "Turn the banner on to hear this one" : "Listen"}
                     onClick={() => listen(sound)}
                     disabled={gated}
-                    className="grid h-9 w-9 shrink-0 place-items-center rounded-pill border border-line
+                    className="grid size-[30px] shrink-0 place-items-center rounded-pill border border-line
                       bg-elevated text-ink-muted transition-colors hover:bg-hover hover:text-ink
                       disabled:pointer-events-none disabled:opacity-40"
                   >
@@ -225,7 +242,7 @@ export function NotificationsTab() {
                     </svg>
                   </button>
                 ) : (
-                  <span className="h-9" />
+                  <span className="h-[30px]" />
                 )}
                 <p className="min-w-0 text-sm font-medium">{label}</p>
                 {sound && setting ? (
@@ -273,18 +290,6 @@ export function NotificationsTab() {
           })}
         </Card>
       </section>
-
-      <Card>
-        <Row
-          label="Notify me while I'm playing"
-          hint="On: a small ClippiBoy banner over the game. Off: nothing pops up — the console (Alt+C) still shows it all"
-        >
-          <Toggle
-            checked={friends.notifyWhilePlaying}
-            onChange={(notifyWhilePlaying) => patchConfig({ friends: { ...friends, notifyWhilePlaying } })}
-          />
-        </Row>
-      </Card>
     </div>
   );
 }
