@@ -100,11 +100,11 @@ export function SettingsGroup({
 }) {
   const [open, setOpen] = useState(() => readOpen(storageKey, defaultOpen));
   const id = useId();
-  const toggle = () =>
-    setOpen((now) => {
-      writeOpen(storageKey, !now);
-      return !now;
-    });
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    writeOpen(storageKey, next);
+  };
   const off = master !== undefined && !master.checked;
   return (
     <>
@@ -131,7 +131,7 @@ export function SettingsGroup({
             type="button"
             aria-expanded={open}
             aria-controls={id}
-            aria-label={open ? `Collapse ${title}` : `Expand ${title}`}
+            aria-label={title}
             onClick={(e) => {
               e.stopPropagation();
               toggle();

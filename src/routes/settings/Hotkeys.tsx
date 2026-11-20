@@ -311,8 +311,14 @@ export function Hotkeys({ only }: { only?: PadAction } = {}) {
             </div>
             {/* One fixed column per slot, so Tap/Hold and the bindings line up from row to row.
                 In a narrow window a set second slot wraps under the first. */}
-            <div className="flex w-[366px] shrink-0 flex-wrap items-center gap-x-3 gap-y-1 min-[1280px]:w-[596px]">
-              <div className="flex w-[310px] shrink-0 justify-start">{input(first, false)}</div>
+            <div
+              className={cn(
+                "flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1",
+                // The setup's single row has no columns to line up with.
+                only ? "justify-end" : "w-[366px] min-[1280px]:w-[596px]",
+              )}
+            >
+              <div className={cn("flex shrink-0 justify-start", !only && "w-[310px]")}>{input(first, false)}</div>
               <div className="flex shrink-0 justify-start">{input(second, true)}</div>
             </div>
           </div>
