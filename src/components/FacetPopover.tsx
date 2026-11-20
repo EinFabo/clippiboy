@@ -153,7 +153,7 @@ export function FacetPopover({
       }
       return;
     }
-    if (event.key === "Tab") {
+    if (event.key === "Tab" && removing === null) {
       // Out of the list and on from its button, as if it had never been open.
       anchor.current?.querySelector<HTMLElement>("button")?.focus();
       onClose();
@@ -195,10 +195,8 @@ export function FacetPopover({
         aria-checked={checked}
         onClick={toggle}
         onContextMenu={(event) => {
-          if (muted || !onRemove) {
-            event.preventDefault();
-            return;
-          }
+          // Nothing to offer: TextMenu keeps the WebView's own menu away.
+          if (muted || !onRemove) return;
           menu.open(event, [
             { kind: "item", label: "Remove game name…", onSelect: () => setRemoving(name) },
           ]);
@@ -230,7 +228,15 @@ export function FacetPopover({
       role="dialog"
       aria-label={`Filter by ${noun}`}
       onKeyDown={onKeyDown}
-      onContextMenu={(event) => event.preventDefault()}
+      tabIndex={-1}
+      onPointerDown={(event) => {
+        // A click on a bare part keeps focus inside the list, so Escape and
+        // the arrows still reach it.
+        if (!(event.target as HTMLElement).closest("button, input")) {
+          event.preventDefault();
+          (field.current ?? box.current)?.focus();
+        }
+      }}
       style={{
         left: place?.left ?? 0,
         top: place ? place.top : 0,
@@ -274,7 +280,13 @@ export function FacetPopover({
         )}
       </div>
       <div className="mt-1 flex shrink-0 justify-end border-t border-line pt-1.5">
-        <Button variant="ghost" size="sm" className="h-[26px] px-2.5" disabled={!anyChecked} onClick={onClear}>
+        <Button variant="ghost" size="sm" className="h-[26px] px-2.5" disabled={!anyChecked}
+          onClick={() => {
+            onClear();
+            // The button disables itself; keep focus in the list.
+            (field.current ?? box.current?.querySelector<HTMLElement>("[data-facet-row]") ?? box.current)?.focus();
+          }}
+        >
           Clear
         </Button>
       </div>

@@ -143,13 +143,15 @@ function UsageCard({ usage }: { usage: StorageUsage | null }) {
     ],
   ];
   const total = rows.reduce((sum, [, bytes]) => sum + bytes, 0);
+  // Nothing to show until the numbers are in.
+  if (!usage) return null;
 
   return (
     <Card className="mt-3 divide-y divide-line">
       <SettingsGroup
         title="Everything ClippiBoy takes"
         storageKey="storage.usage"
-        summary={usage ? <span className="font-mono">{formatSize(total)}</span> : "…"}
+        summary={<span className="font-mono">{formatSize(total)}</span>}
       >
         {rows.map(([label, bytes, hint]) => (
           <div key={label} className="flex items-center justify-between gap-6 p-4">

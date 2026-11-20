@@ -41,7 +41,7 @@ test("camera summaries", () => {
   assert.equal(camAppearsSummary(true, true, false, false), "Clips · Recordings");
   assert.equal(camAppearsSummary(true, true, true, true), "Clips · Recordings · Screenshots · Console");
   assert.equal(camAppearsSummary(false, false, false, false), "Nowhere");
-  assert.equal(camPositionSummary("circle", true, 0), "Round · mirrored");
+  assert.equal(camPositionSummary("circle", true, 0), "Circle · mirrored");
   assert.equal(camPositionSummary("rect", false, 0), "Rectangle");
   assert.equal(camPositionSummary("rounded", false, -40), "Rounded · \u221240 ms");
   assert.equal(camPositionSummary("rounded", true, 120), "Rounded · mirrored · +120 ms");

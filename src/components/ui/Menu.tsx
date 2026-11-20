@@ -54,8 +54,6 @@ export interface MenuOptions {
   anchor?: Anchor;
   /** Space between the anchor and the menu. */
   gap?: number;
-  /** Stays put above the scrolling entries — a search field, say. */
-  header?: ReactNode;
 }
 
 interface MenuApi {
@@ -132,7 +130,6 @@ function Surface({
   alignRight,
   anchor,
   gap,
-  header,
   onClose,
 }: Open & { onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null);
@@ -270,7 +267,6 @@ function Surface({
         shown ? "scale-100 opacity-100" : "scale-[0.97] opacity-0",
       )}
     >
-      {header}
       <div ref={list} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {entries.map((entry, index) =>
           entry.kind === "separator" ? (

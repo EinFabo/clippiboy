@@ -114,7 +114,7 @@ export function SettingsGroup({
       {/* The whole header toggles; the switch keeps its click to itself. */}
       <div
         onClick={toggle}
-        className="flex cursor-pointer items-center justify-between gap-6 px-5 py-3.5"
+        className="flex cursor-pointer items-center justify-between gap-6 px-5 py-3.5 [&:has(+[hidden]:last-child)]:border-b-0"
       >
         <p className="text-sm font-medium">{title}</p>
         <div className="flex min-w-0 items-center gap-3.5">

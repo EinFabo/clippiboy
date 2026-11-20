@@ -66,7 +66,7 @@ export function camAppearsSummary(inClips: boolean, inRecordings: boolean, inScr
   return places.length > 0 ? places.join(" · ") : "Nowhere";
 }
 
-const SHAPE_WORDS: Record<CamShape, string> = { rect: "Rectangle", rounded: "Rounded", circle: "Round" };
+const SHAPE_WORDS: Record<CamShape, string> = { rect: "Rectangle", rounded: "Rounded", circle: "Circle" };
 
 /** The status a closed Position group shows: shape, mirroring, a delay if set. */
 export function camPositionSummary(shape: CamShape, mirror: boolean, delayMs: number): string {
