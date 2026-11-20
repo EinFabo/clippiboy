@@ -10,7 +10,7 @@ import { IconCheck, IconClose } from "@/components/icons";
 import { Segmented } from "@/components/ui/Controls";
 import { useCountUp } from "@/lib/useCountUp";
 import type { StorageUsage, TrimOriginals } from "@/lib/types";
-import { Row } from "./shared";
+import { Row, SettingsGroup } from "./shared";
 
 export function StorageTab() {
   return (
@@ -89,7 +89,7 @@ function Storage() {
   // cache can take a moment, and the button has nothing to do with it.
   return (
     <>
-      {usage && <UsageCard usage={usage} />}
+      <UsageCard usage={usage} />
       <ClearTrims onCleared={() => setReads((n) => n + 1)} />
       {usage && usage.facecamBytes > 0 && (
         <BakeCams bytes={usage.facecamBytes} onBaked={() => setReads((n) => n + 1)} />
@@ -98,8 +98,8 @@ function Storage() {
   );
 }
 
-function UsageCard({ usage }: { usage: StorageUsage }) {
-  const rows: Array<[string, number, string]> = [
+function UsageCard({ usage }: { usage: StorageUsage | null }) {
+  const rows: Array<[string, number, string]> = !usage ? [] : [
     [
       "Clips",
       usage.clipsBytes,
@@ -146,24 +146,21 @@ function UsageCard({ usage }: { usage: StorageUsage }) {
 
   return (
     <Card className="mt-3 divide-y divide-line">
-      {rows.map(([label, bytes, hint]) => (
-        <div
-          key={label}
-          className="flex items-center justify-between gap-6 p-4"
-        >
-          <div>
-            <p className="text-sm">{label}</p>
-            <p className="mt-0.5 text-xs text-ink-faint">{hint}</p>
+      <SettingsGroup
+        title="Everything ClippiBoy takes"
+        storageKey="storage.usage"
+        summary={usage ? <span className="font-mono">{formatSize(total)}</span> : "…"}
+      >
+        {rows.map(([label, bytes, hint]) => (
+          <div key={label} className="flex items-center justify-between gap-6 p-4">
+            <div>
+              <p className="text-sm">{label}</p>
+              <p className="mt-0.5 text-xs text-ink-faint">{hint}</p>
+            </div>
+            <span className="shrink-0 font-mono text-sm text-ink-muted">{formatSize(bytes)}</span>
           </div>
-          <span className="shrink-0 font-mono text-sm text-ink-muted">
-            {formatSize(bytes)}
-          </span>
-        </div>
-      ))}
-      <div className="flex items-center justify-between gap-6 p-4">
-        <p className="text-sm font-medium">Everything ClippiBoy takes</p>
-        <span className="shrink-0 font-mono text-sm">{formatSize(total)}</span>
-      </div>
+        ))}
+      </SettingsGroup>
     </Card>
   );
 }

@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
 import { Segmented, Toggle } from "@/components/ui/Controls";
-import { Row } from "./shared";
+import { blockedSummary } from "@/lib/settingsSummary";
+import { Row, SettingsGroup } from "./shared";
 
 export function FriendsTab() {
   const { friends, patchConfig } = useEngine(
@@ -100,52 +101,49 @@ export function FriendsTab() {
 
       {signedIn && (
         <section>
-          <SectionTitle title="Blocked" />
           <Card className="divide-y divide-line">
-            {blocked.length === 0 ? (
-              <p className="p-5 text-sm text-ink-muted">Nobody. Block someone from the menu on their name.</p>
-            ) : (
-              blocked.map((user) => (
-                <Row key={user.id} label={user.displayName} hint={`@${user.username}`}>
-                  <Button size="sm" variant="ghost" onClick={() => run(friendsApi.unblock(user.id))}>
-                    Unblock
+            <SettingsGroup title="Blocked" storageKey="friends.blocked" summary={blockedSummary(blocked.length)}>
+              {blocked.length === 0 ? (
+                <p className="p-5 text-sm text-ink-muted">Nobody. Block someone from the menu on their name.</p>
+              ) : (
+                blocked.map((user) => (
+                  <Row key={user.id} label={user.displayName} hint={`@${user.username}`}>
+                    <Button size="sm" variant="ghost" onClick={() => run(friendsApi.unblock(user.id))}>
+                      Unblock
+                    </Button>
+                  </Row>
+                ))
+              )}
+            </SettingsGroup>
+            {me && (
+              <SettingsGroup title="Account" storageKey="friends.account" summary={`Signed in as ${me.displayName}`}>
+                <Row label={`Signed in as ${me.displayName}`} hint={`With Discord, @${me.username}`}>
+                  <Button size="sm" onClick={() => run(friendsApi.signOut())}>
+                    Sign out
                   </Button>
                 </Row>
-              ))
+                <Row label="Delete account" hint="Removes you, your friends list and your requests from the server">
+                  {confirmDelete ? (
+                    <ConfirmDelete
+                      origin="right"
+                      question="Delete account?"
+                      confirmTitle="Delete it for good"
+                      cancelLabel="Keep the account"
+                      cancelTitle="Keep it — Escape does the same"
+                      onConfirm={() => {
+                        setConfirmDelete(false);
+                        run(friendsApi.deleteAccount());
+                      }}
+                      onCancel={() => setConfirmDelete(false)}
+                    />
+                  ) : (
+                    <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)}>
+                      Delete
+                    </Button>
+                  )}
+                </Row>
+              </SettingsGroup>
             )}
-          </Card>
-        </section>
-      )}
-
-      {signedIn && me && (
-        <section>
-          <SectionTitle title="Account" />
-          <Card className="divide-y divide-line">
-            <Row label={`Signed in as ${me.displayName}`} hint={`With Discord, @${me.username}`}>
-              <Button size="sm" onClick={() => run(friendsApi.signOut())}>
-                Sign out
-              </Button>
-            </Row>
-            <Row label="Delete account" hint="Removes you, your friends list and your requests from the server">
-              {confirmDelete ? (
-                <ConfirmDelete
-                  origin="right"
-                  question="Delete account?"
-                  confirmTitle="Delete it for good"
-                  cancelLabel="Keep the account"
-                  cancelTitle="Keep it — Escape does the same"
-                  onConfirm={() => {
-                    setConfirmDelete(false);
-                    run(friendsApi.deleteAccount());
-                  }}
-                  onCancel={() => setConfirmDelete(false)}
-                />
-              ) : (
-                <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)}>
-                  Delete
-                </Button>
-              )}
-            </Row>
           </Card>
         </section>
       )}

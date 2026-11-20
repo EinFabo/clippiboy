@@ -86,6 +86,7 @@ export function SettingsGroup({
   storageKey,
   defaultOpen = false,
   master,
+  disabled = false,
   children,
 }: {
   title: string;
@@ -96,6 +97,8 @@ export function SettingsGroup({
   defaultOpen?: boolean;
   /** Switch in the header; off dims the rows inside and makes them inert. */
   master?: { checked: boolean; onChange: (checked: boolean) => void; label?: string };
+  /** Dims the rows inside like an off master does, for a switch outside the group; the group stays openable. */
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(() => readOpen(storageKey, defaultOpen));
@@ -105,7 +108,7 @@ export function SettingsGroup({
     setOpen(next);
     writeOpen(storageKey, next);
   };
-  const off = master !== undefined && !master.checked;
+  const off = disabled || (master !== undefined && !master.checked);
   return (
     <>
       {/* The whole header toggles; the switch keeps its click to itself. */}

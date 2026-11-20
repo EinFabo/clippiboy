@@ -1,4 +1,4 @@
-import type { OverlayCorner, PadAction, PadBindings, PadProfiles, PadType } from "./types";
+import type { CamShape, OverlayCorner, PadAction, PadBindings, PadProfiles, PadType } from "./types";
 import { PAD_ACTIONS, PROFILE_NAMES, triggerOf } from "./hotkeyText.ts";
 
 /** The corner as words, as in the position pad's labels. */
@@ -53,4 +53,30 @@ export function controllerSummary(
 /** The status a closed Stream Deck group shows. */
 export function streamDeckSummary(enabled: boolean, port: number): string {
   return enabled ? `Allowed · port ${port}` : "Off";
+}
+
+/** The status a closed "Where it appears" group shows. */
+export function camAppearsSummary(inClips: boolean, inRecordings: boolean, inScreenshots: boolean, inConsole: boolean): string {
+  const places = [
+    inClips && "Clips",
+    inRecordings && "Recordings",
+    inScreenshots && "Screenshots",
+    inConsole && "Console",
+  ].filter(Boolean);
+  return places.length > 0 ? places.join(" · ") : "Nowhere";
+}
+
+const SHAPE_WORDS: Record<CamShape, string> = { rect: "Rectangle", rounded: "Rounded", circle: "Round" };
+
+/** The status a closed Position group shows: shape, mirroring, a delay if set. */
+export function camPositionSummary(shape: CamShape, mirror: boolean, delayMs: number): string {
+  const parts = [SHAPE_WORDS[shape]];
+  if (mirror) parts.push("mirrored");
+  if (delayMs !== 0) parts.push(`${delayMs > 0 ? "+" : "\u2212"}${Math.abs(delayMs)} ms`);
+  return parts.join(" \u00b7 ");
+}
+
+/** The status a closed Blocked group shows. */
+export function blockedSummary(count: number): string {
+  return count === 0 ? "Nobody" : `${count} blocked`;
 }

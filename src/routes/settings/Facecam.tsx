@@ -10,7 +10,8 @@ import { camBox, layoutFromRect, snapLayout } from "@/lib/camGeometry";
 import { usePictureBox } from "@/lib/pictureBox";
 import { RectLayer } from "@/components/ui/RectLayer";
 import type { CamLayout, CamShape, FacecamConfig } from "@/lib/types";
-import { Row } from "./shared";
+import { camAppearsSummary, camPositionSummary } from "@/lib/settingsSummary";
+import { Row, SettingsGroup } from "./shared";
 
 /** The value the camera dropdown uses for "no camera chosen". */
 const FIRST = "__first";
@@ -107,85 +108,93 @@ export function FacecamTab() {
             onChange={(resolution) => patch({ resolution })}
           />
         </Row>
-        <Row label="In clips">
-          <Toggle checked={cam.inClips} disabled={off} onChange={(inClips) => patch({ inClips })} />
-        </Row>
-        <Row label="In recordings">
-          <Toggle checked={cam.inRecordings} disabled={off} onChange={(inRecordings) => patch({ inRecordings })} />
-        </Row>
-        <Row label="In screenshots">
-          <Toggle checked={cam.inScreenshots} disabled={off} onChange={(inScreenshots) => patch({ inScreenshots })} />
-        </Row>
-        <Row label="In the console">
-          <Toggle
-            checked={cam.consolePreview}
-            disabled={off}
-            onChange={(consolePreview) => patch({ consolePreview })}
-          />
-        </Row>
-        <Row label="Virtual camera">
-          <div className="flex items-center gap-3">
-            {vcamStatus?.kind === "live" && <span className="text-xs text-ink-muted">In use</span>}
-            {vcamStatus?.kind === "needsUpdate" && (
-              <Button size="sm" disabled={vcamBusy} onClick={() => void vcamDo(() => setVirtualCamera(true))}>
-                Update
-              </Button>
-            )}
-            {vcamStatus && vcamStatus.kind !== "notInstalled" && !cam.virtualCamera && (
-              <Button size="sm" variant="ghost" disabled={vcamBusy} onClick={() => void vcamDo(removeVirtualCamera)}>
-                Remove
-              </Button>
-            )}
-            <Toggle
-              checked={!off && cam.virtualCamera}
-              disabled={off || vcamBusy}
-              onChange={(on) => void vcamDo(() => setVirtualCamera(on))}
+        <SettingsGroup
+          title="Where it appears"
+          storageKey="camera.appears"
+          disabled={off}
+          summary={camAppearsSummary(cam.inClips, cam.inRecordings, cam.inScreenshots, cam.consolePreview)}
+        >
+          <Row label="In clips">
+            <Toggle checked={cam.inClips} onChange={(inClips) => patch({ inClips })} />
+          </Row>
+          <Row label="In recordings">
+            <Toggle checked={cam.inRecordings} onChange={(inRecordings) => patch({ inRecordings })} />
+          </Row>
+          <Row label="In screenshots">
+            <Toggle checked={cam.inScreenshots} onChange={(inScreenshots) => patch({ inScreenshots })} />
+          </Row>
+          <Row label="In the console">
+            <Toggle checked={cam.consolePreview} onChange={(consolePreview) => patch({ consolePreview })} />
+          </Row>
+        </SettingsGroup>
+        <SettingsGroup
+          title="Position"
+          storageKey="camera.position"
+          disabled={off}
+          summary={camPositionSummary(cam.layout.shape, cam.layout.mirror, cam.delayMs)}
+        >
+          <Row label="Shape">
+            <Segmented<CamShape>
+              value={cam.layout.shape}
+              options={[
+                { key: "rect", label: "Rectangle" },
+                { key: "rounded", label: "Rounded" },
+                { key: "circle", label: "Circle" },
+              ]}
+              onChange={(shape) => patch({ layout: { ...cam.layout, shape } })}
             />
-          </div>
-        </Row>
-      </Card>
-
-      <SectionTitle title="Position" />
-      <Card className="divide-y divide-line">
-        <Row label="Shape">
-          <Segmented<CamShape>
-            value={cam.layout.shape}
-            disabled={off}
-            options={[
-              { key: "rect", label: "Rectangle" },
-              { key: "rounded", label: "Rounded" },
-              { key: "circle", label: "Circle" },
-            ]}
-            onChange={(shape) => patch({ layout: { ...cam.layout, shape } })}
-          />
-        </Row>
-        <Row label="Mirror">
-          <Toggle
-            checked={cam.layout.mirror}
-            disabled={off}
-            onChange={(mirror) => patch({ layout: { ...cam.layout, mirror } })}
-          />
-        </Row>
-        <Row label="Delay">
-          <div className={off ? "pointer-events-none flex w-56 items-center gap-3 opacity-40" : "flex w-56 items-center gap-3"}>
-            <Slider
-              label="Delay"
-              value={delayDraft ?? cam.delayMs}
-              min={-300}
-              max={300}
-              step={10}
-              onChange={setDelayDraft}
-              onRelease={() => setDelayDraft(null)}
-              onCommit={(delayMs) => {
-                setDelayDraft(null);
-                patch({ delayMs });
-              }}
-            />
-            <span className="w-16 shrink-0 text-right font-mono text-xs text-ink-muted">
-              {(delayDraft ?? cam.delayMs).toString().replace("-", "−")} ms
-            </span>
-          </div>
-        </Row>
+          </Row>
+          <Row label="Mirror">
+            <Toggle checked={cam.layout.mirror} onChange={(mirror) => patch({ layout: { ...cam.layout, mirror } })} />
+          </Row>
+          <Row label="Delay">
+            <div className="flex w-56 items-center gap-3">
+              <Slider
+                label="Delay"
+                value={delayDraft ?? cam.delayMs}
+                min={-300}
+                max={300}
+                step={10}
+                onChange={setDelayDraft}
+                onRelease={() => setDelayDraft(null)}
+                onCommit={(delayMs) => {
+                  setDelayDraft(null);
+                  patch({ delayMs });
+                }}
+              />
+              <span className="w-16 shrink-0 text-right font-mono text-xs text-ink-muted">
+                {(delayDraft ?? cam.delayMs).toString().replace("-", "−")} ms
+              </span>
+            </div>
+          </Row>
+        </SettingsGroup>
+        <SettingsGroup
+          title="Virtual camera"
+          storageKey="camera.virtual"
+          disabled={off}
+          summary={!off && cam.virtualCamera ? "On" : "Off"}
+        >
+          <Row label="Virtual camera">
+            <div className="flex items-center gap-3">
+              {vcamStatus?.kind === "live" && <span className="text-xs text-ink-muted">In use</span>}
+              {vcamStatus?.kind === "needsUpdate" && (
+                <Button size="sm" disabled={vcamBusy} onClick={() => void vcamDo(() => setVirtualCamera(true))}>
+                  Update
+                </Button>
+              )}
+              {vcamStatus && vcamStatus.kind !== "notInstalled" && !cam.virtualCamera && (
+                <Button size="sm" variant="ghost" disabled={vcamBusy} onClick={() => void vcamDo(removeVirtualCamera)}>
+                  Remove
+                </Button>
+              )}
+              <Toggle
+                checked={!off && cam.virtualCamera}
+                disabled={vcamBusy}
+                onChange={(on) => void vcamDo(() => setVirtualCamera(on))}
+              />
+            </div>
+          </Row>
+        </SettingsGroup>
       </Card>
     </section>
   );
