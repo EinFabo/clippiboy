@@ -373,7 +373,7 @@ export function ShareMenuButton({
             stopPropagation: () => {},
           },
           entries,
-          { glass: true, alignRight: true },
+          { glass: true, alignRight: true, anchor: box, gap: 8 },
         );
       }}
     >

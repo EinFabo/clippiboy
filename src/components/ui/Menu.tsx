@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/cn";
+import { placeMenu, type Anchor } from "@/lib/menuPlace";
 import { menuOwns } from "@/lib/viewer";
 
 /** One entry in the menu. Separators carry nothing but themselves. */
@@ -46,6 +47,15 @@ export interface MenuOptions {
   glass?: boolean;
   /** The trigger's x is the menu's right edge, not its left. */
   alignRight?: boolean;
+  /**
+   * The button the menu hangs from. With it the menu can flip above the button
+   * when there is no room below; without it the trigger's point is the anchor.
+   */
+  anchor?: Anchor;
+  /** Space between the anchor and the menu. */
+  gap?: number;
+  /** Stays put above the scrolling entries — a search field, say. */
+  header?: ReactNode;
 }
 
 interface MenuApi {
@@ -120,26 +130,51 @@ function Surface({
   entries,
   glass,
   alignRight,
+  anchor,
+  gap,
+  header,
   onClose,
 }: Open & { onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   const [at, setAt] = useState({ x, y });
+  /** Undefined until measured: the natural height is read without a limit. */
+  const [maxHeight, setMaxHeight] = useState<number>();
+  /** Set by the arrow keys, so only they scroll the list. */
+  const byKey = useRef(false);
   const [shown, setShown] = useState(false);
   /** What the keyboard is working on. -1 means nothing is highlighted. */
   const [active, setActive] = useState(-1);
 
-  // Flip instead of running out of the window. Only after mounting — before
-  // that the menu's size is not known.
+  // Flip or shrink instead of running out of the window. Only after mounting —
+  // before that the menu's size is not known.
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
-    const { width, height } = el.getBoundingClientRect();
-    setAt({
-      x: Math.max(EDGE, Math.min(alignRight ? x - width : x, window.innerWidth - width - EDGE)),
-      y: Math.max(EDGE, Math.min(y, window.innerHeight - height - EDGE)),
+    // The layout size: the entry animation starts at 97 % scale, which
+    // getBoundingClientRect would report.
+    const { offsetWidth: width, offsetHeight: height } = el;
+    const place = placeMenu({
+      anchor: anchor ?? { left: x, top: y, right: x, bottom: y },
+      size: { width, height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      margin: EDGE,
+      gap: anchor ? (gap ?? 0) : 0,
+      alignRight,
     });
+    setAt({ x: place.x, y: place.y });
+    setMaxHeight(place.maxHeight);
     setShown(true);
-  }, [x, y, alignRight]);
+  }, [x, y, alignRight, anchor, gap]);
+
+  // The keyboard walks the list: keep the highlighted entry in view.
+  useEffect(() => {
+    if (!byKey.current || active < 0) return;
+    byKey.current = false;
+    list.current
+      ?.querySelector<HTMLElement>(`[data-index="${active}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [active]);
 
   const selectable = entries
     .map((entry, index) => ({ entry, index }))
@@ -154,7 +189,11 @@ function Surface({
 
   useEffect(() => {
     // Anything that draws the eye elsewhere closes the menu.
-    const onScroll = () => onClose();
+    // The menu's own list scrolling is not "looking elsewhere".
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && box.current?.contains(event.target)) return;
+      onClose();
+    };
     // A click **inside** the menu must not close it before the entry has fired —
     // otherwise the button would vanish from under the cursor and `click` would
     // never arrive.
@@ -179,6 +218,7 @@ function Surface({
         event.preventDefault();
         if (selectable.length === 0) return;
         const step = event.key === "ArrowDown" ? 1 : -1;
+        byKey.current = true;
         setActive((current) => {
           const at = selectable.indexOf(current);
           const next = at === -1 ? (step === 1 ? 0 : selectable.length - 1) : at + step;
@@ -218,10 +258,11 @@ function Surface({
       style={{
         left: at.x,
         top: at.y,
+        maxHeight,
         ...(glass && { background: "var(--glass)", backdropFilter: "blur(20px)" }),
       }}
       className={cn(
-        "fixed z-[75] min-w-[224px] py-1.5",
+        "fixed z-[75] flex min-w-[224px] flex-col py-1.5",
         glass
           ? "rounded-inner border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
           : "rounded-inner border border-line bg-elevated/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.55)]",
@@ -229,39 +270,43 @@ function Surface({
         shown ? "scale-100 opacity-100" : "scale-[0.97] opacity-0",
       )}
     >
-      {entries.map((entry, index) =>
-        entry.kind === "separator" ? (
-          <div key={index} className="my-1.5 border-t border-line" />
-        ) : (
-          <button
-            key={index}
-            role="menuitem"
-            disabled={entry.disabled}
-            onMouseEnter={() => setActive(index)}
-            onMouseLeave={() => setActive(-1)}
-            onClick={() => run(entry)}
-            className={cn(
-              "mx-1.5 flex h-9 w-[calc(100%-0.75rem)] items-center gap-2.5 rounded-inner px-2.5",
-              "text-left text-[13px] font-medium transition-colors duration-100",
-              "disabled:pointer-events-none disabled:opacity-35",
-              entry.danger ? "text-live" : "text-ink",
-              active === index && (entry.danger ? "bg-live/15" : "bg-hover"),
-            )}
-          >
-            {/* A fixed column for the icon, so labels line up even without
-                one. */}
-            <span className="grid h-4 w-4 shrink-0 place-items-center text-ink-muted">
-              {entry.icon}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{entry.label}</span>
-            {entry.shortcut && (
-              <span className="shrink-0 text-xs text-ink-faint tabular-nums">
-                {entry.shortcut}
+      {header}
+      <div ref={list} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        {entries.map((entry, index) =>
+          entry.kind === "separator" ? (
+            <div key={index} className="my-1.5 border-t border-line" />
+          ) : (
+            <button
+              key={index}
+              data-index={index}
+              role="menuitem"
+              disabled={entry.disabled}
+              onMouseEnter={() => setActive(index)}
+              onMouseLeave={() => setActive(-1)}
+              onClick={() => run(entry)}
+              className={cn(
+                "mx-1.5 flex h-9 w-[calc(100%-0.75rem)] items-center gap-2.5 rounded-inner px-2.5",
+                "text-left text-[13px] font-medium transition-colors duration-100",
+                "disabled:pointer-events-none disabled:opacity-35",
+                entry.danger ? "text-live" : "text-ink",
+                active === index && (entry.danger ? "bg-live/15" : "bg-hover"),
+              )}
+            >
+              {/* A fixed column for the icon, so labels line up even without
+                  one. */}
+              <span className="grid h-4 w-4 shrink-0 place-items-center text-ink-muted">
+                {entry.icon}
               </span>
-            )}
-          </button>
-        ),
-      )}
+              <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+              {entry.shortcut && (
+                <span className="shrink-0 text-xs text-ink-faint tabular-nums">
+                  {entry.shortcut}
+                </span>
+              )}
+            </button>
+          ),
+        )}
+      </div>
     </div>
   );
 }

@@ -1110,7 +1110,7 @@ function SortButton({ sort, onChange }: { sort: ClipSort; onChange: (sort: ClipS
             icon: key === sort ? <IconCheck className="h-3.5 w-3.5" /> : undefined,
             onSelect: () => onChange(key),
           })),
-          { alignRight: true },
+          { alignRight: true, anchor: box, gap: 6 },
         );
       }}
     >
@@ -1513,6 +1513,7 @@ function FilterBar({
         stopPropagation: () => {},
       },
       entries,
+      { anchor: box, gap: 6 },
     );
   };
 
