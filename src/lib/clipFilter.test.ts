@@ -4,7 +4,11 @@ import {
   NO_FILTER,
   dayLabel,
   filterClips,
-  fitChips,
+  facetHasSearch,
+  facetLabel,
+  gameFacet,
+  searchFacet,
+  tagFacet,
   groupByDay,
   isFiltered,
   kindCounts,
@@ -260,86 +264,83 @@ test("an item out of order still lands in its own day, never in a second group o
   assert.equal(new Set(groups.map((g) => g.key)).size, groups.length);
 });
 
-// --- chips that fit -------------------------------------------------------
+// --- the Game and Tags lists ---------------------------------------------
 
-const chip = (id: string, width: number, selected = false) => ({ id, width, selected });
+test("game list: counts within the chosen type, most clips first, then by name", () => {
+  const clips = [
+    clip("a", { game: "valorant" }),
+    clip("b", { game: "CS2" }),
+    clip("c", { game: "CS2" }),
+    clip("d", { game: "Apex" }),
+    clip("e", { game: "Valorant", screenshot: true }),
+    clip("f", {}),
+    clip("g", { screenshot: true }),
+  ];
+  assert.deepEqual(gameFacet(clips, "all", []), {
+    values: [
+      { name: "CS2", count: 2 },
+      { name: "Apex", count: 1 },
+      { name: "valorant", count: 1 },
+      { name: "Valorant", count: 1 },
+    ],
+    noGame: 2,
+  });
+  assert.deepEqual(gameFacet(clips, "screenshots", []), {
+    values: [{ name: "Valorant", count: 1 }],
+    noGame: 1,
+  });
+  assert.deepEqual(gameFacet(clips, "recordings", []), { values: [], noGame: 0 });
+});
 
-test("everything fits: nothing hidden, no more chip", () => {
-  const fit = fitChips({
-    lead: 100,
-    chips: [chip("a", 50), chip("b", 50)],
-    tail: 60,
-    more: 40,
-    row: 400,
-    gap: 8,
-    lines: 2,
-  });
-  assert.deepEqual(fit, { hidden: [], overflow: false });
+test("names sort without regard to case", () => {
+  const clips = [clip("a", { game: "beta" }), clip("b", { game: "Alpha" }), clip("c", { game: "Gamma" })];
+  assert.deepEqual(
+    gameFacet(clips, "all", []).values.map((v) => v.name),
+    ["Alpha", "beta", "Gamma"],
+  );
 });
-test("chips wrap onto a second line before anything hides", () => {
-  // Line 1: lead 100 + a 150 + b 130 = 396 with gaps; line 2: c, tail.
-  const fit = fitChips({
-    lead: 100,
-    chips: [chip("a", 150), chip("b", 130), chip("c", 200)],
-    tail: 60,
-    more: 40,
-    row: 400,
-    gap: 8,
-    lines: 2,
-  });
-  assert.deepEqual(fit, { hidden: [], overflow: false });
+
+test("a chosen value outside the type stays in the list with 0, so it can be unticked", () => {
+  const clips = [clip("a", { game: "CS2" }), clip("b", { game: "Valorant", screenshot: true, tags: ["ace"] })];
+  assert.deepEqual(gameFacet(clips, "clips", ["Valorant"]).values, [
+    { name: "CS2", count: 1 },
+    { name: "Valorant", count: 0 },
+  ]);
+  assert.deepEqual(tagFacet(clips, "clips", ["ace"]), [{ name: "ace", count: 0 }]);
 });
-test("chips past the second line go into more, from the end", () => {
-  const fit = fitChips({
-    lead: 300,
-    chips: [chip("a", 90), chip("b", 200), chip("c", 150), chip("d", 100)],
-    tail: 60,
-    more: 50,
-    row: 400,
-    gap: 8,
-    lines: 2,
-  });
-  // Line 1: lead, a. Line 2: b, c → d and the tail do not fit; with more: b, c, more = 416 > 400 → c goes too.
-  assert.deepEqual(fit, { hidden: ["c", "d"], overflow: true });
+
+test("tag list: every tag of a clip counts, within the type", () => {
+  assert.deepEqual(tagFacet(library, "all", []), [
+    { name: "ace", count: 2 },
+    { name: "clutch", count: 2 },
+  ]);
+  assert.deepEqual(tagFacet(library, "recordings", []), [{ name: "ace", count: 1 }]);
+  assert.deepEqual(tagFacet(library, "screenshots", []), []);
 });
-test("a selected chip stays in the row, an unselected one before it goes instead", () => {
-  const fit = fitChips({
-    lead: 300,
-    chips: [chip("a", 90), chip("b", 200), chip("c", 150, true), chip("d", 100)],
-    tail: 60,
-    more: 50,
-    row: 400,
-    gap: 8,
-    lines: 2,
-  });
-  assert.deepEqual(fit, { hidden: ["b", "d"], overflow: true });
+
+test("search in a list: part of the name, any case", () => {
+  const values = [
+    { name: "Counter-Strike 2", count: 3 },
+    { name: "Valorant", count: 2 },
+    { name: "Rocket League", count: 1 },
+  ];
+  assert.deepEqual(searchFacet(values, "").map((v) => v.name), ["Counter-Strike 2", "Valorant", "Rocket League"]);
+  assert.deepEqual(searchFacet(values, "  ").length, 3);
+  assert.deepEqual(searchFacet(values, "STRIKE").map((v) => v.name), ["Counter-Strike 2"]);
+  assert.deepEqual(searchFacet(values, "e").map((v) => v.name), ["Counter-Strike 2", "Rocket League"]);
+  assert.deepEqual(searchFacet(values, "xyz"), []);
 });
-test("the tail alone can force the overflow", () => {
-  // Chips fill both lines exactly; the trash button would need a third.
-  const fit = fitChips({
-    lead: 200,
-    chips: [chip("a", 192), chip("b", 400)],
-    tail: 100,
-    more: 50,
-    row: 400,
-    gap: 8,
-    lines: 2,
-  });
-  assert.deepEqual(fit, { hidden: ["b"], overflow: true });
+
+test("the search field comes with more than eight entries", () => {
+  assert.equal(facetHasSearch(8), false);
+  assert.equal(facetHasSearch(9), true);
 });
-test("without a tail the last line may be full", () => {
-  const fit = fitChips({
-    lead: 200,
-    chips: [chip("a", 192), chip("b", 400)],
-    tail: 0,
-    more: 50,
-    row: 400,
-    gap: 8,
-    lines: 2,
-  });
-  assert.deepEqual(fit, { hidden: [], overflow: false });
-});
-test("an unmeasured row hides nothing", () => {
-  const fit = fitChips({ lead: 0, chips: [chip("a", 0)], tail: 0, more: 0, row: 0, gap: 8, lines: 2 });
-  assert.deepEqual(fit, { hidden: [], overflow: false });
+
+test("button label: the facet, the one name, or how many", () => {
+  assert.equal(facetLabel("game", []), "Game");
+  assert.equal(facetLabel("tag", []), "Tags");
+  assert.equal(facetLabel("game", ["Counter-Strike 2"]), "Counter-Strike 2");
+  assert.equal(facetLabel("tag", ["clutch"]), "clutch");
+  assert.equal(facetLabel("game", ["CS2", "No game"]), "2 games");
+  assert.equal(facetLabel("tag", ["ace", "clutch", "funny"]), "3 tags");
 });

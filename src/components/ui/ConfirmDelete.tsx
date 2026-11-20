@@ -6,7 +6,7 @@ import { IconCheck, IconClose } from "../icons";
  * The question before a clip is deleted, standing in the place of the control
  * that asked it.
  *
- * Same idea as the filter bar's confirmation: no dialog over the page, just the
+ * Same idea as the Game list's confirmation: no dialog over the page, just the
  * button turning into a question. What is at stake here is larger, though — a
  * deleted clip leaves the gallery, and from Recently deleted it goes for
  * good — so unlike that one it does **not**

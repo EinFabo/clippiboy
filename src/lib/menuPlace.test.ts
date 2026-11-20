@@ -21,13 +21,34 @@ test("does not fit below but fits above: flips, bottom edge sits at the anchor's
   assert.equal(p.maxHeight, 600 - 6 - 8);
 });
 
-test("neither fits: the larger side, height capped to it minus the margin", () => {
+test("fits the window but neither side: shifted so it shows whole, no cap", () => {
+  // A right-click in the middle of a 1080 x 680 window, a 500 px menu: 372 px
+  // below, 292 above — neither is enough, the window is.
+  const p = placeMenu({ ...base, anchor: rect(400, 300), size: { width: 224, height: 500 } });
+  assert.equal(p.placement, "below");
+  assert.equal(p.y, 680 - 8 - 500);
+  assert.ok(p.maxHeight >= 500);
+  const q = placeMenu({ ...base, anchor: rect(400, 420), size: { width: 224, height: 500 } });
+  assert.equal(q.placement, "above");
+  assert.equal(q.y, 8);
+  assert.ok(q.maxHeight >= 500);
+});
+
+test("without sliding, a menu that fits neither side is capped to the larger one", () => {
+  const p = placeMenu({ ...base, slide: false, anchor: rect(400, 300, 480, 330), size: { width: 300, height: 500 }, gap: 6 });
+  // below: 680 - 330 - 6 - 8 = 336, above: 300 - 6 - 8 = 286
+  assert.equal(p.placement, "below");
+  assert.equal(p.maxHeight, 336);
+  assert.equal(p.y, 336);
+});
+
+test("taller than the window: the larger side, height capped to it minus the margin", () => {
   const p = placeMenu({ ...base, anchor: rect(100, 300, 100, 300), size: { width: 224, height: 900 } });
   // above has 300 - 8 = 292, below has 680 - 300 - 8 = 372
   assert.equal(p.placement, "below");
   assert.equal(p.maxHeight, 372);
   assert.equal(p.y, 300);
-  const q = placeMenu({ ...base, anchor: rect(100, 400, 100, 400), size: { width: 224, height: 900 } });
+  const q = placeMenu({ ...base, anchor: rect(100, 400, 100, 400), size: { width: 224, height: 2000 } });
   assert.equal(q.placement, "above");
   assert.equal(q.maxHeight, 392);
   assert.equal(q.y, 8);

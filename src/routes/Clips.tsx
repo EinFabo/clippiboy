@@ -7,7 +7,8 @@ import { useEngine } from "@/store";
 import { Card, Pill } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Segmented } from "@/components/ui/Controls";
-import { useMenu, type MenuEntry } from "@/components/ui/Menu";
+import { useMenu } from "@/components/ui/Menu";
+import { FacetPopover } from "@/components/FacetPopover";
 import { ClipPlayer } from "@/components/ClipPlayer";
 import { ShotViewer } from "@/components/ShotViewer";
 import { ShareMenuButton, useClipMenu } from "@/components/clipMenu";
@@ -42,14 +43,16 @@ import { useFriends } from "@/lib/friends";
 import { useShare } from "@/lib/share";
 import {
   NO_FILTER,
+  facetLabel,
   filterClips,
-  fitChips,
+  gameFacet,
   groupByDay,
   isFiltered,
   kindCounts,
   kindOf,
   pruneFilter,
   sortClips,
+  tagFacet,
   toggled,
   type ClipFilter,
   type ClipKind,
@@ -200,34 +203,14 @@ export function Clips({
     [],
   );
 
-  /** Games with a count, most frequent first — the bar should lead with what
-      people actually filter by. */
-  const games = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const clip of clips) {
-      if (clip.game) counts.set(clip.game, (counts.get(clip.game) ?? 0) + 1);
-    }
-    return [...counts]
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "en"));
-  }, [clips]);
-
-  /** Tags by how often they are used, like the games. */
-  const tags = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const clip of clips) {
-      for (const tag of clip.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
-    }
-    return [...counts]
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "en"));
-  }, [clips]);
-
-  const untagged = useMemo(() => clips.filter((c) => !c.game).length, [clips]);
+  /** Every game and tag in the library, whatever the type — what a choice may
+      still point at. */
+  const { values: games, noGame: untagged } = useMemo(() => gameFacet(clips, "all", []), [clips]);
+  const tags = useMemo(() => tagFacet(clips, "all", []), [clips]);
   const favorites = useMemo(() => clips.filter((c) => c.favorite).length, [clips]);
   const kinds = useMemo(() => kindCounts(clips), [clips]);
 
-  // If a clip's game is renamed or removed, its chip disappears and so must
+  // If a clip's game is renamed or removed, its row disappears and so must
   // the choice — without this the gallery would stay empty and nobody would
   // know why. Not while the player is open, though: that is where the change
   // is being made, and the filter behind it should stay put.
@@ -509,9 +492,7 @@ export function Clips({
         </div>
 
         <FilterBar
-          games={games}
-          tags={tags}
-          untagged={untagged}
+          clips={clips}
           favorites={favorites}
           kinds={kinds}
           deleted={trash.length}
@@ -1246,41 +1227,13 @@ const KINDS: Array<{ key: ClipKind; label: string }> = [
   { key: "screenshots", label: "Screenshots" },
 ];
 
-/** At most this many lines of chips — whatever does not fit goes into "+N more". */
-const CHIP_LINES = 2;
-/** `gap-2` of the row, in pixels. */
-const CHIP_GAP = 8;
-
-/** One toggle in the chip row. */
-interface ChipSpec {
-  /** Prefixed by kind, so a game called "Favorites" stays apart from the chip. */
-  id: string;
-  label: string;
-  /** How it reads in the "+N more" menu, where there is no room for an icon. */
-  menuLabel: string;
-  count: number;
-  selected: boolean;
-  icon?: (selected: boolean) => React.ReactNode;
-  /** The filter with this chip on or off. */
-  set: (filter: ClipFilter, on: boolean) => ClipFilter;
-  /** Games only: the name the hover-× would detach. */
-  game?: string;
-}
-
 /**
- * The type segment and the chips that combine with it.
- *
- * The chips wrap onto at most two lines; what does not fit collapses into a
- * last chip "+N more" with a menu, and chosen chips are the last to go there.
- * Recently deleted sits at the end of the row, or at the end of that menu once
- * it exists. A game chip keeps its hover-× that detaches the name from its
- * clips — on a chosen chip the × means "off" instead, and the whole chip is
- * the button for it.
+ * The type segment and the filters that combine with it, always on one line:
+ * Favorites, "Game ▾" and "Tags ▾" with their lists, and Recently deleted at
+ * the end. A chosen filter turns its button white with a × that clears it.
  */
 function FilterBar({
-  games,
-  tags,
-  untagged,
+  clips,
   favorites,
   kinds,
   deleted,
@@ -1290,313 +1243,238 @@ function FilterBar({
   onTrash,
   onRemove,
 }: {
-  games: Array<{ name: string; count: number }>;
-  tags: Array<{ name: string; count: number }>;
-  untagged: number;
+  clips: Clip[];
   favorites: number;
   kinds: Record<ClipKind, number>;
   deleted: number;
   filter: ClipFilter;
-  /** Recently deleted is open: nothing in the segment or the chips is lit. */
+  /** Recently deleted is open: nothing in the segment or the buttons is lit. */
   inTrash: boolean;
   onChange: (filter: ClipFilter) => void;
   onTrash: () => void;
+  /** Detaches a game name from its clips. */
   onRemove: (game: string) => void;
 }) {
-  const menu = useMenu();
   const row = useRef<HTMLDivElement>(null);
-  const lead = useRef<HTMLDivElement>(null);
-  const mirror = useRef<HTMLDivElement>(null);
-  const [confirming, setConfirming] = useState<string | null>(null);
-  const [fit, setFit] = useState<{ hidden: string[]; overflow: boolean }>({
-    hidden: [],
-    overflow: false,
-  });
+  const gameButton = useRef<HTMLDivElement>(null);
+  const tagButton = useRef<HTMLDivElement>(null);
+  const [opened, setOpened] = useState<"game" | "tag" | null>(null);
 
-  const specs: ChipSpec[] = [
-    ...(favorites > 0
-      ? [
-          {
-            id: "fav",
-            label: "Favorites",
-            menuLabel: "Favorites",
-            count: favorites,
-            selected: filter.favorites,
-            icon: (on: boolean) => (
-              <IconHeart filled className={cn("h-3.5 w-3.5", on ? "text-black/70" : "text-live")} />
-            ),
-            set: (f: ClipFilter, on: boolean) => ({ ...f, favorites: on }),
-          },
-        ]
-      : []),
-    ...games.map(({ name, count }) => ({
-      id: `game:${name}`,
-      label: name,
-      menuLabel: name,
-      count,
-      selected: filter.games.includes(name),
-      set: (f: ClipFilter, on: boolean) => ({
-        ...f,
-        games: on === f.games.includes(name) ? f.games : toggled(f.games, name),
-      }),
-      game: name,
-    })),
-    ...(untagged > 0
-      ? [
-          {
-            id: "nogame",
-            label: "No game",
-            menuLabel: "No game",
-            count: untagged,
-            selected: filter.noGame,
-            set: (f: ClipFilter, on: boolean) => ({ ...f, noGame: on }),
-          },
-        ]
-      : []),
-    // Tags come after the games: a game every clip has, a tag only some.
-    ...tags.map(({ name, count }) => ({
-      id: `tag:${name}`,
-      label: name,
-      menuLabel: `#${name}`,
-      count,
-      selected: filter.tags.includes(name),
-      icon: (on: boolean) => <span className={on ? "text-black/45" : "text-ink-faint"}>#</span>,
-      set: (f: ClipFilter, on: boolean) => ({
-        ...f,
-        tags: on === f.tags.includes(name) ? f.tags : toggled(f.tags, name),
-      }),
-    })),
-  ];
+  // Counted within the chosen type, like the segment's own numbers narrow it.
+  const gameList = useMemo(
+    () => gameFacet(clips, filter.kind, filter.games),
+    [clips, filter.kind, filter.games],
+  );
+  const tagList = useMemo(() => tagFacet(clips, filter.kind, filter.tags), [clips, filter.kind, filter.tags]);
+
   // Recently deleted shows a list of its own; the filters wait behind it,
-  // unlit, and a chip picked from there brings the gallery back with it on.
-  const lit = (spec: ChipSpec) => !inTrash && spec.selected;
-  const pick = (spec: ChipSpec) => onChange(spec.set(filter, inTrash || !spec.selected));
+  // unlit, and one picked from there brings the gallery back with it on.
+  const games = inTrash ? [] : filter.games;
+  const noGame = !inTrash && filter.noGame;
+  const tags = inTrash ? [] : filter.tags;
+  const chosenGames = [...games, ...(noGame ? ["No game"] : [])];
+  const pick = (list: string[], name: string) =>
+    inTrash ? (list.includes(name) ? list : [...list, name]) : toggled(list, name);
 
-  // Everything a chip's width depends on — the widths are measured again
-  // whenever it changes, and when the row itself changes size.
-  const signature = [
-    ...specs.map((s) => `${s.id}:${s.count}:${lit(s)}:${confirming === s.game}`),
-    `trash:${deleted}:${inTrash}`,
-  ].join("|");
-  const latest = useRef({ specs, lit });
-  latest.current = { specs, lit };
-
-  useLayoutEffect(() => {
-    const measure = () => {
-      const box = mirror.current;
-      if (!row.current || !lead.current || !box) return;
-      const width = (id: string) =>
-        box.querySelector<HTMLElement>(`[data-measure="${CSS.escape(id)}"]`)?.offsetWidth ?? 0;
-      const next = fitChips({
-        lead: lead.current.offsetWidth,
-        chips: latest.current.specs.map((s) => ({
-          id: s.id,
-          width: width(s.id),
-          selected: latest.current.lit(s),
-        })),
-        tail: width("trash"),
-        more: width("more"),
-        row: row.current.clientWidth,
-        gap: CHIP_GAP,
-        lines: CHIP_LINES,
-      });
-      // With nothing left to hide there is no "+0 more": the trash stays a button.
-      const settled = next.hidden.length > 0 ? next : { hidden: [], overflow: false };
-      setFit((was) =>
-        was.overflow === settled.overflow && was.hidden.join("|") === settled.hidden.join("|")
-          ? was
-          : settled,
-      );
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    if (row.current) observer.observe(row.current);
-    if (mirror.current) observer.observe(mirror.current);
-    return () => observer.disconnect();
-  }, [signature]);
-
-  // The confirmation must not stay up when you carry on elsewhere.
-  useEffect(() => {
-    if (!confirming) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setConfirming(null);
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [confirming]);
-
-  const hidden = new Set(fit.hidden);
-  const shown = specs.filter((s) => !hidden.has(s.id));
-  const overflow = fit.overflow && fit.hidden.length > 0;
-
-  // Chips are sorted by how often a game turns up, and the confirmation takes
-  // the place of the chip it belongs to. Both shift everything to the right of
-  // them, and that should be a slide rather than a jump.
-  useFlip(
-    row,
-    [
-      ...shown.map((s) => (confirming !== null && confirming === s.game ? `${s.id}?` : s.id)),
-      overflow ? "more" : deleted > 0 && "trash",
-    ]
-      .filter(Boolean)
-      .join(),
-  );
-
-  const chipFor = (spec: ChipSpec, measuring = false) =>
-    spec.game !== undefined && confirming === spec.game ? (
-      <ConfirmChip
-        key={spec.id}
-        id={spec.id}
-        name={spec.label}
-        autoFocus={!measuring}
-        onConfirm={() => {
-          onRemove(spec.label);
-          setConfirming(null);
-        }}
-        onCancel={() => setConfirming(null)}
-      />
-    ) : (
-      <Chip
-        key={spec.id}
-        id={spec.id}
-        active={lit(spec)}
-        count={spec.count}
-        icon={spec.icon?.(lit(spec))}
-        onClick={() => pick(spec)}
-        onRemove={spec.game !== undefined ? () => setConfirming(spec.game ?? null) : undefined}
-      >
-        {spec.label}
-      </Chip>
-    );
-
-  const trashButton = (
-    <Button
-      variant={inTrash ? "primary" : "ghost"}
-      size="sm"
-      aria-pressed={inTrash}
-      icon={<IconTrash className="h-3.5 w-3.5" />}
-      onClick={onTrash}
-    >
-      Recently deleted
-      <span className={cn("tabular-nums", inTrash ? "text-black/45" : "text-ink-faint")}>
-        {deleted}
-      </span>
-    </Button>
-  );
-
-  const openMore = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const box = event.currentTarget.getBoundingClientRect();
-    const entries: MenuEntry[] = specs
-      .filter((s) => hidden.has(s.id))
-      .map((s) => ({
-        kind: "item",
-        label: s.menuLabel,
-        icon: lit(s) ? <IconCheck className="h-3.5 w-3.5" /> : undefined,
-        shortcut: String(s.count),
-        onSelect: () => pick(s),
-      }));
-    if (deleted > 0) {
-      entries.push(
-        { kind: "separator" },
-        {
-          kind: "item",
-          label: "Recently deleted",
-          icon: inTrash ? <IconCheck className="h-3.5 w-3.5" /> : <IconTrash className="h-3.5 w-3.5" />,
-          shortcut: String(deleted),
-          onSelect: onTrash,
-        },
-      );
-    }
-    menu.open(
-      {
-        clientX: box.left,
-        clientY: box.bottom + 6,
-        preventDefault: () => {},
-        stopPropagation: () => {},
-      },
-      entries,
-      { anchor: box, gap: 6 },
-    );
-  };
+  const gameLabel = facetLabel("game", chosenGames);
+  const tagLabel = facetLabel("tag", tags);
+  // A longer label pushes the buttons after it along — a slide, not a jump.
+  useFlip(row, [favorites > 0, gameLabel, chosenGames.length > 0, tagLabel, tags.length > 0].join("|"));
 
   return (
-    <div className="relative">
-      {/* Every chip once more, out of sight and in one line: this is where
-          their widths come from. Clipped to nothing, so it cannot widen the
-          page. */}
-      <div aria-hidden inert className="invisible absolute inset-x-0 top-0 h-0 overflow-hidden">
-        <div ref={mirror} className="flex w-max items-center gap-2">
-          {specs.map((spec) => (
-            <div key={spec.id} data-measure={spec.id} className="shrink-0">
-              {chipFor(spec, true)}
-            </div>
-          ))}
-          {deleted > 0 && (
-            <div data-measure="trash" className="shrink-0">
-              {trashButton}
-            </div>
-          )}
-          <div data-measure="more" className="shrink-0">
-            <MoreChip count={88} />
-          </div>
-        </div>
+    <div ref={row} className="flex items-center gap-2 py-0.5">
+      <div className="shrink-0 pr-1.5">
+        <Segmented
+          value={inTrash ? null : filter.kind}
+          onChange={(kind) => onChange({ ...filter, kind })}
+          options={KINDS.map(({ key, label }) => ({
+            key,
+            label: (
+              <>
+                {label}
+                <span
+                  className={cn(
+                    "ml-1.5 text-xs",
+                    !inTrash && filter.kind === key ? "text-black/45" : "text-ink-faint",
+                  )}
+                >
+                  {kinds[key]}
+                </span>
+              </>
+            ),
+          }))}
+        />
       </div>
+      {favorites > 0 && (
+        <Chip
+          id="fav"
+          active={!inTrash && filter.favorites}
+          count={favorites}
+          icon={
+            <IconHeart
+              filled
+              className={cn("h-3.5 w-3.5", !inTrash && filter.favorites ? "text-black/70" : "text-live")}
+            />
+          }
+          onClick={() => onChange({ ...filter, favorites: inTrash || !filter.favorites })}
+        >
+          Favorites
+        </Chip>
+      )}
+      <FacetButton
+        id="game"
+        anchor={gameButton}
+        label={gameLabel}
+        noun="game"
+        active={chosenGames.length > 0}
+        open={opened === "game"}
+        onOpen={() => setOpened((now) => (now === "game" ? null : "game"))}
+        onClear={() => onChange({ ...filter, games: [], noGame: false })}
+      />
+      <FacetButton
+        id="tag"
+        anchor={tagButton}
+        label={tagLabel}
+        noun="tag"
+        active={tags.length > 0}
+        open={opened === "tag"}
+        onOpen={() => setOpened((now) => (now === "tag" ? null : "tag"))}
+        onClear={() => onChange({ ...filter, tags: [] })}
+      />
+      {deleted > 0 && (
+        <Button
+          variant={inTrash ? "primary" : "ghost"}
+          size="sm"
+          aria-pressed={inTrash}
+          className="ml-auto shrink-0"
+          icon={<IconTrash className="h-3.5 w-3.5" />}
+          onClick={onTrash}
+        >
+          Recently deleted
+          <span className={cn("tabular-nums", inTrash ? "text-black/45" : "text-ink-faint")}>
+            {deleted}
+          </span>
+        </Button>
+      )}
 
-      <div ref={row} className="flex flex-wrap items-center gap-2 py-0.5">
-        <div ref={lead} className="pr-1.5">
-          <Segmented
-            value={inTrash ? null : filter.kind}
-            onChange={(kind) => onChange({ ...filter, kind })}
-            options={KINDS.map(({ key, label }) => ({
-              key,
-              label: (
-                <>
-                  {label}
-                  <span
-                    className={cn(
-                      "ml-1.5 text-xs",
-                      !inTrash && filter.kind === key ? "text-black/45" : "text-ink-faint",
-                    )}
-                  >
-                    {kinds[key]}
-                  </span>
-                </>
-              ),
-            }))}
-          />
-        </div>
-        {shown.map((spec) => chipFor(spec))}
-        {overflow ? (
-          <MoreChip count={fit.hidden.length} onClick={openMore} />
-        ) : (
-          deleted > 0 && (
-            <div data-flip="trash" className="shrink-0">
-              {trashButton}
-            </div>
-          )
-        )}
-      </div>
+      {opened === "game" && (
+        <FacetPopover
+          anchor={gameButton}
+          noun="games"
+          values={gameList.values.map((v) => ({ ...v, checked: games.includes(v.name) }))}
+          noGame={gameList.noGame > 0 || noGame ? { count: gameList.noGame, checked: noGame } : null}
+          onToggle={(name) => onChange({ ...filter, games: pick(filter.games, name) })}
+          onToggleNoGame={() => onChange({ ...filter, noGame: inTrash || !filter.noGame })}
+          onClear={() => onChange({ ...filter, games: [], noGame: false })}
+          onRemove={onRemove}
+          onClose={() => setOpened(null)}
+        />
+      )}
+      {opened === "tag" && (
+        <FacetPopover
+          anchor={tagButton}
+          noun="tags"
+          values={tagList.map((v) => ({ ...v, checked: tags.includes(v.name) }))}
+          onToggle={(name) => onChange({ ...filter, tags: pick(filter.tags, name) })}
+          onClear={() => onChange({ ...filter, tags: [] })}
+          onClose={() => setOpened(null)}
+        />
+      )}
     </div>
   );
 }
 
-/** The last chip of a full row: the ones that did not fit, as a menu. */
-function MoreChip({
-  count,
-  onClick,
+/** A single small nod when a filter takes over — not on mount, or the whole
+ *  bar would twitch every time the gallery opens. */
+function useNod(box: React.RefObject<HTMLElement | null>, active: boolean) {
+  const was = useRef(active);
+  useEffect(() => {
+    if (was.current === active) return;
+    was.current = active;
+    if (!active) return;
+    animate(
+      box.current,
+      [
+        { transform: "scale(1)" },
+        { transform: "scale(1.04)", offset: 0.45 },
+        { transform: "scale(1)" },
+      ],
+      { duration: 300, easing: EASE_SPRING },
+    );
+  }, [box, active]);
+}
+
+/**
+ * "Game ▾" or "Tags ▾" in the chip look. Once something is chosen it is white
+ * like a chosen chip, names it ("Valorant", "2 games") and has a × that clears
+ * it without opening the list.
+ */
+function FacetButton({
+  id,
+  anchor,
+  label,
+  noun,
+  active,
+  open,
+  onOpen,
+  onClear,
 }: {
-  count: number;
-  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  id: string;
+  /** The whole pill: the list hangs from it. */
+  anchor: React.RefObject<HTMLDivElement | null>;
+  label: string;
+  noun: string;
+  active: boolean;
+  open: boolean;
+  onOpen: () => void;
+  onClear: () => void;
 }) {
+  useNod(anchor, active);
   return (
-    <button
-      data-flip="more"
-      aria-haspopup="menu"
-      onClick={onClick}
-      className="flex h-8 shrink-0 items-center rounded-pill border border-dashed border-line bg-surface
-        px-4 text-[13px] font-medium text-ink-muted transition-colors duration-150
-        hover:border-line-strong hover:text-ink"
+    <div
+      ref={anchor}
+      data-flip={id}
+      className={cn(
+        "flex h-8 items-center rounded-pill border transition-colors duration-150",
+        // The one thing in the row that gives way, so it stays one line with
+        // long names chosen at the narrowest window. A short name keeps itself:
+        // "c…" would say nothing.
+        label.length > 8 ? "min-w-0" : "shrink-0",
+        active
+          ? "border-white bg-white text-black"
+          : cn(
+              "border-line bg-surface hover:border-line-strong hover:text-ink",
+              open ? "border-line-strong text-ink" : "text-ink-muted",
+            ),
+      )}
     >
-      +{count} more
-    </button>
+      <button
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={active ? label : undefined}
+        onClick={onOpen}
+        className={cn(
+          "flex h-full min-w-0 items-center gap-1.5 rounded-pill pl-4 text-[13px] font-medium",
+          active ? "pr-1" : "pr-4",
+        )}
+      >
+        <span className="max-w-[180px] truncate">{label}</span>
+        <span aria-hidden className="shrink-0">
+          ▾
+        </span>
+      </button>
+      {active && (
+        <button
+          aria-label={`Clear the ${noun} filter`}
+          title={`Clear the ${noun} filter`}
+          onClick={onClear}
+          className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-pill text-black/70
+            transition-colors hover:bg-black/10 hover:text-black"
+        >
+          <IconClose className="h-3 w-3" />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -1756,23 +1634,14 @@ function TrashList({ trash, query }: { trash: Trashed[]; query: string }) {
   );
 }
 
-/**
- * One filter pill, on or off. A chosen one is white with a × — the whole pill is
- * the button that switches it off again.
- *
- * A game's pill also has the × that detaches the name from its clips, only
- * while it is not chosen, so the two never sit in the same place at once. It
- * holds its place in the layout and only becomes visible on hover — if it did
- * not, every following pill would jump sideways as you moved across. The ×
- * of a chosen pill takes exactly that place.
- */
+/** The Favorites pill, on or off. A chosen one is white with a × — the whole
+ *  pill is the button that switches it off again. */
 function Chip({
   id,
   active,
   count,
   icon,
   onClick,
-  onRemove,
   children,
 }: {
   id: string;
@@ -1780,35 +1649,17 @@ function Chip({
   count: number;
   icon?: React.ReactNode;
   onClick: () => void;
-  onRemove?: () => void;
   children: string;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const was = useRef(active);
-
-  // A single small nod when the chip takes over — not on mount, or the whole
-  // bar would twitch every time the gallery opens.
-  useEffect(() => {
-    if (was.current === active) return;
-    was.current = active;
-    if (!active) return;
-    animate(
-      box.current,
-      [
-        { transform: "scale(1)" },
-        { transform: "scale(1.04)", offset: 0.45 },
-        { transform: "scale(1)" },
-      ],
-      { duration: 300, easing: EASE_SPRING },
-    );
-  }, [active]);
+  useNod(box, active);
 
   return (
     <div
       ref={box}
       data-flip={id}
       className={cn(
-        "group/chip flex h-8 shrink-0 items-center rounded-pill border",
+        "flex h-8 shrink-0 items-center rounded-pill border",
         "transition-colors duration-150",
         active
           ? "border-white bg-white text-black"
@@ -1821,7 +1672,7 @@ function Chip({
         title={active ? `${children} — click to turn off` : children}
         className={cn(
           "flex h-full min-w-0 items-center gap-1.5 rounded-pill pl-4 text-[13px] font-medium",
-          active ? "pr-1" : onRemove ? "pr-1.5" : "pr-4",
+          active ? "pr-1" : "pr-4",
         )}
       >
         {icon}
@@ -1834,63 +1685,6 @@ function Chip({
             <IconClose className="h-3 w-3" />
           </span>
         )}
-      </button>
-      {onRemove && !active && (
-        <button
-          aria-label={`Remove the "${children}" filter`}
-          title="Remove filter — the game name is detached from these clips"
-          onClick={onRemove}
-          className={cn(
-            "mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-pill opacity-0 transition",
-            "group-hover/chip:opacity-100 focus-visible:opacity-100 hover:bg-hover hover:text-live",
-          )}
-        >
-          <IconClose className="h-3 w-3" />
-        </button>
-      )}
-    </div>
-  );
-}
-
-/** The confirmation sits in the pill's place — no dialog over the page. */
-function ConfirmChip({
-  id,
-  name,
-  autoFocus = true,
-  onConfirm,
-  onCancel,
-}: {
-  id: string;
-  name: string;
-  /** Off for the copy that is only there to be measured. */
-  autoFocus?: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div
-      data-flip={id}
-      className="cb-chip-expand flex h-8 shrink-0 items-center gap-1 rounded-pill border
-        border-live/40 bg-live/15 pl-4 text-[13px] font-medium text-live"
-    >
-      <span className="max-w-[160px] truncate" title={name}>
-        {name}
-      </span>
-      <span className="whitespace-nowrap">remove?</span>
-      <button
-        aria-label="Confirm removal"
-        onClick={onConfirm}
-        autoFocus={autoFocus}
-        className="ml-1 grid h-6 w-6 place-items-center rounded-pill hover:bg-live/25"
-      >
-        <IconCheck className="h-3.5 w-3.5" />
-      </button>
-      <button
-        aria-label="Cancel"
-        onClick={onCancel}
-        className="mr-1 grid h-6 w-6 place-items-center rounded-pill text-ink-muted hover:bg-hover hover:text-ink"
-      >
-        <IconClose className="h-3 w-3" />
       </button>
     </div>
   );

@@ -1,6 +1,6 @@
 // What the gallery shows and in which order: the filters that combine, the
-// sort, the day headings, and which chips still fit in the row. Pure, so it
-// can be tested.
+// sort, the day headings, and the Game and Tags lists. Pure, so it can be
+// tested.
 import type { Clip } from "./types.ts";
 
 /** The type segment. "clips" are the ones cut out of the buffer. */
@@ -76,7 +76,7 @@ export function isFiltered(filter: ClipFilter): boolean {
   );
 }
 
-/** The counts in the type segment — over the whole library, like the chips'. */
+/** The counts in the type segment — over the whole library. */
 export function kindCounts(clips: Array<Pick<Clip, "screenshot" | "recording">>): Record<ClipKind, number> {
   const counts = { all: clips.length, clips: 0, recordings: 0, screenshots: 0 };
   for (const clip of clips) counts[kindOf(clip)]++;
@@ -204,61 +204,81 @@ export function groupByDay<T>(
   return [...groups.values()];
 }
 
+/** One entry of the Game or Tags list. */
+export interface FacetValue {
+  name: string;
+  count: number;
+}
+
+/** Most clips first, then by name — case does not count, so "beta" sits between "Alpha" and "Gamma". */
+function sortFacet(counts: Map<string, number>): FacetValue[] {
+  return [...counts]
+    .map(([name, count]) => ({ name, count }))
+    .sort(
+      (a, b) =>
+        b.count - a.count ||
+        a.name.localeCompare(b.name, "en", { sensitivity: "base" }) ||
+        a.name.localeCompare(b.name, "en"),
+    );
+}
+
+type Facetable = Pick<Clip, "game" | "tags" | "screenshot" | "recording">;
+
+/** The clips the type segment lets through — the lists count within these. */
+function ofKind<T extends Facetable>(clips: T[], kind: ClipKind): T[] {
+  return kind === "all" ? clips : clips.filter((clip) => kindOf(clip) === kind);
+}
+
+/** A chosen value nothing of this type carries still gets its row, at 0 — or it could not be unticked. */
+function keepChosen(counts: Map<string, number>, chosen: string[]) {
+  for (const name of chosen) if (!counts.has(name)) counts.set(name, 0);
+}
+
 /**
- * Which chips have to go into "+N more" so the row stays within `lines` lines.
- *
- * The row is: the type segment (`lead`), the chips, then either the trash
- * button (`tail`, 0 when there is none) or, once anything overflows, the
- * "+N more" chip (`more`) — the trash then moves into its menu. Unselected
- * chips go first, from the end; a selected one only when nothing else is left.
- * Widths in pixels, `gap` between neighbours, laid out the way flex-wrap does.
+ * The Game list: every game of the chosen type with its clips, and how many of
+ * them have no game ("No game" goes last, apart from the rest).
  */
-export function fitChips({
-  lead,
-  chips,
-  tail,
-  more,
-  row,
-  gap,
-  lines,
-}: {
-  lead: number;
-  chips: Array<{ id: string; width: number; selected: boolean }>;
-  tail: number;
-  more: number;
-  row: number;
-  gap: number;
-  lines: number;
-}): { hidden: string[]; overflow: boolean } {
-  if (row <= 0) return { hidden: [], overflow: false };
-
-  const fits = (widths: number[]) => {
-    let line = 1;
-    let x = -1;
-    for (const width of widths) {
-      if (x < 0) x = width;
-      else if (x + gap + width <= row) x += gap + width;
-      else {
-        line++;
-        x = width;
-      }
-    }
-    return line <= lines;
-  };
-
-  const all = chips.map((chip) => chip.width);
-  if (fits([lead, ...all, ...(tail > 0 ? [tail] : [])])) return { hidden: [], overflow: false };
-
-  // Who goes first: unselected from the end, then selected from the end.
-  const order = [
-    ...chips.filter((chip) => !chip.selected).reverse(),
-    ...chips.filter((chip) => chip.selected).reverse(),
-  ].map((chip) => chip.id);
-  const hidden = new Set<string>();
-  for (const id of order) {
-    hidden.add(id);
-    const shown = chips.filter((chip) => !hidden.has(chip.id)).map((chip) => chip.width);
-    if (fits([lead, ...shown, more])) break;
+export function gameFacet(
+  clips: Facetable[],
+  kind: ClipKind,
+  chosen: string[],
+): { values: FacetValue[]; noGame: number } {
+  const counts = new Map<string, number>();
+  let noGame = 0;
+  for (const clip of ofKind(clips, kind)) {
+    if (clip.game) counts.set(clip.game, (counts.get(clip.game) ?? 0) + 1);
+    else noGame++;
   }
-  return { hidden: chips.filter((chip) => hidden.has(chip.id)).map((chip) => chip.id), overflow: true };
+  keepChosen(counts, chosen);
+  return { values: sortFacet(counts), noGame };
+}
+
+/** The Tags list, counted like the games. */
+export function tagFacet(clips: Facetable[], kind: ClipKind, chosen: string[]): FacetValue[] {
+  const counts = new Map<string, number>();
+  for (const clip of ofKind(clips, kind)) {
+    for (const tag of clip.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  keepChosen(counts, chosen);
+  return sortFacet(counts);
+}
+
+/** What the search field at the top of a list leaves of it. */
+export function searchFacet<T extends { name: string }>(values: T[], query: string): T[] {
+  const needle = query.trim().toLowerCase();
+  return needle ? values.filter((value) => value.name.toLowerCase().includes(needle)) : values;
+}
+
+/** A list gets its search field once it is longer than this. */
+const FACET_SEARCH_FROM = 8;
+
+export function facetHasSearch(entries: number): boolean {
+  return entries > FACET_SEARCH_FROM;
+}
+
+/** The button's text: "Game" or "Tags" with nothing chosen, the one name, or "2 games". */
+export function facetLabel(facet: "game" | "tag", chosen: string[]): string {
+  if (chosen.length === 0) return facet === "game" ? "Game" : "Tags";
+  if (chosen.length === 1) return chosen[0];
+  return `${chosen.length} ${facet === "game" ? "games" : "tags"}`;
 }
