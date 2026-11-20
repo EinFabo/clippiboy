@@ -171,7 +171,17 @@ export function FacetPopover({
     }
   };
 
-  const row = (name: string, count: number, checked: boolean, toggle: () => void, muted = false) =>
+  // Checked rows next to each other share one highlight: the corners between
+  // them go square, so a run of picks reads as one block instead of a stack of
+  // separate pills.
+  const row = (
+    name: string,
+    count: number,
+    checked: boolean,
+    toggle: () => void,
+    muted = false,
+    joins: { above?: boolean; below?: boolean } = {},
+  ) =>
     removing === name && onRemove && !muted ? (
       <ConfirmRow
         key={name}
@@ -205,6 +215,8 @@ export function FacetPopover({
           "flex h-[34px] w-full shrink-0 items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[13px]",
           "font-medium transition-colors duration-100 hover:bg-hover focus-visible:bg-hover",
           checked && "bg-white/[0.08]",
+          checked && joins.above && "rounded-t-none",
+          checked && joins.below && "rounded-b-none",
         )}
       >
         <span
@@ -268,7 +280,12 @@ export function FacetPopover({
         </div>
       )}
       <div role="group" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
-        {shown.map((value) => row(value.name, value.count, value.checked, () => onToggle(value.name)))}
+        {shown.map((value, i) =>
+          row(value.name, value.count, value.checked, () => onToggle(value.name), false, {
+            above: shown[i - 1]?.checked && removing !== shown[i - 1].name,
+            below: shown[i + 1]?.checked && removing !== shown[i + 1].name,
+          }),
+        )}
         {showNoGame && noGame && (
           <>
             {shown.length > 0 && <div className="mx-2 my-1 shrink-0 border-t border-line" />}
