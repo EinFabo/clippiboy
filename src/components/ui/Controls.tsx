@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { settlesWithoutChange } from "@/lib/draft";
 import { SLIDE, SlidingIndicator } from "./SlidingIndicator";
@@ -220,43 +220,5 @@ export function Select<T extends string>({
         </option>
       ))}
     </select>
-  );
-}
-
-/// Levels rise instantly and fall softly — otherwise the bar flickers at the 20
-/// peak values a second the core delivers.
-export function Meter({ level }: { level: number }) {
-  const [shown, setShown] = useState(0);
-
-  useEffect(() => {
-    setShown((current) => (level > current ? level : current));
-  }, [level]);
-
-  useEffect(() => {
-    const timer = setInterval(
-      () => setShown((current) => (current < 0.005 ? 0 : current * 0.78)),
-      60,
-    );
-    return () => clearInterval(timer);
-  }, []);
-
-  // Linear amplitude always looks like "nothing" on a bar: normal speech sits at
-  // 0.03–0.1. Hence a dB scale from -60 to 0.
-  const db = shown > 0 ? 20 * Math.log10(shown) : -Infinity;
-  const pct = Math.min(100, Math.max(0, ((db + 60) / 60) * 100));
-
-  return (
-    <div className="h-1.5 w-full overflow-hidden rounded-pill bg-line">
-      <div
-        className="h-full rounded-pill transition-[width] duration-75 ease-linear"
-        style={{
-          width: `${pct}%`,
-          background:
-            pct > 92
-              ? "var(--color-live)"
-              : "linear-gradient(90deg, var(--color-ok), var(--color-accent-bright))",
-        }}
-      />
-    </div>
   );
 }

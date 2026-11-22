@@ -32,3 +32,14 @@ test("an array is not an object with the same keys", () =>
 test("a missing key is not an undefined one", () =>
   assert.equal(sameData({ a: undefined }, { b: undefined }), false));
 test("NaN equals NaN, like Object.is", () => assert.equal(sameData({ n: NaN }, { n: NaN }), true));
+
+import { changedPart } from "./same.ts";
+
+test("changedPart: an unchanged tick yields null", () => {
+  const cur = { a: {}, b: [1], c: 3 };
+  assert.equal(changedPart(cur, { a: {}, b: [1], c: 3 }), null);
+});
+test("changedPart: only the changed keys come back", () => {
+  const cur = { a: { x: 1 }, b: [1], c: 3 };
+  assert.deepEqual(changedPart(cur, { a: { x: 1 }, b: [2], c: 3 }), { b: [2] });
+});

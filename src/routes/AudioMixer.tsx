@@ -3,7 +3,8 @@ import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Meter, Slider, Toggle } from "@/components/ui/Controls";
+import { Slider, Toggle } from "@/components/ui/Controls";
+import { Meter } from "@/components/ui/Meter";
 import {
   IconApp,
   IconGamepad,
@@ -177,7 +178,7 @@ export function AudioMixer() {
     patchConfig,
     // `levels` steht mit Absicht nicht hier: die Pegel kommen zwanzigmal die
     // Sekunde, und über diese Zeile hätte der ganze Mischer sie mitgemacht.
-    // Jeder Balken holt sich seinen eigenen Wert — siehe `SourceMeter`.
+    // Jeder Balken holt sich seinen eigenen Wert — siehe `Meter`.
   } = useEngine(
     useShallow((s) => ({
       config: s.config,
@@ -431,7 +432,7 @@ export function AudioMixer() {
                         )}
                     </p>
                     <div className="mt-2.5 px-1.5">
-                      <SourceMeter id={source.id} muted={source.muted} />
+                      <Meter source={source.id} muted={source.muted} />
                     </div>
                   </div>
 
@@ -681,19 +682,6 @@ export function QuickSetup({
       </div>
     </Card>
   );
-}
-
-/**
- * Der Pegelbalken einer Quelle.
- *
- * Eigene Komponente, damit er seinen Wert selbst aus dem Store zieht: die Pegel
- * kommen zwanzigmal die Sekunde, und stünde `levels` oben im Mischer, baute sich
- * bei jedem Paket der ganze Baum aus Karten, Reglern und Menüs neu auf. So
- * rendert zwanzigmal die Sekunde nur dieses eine Element neu.
- */
-function SourceMeter({ id, muted }: { id: string; muted: boolean }) {
-  const level = useEngine((s) => s.levels[id] ?? 0);
-  return <Meter level={muted ? 0 : level} />;
 }
 
 function MiniToggle({

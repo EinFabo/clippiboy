@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useStorageInfo } from "./lib/storageInfo";
+import { changedPart } from "./lib/same";
 import { coalesce } from "./lib/coalesce";
 import { Outbox } from "./lib/outbox";
 import { removeSourceWrite, sourceWrite } from "./lib/sourceWrite";
@@ -420,8 +421,13 @@ export const useEngine = create<EngineState>((set, get) => ({
       if (configRead) configLoaded = true;
 
       await events.onLevels((levels) => set({ levels }));
+      // The engine tick arrives every second, mostly unchanged; set only what moved.
+      const setChanged = (patch: Partial<EngineState>) => {
+        const part = changedPart(get(), patch);
+        if (part) set(part);
+      };
       await events.onStatus((s) =>
-        set({
+        setChanged({
           bufferActive: s.bufferActive,
           recording: s.recording,
           recordingSeconds: s.recordingSeconds,
@@ -474,9 +480,9 @@ export const useEngine = create<EngineState>((set, get) => ({
         .listTrash()
         .then((trash) => set({ trash }))
         .catch(() => {});
-      await events.onAudioErrors((sourceErrors) => set({ sourceErrors }));
-      await events.onAudioWarnings((sourceWarnings) => set({ sourceWarnings }));
-      await events.onAudioTaps((taps) => set({ taps }));
+      await events.onAudioErrors((sourceErrors) => setChanged({ sourceErrors }));
+      await events.onAudioWarnings((sourceWarnings) => setChanged({ sourceWarnings }));
+      await events.onAudioTaps((taps) => setChanged({ taps }));
       // The core checks every hour and says so by event; a find from before
       // this window existed is asked for once.
       await events.onFfmpegStatus((ffmpeg) => set({ ffmpeg }));
