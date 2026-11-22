@@ -173,3 +173,16 @@ test("reason reads on after a dot", () => {
   assert.equal(reason(t({ stage: "failed", error: "ClippiBoy could not read the file." })), "ClippiBoy could not read the file");
   assert.equal(reason(t({ stage: "expired" })), "no answer");
 });
+
+test("row: clips still queued for the friend count in", () => {
+  const queued = [{ name: "Retake B", screenshot: false, recording: false }];
+  // Handed over, nothing in the list yet.
+  assert.deepEqual(rowTransfer("1", [], {}, queued), { kind: "sending", ids: [], text: "Getting Retake B ready", share: null });
+  // One waiting for an answer, one behind it.
+  assert.equal(rowTransfer("1", [t({ stage: "asking" })], {}, queued)?.text, "Sending 2 clips");
+  const shot = [{ name: "Scoreboard", screenshot: true, recording: false }];
+  assert.equal(rowTransfer("1", [t({ moved: 50 })], {}, shot)?.text, "Sending 2 clips");
+  assert.equal(rowTransfer("1", [t({ moved: 50 })], {}, shot)?.kind === "sending" && rowTransfer("1", [t({ moved: 50 })], {}, shot)?.share, 0.5);
+  // Receiving from them while one's own clips wait: the sending shows.
+  assert.equal(rowTransfer("1", [t({ direction: "in", moved: 10 })], {}, queued)?.kind, "sending");
+});

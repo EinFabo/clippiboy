@@ -114,7 +114,7 @@ export function noun(t: Pick<Transfer, "screenshot" | "recording">): string {
   return t.screenshot ? "screenshot" : t.recording ? "recording" : "clip";
 }
 
-function plural(ts: Transfer[]): string {
+function plural(ts: Pick<Transfer, "screenshot" | "recording">[]): string {
   const nouns = new Set(ts.map(noun));
   return `${nouns.size === 1 ? [...nouns][0] : "clip"}s`;
 }
@@ -128,28 +128,36 @@ export function reason(t: Transfer): string {
   return /^[A-Z][a-z]*$/.test(first) ? text[0].toLowerCase() + text.slice(1) : text;
 }
 
+/** A clip still waiting its turn to go to the friend (`sendQueue`). */
+export type QueuedClip = Pick<Transfer, "name" | "screenshot" | "recording">;
+
 /**
- * The row's transfer line for one friend: running first, then failures, then
- * what has ended — the newest of those.
+ * The row's transfer line for one friend: running first (with the clips still
+ * queued for them counted in), then failures, then what has ended — the newest
+ * of those.
  */
 export function rowTransfer(
   friendId: string,
   transfers: Transfer[],
   ended: Record<string, Ended>,
+  queued: QueuedClip[] = [],
 ): RowTransfer | null {
   const mine = transfers.filter((t) => t.friendId === friendId);
   const by = (kind: TransferKind) => mine.filter((t) => transferKind(t) === kind);
 
   const active = by("active");
   const out = active.filter((t) => t.direction === "out");
-  const running = out.length > 0 ? out : active;
-  if (running.length > 0) {
-    const sending = running[0].direction === "out";
+  const sending = out.length > 0 || queued.length > 0;
+  const running = sending ? out : active;
+  const waiting = sending ? queued : [];
+  if (running.length + waiting.length > 0) {
     const moving = running.filter((t) => t.stage === "moving");
     const size = running.reduce((sum, t) => sum + t.size, 0);
     const moved = running.reduce((sum, t) => sum + t.moved, 0);
+    const count = running.length + waiting.length;
     let text: string;
-    if (running.length > 1) text = `${sending ? "Sending" : "Receiving"} ${running.length} ${plural(running)}`;
+    if (count > 1) text = `${sending ? "Sending" : "Receiving"} ${count} ${plural([...running, ...waiting])}`;
+    else if (running.length === 0) text = `Getting ${waiting[0].name} ready`;
     else if (!sending) text = `Receiving ${running[0].name}`;
     else if (running[0].stage === "moving") text = `Sending ${running[0].name}`;
     else if (running[0].stage === "asking") text = `Waiting for an answer · ${running[0].name}`;

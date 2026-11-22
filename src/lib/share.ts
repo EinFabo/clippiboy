@@ -2,9 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { inTauri } from "./ipc";
+import { clipName } from "./format";
 import { useFriends } from "./friends";
 import { toast } from "./toastBus";
-import { noteEnded, toDismiss, type Ended } from "./transferRows";
+import { noteEnded, noun, toDismiss, type Ended } from "./transferRows";
+import { dropQueue, enqueue, step, type Queued, type SendQueue } from "./sendQueue";
 import type { Clip, FriendUser, Transfer } from "./types";
 
 /**
@@ -25,7 +27,7 @@ interface ShareState {
   transfers: Transfer[];
   /** The clip whose "Send to a friend" picker is open. */
   picking: Clip | null;
-  /** More clips going to the same friend, picked together with `picking`. */
+  /** Opens the picker for a clip, or closes it. */
   pick: (clip: Clip | null) => void;
   /** The friend whose "Send a clip" picker is open — the same, the other way round. */
   choosingFor: FriendUser | null;
@@ -69,6 +71,7 @@ const dismissing = new Set<string>();
  */
 export function watchTransfers(): () => void {
   const check = () => {
+    runQueue();
     const { transfers } = useShare.getState();
     const { presence } = useFriends.getState();
     const before = useTransferMemory.getState().ended;
@@ -85,25 +88,84 @@ export function watchTransfers(): () => void {
   };
   check();
   const stopShare = useShare.subscribe(check);
+  const stopQueue = useSendQueue.subscribe((next, prev) => {
+    if (next.queue !== prev.queue) runQueue();
+  });
   const stopFriends = useFriends.subscribe((next, prev) => {
     if (next.presence !== prev.presence) check();
   });
   return () => {
     stopShare();
+    stopQueue();
     stopFriends();
   };
 }
 
-/** Sends the clips of failed transfers again; each failure goes once its new
- *  transfer is on its way, and stays if that cannot start either. */
+/** Clips waiting their turn, by friend — see `sendQueue`. Run by the main
+ *  window (`watchTransfers`), where the pickers are. */
+export const useSendQueue = create<{ queue: SendQueue }>(() => ({ queue: {} }));
+
+/** Sends clips to a friend one after another, each once the one before is answered. */
+export function sendClips(friendId: string, clips: Clip[]): void {
+  const items = clips.map((clip) => ({
+    clipId: clip.id,
+    name: clipName(clip),
+    screenshot: clip.screenshot,
+    recording: clip.recording,
+  }));
+  useSendQueue.setState((s) => ({ queue: enqueue(s.queue, friendId, items) }));
+}
+
+/** Nothing more goes to this friend — the row's X. */
+export function stopSending(friendId: string): void {
+  useSendQueue.setState((s) => ({ queue: dropQueue(s.queue, friendId) }));
+}
+
+function friendName(friendId: string): string {
+  return useFriends.getState().lists.friends.find((f) => f.id === friendId)?.displayName ?? "your friend";
+}
+
+/** "2 more clips weren't sent to Luca." */
+function leftUnsent(left: Queued[], friendId: string): string {
+  const nouns = new Set(left.map(noun));
+  const what = nouns.size === 1 ? [...nouns][0] : "clip";
+  return left.length === 1
+    ? `1 more ${what} wasn't sent to ${friendName(friendId)}.`
+    : `${left.length} more ${what}s weren't sent to ${friendName(friendId)}.`;
+}
+
+function runQueue(): void {
+  const { queue } = useSendQueue.getState();
+  const next = step(queue, useShare.getState().transfers);
+  if (next.queue !== queue) useSendQueue.setState({ queue: next.queue });
+  for (const { friendId, left } of next.stopped) if (left.length > 0) toast("error", leftUnsent(left, friendId));
+  for (const { friendId, item } of next.send) {
+    shareApi
+      .send(item.clipId, friendId)
+      .then(() => {
+        if (item.replaces) void shareApi.dismiss(item.replaces).catch(() => {});
+      })
+      .catch((err) => {
+        // It could not start: the chain ends here, and says so.
+        const left = useSendQueue.getState().queue[friendId]?.items ?? [];
+        stopSending(friendId);
+        const why = typeof err === "string" ? err : `Couldn't send it to ${friendName(friendId)}.`;
+        toast("error", left.length > 0 ? `${why} ${leftUnsent(left, friendId)}` : why);
+      });
+  }
+}
+
+/** Sends the clips of failed transfers again, through the same chain; each
+ *  failure goes once its new transfer is on its way, and stays if that cannot
+ *  start either. */
 export function retryTransfers(failed: Transfer[]): void {
+  const byFriend = new Map<string, Queued[]>();
   for (const t of failed) {
     if (t.direction !== "out" || !t.clipId) continue;
-    shareApi
-      .send(t.clipId, t.friendId)
-      .then(() => shareApi.dismiss(t.id))
-      .catch((err) => toast("error", typeof err === "string" ? err : "Couldn't send it again."));
+    const item = { clipId: t.clipId, name: t.name, screenshot: t.screenshot, recording: t.recording, replaces: t.id };
+    byFriend.set(t.friendId, [...(byFriend.get(t.friendId) ?? []), item]);
   }
+  for (const [friendId, items] of byFriend) useSendQueue.setState((s) => ({ queue: enqueue(s.queue, friendId, items) }));
 }
 
 /** What App listens for to open a clip in the gallery. */

@@ -29,7 +29,17 @@ import {
 } from "@/lib/friendsPage";
 import { openSettings } from "@/lib/settingsLink";
 import { useStreamer } from "@/lib/streamer";
-import { megabytes, openClip, retryTransfers, shareApi, useShare, useTransferMemory } from "@/lib/share";
+import {
+  megabytes,
+  openClip,
+  retryTransfers,
+  shareApi,
+  stopSending,
+  useSendQueue,
+  useShare,
+  useTransferMemory,
+} from "@/lib/share";
+import { waitingFor } from "@/lib/sendQueue";
 import { ago, friendStatus, groupFriends, pendingRows, type FriendStatus } from "@/lib/friendsList";
 import { noun, rowTransfer, type Ended, type RowTransfer } from "@/lib/transferRows";
 import { readOpen, writeOpen } from "@/lib/groupState";
@@ -801,6 +811,8 @@ function Group({
 }) {
   const storageKey = `friends.${title.toLowerCase()}`;
   const [open, setOpen] = useState(() => !collapsible || readOpen(storageKey, true));
+  // Clips picked together go one by one; the ones still waiting count in the row.
+  const queue = useSendQueue((s) => s.queue);
   if (friends.length === 0) return null;
   const toggle = () => {
     setOpen(!open);
@@ -820,7 +832,7 @@ function Group({
               presence={presence[friend.id] ?? null}
               lastSeen={lastSeen[friend.id]}
               now={now}
-              transfer={rowTransfer(friend.id, transfers, ended)}
+              transfer={rowTransfer(friend.id, transfers, ended, waitingFor(queue, friend.id))}
             />
           ))}
         </Card>
@@ -971,7 +983,7 @@ function FriendRow({
         />
       ) : (
         <>
-          {transfer && <TransferActions transfer={transfer} reachable={reachable} />}
+          {transfer && <TransferActions transfer={transfer} friendId={friend.id} reachable={reachable} />}
           {sendButton}
           {moreButton}
         </>
@@ -1007,7 +1019,16 @@ function TransferLine({ transfer: t, now }: { transfer: RowTransfer; now: number
 }
 
 /** On the right of the row: the bar and its X, Retry and its X, or Open. */
-function TransferActions({ transfer: t, reachable }: { transfer: RowTransfer; reachable: boolean }) {
+function TransferActions({
+  transfer: t,
+  friendId,
+  reachable,
+}: {
+  transfer: RowTransfer;
+  friendId: string;
+  reachable: boolean;
+}) {
+  const waiting = useSendQueue((s) => waitingFor(s.queue, friendId).length);
   const closeButton = (label: string, onClick: () => void) => (
     <button aria-label={label} title={label} onClick={onClick} className={cn(ICON_BUTTON, "bg-elevated text-ink-muted")}>
       <IconClose className="h-3.5 w-3.5" />
@@ -1022,7 +1043,9 @@ function TransferActions({ transfer: t, reachable }: { transfer: RowTransfer; re
             {Math.floor(t.share * 100)} %
           </span>
         )}
-        {closeButton(t.ids.length > 1 ? "Cancel all" : "Cancel", () => {
+        {closeButton(t.ids.length + waiting > 1 ? "Cancel all" : "Cancel", () => {
+          // The clips still waiting their turn stay home too.
+          stopSending(friendId);
           for (const id of t.ids) void shareApi.cancel(id);
         })}
       </>
