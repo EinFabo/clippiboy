@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { listen } from "@tauri-apps/api/event";
 import { useEngine } from "./store";
@@ -35,6 +35,11 @@ export default function App() {
   const init = useEngine((s) => s.init);
   const scroller = useRef<HTMLElement>(null);
   useScrollingFlag(scroller);
+
+  // Every page starts at the top, whatever the last one was scrolled to.
+  useLayoutEffect(() => {
+    scroller.current?.scrollTo(0, 0);
+  }, [route]);
 
   useEffect(() => {
     void init();

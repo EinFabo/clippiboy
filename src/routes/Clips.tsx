@@ -35,6 +35,7 @@ import { isTextField } from "@/lib/dom";
 import { useFlip } from "@/lib/useFlip";
 import { useStableHandler } from "@/lib/useStableHandler";
 import { sameData } from "@/lib/same";
+import { limitGroups } from "@/lib/limitGroups";
 import { usePresence } from "@/lib/usePresence";
 import { useCountUp } from "@/lib/useCountUp";
 import { useClipSelection, type SelectMods } from "@/lib/useClipSelection";
@@ -145,6 +146,11 @@ function touchedTiles(records: MutationRecord[]): Set<HTMLElement> {
  * tab for the fourth time should simply show the clips.
  */
 let greeted = false;
+/** Tiles built on the first frame, the batch added per frame after it, and how
+    many of the first ones play the entrance (about the first screen). */
+const FIRST_TILES = 24;
+const TILE_BATCH = 48;
+const GREETED_TILES = 12;
 
 export function Clips({
   onNavigate,
@@ -301,6 +307,17 @@ export function Clips({
       sorts that have no days. */
   const groups = groupByDay(tiles, (tile) => tile.item.createdAt, sort, Date.now());
 
+  // The page opens with the first screens' worth of tiles and the rest follows
+  // in the next frames, so the click is answered before 300 tiles are built.
+  // Once everything is in, it stays in.
+  const [built, setBuilt] = useState(FIRST_TILES);
+  useEffect(() => {
+    if (built === Infinity) return;
+    const frame = requestAnimationFrame(() => setBuilt((n) => (n + TILE_BATCH >= tiles.length ? Infinity : n + TILE_BATCH)));
+    return () => cancelAnimationFrame(frame);
+  }, [built, tiles.length]);
+  const shownGroups = limitGroups(groups, built);
+
   // The grid is one tab stop: only the tile the focus last rested on is
   // reachable with Tab, the arrow keys move between the tiles.
   const [resting, setResting] = useState<string | null>(null);
@@ -364,7 +381,7 @@ export function Clips({
   if (greeting.current === null && tiles.length > 0) {
     greeting.current = greeted
       ? new Map()
-      : new Map(tiles.map((tile, slot) => [tile.key, Math.min(slot, 11) * 30]));
+      : new Map(tiles.slice(0, GREETED_TILES).map((tile, slot) => [tile.key, slot * 30]));
     greeted = true;
   }
   if (known.current === null) {
@@ -593,12 +610,12 @@ export function Clips({
             if (id) setResting(id);
           }}
         >
-          {groups.map((group) => (
+          {shownGroups.map((group, at) => (
             <section key={group.key}>
               {group.label && (
                 <DayHeading
                   label={group.label}
-                  count={group.items.filter((tile) => !tile.leaving).length}
+                  count={groups[at].items.filter((tile) => !tile.leaving).length}
                 />
               )}
               <div className="grid grid-cols-3 gap-4">
