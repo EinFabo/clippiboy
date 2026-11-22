@@ -74,9 +74,8 @@ pub fn app_of(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
             break;
         };
         match tree.get(parent) {
-            // Never up into the shell.
-            Some((_, parent_exe))
-                if is_audio_helper(exe) && !parent_exe.eq_ignore_ascii_case("explorer.exe") =>
+            // Never up into the shell or a system host: the helper stays.
+            Some((_, parent_exe)) if is_audio_helper(exe) && !is_system_host(parent_exe) =>
             {
                 current = app_root(*parent, tree)
             }
@@ -97,6 +96,22 @@ const AUDIO_HELPERS: &[&str] = &[
     "cefsubprocess.exe",
     "crashpad_handler.exe",
 ];
+
+/// Processes that start things for the whole session and own no application.
+const SYSTEM_HOSTS: &[&str] = &[
+    "explorer.exe",
+    "svchost.exe",
+    "sihost.exe",
+    "runtimebroker.exe",
+    "services.exe",
+    "winlogon.exe",
+    "dwm.exe",
+    "applicationframehost.exe",
+];
+
+fn is_system_host(exe: &str) -> bool {
+    SYSTEM_HOSTS.iter().any(|name| name.eq_ignore_ascii_case(exe))
+}
 
 pub fn is_audio_helper(exe: &str) -> bool {
     AUDIO_HELPERS.iter().any(|name| name.eq_ignore_ascii_case(exe))
@@ -151,6 +166,10 @@ pub fn group_apps(
                 (root == session.pid).then(|| session.exe.clone()).flatten()
             })
             .unwrap_or_else(|| format!("PID {root}"));
+        // The host is gone: a bare web view says nothing about who it plays for.
+        if is_audio_helper(&exe) {
+            continue;
+        }
         let own_session = root == session.pid
             || session
                 .exe
@@ -231,32 +250,88 @@ pub fn name_taps(
         .collect()
 }
 
-/// The note for every application source nothing matches while the buffer
-/// runs: that track is written, and it is silence.
+/// The notes about application sources: one nothing matches while the buffer
+/// runs (that track is written, and it is silence), one stored under a bare
+/// helper name that cannot be found again, and the second of two sources that
+/// end up on the same application.
 pub fn missing_app_notes(
     sources: &[AudioSource],
+    game_pid: Option<u32>,
     tree: &HashMap<u32, (u32, String)>,
     own: u32,
     buffering: bool,
 ) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    if !buffering {
-        return out;
-    }
+    // Who has which application, in the order the engine claims them.
+    let mut owner: HashMap<u32, &str> = HashMap::new();
     for source in sources.iter().filter(|s| s.enabled) {
-        if let SourceKind::Process {
-            pid,
-            exe,
-            mode: ProcessMode::Include,
-        } = &source.kind
-        {
-            if live_pid(own, *pid, exe.as_deref(), tree).is_none() {
-                out.insert(
-                    source.id.clone(),
-                    format!("{} is not running — this track stays silent", source.label),
-                );
+        let root = match &source.kind {
+            SourceKind::Game => game_pid.map(|pid| app_root(pid, tree)),
+            SourceKind::Process {
+                pid,
+                exe,
+                mode: ProcessMode::Include,
+            } => {
+                let live = live_pid(own, *pid, exe.as_deref(), tree);
+                if live.is_none() && buffering {
+                    let helper = exe.as_deref().is_some_and(is_audio_helper);
+                    out.insert(
+                        source.id.clone(),
+                        if helper {
+                            format!("Add {} again from the list", source.label)
+                        } else {
+                            format!("{} is not running — this track stays silent", source.label)
+                        },
+                    );
+                }
+                live.map(|pid| app_root(pid, tree))
+            }
+            _ => None,
+        };
+        let Some(root) = root else { continue };
+        match owner.get(&root) {
+            Some(winner) => {
+                out.insert(source.id.clone(), format!("Already recorded by {winner}"));
+            }
+            None => {
+                owner.insert(root, source.label.as_str());
             }
         }
+    }
+    out
+}
+
+/// Sources stored under a helper's exe (`msedgewebview2.exe`) by an older
+/// version, whose helper still runs: the host application's exe to store
+/// instead, as (source id, new pid, new exe, new label when the label was the
+/// helper's name). Empty once migrated, so applying it again changes nothing.
+pub fn helper_migrations(
+    sources: &[AudioSource],
+    tree: &HashMap<u32, (u32, String)>,
+    own: u32,
+) -> Vec<(String, u32, String, Option<String>)> {
+    let mut out = Vec::new();
+    for source in sources.iter().filter(|s| s.enabled) {
+        let SourceKind::Process { pid, exe: Some(exe), .. } = &source.kind else {
+            continue;
+        };
+        if !is_audio_helper(exe) {
+            continue;
+        }
+        let Some((_, running)) = tree.get(pid) else { continue };
+        if !running.eq_ignore_ascii_case(exe) {
+            continue;
+        }
+        let host = app_of(*pid, tree);
+        let Some((_, host_exe)) = tree.get(&host) else { continue };
+        if host == *pid || is_audio_helper(host_exe) || in_tree_of(host, own, tree) {
+            continue;
+        }
+        let stem = exe.trim_end_matches(".exe");
+        let label = (source.label.eq_ignore_ascii_case(stem)
+            || source.label.eq_ignore_ascii_case(exe))
+        .then(|| host_exe.trim_end_matches(".exe").to_string());
+        out.push((source.id.clone(), host, host_exe.clone(), label));
     }
     out
 }
@@ -714,7 +789,10 @@ fn resolve_for(
             // point. Restarting Discord used to leave this source dead for good.
             SourceKind::Process { pid, exe, mode } => {
                 if let Some(now) = live_pid(own, *pid, exe.as_deref(), tree) {
-                    if !claim(&mut tapped, app_root(now, tree), &source.label) {
+                    // Only a source that taps claims; "everything except" does not.
+                    if *mode == ProcessMode::Include
+                        && !claim(&mut tapped, app_root(now, tree), &source.label)
+                    {
                         continue;
                     }
                     out.push(Stream {
@@ -739,7 +817,8 @@ fn resolve_for(
 /// Marks `root` as tapped; false (and a log line) when another source has it.
 fn claim(tapped: &mut Vec<u32>, root: u32, label: &str) -> bool {
     if tapped.contains(&root) {
-        log::info!("'{label}' is already recorded by another source (process {root}) — tapped once");
+        // Every 2 s while it lasts: debug, the UI says it in the row's note.
+        log::debug!("'{label}' is already recorded by another source (process {root}) — tapped once");
         return false;
     }
     tapped.push(root);
@@ -1802,13 +1881,13 @@ mod tests {
         gone.label = "Discord".into();
         let sources = vec![gone];
         let tree = tree(&[(4321, 1, "notepad.exe")]);
-        let notes = missing_app_notes(&sources, &tree, 9999, true);
+        let notes = missing_app_notes(&sources, None, &tree, 9999, true);
         assert_eq!(
             notes.get("chat").map(String::as_str),
             Some("Discord is not running — this track stays silent")
         );
-        assert!(missing_app_notes(&sources, &tree, 9999, false).is_empty());
-        assert!(missing_app_notes(&sources, &discord(), 9999, true).is_empty());
+        assert!(missing_app_notes(&sources, None, &tree, 9999, false).is_empty());
+        assert!(missing_app_notes(&sources, None, &discord(), 9999, true).is_empty());
     }
 
     #[test]
@@ -1819,5 +1898,70 @@ mod tests {
         let named = name_taps(&taps, &discord());
         assert_eq!(named["chat"][0], Tap { pid: 5556, name: "Discord".into() });
         assert_eq!(named["chat"][1].name, "PID 999");
+    }
+
+    // ---- fix round 1 ----
+
+    #[test]
+    fn a_helper_source_that_cannot_be_found_says_to_add_it_again() {
+        let mut src = app_source("web", 77, Some("msedgewebview2.exe"));
+        src.label = "Spotify".into();
+        let notes = missing_app_notes(&[src], None, &tree(&[(5, 1, "x.exe")]), 9999, true);
+        assert_eq!(notes["web"], "Add Spotify again from the list");
+    }
+
+    #[test]
+    fn a_living_helper_source_is_moved_to_its_host() {
+        let tree = tree(&[(10, 1, "Spotify.exe"), (12, 10, "msedgewebview2.exe")]);
+        let mut src = app_source("web", 12, Some("msedgewebview2.exe"));
+        src.label = "msedgewebview2".into();
+        let moves = helper_migrations(&[src.clone()], &tree, 9999);
+        assert_eq!(moves, vec![("web".into(), 10, "Spotify.exe".into(), Some("Spotify".to_string()))]);
+        // A name the user chose stays.
+        src.label = "Music".into();
+        assert_eq!(helper_migrations(&[src], &tree, 9999)[0].3, None);
+        // Migrated already: nothing left to do.
+        let done = app_source("web", 10, Some("Spotify.exe"));
+        assert!(helper_migrations(&[done], &tree, 9999).is_empty());
+        // Dead helper: nothing to resolve.
+        let gone = app_source("web", 99, Some("msedgewebview2.exe"));
+        assert!(helper_migrations(&[gone], &tree, 9999).is_empty());
+    }
+
+    #[test]
+    fn an_exclude_source_never_claims_an_application() {
+        let mut ex = app_source("rest", 5556, Some("Discord.exe"));
+        ex.kind = SourceKind::Process {
+            pid: 5556,
+            exe: Some("Discord.exe".into()),
+            mode: ProcessMode::Exclude,
+        };
+        let sources = vec![ex, app_source("chat", 5556, Some("Discord.exe"))];
+        let streams = resolve_for(9999, true, &sources, None, &nothing(), &discord(), &ledger(""));
+        assert_eq!(pid_of(&streams, "chat"), Some(5556));
+    }
+
+    #[test]
+    fn the_helper_stays_put_below_a_system_host() {
+        for host in ["svchost.exe", "RuntimeBroker.exe", "sihost.exe", "dwm.exe"] {
+            let tree = tree(&[(5, 1, host), (6, 5, "msedgewebview2.exe")]);
+            assert_eq!(app_of(6, &tree), 6, "{host}");
+        }
+    }
+
+    #[test]
+    fn the_losing_duplicate_says_who_has_the_application() {
+        let mut a = app_source("a", 30988, Some("Discord.exe"));
+        a.label = "Discord".into();
+        let b = app_source("b", 2584, Some("Discord.exe"));
+        let notes = missing_app_notes(&[a, b], None, &discord(), 9999, false);
+        assert_eq!(notes.get("b").map(String::as_str), Some("Already recorded by Discord"));
+        assert!(!notes.contains_key("a"));
+    }
+
+    #[test]
+    fn a_picker_row_whose_host_is_gone_is_left_out() {
+        let tree = tree(&[(5, 1, "explorer.exe"), (6, 5, "msedgewebview2.exe")]);
+        assert!(group_apps(&[seen(6, true, None)], &tree, 9999).is_empty());
     }
 }

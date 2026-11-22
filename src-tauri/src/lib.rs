@@ -1575,12 +1575,44 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                         tick_game.held.is_some(),
                         state.is_buffering(),
                     );
-                    notes.extend(audio::missing_app_notes(
-                        &sources,
-                        &audio::devices::process_tree(),
-                        std::process::id(),
-                        state.is_buffering(),
-                    ));
+                    // One process snapshot, and only where an application source
+                    // asks for it.
+                    if sources.iter().any(|s| {
+                        s.enabled
+                            && matches!(s.kind, model::SourceKind::Game | model::SourceKind::Process { .. })
+                    }) {
+                        let tree = audio::devices::process_tree();
+                        let own = std::process::id();
+                        notes.extend(audio::missing_app_notes(
+                            &sources,
+                            state.game_pid(),
+                            &tree,
+                            own,
+                            state.is_buffering(),
+                        ));
+                        // A source an older version stored under a web view's
+                        // name follows its host application from now on.
+                        for (id, pid, exe, label) in audio::helper_migrations(&sources, &tree, own) {
+                            let Some(mut source) = sources.iter().find(|s| s.id == id).cloned()
+                            else {
+                                continue;
+                            };
+                            source.kind = model::SourceKind::Process {
+                                pid,
+                                exe: Some(exe),
+                                mode: match &source.kind {
+                                    model::SourceKind::Process { mode, .. } => *mode,
+                                    _ => model::ProcessMode::Include,
+                                },
+                            };
+                            if let Some(label) = label {
+                                source.label = label;
+                            }
+                            if let Ok(config) = state.update_source(source, None) {
+                                commands::tell_main(&handle, &config);
+                            }
+                        }
+                    }
                     notes.extend(audio::app_capture_notes(&sources, audio::app_capture_ok()));
                     *state.source_notes.lock() = notes;
                 }
