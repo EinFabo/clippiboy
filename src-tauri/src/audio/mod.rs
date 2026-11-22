@@ -89,14 +89,31 @@ pub fn app_of(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
 /// Executables that only ever play sound on behalf of another application —
 /// embedded browsers. Picking one by itself would record whichever program
 /// happens to host a web view.
+///
+/// Not the launchers' own web views (`steamwebhelper.exe`, `epicwebhelper.exe`):
+/// climbing from those lands on the launcher, and a tap on the launcher records
+/// its whole tree — every game it started, a second time. They stay entries of
+/// their own, as before; see [`LAUNCHER_HELPERS`].
 const AUDIO_HELPERS: &[&str] = &[
     "msedgewebview2.exe",
-    "steamwebhelper.exe",
-    "epicwebhelper.exe",
     "cefsharp.browsersubprocess.exe",
     "cefsubprocess.exe",
     "crashpad_handler.exe",
 ];
+
+/// The launchers' web views — overlay, friends' voice chat, the store — and the
+/// name the picker gives them, since the exe says little.
+const LAUNCHER_HELPERS: &[(&str, &str)] = &[
+    ("steamwebhelper.exe", "Steam (overlay & voice)"),
+    ("epicwebhelper.exe", "Epic Games (web)"),
+];
+
+fn launcher_helper_name(exe: &str) -> Option<&'static str> {
+    LAUNCHER_HELPERS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(exe))
+        .map(|(_, shown)| *shown)
+}
 
 /// Processes that start things for the whole session and own no application.
 const SYSTEM_HOSTS: &[&str] = &[
@@ -208,8 +225,9 @@ pub fn group_apps(
         .into_iter()
         .map(|group| crate::model::AudioProcess {
             pid: group.root,
-            name: group
-                .display
+            name: launcher_helper_name(&group.exe)
+                .map(str::to_string)
+                .or(group.display)
                 .unwrap_or_else(|| group.exe.trim_end_matches(".exe").to_string()),
             exe: group.exe,
             count: group.pids.len() as u32,
@@ -251,18 +269,86 @@ pub fn name_taps(
         .collect()
 }
 
+/// A note on one source, written to follow its name ("Discord is not
+/// running — …"), the way every note the core gives reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub text: String,
+    /// Only for the source's row in the mixer: a state the user chose (an
+    /// application closed for now), nothing to raise over a game or on the
+    /// Video page.
+    pub mixer_only: bool,
+}
+
+impl Note {
+    fn everywhere(text: String) -> Self {
+        Note { text, mixer_only: false }
+    }
+
+    fn mixer(text: String) -> Self {
+        Note { text, mixer_only: true }
+    }
+}
+
+/// The applications another source records: the detected game (whether or not
+/// a source asks for it — it is the one thing that must never be swallowed) and
+/// every application picked by hand that runs. A tap on an ancestor of one of
+/// them would record it a second time.
+fn recorded_roots(
+    sources: &[AudioSource],
+    game_pid: Option<u32>,
+    tree: &HashMap<u32, (u32, String)>,
+    own: u32,
+) -> Vec<u32> {
+    let mut out: Vec<u32> = game_pid.map(|pid| app_root(pid, tree)).into_iter().collect();
+    for source in sources.iter().filter(|s| s.enabled) {
+        if let SourceKind::Process {
+            pid,
+            exe,
+            mode: ProcessMode::Include,
+        } = &source.kind
+        {
+            out.extend(live_pid(own, *pid, exe.as_deref(), tree).map(|pid| app_root(pid, tree)));
+        }
+    }
+    out
+}
+
+/// The application of `others` that a tap on `root` would take in with its
+/// tree — a launcher picked as a source, with the game it started below it.
+fn swallowed(root: u32, others: &[u32], tree: &HashMap<u32, (u32, String)>) -> Option<u32> {
+    others
+        .iter()
+        .copied()
+        .find(|other| *other != root && ancestors(*other, tree).contains(&root))
+}
+
+/// [`swallowed`] said no to a tap: once per pair in the log, not every 2 s.
+fn log_left_out(label: &str, root: u32, other: u32) {
+    static SEEN: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !seen.contains(&(root, other)) {
+        seen.push((root, other));
+        log::info!(
+            "'{label}' (process {root}) started process {other}, which is recorded already — not tapped, it would be in the clip twice"
+        );
+    }
+}
+
 /// The notes about application sources: one nothing matches while the buffer
-/// runs (that track is written, and it is silence), one stored under a bare
-/// helper name that cannot be found again, and the second of two sources that
-/// end up on the same application.
+/// runs (that track is written, and it is silence — mixer only), one stored
+/// under a bare helper name that cannot be found again, one left out because
+/// its tap would take in another recorded application (mixer only), and the
+/// second of two sources that end up on the same application.
 pub fn missing_app_notes(
     sources: &[AudioSource],
     game_pid: Option<u32>,
     tree: &HashMap<u32, (u32, String)>,
     own: u32,
     buffering: bool,
-) -> HashMap<String, String> {
+) -> HashMap<String, Note> {
     let mut out = HashMap::new();
+    let others = recorded_roots(sources, game_pid, tree, own);
     // Who has which application, in the order the engine claims them.
     let mut owner: HashMap<u32, &str> = HashMap::new();
     for source in sources.iter().filter(|s| s.enabled) {
@@ -279,20 +365,35 @@ pub fn missing_app_notes(
                     out.insert(
                         source.id.clone(),
                         if helper {
-                            format!("Add {} again from the list", source.label)
+                            Note::everywhere("has to be added again from the list".to_string())
                         } else {
-                            format!("{} is not running — this track stays silent", source.label)
+                            Note::mixer("is not running — this track stays silent".to_string())
                         },
                     );
                 }
-                live.map(|pid| app_root(pid, tree))
+                let root = live.map(|pid| app_root(pid, tree));
+                if let Some(other) = root.and_then(|root| swallowed(root, &others, tree)) {
+                    let name = tree
+                        .get(&other)
+                        .map(|(_, exe)| exe.trim_end_matches(".exe").to_string())
+                        .unwrap_or_else(|| format!("PID {other}"));
+                    out.insert(
+                        source.id.clone(),
+                        Note::mixer(format!("is left out — it would record {name} a second time")),
+                    );
+                    continue;
+                }
+                root
             }
             _ => None,
         };
         let Some(root) = root else { continue };
         match owner.get(&root) {
             Some(winner) => {
-                out.insert(source.id.clone(), format!("Already recorded by {winner}"));
+                out.insert(
+                    source.id.clone(),
+                    Note::everywhere(format!("is already recorded by {winner}")),
+                );
             }
             None => {
                 owner.insert(root, source.label.as_str());
@@ -305,13 +406,19 @@ pub fn missing_app_notes(
 /// Sources stored under a helper's exe (`msedgewebview2.exe`) by an older
 /// version, whose helper still runs: the host application's exe to store
 /// instead, as (source id, new pid, new exe, new label when the label was the
-/// helper's name). Empty once migrated, so applying it again changes nothing.
+/// helper's name). Empty once migrated, so applying it again changes nothing,
+/// and empty where an application cannot be tapped at all (Windows 10): there
+/// the source records nothing either way, and is left as the user stored it.
 pub fn helper_migrations(
     sources: &[AudioSource],
     tree: &HashMap<u32, (u32, String)>,
     own: u32,
+    supported: bool,
 ) -> Vec<(String, u32, String, Option<String>)> {
     let mut out = Vec::new();
+    if !supported {
+        return out;
+    }
     for source in sources.iter().filter(|s| s.enabled) {
         let SourceKind::Process { pid, exe: Some(exe), .. } = &source.kind else {
             continue;
@@ -335,6 +442,38 @@ pub fn helper_migrations(
         out.push((source.id.clone(), host, host_exe.clone(), label));
     }
     out
+}
+
+/// One of [`helper_migrations`] applied to the source as it is stored *now*.
+///
+/// `before` is the source the migration was worked out from; `current` the
+/// same id read again right before the write. Anything changed in between — a
+/// rename, another pick, the source deleted — and nothing is written: the
+/// migration would put back a stale copy. The next tick works it out afresh.
+pub fn migrated_source(
+    before: &AudioSource,
+    current: Option<&AudioSource>,
+    pid: u32,
+    exe: String,
+    label: Option<String>,
+) -> Option<AudioSource> {
+    let current = current.filter(|now| *now == before)?;
+    let SourceKind::Process { exe: Some(old), mode, .. } = &current.kind else {
+        return None;
+    };
+    if !is_audio_helper(old) {
+        return None;
+    }
+    let mut source = current.clone();
+    source.kind = SourceKind::Process {
+        pid,
+        exe: Some(exe),
+        mode: *mode,
+    };
+    if let Some(label) = label {
+        source.label = label;
+    }
+    Some(source)
 }
 
 /// Is anything being recorded application by application right now?
@@ -392,7 +531,12 @@ pub fn app_capture_notes(sources: &[AudioSource], supported: bool) -> HashMap<St
     sources
         .iter()
         .filter(|s| s.enabled && is_app_source(&s.kind))
-        .map(|s| (s.id.clone(), "Per-app audio needs Windows 11".to_string()))
+        .map(|s| {
+            (
+                s.id.clone(),
+                "records nothing — per-app audio needs Windows 11".to_string(),
+            )
+        })
         .collect()
 }
 
@@ -719,6 +863,12 @@ fn resolve_for(
     // clip back while the buffer runs must not end up in the next one. The
     // leftovers add to this as they go, which is what keeps several of them from
     // taking the same application.
+    //
+    // An application picked by hand whose tap would take in the game or another
+    // recorded application with its tree — Steam, with the game it started —
+    // is left out altogether, here and below: tapped, the game would be in the
+    // clip twice, and as taken, the leftovers would skip what sits below it.
+    let others = recorded_roots(sources, game_pid, tree, own);
     let mut taken: Vec<u32> = vec![own];
     for source in enabled() {
         match &source.kind {
@@ -732,7 +882,9 @@ fn resolve_for(
                 exe,
                 mode: ProcessMode::Include,
             } => taken.extend(
-                live_pid(own, *pid, exe.as_deref(), tree).map(|pid| app_root(pid, tree)),
+                live_pid(own, *pid, exe.as_deref(), tree)
+                    .map(|pid| app_root(pid, tree))
+                    .filter(|root| swallowed(*root, &others, tree).is_none()),
             ),
             _ => {}
         }
@@ -790,11 +942,16 @@ fn resolve_for(
             // point. Restarting Discord used to leave this source dead for good.
             SourceKind::Process { pid, exe, mode } => {
                 if let Some(now) = live_pid(own, *pid, exe.as_deref(), tree) {
-                    // Only a source that taps claims; "everything except" does not.
-                    if *mode == ProcessMode::Include
-                        && !claim(&mut tapped, app_root(now, tree), &source.label)
-                    {
-                        continue;
+                    if *mode == ProcessMode::Include {
+                        let root = app_root(now, tree);
+                        if let Some(other) = swallowed(root, &others, tree) {
+                            log_left_out(&source.label, root, other);
+                            continue;
+                        }
+                        // Only a source that taps claims; "everything except" does not.
+                        if !claim(&mut tapped, root, &source.label) {
+                            continue;
+                        }
                     }
                     out.push(Stream {
                         source_id: source.id.clone(),
@@ -1650,7 +1807,7 @@ mod tests {
         ];
         let notes = app_capture_notes(&sources, false);
         assert_eq!(notes.len(), 1);
-        assert_eq!(notes["game"], "Per-app audio needs Windows 11");
+        assert_eq!(notes["game"], "records nothing — per-app audio needs Windows 11");
         assert!(app_capture_notes(&sources, true).is_empty());
     }
 
@@ -1883,9 +2040,10 @@ mod tests {
         let sources = vec![gone];
         let tree = tree(&[(4321, 1, "notepad.exe")]);
         let notes = missing_app_notes(&sources, None, &tree, 9999, true);
+        // Follows the name ("Discord is not running …"), and only in the mixer.
         assert_eq!(
-            notes.get("chat").map(String::as_str),
-            Some("Discord is not running — this track stays silent")
+            notes.get("chat"),
+            Some(&Note::mixer("is not running — this track stays silent".into()))
         );
         assert!(missing_app_notes(&sources, None, &tree, 9999, false).is_empty());
         assert!(missing_app_notes(&sources, None, &discord(), 9999, true).is_empty());
@@ -1908,7 +2066,7 @@ mod tests {
         let mut src = app_source("web", 77, Some("msedgewebview2.exe"));
         src.label = "Spotify".into();
         let notes = missing_app_notes(&[src], None, &tree(&[(5, 1, "x.exe")]), 9999, true);
-        assert_eq!(notes["web"], "Add Spotify again from the list");
+        assert_eq!(notes["web"], Note::everywhere("has to be added again from the list".into()));
     }
 
     #[test]
@@ -1916,17 +2074,19 @@ mod tests {
         let tree = tree(&[(10, 1, "Spotify.exe"), (12, 10, "msedgewebview2.exe")]);
         let mut src = app_source("web", 12, Some("msedgewebview2.exe"));
         src.label = "msedgewebview2".into();
-        let moves = helper_migrations(&[src.clone()], &tree, 9999);
+        let moves = helper_migrations(&[src.clone()], &tree, 9999, true);
         assert_eq!(moves, vec![("web".into(), 10, "Spotify.exe".into(), Some("Spotify".to_string()))]);
+        // Windows 10: nothing can be tapped, nothing is rewritten.
+        assert!(helper_migrations(&[src.clone()], &tree, 9999, false).is_empty());
         // A name the user chose stays.
         src.label = "Music".into();
-        assert_eq!(helper_migrations(&[src], &tree, 9999)[0].3, None);
+        assert_eq!(helper_migrations(&[src], &tree, 9999, true)[0].3, None);
         // Migrated already: nothing left to do.
         let done = app_source("web", 10, Some("Spotify.exe"));
-        assert!(helper_migrations(&[done], &tree, 9999).is_empty());
+        assert!(helper_migrations(&[done], &tree, 9999, true).is_empty());
         // Dead helper: nothing to resolve.
         let gone = app_source("web", 99, Some("msedgewebview2.exe"));
-        assert!(helper_migrations(&[gone], &tree, 9999).is_empty());
+        assert!(helper_migrations(&[gone], &tree, 9999, true).is_empty());
     }
 
     #[test]
@@ -1956,7 +2116,7 @@ mod tests {
         a.label = "Discord".into();
         let b = app_source("b", 2584, Some("Discord.exe"));
         let notes = missing_app_notes(&[a, b], None, &discord(), 9999, false);
-        assert_eq!(notes.get("b").map(String::as_str), Some("Already recorded by Discord"));
+        assert_eq!(notes.get("b"), Some(&Note::everywhere("is already recorded by Discord".into())));
         assert!(!notes.contains_key("a"));
     }
 
@@ -1964,5 +2124,151 @@ mod tests {
     fn a_picker_row_whose_host_is_gone_is_left_out() {
         let tree = tree(&[(5, 1, "explorer.exe"), (6, 5, "msedgewebview2.exe")]);
         assert!(group_apps(&[seen(6, true, None)], &tree, 9999).is_empty());
+    }
+
+    // ---- final fix wave: launchers and their helpers ----
+
+    /// Steam as it runs: its web view in two processes, the game a child of
+    /// Steam itself.
+    fn steam_with_game() -> HashMap<u32, (u32, String)> {
+        tree(&[
+            (1, 0, "explorer.exe"),
+            (10, 1, "steam.exe"),
+            (11, 10, "steamwebhelper.exe"),
+            (12, 11, "steamwebhelper.exe"),
+            (20, 10, "cs2.exe"),
+        ])
+    }
+
+    /// Steam's web view is an entry of its own: climbing to steam.exe would tap
+    /// the game Steam started a second time.
+    #[test]
+    fn a_launchers_helper_never_climbs_to_the_launcher() {
+        let tree = steam_with_game();
+        assert_eq!(app_of(12, &tree), 11);
+        let rows = group_apps(&[seen(12, true, None)], &tree, 9999);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 11);
+        assert_eq!(rows[0].exe, "steamwebhelper.exe");
+        assert_eq!(rows[0].name, "Steam (overlay & voice)");
+        // A source stored under it stays where it is and is found again.
+        let src = app_source("steam", 11, Some("steamwebhelper.exe"));
+        assert!(helper_migrations(std::slice::from_ref(&src), &tree, 9999, true).is_empty());
+        assert_eq!(live_pid(9999, 4242, Some("steamwebhelper.exe"), &tree), Some(11));
+        let streams = resolve_for(9999, true, &[src], Some(20), &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "steam"), Some(11));
+    }
+
+    #[test]
+    fn epics_helper_stays_its_own_entry() {
+        let tree = tree(&[
+            (1, 0, "explorer.exe"),
+            (30, 1, "EpicGamesLauncher.exe"),
+            (31, 30, "EpicWebHelper.exe"),
+            (40, 30, "FortniteClient-Win64-Shipping.exe"),
+        ]);
+        assert_eq!(app_of(31, &tree), 31);
+        assert_eq!(group_apps(&[seen(31, true, None)], &tree, 9999)[0].name, "Epic Games (web)");
+        // The launcher itself, picked by hand, would take in the game.
+        let sources = vec![
+            of_kind("game", SourceKind::Game),
+            app_source("epic", 30, Some("EpicGamesLauncher.exe")),
+        ];
+        let streams = resolve_for(9999, true, &sources, Some(40), &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "game"), Some(40));
+        assert_eq!(pid_of(&streams, "epic"), None);
+    }
+
+    /// Steam picked as a source while it runs the game: not tapped — the game
+    /// would be in the clip twice — and the mixer row says why.
+    #[test]
+    fn a_launcher_picked_by_hand_never_takes_in_the_game() {
+        let tree = steam_with_game();
+        let mut steam = app_source("steam", 10, Some("steam.exe"));
+        steam.label = "Steam".into();
+        let sources = vec![
+            of_kind("game", SourceKind::Game),
+            steam,
+            of_kind("rest", leftovers("spk")),
+        ];
+        let playing = playing(&[("spk", &idle(&[10, 12, 20]))]);
+        let streams = resolve_for(9999, true, &sources, Some(20), &playing, &tree, &ledger("spk"));
+        assert_eq!(pids_of(&streams, "game"), vec![20]);
+        assert!(pids_of(&streams, "steam").is_empty());
+        // The leftovers still get Steam's web view, and the game only once.
+        assert_eq!(pids_of(&streams, "rest"), vec![11]);
+        let notes = missing_app_notes(&sources, Some(20), &tree, 9999, true);
+        assert_eq!(
+            notes.get("steam"),
+            Some(&Note::mixer("is left out — it would record cs2 a second time".into()))
+        );
+        // Even without a game source the detected game is not swallowed.
+        let streams = resolve_for(9999, true, &sources[1..2], Some(20), &nothing(), &tree, &ledger(""));
+        assert!(pids_of(&streams, "steam").is_empty());
+        // No game running: Steam is just an application.
+        let streams = resolve_for(9999, true, &sources[1..2], None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pids_of(&streams, "steam"), vec![10]);
+        assert!(missing_app_notes(&sources[1..2], None, &tree, 9999, true).is_empty());
+    }
+
+    /// The same for an application picked by hand below another one.
+    #[test]
+    fn a_tap_never_takes_in_another_picked_application() {
+        let tree = steam_with_game();
+        let sources = vec![
+            app_source("steam", 10, Some("steam.exe")),
+            app_source("cs2", 20, Some("cs2.exe")),
+        ];
+        let streams = resolve_for(9999, true, &sources, None, &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "cs2"), Some(20));
+        assert_eq!(pid_of(&streams, "steam"), None);
+    }
+
+    /// A web view still plays for its host, and the host with nothing recorded
+    /// below it is tapped as ever.
+    #[test]
+    fn a_webview_under_spotify_still_climbs() {
+        let tree = tree(&[
+            (1, 0, "explorer.exe"),
+            (10, 1, "Spotify.exe"),
+            (12, 10, "msedgewebview2.exe"),
+            (20, 1, "cs2.exe"),
+        ]);
+        assert_eq!(app_of(12, &tree), 10);
+        let sources = vec![
+            of_kind("game", SourceKind::Game),
+            app_source("music", 12, Some("msedgewebview2.exe")),
+        ];
+        let streams = resolve_for(9999, true, &sources, Some(20), &nothing(), &tree, &ledger(""));
+        assert_eq!(pid_of(&streams, "music"), Some(10));
+        assert_eq!(pid_of(&streams, "game"), Some(20));
+    }
+
+    /// The migration writes only onto the source as it still is.
+    #[test]
+    fn a_migration_never_writes_a_stale_copy() {
+        let mut before = app_source("web", 12, Some("msedgewebview2.exe"));
+        before.label = "msedgewebview2".into();
+        let moved =
+            migrated_source(&before, Some(&before), 10, "Spotify.exe".into(), Some("Spotify".into()))
+                .expect("unchanged source is migrated");
+        assert_eq!(moved.label, "Spotify");
+        assert_eq!(
+            moved.kind,
+            SourceKind::Process {
+                pid: 10,
+                exe: Some("Spotify.exe".into()),
+                mode: ProcessMode::Include
+            }
+        );
+        // Renamed in the meantime.
+        let mut renamed = before.clone();
+        renamed.label = "Music".into();
+        assert!(migrated_source(&before, Some(&renamed), 10, "Spotify.exe".into(), None).is_none());
+        // Deleted in the meantime.
+        assert!(migrated_source(&before, None, 10, "Spotify.exe".into(), None).is_none());
+        // No longer a helper (picked again).
+        let repicked = app_source("web", 10, Some("Spotify.exe"));
+        assert!(migrated_source(&repicked, Some(&repicked), 10, "Spotify.exe".into(), None).is_none());
     }
 }

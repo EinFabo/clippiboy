@@ -207,6 +207,9 @@ pub struct AppState {
     /// endpoints, and enumerating those is a COM round trip — not something to
     /// do once a second for a line that changes about once an hour.
     pub source_notes: Mutex<std::collections::HashMap<String, String>>,
+    /// Notes for the mixer's rows only (`audio::Note::mixer_only`), beside
+    /// `source_notes` and on the same tick.
+    pub mixer_notes: Mutex<std::collections::HashMap<String, String>>,
     /// The game that was running when the buffer last ran — the name on the
     /// clip.
     ///
@@ -743,6 +746,7 @@ impl AppState {
             game_pid: Mutex::new(None),
             logged_game: Mutex::new(None),
             source_notes: Mutex::new(std::collections::HashMap::new()),
+            mixer_notes: Mutex::new(std::collections::HashMap::new()),
             buffering_game: Mutex::new(None),
             game_ended: Mutex::new(None),
             quitting: std::sync::atomic::AtomicBool::new(false),

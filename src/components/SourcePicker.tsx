@@ -156,7 +156,7 @@ function ListRow({
         {name}
       </span>
       {aside && (
-        <span className={cn("shrink-0 text-[11px]", on ? "text-[#6b6b75]" : "text-ink-faint")}>
+        <span className="shrink-0 text-[11px] text-ink-faint">
           {aside}
         </span>
       )}

@@ -312,6 +312,11 @@ export const events = {
     cb: (warnings: Record<string, string>) => void,
   ): Promise<UnlistenFn> =>
     listen<Record<string, string>>("audio-warnings", (e) => cb(e.payload)),
+  /** Notes only the mixer's rows show (an application not running). */
+  onAudioNotes: (
+    cb: (notes: Record<string, string>) => void,
+  ): Promise<UnlistenFn> =>
+    listen<Record<string, string>>("audio-notes", (e) => cb(e.payload)),
   /**
    * Which processes each source is tapping. For the leftovers there is no
    * device to look at, so this is the only way to see what is in the track.

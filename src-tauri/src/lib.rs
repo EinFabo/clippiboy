@@ -1586,6 +1586,8 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                         tick_game.held.is_some(),
                         state.is_buffering(),
                     );
+                    // The ones for the mixer's rows alone (`audio::Note`).
+                    let mut mixer_notes = std::collections::HashMap::new();
                     // One process snapshot, and only where an application source
                     // asks for it.
                     if sources.iter().any(|s| {
@@ -1594,31 +1596,42 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     }) {
                         let tree = audio::devices::process_tree();
                         let own = std::process::id();
-                        notes.extend(audio::missing_app_notes(
+                        for (id, note) in audio::missing_app_notes(
                             &sources,
                             state.game_pid(),
                             &tree,
                             own,
                             state.is_buffering(),
-                        ));
+                        ) {
+                            if note.mixer_only {
+                                mixer_notes.insert(id, note.text);
+                            } else {
+                                notes.insert(id, note.text);
+                            }
+                        }
                         // A source an older version stored under a web view's
-                        // name follows its host application from now on.
-                        for (id, pid, exe, label) in audio::helper_migrations(&sources, &tree, own) {
-                            let Some(mut source) = sources.iter().find(|s| s.id == id).cloned()
-                            else {
+                        // name follows its host application from now on — read
+                        // again right before the write, so an edit made since
+                        // the snapshot is never overwritten with a stale copy.
+                        for (id, pid, exe, label) in audio::helper_migrations(
+                            &sources,
+                            &tree,
+                            own,
+                            audio::app_capture_ok(),
+                        ) {
+                            let Some(before) = sources.iter().find(|s| s.id == id) else {
                                 continue;
                             };
-                            source.kind = model::SourceKind::Process {
+                            let now = state.config_snapshot().sources;
+                            let Some(source) = audio::migrated_source(
+                                before,
+                                now.iter().find(|s| s.id == id),
                                 pid,
-                                exe: Some(exe),
-                                mode: match &source.kind {
-                                    model::SourceKind::Process { mode, .. } => *mode,
-                                    _ => model::ProcessMode::Include,
-                                },
+                                exe,
+                                label,
+                            ) else {
+                                continue;
                             };
-                            if let Some(label) = label {
-                                source.label = label;
-                            }
                             if let Ok(config) = state.update_source(source, None) {
                                 commands::tell_main(&handle, &config);
                             }
@@ -1626,6 +1639,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     }
                     notes.extend(audio::app_capture_notes(&sources, audio::app_capture_ok()));
                     *state.source_notes.lock() = notes;
+                    *state.mixer_notes.lock() = mixer_notes;
                 }
                 apply_auto_buffer(&handle, tick_game.playing);
                 // The windows first: the buffer's restart announces itself with
@@ -1716,13 +1730,20 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                         .map(|(id, note)| (id.clone(), note.clone())),
                 );
                 let _ = handle.emit("audio-warnings", warnings);
-                let taps = state.audio.taps();
-                let named = if taps.is_empty() {
-                    Default::default()
-                } else {
-                    audio::name_taps(&taps, &audio::devices::process_tree())
-                };
-                let _ = handle.emit("audio-taps", named);
+                // The rest only the main window shows, in the mixer's rows:
+                // notes that are no trouble (an application closed for now)
+                // and what each source taps — the latter costs a process
+                // snapshot, so only while that window can be seen.
+                if watched {
+                    let _ = handle.emit("audio-notes", state.mixer_notes.lock().clone());
+                    let taps = state.audio.taps();
+                    let named = if taps.is_empty() {
+                        Default::default()
+                    } else {
+                        audio::name_taps(&taps, &audio::devices::process_tree())
+                    };
+                    let _ = handle.emit("audio-taps", named);
+                }
             }
         }
     });

@@ -80,6 +80,9 @@ export interface EngineState {
   /** The source runs, but doubled or on a fallback clock — not an error, but
    *  something you want to know before recording. */
   sourceWarnings: Record<string, string>;
+  /** Notes for the mixer's rows alone — an application closed for now is no
+   *  trouble to raise over a game or on the Video page. */
+  sourceNotes: Record<string, string>;
   /** Which processes each source taps. Only the leftovers have no other way of
    *  showing what is actually in the track. */
   taps: Record<string, Tap[]>;
@@ -281,6 +284,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   mix: { l: 0, r: 0 },
   sourceErrors: {},
   sourceWarnings: {},
+  sourceNotes: {},
   taps: {},
   bufferActive: false,
   recording: false,
@@ -502,6 +506,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         .catch(() => {});
       await events.onAudioErrors((sourceErrors) => setChanged({ sourceErrors }));
       await events.onAudioWarnings((sourceWarnings) => setChanged({ sourceWarnings }));
+      await events.onAudioNotes((sourceNotes) => setChanged({ sourceNotes }));
       await events.onAudioTaps((taps) => setChanged({ taps }));
       // The core checks every hour and says so by event; a find from before
       // this window existed is asked for once.

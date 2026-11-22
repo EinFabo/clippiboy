@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   gainText,
+  leftoversMode,
+  noteLine,
   SOLO_CLEAR_ATTEMPTS,
   soloToClear,
   sourceStatus,
@@ -101,7 +103,36 @@ test("an output in leftovers mode says what it holds", () => {
 test("the core's error and warning win over the plain line", () => {
   const d = src("d", proc(10, "Discord.exe"));
   assert.deepEqual(sourceStatus(d, ctx({ error: "boom", warning: "hm" })), { text: "boom", tone: "error" });
-  assert.deepEqual(sourceStatus(d, ctx({ warning: "hm" })), { text: "hm", tone: "warn" });
+  assert.deepEqual(sourceStatus(d, ctx({ warning: "hm" })), { text: "Hm", tone: "warn" });
+});
+
+test("output devices hold the leftovers only where per-app capture exists", () => {
+  const out = src("o", { type: "outputDevice", deviceId: "o1" });
+  const game = src("g", { type: "game" });
+  const app = src("d", proc(10, "Discord.exe"));
+  const except = src("x", proc(10, "Discord.exe", "exclude"));
+  assert.equal(leftoversMode([out, game], true), true);
+  assert.equal(leftoversMode([out, app], true), true);
+  // Windows 10: the core records the whole device, so must the row.
+  assert.equal(leftoversMode([out, game], false), false);
+  assert.equal(leftoversMode([out, app], false), false);
+  assert.equal(leftoversMode([out, except], true), false);
+  assert.equal(leftoversMode([out, { ...game, enabled: false }], true), false);
+});
+
+test("a core note, written to follow the name, starts the row's line", () => {
+  assert.equal(noteLine("is not running — this track stays silent"), "Is not running — this track stays silent");
+  assert.equal(noteLine("This device reports unusable timestamps"), "This device reports unusable timestamps");
+  const gone = src("s", proc(5, "Spotify.exe"));
+  assert.deepEqual(sourceStatus(gone, ctx({ warning: "is not running — this track stays silent" })), {
+    text: "Is not running — this track stays silent",
+    tone: "warn",
+  });
+  const running = src("d", proc(10, "Discord.exe"));
+  assert.equal(
+    sourceStatus(running, ctx({ warning: "is already recorded by Discord" })).text,
+    "Is already recorded by Discord",
+  );
 });
 
 test("gain text carries a sign only above zero", () => {

@@ -38,13 +38,42 @@ export interface StatusContext {
   devices: AudioDevice[];
   processes: AudioProcess[];
   detectedGame: string | null;
-  /** The core's error / warning for this source, if any. */
+  /** The core's error / warning (or mixer-only note) for this source, if any;
+   *  a warning follows the source's name, see `noteLine`. */
   error?: string;
   warning?: string;
   /** The applications an output device is actually tapping right now. */
   tapped: string[];
   /** Output devices record only what individual applications leave over. */
   leftovers: boolean;
+}
+
+/**
+ * Is anything recorded application by application?
+ *
+ * Then an output device records only what those leave over, otherwise the same
+ * sound would be in the clip twice. Nothing to switch: it follows from the
+ * sources, and the same rule runs in the core (`audio::records_single_applications`)
+ * — including that without per-app capture (Windows 10) a device stays whole.
+ */
+export function leftoversMode(sources: AudioSource[], appCapture: boolean): boolean {
+  return (
+    appCapture &&
+    sources.some(
+      (s) =>
+        s.enabled &&
+        (s.kind.type === "game" || (s.kind.type === "process" && s.kind.mode === "include")),
+    )
+  );
+}
+
+/**
+ * A core note on its own line. The notes are written to follow the source's
+ * name ("Discord is not running — …"), the way the console and the Video page
+ * show them; under the name in a row they start the line instead.
+ */
+export function noteLine(note: string): string {
+  return note.charAt(0).toUpperCase() + note.slice(1);
 }
 
 const sameExe = (a: string | null | undefined, b: string | null | undefined) =>
@@ -77,7 +106,7 @@ export function sourceStatus(source: AudioSource, ctx: StatusContext): SourceSta
       } else {
         status = tappedNow || found
           ? { text: `${found?.name ?? tappedNow} · running`, tone: "plain" }
-          : { text: ctx.warning ?? "Not running · waiting", tone: "warn" };
+          : { text: ctx.warning ? noteLine(ctx.warning) : "Not running · waiting", tone: "warn" };
       }
       break;
     }
@@ -108,7 +137,7 @@ export function sourceStatus(source: AudioSource, ctx: StatusContext): SourceSta
       break;
     }
   }
-  if (status.tone === "plain" && ctx.warning) return { text: ctx.warning, tone: "warn" };
+  if (status.tone === "plain" && ctx.warning) return { text: noteLine(ctx.warning), tone: "warn" };
   return status;
 }
 

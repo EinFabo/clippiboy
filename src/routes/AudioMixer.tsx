@@ -30,7 +30,7 @@ import {
 import { cn } from "@/lib/cn";
 import { labelToSave } from "@/lib/draft";
 import { useReorder } from "@/lib/useReorder";
-import { gainText, sourceStatus } from "@/lib/audioRows";
+import { gainText, leftoversMode, sourceStatus } from "@/lib/audioRows";
 import { placeMenu } from "@/lib/menuPlace";
 import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
 import type { AudioProcess, AudioSource, SourceKind } from "@/lib/types";
@@ -115,22 +115,6 @@ function newSource(label: string, kind: SourceKind): AudioSource {
  */
 export function discordSource(process: AudioProcess): AudioSource {
   return newSource("Discord", discordKind(process));
-}
-
-/**
- * Is anything recorded application by application?
- *
- * Then an output device records only what those leave over, otherwise the same
- * sound would be in the clip twice. Nothing to switch: it follows from the
- * sources, and the same rule runs in the core (`audio::records_single_applications`).
- */
-function leftoversMode(sources: AudioSource[]): boolean {
-  return sources.some(
-    (s) =>
-      s.enabled &&
-      (s.kind.type === "game" ||
-        (s.kind.type === "process" && s.kind.mode === "include")),
-  );
 }
 
 function sourceIcon(kind: SourceKind, leftovers: boolean) {
@@ -255,6 +239,8 @@ export function AudioMixer() {
     processes,
     sourceErrors,
     sourceWarnings,
+    sourceNotes,
+    appCapture,
     detectedGame,
     taps,
     upsertSource,
@@ -270,6 +256,8 @@ export function AudioMixer() {
       processes: s.processes,
       sourceErrors: s.sourceErrors,
       sourceWarnings: s.sourceWarnings,
+      sourceNotes: s.sourceNotes,
+      appCapture: s.appCapture,
       detectedGame: s.detectedGame,
       taps: s.taps,
       upsertSource: s.upsertSource,
@@ -288,7 +276,7 @@ export function AudioMixer() {
   /** What a screen reader hears after a move. */
   const [moved, setMoved] = useState("");
 
-  const leftovers = leftoversMode(config.sources);
+  const leftovers = leftoversMode(config.sources, appCapture);
 
   /**
    * Write a new order of the sources.
@@ -400,7 +388,8 @@ export function AudioMixer() {
               processes,
               detectedGame,
               error: sourceErrors[source.id],
-              warning: sourceWarnings[source.id],
+              // The row is the one place for the mixer-only notes too.
+              warning: sourceWarnings[source.id] ?? sourceNotes[source.id],
               tapped: (taps[source.id] ?? []).map((t) => t.name),
               leftovers,
             });
