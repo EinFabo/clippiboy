@@ -64,3 +64,9 @@ test("with a Discord track the note says where to turn it down", () => {
 
 test("without Discord there is nothing to say", () =>
   assert.equal(discordHint([app("chrome.exe")], [proc(2, "chrome.exe")]), null));
+test("no Discord hint of any kind without per-app capture", () => {
+  assert.equal(discordHint([app("Discord.exe")], [proc(7, "Discord.exe")], false), null);
+});
+test("a Discord hint is still offered where per-app capture works", () =>
+  assert.equal(discordHint([], [proc(7, "Discord.exe")], true), "add"));
+

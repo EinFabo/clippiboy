@@ -36,7 +36,10 @@ export function discordKind(process: AudioProcess): SourceKind {
 export function discordHint(
   sources: AudioSource[],
   processes: AudioProcess[],
+  appCapture = true,
 ): "add" | "turnDown" | null {
+  // Without per-app capture (Windows 10) a Discord source records nothing.
+  if (!appCapture) return null;
   if (hasDiscordSource(sources)) return "turnDown";
   if (runningDiscord(processes)) return "add";
   return null;

@@ -1569,13 +1569,12 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 // because it has to enumerate the endpoints.
                 {
                     let sources = state.config_snapshot().sources;
-                    let notes = audio::configuration_warnings(
+                    let mut notes = audio::configuration_warnings(
                         &sources,
                         &audio::devices::list_devices(),
                         tick_game.held.is_some(),
                         state.is_buffering(),
                     );
-                    let mut notes = notes;
                     notes.extend(audio::app_capture_notes(&sources, audio::app_capture_ok()));
                     *state.source_notes.lock() = notes;
                 }
