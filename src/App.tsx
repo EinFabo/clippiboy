@@ -56,7 +56,15 @@ export default function App() {
     for (const source of stuckSolo(sources)) {
       if (cleared.current.has(source.id)) continue;
       cleared.current.add(source.id);
-      void upsertSource({ ...source, solo: false });
+      // A write that did not go through (it resolves quietly then) is tried
+      // again at the next change.
+      const id = source.id;
+      const retry = () => cleared.current.delete(id);
+      upsertSource({ ...source, solo: false })
+        .then(() => {
+          if (useEngine.getState().config.sources.some((s) => s.id === id && s.solo)) retry();
+        })
+        .catch(retry);
     }
   }, [sources, upsertSource]);
 

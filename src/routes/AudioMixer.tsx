@@ -857,7 +857,7 @@ function AddSourceList({
           <>
             {captureBroken && (
               <p className="mx-1 mb-1 rounded-inner bg-live/10 px-2.5 py-2 text-xs text-live">
-                Application capture needs Windows 11 (build 20348 or newer).
+                Application capture needs Windows 10 build 20348 or newer.
               </p>
             )}
             {!hasGame && (

@@ -101,8 +101,12 @@ test("the core's error and warning win over the plain line", () => {
 test("application capture is unavailable only on an application source's error", () => {
   const app = src("a", proc(1, "a.exe"));
   const dev = src("m", { type: "inputDevice", deviceId: "x" });
-  assert.equal(appCaptureUnavailable([app], { a: "audio source not available: 0x80" }), true);
-  assert.equal(appCaptureUnavailable([dev], { m: "audio source not available: 0x80" }), false);
+  const named = "process loopback needs Windows build 20348 or newer";
+  assert.equal(appCaptureUnavailable([app], { a: named }), true);
+  assert.equal(appCaptureUnavailable([dev], { m: named }), false);
+  // What the core says for any source that cannot start says nothing about the Windows build.
+  assert.equal(appCaptureUnavailable([app], { a: "audio source not available: The parameter is incorrect" }), false);
+  assert.equal(appCaptureUnavailable([app], { a: "loopback device not available" }), false);
   assert.equal(appCaptureUnavailable([app], {}), false);
 });
 
