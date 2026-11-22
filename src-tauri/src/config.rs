@@ -35,6 +35,7 @@ pub fn default_config() -> AppConfig {
             target_kind: TargetKind::Monitor,
             target_id: None,
             target_stable_id: None,
+            target_rect: None,
             width: 1920,
             height: 1080,
             fps: 60,

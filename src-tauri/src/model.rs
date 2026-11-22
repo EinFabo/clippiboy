@@ -160,6 +160,32 @@ pub struct CaptureTarget {
     /// The screen's refresh rate in hertz — for a window, that of the screen
     /// it sits on. `None` if Windows does not report it.
     pub refresh_hz: Option<u32>,
+    /// A monitor's top-left corner on the virtual desktop, in the same physical
+    /// pixels as `width` and `height` (`rcMonitor`). The primary screen sits at
+    /// 0,0; a screen to its left or above has negative numbers. 0 for windows.
+    #[serde(default)]
+    pub x: i32,
+    #[serde(default)]
+    pub y: i32,
+    /// A window's application icon as a PNG data URL. Filled in only for the
+    /// Video page (`list_capture_targets`), not for the lookups the core makes
+    /// for itself; `None` for monitors and when the process will not say.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// The window belongs to the process the game detection is bound to.
+    /// Like `icon`, only set for the Video page.
+    #[serde(default)]
+    pub is_game: bool,
+}
+
+/// Where the chosen monitor last stood, see [`RecordingConfig::target_rect`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +201,11 @@ pub struct RecordingConfig {
     /// saved monitor is found.
     #[serde(default)]
     pub target_stable_id: Option<String>,
+    /// The chosen monitor's place on the virtual desktop when it was picked.
+    /// Only for the Video page: a screen that is unplugged is still drawn
+    /// where it was. Not part of the capture, see `state::capture_changed`.
+    #[serde(default)]
+    pub target_rect: Option<TargetRect>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,

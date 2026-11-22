@@ -1,3 +1,4 @@
+pub mod appicon;
 pub mod audio;
 pub mod bindings;
 pub mod buffer;

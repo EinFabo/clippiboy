@@ -42,9 +42,17 @@ pub fn app_capture_supported() -> bool {
     audio::app_capture_ok()
 }
 
+/// Monitors with their place on the desktop and windows with their program's
+/// icon — what the Video page draws. The icons are looked up here and not in
+/// `capture::list_targets`, which the core calls for itself all the time.
 #[tauri::command(async)]
-pub fn list_capture_targets() -> Vec<CaptureTarget> {
-    capture::list_targets()
+pub fn list_capture_targets(app: tauri::AppHandle) -> Vec<CaptureTarget> {
+    use tauri::Manager;
+    crate::appicon::log_dpi_awareness();
+    let mut targets = capture::list_targets();
+    let game_pid = app.state::<AppState>().game_pid();
+    crate::appicon::dress_windows(&mut targets, game_pid);
+    targets
 }
 
 /// Async so the Media Foundation enumeration runs off the main thread. It

@@ -3,6 +3,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
+import { SourcePicker } from "@/components/SourcePicker";
 import { SourceTrouble } from "@/components/SourceTrouble";
 import type { Route } from "@/components/NavBar";
 import { Segmented, Select, Slider } from "@/components/ui/Controls";
@@ -22,6 +23,7 @@ import {
   QUALITY_STEPS,
 } from "@/lib/videoPlan";
 import { cn } from "@/lib/cn";
+import { rectOf, sameRect } from "@/lib/monitorMap";
 import { autoFit, fit, fpsChoices } from "@/lib/fit";
 import type { AppConfig, CaptureTarget, EncoderId } from "@/lib/types";
 
@@ -57,9 +59,6 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
   const setRec = (patch: Partial<typeof rec>) =>
     patchConfig({ recording: { ...rec, ...patch } });
-
-  const monitors = targets.filter((t) => t.kind === "monitor");
-  const windows = targets.filter((t) => t.kind === "window");
 
   // The saved screen, matched the way the core matches it: by the panel's own
   // identity first, and only then by the device name. `\\.\DISPLAY2` is handed
@@ -138,7 +137,20 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   ]);
 
   const pickTarget = (t: CaptureTarget) =>
-    setRec({ targetKind: t.kind, targetId: t.id, targetStableId: t.stableId });
+    setRec({
+      targetKind: t.kind,
+      targetId: t.id,
+      targetStableId: t.stableId,
+      targetRect: rectOf(t),
+    });
+
+  // Where the saved screen stands now, kept for the day it is unplugged: the
+  // map then draws it there. Displays rearranged since it was picked would
+  // otherwise leave it at a place it no longer has.
+  const savedRect = saved?.kind === "monitor" ? rectOf(saved) : null;
+  useEffect(() => {
+    if (savedRect && !sameRect(savedRect, rec.targetRect)) setRec({ targetRect: savedRect });
+  }, [savedRect?.x, savedRect?.y, savedRect?.width, savedRect?.height]);
 
   const quality = nearestStep(rec.quality);
   const encoder = encoders.find((e) => e.id === rec.encoder);
@@ -183,35 +195,16 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
             </Button>
           }
         />
-        {/* One grid, monitors first. A long window list scrolls inside it. */}
-        <div className="-m-1 grid max-h-80 grid-cols-3 gap-3 overflow-y-auto p-1">
-          {missing && (
-            <SourceTile
-              name={rec.targetId ?? "Screen"}
-              meta="Not connected · using primary"
-              title="Not connected · recording uses the primary screen"
-              picked
-              warn
-            />
-          )}
-          {[...monitors, ...windows].map((t) => (
-            <SourceTile
-              key={t.id}
-              name={t.kind === "monitor" ? t.title.replace(/ — \d+×\d+$/, "") : t.title}
-              meta={`${t.kind === "window" ? "Window · " : ""}${t.width}×${t.height}${
-                t.refreshHz ? ` · ${t.refreshHz} Hz` : ""
-              }`}
-              chip={t.kind === "monitor" && t.isPrimary ? "Primary" : undefined}
-              picked={!missing && isPicked(t)}
-              onPick={() => pickTarget(t)}
-            />
-          ))}
-          {targets.length === 0 && (
-            <p className="col-span-3 text-xs text-ink-faint">
-              No monitor or window found. Start the game and hit "Refresh".
-            </p>
-          )}
-        </div>
+        <SourcePicker
+          targets={targets}
+          isPicked={isPicked}
+          missing={
+            missing
+              ? { kind: rec.targetKind, rect: rec.targetKind === "monitor" ? rec.targetRect : null }
+              : null
+          }
+          onPick={pickTarget}
+        />
       </section>
 
       <section>
@@ -421,74 +414,6 @@ function EstimateRow({ left, right }: { left: string; right: React.ReactNode }) 
       <span className="min-w-0">{left}</span>
       <span className="min-w-0 text-right">{right}</span>
     </div>
-  );
-}
-
-function SourceTile({
-  name,
-  meta,
-  title,
-  chip,
-  picked,
-  warn,
-  onPick,
-}: {
-  name: string;
-  meta: string;
-  /** Full text for the meta line when it is shortened. */
-  title?: string;
-  chip?: string;
-  picked: boolean;
-  warn?: boolean;
-  onPick?: () => void;
-}) {
-  return (
-    <Card
-      role="button"
-      tabIndex={0}
-      aria-pressed={picked}
-      interactive={onPick !== undefined}
-      onClick={onPick}
-      onKeyDown={(e) => {
-        if (onPick && (e.key === "Enter" || e.key === " ")) {
-          e.preventDefault();
-          onPick();
-        }
-      }}
-      className={cn(
-        "relative min-w-0 px-[18px] py-4 text-left",
-        onPick && "cursor-pointer",
-        picked && !warn && "border-accent-bright shadow-[0_0_0_1px_var(--color-accent-bright)]",
-        warn && "border-warn/60 shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-warn)_60%,transparent)]",
-      )}
-    >
-      {picked && (
-        <span
-          aria-hidden
-          className={cn(
-            "absolute top-3.5 right-3.5 grid size-[22px] place-items-center rounded-full text-white",
-            warn ? "bg-warn" : "bg-accent",
-          )}
-        >
-          <svg viewBox="0 0 12 12" className="size-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M2.5 6.5 5 9l4.5-5.5" />
-          </svg>
-        </span>
-      )}
-      <p className={cn("truncate text-sm font-medium", picked && "pr-8")} title={name}>
-        {name}
-      </p>
-      <p className={cn("mt-1 flex items-center gap-2 text-xs", warn ? "text-warn" : "text-ink-muted")}>
-        <span className="min-w-0 truncate" title={title}>
-          {meta}
-        </span>
-        {chip && (
-          <span className="shrink-0 rounded-pill bg-elevated px-2 py-px text-[11px] text-ink">
-            {chip}
-          </span>
-        )}
-      </p>
-    </Card>
   );
 }
 

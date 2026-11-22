@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Segmented, Toggle } from "@/components/ui/Controls";
 import { Mark } from "@/components/ui/Logo";
 import { cn } from "@/lib/cn";
+import { rectOf } from "@/lib/monitorMap";
 import { api, inTauri } from "@/lib/ipc";
 import { TargetCard } from "@/routes/Recording";
 import { QuickSetup } from "@/routes/AudioMixer";
@@ -273,6 +274,7 @@ export function Setup() {
                           targetKind: t.kind,
                           targetId: t.id,
                           targetStableId: t.stableId,
+                          targetRect: rectOf(t),
                         },
                       })
                     }

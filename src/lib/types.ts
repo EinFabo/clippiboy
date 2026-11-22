@@ -115,6 +115,21 @@ export interface CaptureTarget {
    * when Windows does not report it.
    */
   refreshHz: number | null;
+  /** A monitor's top-left corner on the virtual desktop, physical pixels; 0 for windows. */
+  x: number;
+  y: number;
+  /** A window's application icon as a PNG data URL, `null` when Windows will not say. */
+  icon: string | null;
+  /** The window belongs to the detected game. */
+  isGame: boolean;
+}
+
+/** Where the chosen monitor last stood on the desktop (`TargetRect` in `model.rs`). */
+export interface TargetRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface RecordingConfig {
@@ -122,6 +137,8 @@ export interface RecordingConfig {
   targetId: string | null;
   /** The chosen monitor's stable identity; wins over `targetId`. */
   targetStableId: string | null;
+  /** The chosen monitor's place when it was picked — an unplugged one is drawn there. */
+  targetRect: TargetRect | null;
   width: number;
   height: number;
   fps: number;

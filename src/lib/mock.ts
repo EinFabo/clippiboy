@@ -32,9 +32,10 @@ export const mockProcesses: AudioProcess[] = [
 ];
 
 export const mockTargets: CaptureTarget[] = [
-  { kind: "monitor", id: "\\\\.\\DISPLAY1", stableId: "\\\\?\\DISPLAY#ACME1234#1#{guid}", title: "E2212F — 2560×1440", width: 2560, height: 1440, isPrimary: true, refreshHz: 165 },
-  { kind: "monitor", id: "\\\\.\\DISPLAY2", stableId: "\\\\?\\DISPLAY#ACME5678#1#{guid}", title: "CR270E — 1920×1080", width: 1920, height: 1080, isPrimary: false, refreshHz: 60 },
-  { kind: "window", id: "0x00120A", stableId: null, title: "Counter-Strike 2", width: 2560, height: 1440, isPrimary: false, refreshHz: 165 },
+  { kind: "monitor", id: "\\\\.\\DISPLAY1", stableId: "\\\\?\\DISPLAY#ACME1234#1#{guid}", title: "E2212F — 2560×1440", width: 2560, height: 1440, isPrimary: true, refreshHz: 165, x: 0, y: 0, icon: null, isGame: false },
+  { kind: "monitor", id: "\\\\.\\DISPLAY2", stableId: "\\\\?\\DISPLAY#ACME5678#1#{guid}", title: "CR270E — 1920×1080", width: 1920, height: 1080, isPrimary: false, refreshHz: 60, x: -1920, y: 180, icon: null, isGame: false },
+  { kind: "window", id: "0x00120A", stableId: null, title: "Counter-Strike 2", width: 2560, height: 1440, isPrimary: false, refreshHz: 165, x: 0, y: 0, icon: null, isGame: true },
+  { kind: "window", id: "0x00340C", stableId: null, title: "Discord", width: 1280, height: 860, isPrimary: false, refreshHz: 165, x: 0, y: 0, icon: null, isGame: false },
 ];
 
 export const mockEncoders: EncoderInfo[] = [
@@ -49,6 +50,7 @@ export const mockConfig: AppConfig = {
     targetKind: "monitor",
     targetId: "\\\\.\\DISPLAY1",
     targetStableId: "\\\\?\\DISPLAY#ACME1234#1#{guid}",
+    targetRect: { x: 0, y: 0, width: 2560, height: 1440 },
     width: 1920,
     height: 1080,
     fps: 60,

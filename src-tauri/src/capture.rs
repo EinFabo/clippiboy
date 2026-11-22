@@ -222,6 +222,10 @@ mod win {
                 height,
                 is_primary,
                 refresh_hz,
+                x: rect.left,
+                y: rect.top,
+                icon: None,
+                is_game: false,
             });
         }
         TRUE
@@ -266,6 +270,10 @@ mod win {
             height,
             is_primary: false,
             refresh_hz: refresh_of_window(hwnd),
+            x: 0,
+            y: 0,
+            icon: None,
+            is_game: false,
         });
         TRUE
     }
@@ -868,6 +876,10 @@ mod tests {
             height: 1080,
             is_primary: primary,
             refresh_hz: Some(60),
+            x: 0,
+            y: 0,
+            icon: None,
+            is_game: false,
         };
         vec![
             screen("\\\\.\\DISPLAY1", "E2212F", false),
@@ -973,6 +985,10 @@ mod tests {
             height: 720,
             is_primary: false,
             refresh_hz: None,
+            x: 0,
+            y: 0,
+            icon: None,
+            is_game: false,
         });
         assert!(pick(&targets, TargetKind::Window, Some("0xDEAD"), None).is_none());
         let open = pick(&targets, TargetKind::Window, Some("0xABC"), None).unwrap();
