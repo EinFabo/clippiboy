@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useRef } from "react";
+import { type CSSProperties, type RefObject, useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 import {
   decayLevel,
@@ -7,6 +7,7 @@ import {
   hotUntil,
   levelPct,
   peakDbText,
+  preGain,
   riseLevel,
 } from "@/lib/meter";
 import { type EngineState, useEngine } from "@/store";
@@ -26,6 +27,9 @@ const feedKey = (feed: LevelFeed) =>
 type Entry = {
   read: (s: EngineState) => number;
   muted: boolean;
+  /** Draw the signal before this gain (a volume track); the warning keeps the
+   *  level after it, which is what reaches the clip. */
+  gainDb: number | null;
   /** The level as drawn: rises at once, falls softly. */
   shown: number;
   /** The bar, moved by a transform. */
@@ -54,9 +58,7 @@ function draw(e: Entry, now: number) {
     const pct = levelPct(e.shown);
     if (pct !== e.pct) {
       e.pct = pct;
-      // Slid in from the left rather than scaled, so its rounded tip and its
-      // glow keep their shape at any level.
-      e.fill.style.transform = `translateX(${pct - 100}%)`;
+      e.fill.style.transform = `scaleX(${pct / 100})`;
     }
   }
   if (e.hotTarget) {
@@ -98,7 +100,7 @@ function wake() {
 
 function feed(e: Entry, s: EngineState, now: number) {
   const level = e.muted ? 0 : e.read(s);
-  e.shown = riseLevel(e.shown, level);
+  e.shown = riseLevel(e.shown, e.gainDb === null ? level : preGain(level, e.gainDb));
   e.hotUntil = hotUntil(e.hotUntil, level, now);
   e.held = holdPeak(e.held, level, now);
 }
@@ -130,6 +132,7 @@ function newEntry(read: Entry["read"], muted: boolean): Entry {
   return {
     read,
     muted,
+    gainDb: null,
     shown: 0,
     pct: -1,
     hotUntil: 0,
@@ -140,23 +143,29 @@ function newEntry(read: Entry["read"], muted: boolean): Entry {
 }
 
 /**
- * The live level inside a slider's track: a bright bar with a soft glow that
- * rises instantly and falls softly. Fills its parent (the track) and takes no
- * pointer, so the slider above it stays the control. Reads its level from the
- * store itself and draws outside React.
+ * The live level inside a track: a bright bar with a soft glow that rises
+ * instantly and falls softly. Fills its parent (the track, or the part of it
+ * that is set) and takes no pointer, so a slider above it stays the control.
+ * Reads its level from the store itself and draws outside React.
  *
- * `hot` gets a `data-hot` attribute while the level is about to clip.
+ * With `gainDb` the bar shows the source's signal before that gain — how full
+ * it is within the volume set — while `hot` (a `data-hot` attribute) still
+ * follows the level after it, which is what clips in the clip.
  */
 export function Meter({
   of,
   muted = false,
+  gainDb,
   hot,
   className,
+  style,
 }: {
   of: LevelFeed;
   muted?: boolean;
+  gainDb?: number;
   hot?: RefObject<HTMLElement | null>;
   className?: string;
+  style?: CSSProperties;
 }) {
   const fill = useRef<HTMLDivElement>(null);
   const entry = useRef<Entry | null>(null);
@@ -164,6 +173,7 @@ export function Meter({
 
   useEffect(() => {
     const e = newEntry(reader(of), muted);
+    e.gainDb = gainDb ?? null;
     e.fill = fill.current!;
     e.hotTarget = hot?.current;
     entry.current = e;
@@ -184,21 +194,21 @@ export function Meter({
     if (muted) e.hotUntil = 0;
   }, [muted]);
 
+  // The gain the core applied — the stored one, not a knob still being dragged.
+  useEffect(() => {
+    if (entry.current) entry.current.gainDb = gainDb ?? null;
+  }, [gainDb]);
+
   return (
-    <div
-      className={cn("pointer-events-none absolute inset-0", className)}
-      style={{
-        filter:
-          "drop-shadow(0 0 5px color-mix(in srgb, var(--color-accent-bright) 45%, transparent))",
-      }}
-    >
-      <div className="h-full w-full overflow-hidden rounded-pill">
-        <div
-          ref={fill}
-          className="h-full w-full rounded-pill bg-gradient-to-r from-accent to-accent-bright"
-          style={{ transform: "translateX(-100%)", willChange: "transform" }}
-        />
-      </div>
+    <div className={cn("pointer-events-none absolute inset-0", className)} style={style}>
+      <div
+        ref={fill}
+        className="h-full w-full origin-left rounded-pill bg-gradient-to-r from-accent to-accent-bright
+          shadow-[0_0_10px_color-mix(in_srgb,var(--color-accent-bright)_45%,transparent)]"
+        // The glow is a plain shadow scaled with the bar: nothing is filtered
+        // or laid out per frame.
+        style={{ transform: "scaleX(0)", willChange: "transform" }}
+      />
     </div>
   );
 }

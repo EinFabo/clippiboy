@@ -152,12 +152,13 @@ const GAIN_MAX = 12;
 const THUMB_PX = 14;
 
 /**
- * A source's volume as one track: the part up to the knob in the dark accent
- * (what is set), the live level after that volume bright inside it (what lands
- * in the clip), and the slider's own knob above both — the input stays the
- * control, for the pointer and the keyboard alike. The knob gets a warm ring
- * while the level is about to clip (`.cb-vol[data-hot]` in index.css). Muted or
- * off, the bright part stays away and the track dark.
+ * A source's volume as one track, the way Windows' own mixer draws it: the part
+ * up to the knob in the dark accent (what is set), the live signal bright inside
+ * that part — how full it is, on the meter's dB scale, so it never passes the
+ * knob — and the slider's own knob above both. The input stays the control, for
+ * the pointer and the keyboard alike. The knob gets a warm ring while the level
+ * after the volume is about to clip (`.cb-vol[data-hot]` in index.css). Muted
+ * or off, the bright part stays away and the track dark.
  */
 function VolumeTrack({
   source,
@@ -176,21 +177,21 @@ function VolumeTrack({
 }) {
   const box = useRef<HTMLDivElement>(null);
   const share = (gainDb - min) / (max - min);
+  // Up to the knob's centre, which the browser keeps inside the track.
+  const setWidth = { width: `calc(${THUMB_PX / 2}px + (100% - ${THUMB_PX}px) * ${share})` };
   return (
     <div
       ref={box}
       className={cn("cb-vol relative flex h-4 min-w-[110px] flex-1 items-center", className)}
     >
       <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-pill bg-line">
-        <div
-          className="absolute inset-y-0 left-0 rounded-pill bg-accent-deep"
-          // Up to the knob's centre, which the browser keeps inside the track.
-          style={{ width: `calc(${THUMB_PX / 2}px + (100% - ${THUMB_PX}px) * ${share})` }}
-        />
+        <div className="absolute inset-y-0 left-0 rounded-pill bg-accent-deep" style={setWidth} />
         <Meter
           of={{ source: source.id }}
           muted={source.muted || !source.enabled}
+          gainDb={source.gainDb}
           hot={box}
+          style={setWidth}
         />
       </div>
       <div className="relative flex w-full items-center">{children}</div>

@@ -9,6 +9,7 @@ import {
   levelPct,
   PEAK_HOLD_MS,
   peakDbText,
+  preGain,
   riseLevel,
 } from "./meter.ts";
 
@@ -55,4 +56,12 @@ test("peak text: whole dB, Silent at the bottom", () => {
   assert.equal(peakDbText(0.97), "0 dB");
   assert.equal(peakDbText(1.26), "+2 dB");
   assert.equal(peakDbText(Number.NaN), "Silent");
+});
+test("pre-gain: the volume taken back out, capped at full scale", () => {
+  assert.ok(Math.abs(preGain(0.5, 0) - 0.5) < 1e-9);
+  assert.ok(Math.abs(preGain(10 ** (6 / 20) * 0.25, 6) - 0.25) < 1e-9);
+  assert.ok(Math.abs(preGain(0.1, -20) - 1) < 1e-9);
+  assert.equal(preGain(2, 0), 1);
+  assert.equal(preGain(0, 12), 0);
+  assert.equal(preGain(Number.NaN, 0), 0);
 });

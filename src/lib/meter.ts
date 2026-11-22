@@ -66,3 +66,13 @@ export function peakDbText(level: number): string {
   // Math.round(-0.4) is -0, which would print as "-0".
   return `${db > 0 ? "+" : db < 0 ? "-" : ""}${Math.abs(db)} dB`;
 }
+
+/**
+ * How full a source's own signal is, before its volume (0–1): the core sends
+ * levels after the gain, and a volume track draws the signal inside the part
+ * that is set — the gain moves the knob, so it must not move the bar as well.
+ */
+export function preGain(level: number, gainDb: number): number {
+  const pre = level / 10 ** (gainDb / 20);
+  return pre > 0 ? Math.min(1, pre) : 0;
+}
