@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appCaptureUnavailable, gainText, sourceStatus, stuckSolo } from "./audioRows.ts";
+import {
+  appCaptureUnavailable,
+  gainText,
+  SOLO_CLEAR_ATTEMPTS,
+  soloToClear,
+  sourceStatus,
+  stuckSolo,
+} from "./audioRows.ts";
 import type { StatusContext } from "./audioRows.ts";
 import type { AudioSource, SourceKind } from "./types.ts";
 
@@ -114,4 +121,20 @@ test("gain text carries a sign only above zero", () => {
   assert.equal(gainText(2), "+2.0 dB");
   assert.equal(gainText(0), "0.0 dB");
   assert.equal(gainText(-3.5), "-3.5 dB");
+});
+
+test("solo clean-up: first attempt, retry after a rejection, cap, success stops", () => {
+  const stuck = src("b", { type: "game" }, true);
+  const clean = src("a", { type: "game" });
+  // First attempt.
+  assert.deepEqual(soloToClear([clean, stuck], new Map()), [stuck]);
+  // One rejected write: tried once more.
+  assert.deepEqual(soloToClear([stuck], new Map([["b", 1]])), [stuck]);
+  // Cap reached: no endless loop even if the core keeps reporting Solo.
+  assert.deepEqual(soloToClear([stuck], new Map([["b", SOLO_CLEAR_ATTEMPTS]])), []);
+  // A write that went through is recorded as the cap, so it stops.
+  assert.deepEqual(soloToClear([stuck], new Map([["b", SOLO_CLEAR_ATTEMPTS]])), []);
+  // Nothing stuck, nothing to do; other sources' counts do not matter.
+  assert.deepEqual(soloToClear([clean], new Map()), []);
+  assert.deepEqual(soloToClear([stuck], new Map([["other", 5]])), [stuck]);
 });

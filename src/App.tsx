@@ -26,7 +26,7 @@ import { Recording } from "./routes/Recording";
 import { Friends } from "./routes/Friends";
 import { Settings } from "./routes/settings";
 import { OPEN_SETTINGS_EVENT } from "./lib/settingsLink";
-import { stuckSolo } from "./lib/audioRows";
+import { SOLO_CLEAR_ATTEMPTS, soloToClear } from "./lib/audioRows";
 
 export default function App() {
   const [route, setRoute] = useState<Route>("dashboard");
@@ -51,20 +51,17 @@ export default function App() {
   // back as off, once per source.
   const sources = useEngine((s) => s.config.sources);
   const upsertSource = useEngine((s) => s.upsertSource);
-  const cleared = useRef(new Set<string>());
+  const attempts = useRef(new Map<string, number>());
   useEffect(() => {
-    for (const source of stuckSolo(sources)) {
-      if (cleared.current.has(source.id)) continue;
-      cleared.current.add(source.id);
-      // A write that did not go through (it resolves quietly then) is tried
-      // again at the next change.
+    for (const source of soloToClear(sources, attempts.current)) {
       const id = source.id;
-      const retry = () => cleared.current.delete(id);
-      upsertSource({ ...source, solo: false })
-        .then(() => {
-          if (useEngine.getState().config.sources.some((s) => s.id === id && s.solo)) retry();
-        })
-        .catch(retry);
+      attempts.current.set(id, (attempts.current.get(id) ?? 0) + 1);
+      upsertSource({ ...source, solo: false }).then(
+        // Through: never again, whatever the store shows afterwards.
+        () => attempts.current.set(id, SOLO_CLEAR_ATTEMPTS),
+        // Rejected: the count stays, so the next change retries up to the cap.
+        () => {},
+      );
     }
   }, [sources, upsertSource]);
 

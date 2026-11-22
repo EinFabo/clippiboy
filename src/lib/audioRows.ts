@@ -9,6 +9,23 @@ export function stuckSolo(sources: AudioSource[]): AudioSource[] {
   return sources.filter((s) => s.solo);
 }
 
+/** Writes of one source's Solo clean-up per session: the first and one retry. */
+export const SOLO_CLEAR_ATTEMPTS = 2;
+
+/**
+ * Which stuck sources to write back as off right now. `attempts` counts the
+ * writes started per source id; a source that reached the cap — or whose write
+ * went through (the caller then sets its count to the cap) — is left alone, so
+ * a core that keeps reporting Solo cannot make this write in a loop.
+ */
+export function soloToClear(
+  sources: AudioSource[],
+  attempts: ReadonlyMap<string, number>,
+  max = SOLO_CLEAR_ATTEMPTS,
+): AudioSource[] {
+  return stuckSolo(sources).filter((s) => (attempts.get(s.id) ?? 0) < max);
+}
+
 /** How a status line reads: plain, a problem to look at, or a failure. */
 export type StatusTone = "plain" | "warn" | "error";
 
