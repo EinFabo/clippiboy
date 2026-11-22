@@ -8,6 +8,8 @@ import {
   megabytesPerMinute,
   memoryBudgetMb,
   memoryLimitSummary,
+  nearestStep,
+  encoderShown,
 } from "./videoPlan.ts";
 
 test("buffer presets match only the four steps", () => {
@@ -39,4 +41,20 @@ test("clip length is capped by the buffer; 0 means all of it", () => {
 test("memory limit summary: enough, or only so many seconds", () => {
   assert.deepEqual(memoryLimitSummary(512, 20000, 120), { text: "512 MB · enough for the full 2 min", warn: false });
   assert.deepEqual(memoryLimitSummary(220, 20000, 120), { text: "220 MB · only about 1 min at this quality", warn: true });
+});
+
+test("nearestStep names the closest quality step", () => {
+  assert.equal(nearestStep(50).label, "Smallest");
+  assert.equal(nearestStep(70).label, "Balanced");
+  assert.equal(nearestStep(100).label, "Highest");
+});
+
+test("encoderShown falls back to x264 when the chosen one is missing", () => {
+  const list = [
+    { id: "nvenc", name: "NVIDIA NVENC", available: false },
+    { id: "x264", name: "x264", available: true },
+  ];
+  assert.equal(encoderShown(list, "nvenc"), "x264");
+  assert.equal(encoderShown(list, "x264"), "x264");
+  assert.equal(encoderShown([], "amf"), "amf");
 });

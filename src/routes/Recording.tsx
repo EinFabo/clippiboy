@@ -18,6 +18,8 @@ import {
   memoryBudgetMb,
   memoryLimitSummary,
   memoryNeededMb,
+  nearestStep,
+  QUALITY_STEPS,
 } from "@/lib/videoPlan";
 import { cn } from "@/lib/cn";
 import { autoFit, fit, fpsChoices } from "@/lib/fit";
@@ -25,22 +27,6 @@ import type { AppConfig, CaptureTarget, EncoderId } from "@/lib/types";
 
 /** The usual steps; only what the source supports is offered. */
 const HEIGHTS = [720, 1080, 1440, 2160];
-
-/** The quality steps offered, and what to call them. */
-const QUALITY_STEPS: Array<{ value: number; label: string }> = [
-  { value: 55, label: "Smallest" },
-  { value: 62, label: "Small" },
-  { value: 70, label: "Balanced" },
-  { value: 78, label: "High" },
-  { value: 85, label: "Highest" },
-];
-
-/** The step the stored quality is closest to. */
-function nearestStep(quality: number) {
-  return QUALITY_STEPS.reduce((best, step) =>
-    Math.abs(step.value - quality) < Math.abs(best.value - quality) ? step : best,
-  );
-}
 
 type BufferChoice = "30" | "60" | "120" | "300" | "custom";
 
@@ -202,7 +188,8 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           {missing && (
             <SourceTile
               name={rec.targetId ?? "Screen"}
-              meta="Not connected · recording uses the primary screen"
+              meta="Not connected · using primary"
+              title="Not connected · recording uses the primary screen"
               picked
               warn
             />
@@ -339,6 +326,8 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
                       onRelease={() => setSecondsDraft(null)}
                       onCommit={(seconds) => {
                         setSecondsDraft(null);
+                        // Landing on a step must not close the slider under the knob.
+                        setCustomOpen(true);
                         writeSeconds(seconds);
                       }}
                     />
@@ -383,7 +372,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </Row>
           <EstimateRow
             left={`About ${clipMegabytes(rec.bitrateKbps, clipLength(buffer))} MB per clip`}
-            right={`Uses up to ${memoryNeededMb(rec.bitrateKbps, buffer.seconds)} MB memory${
+            right={`Uses up to ${Math.min(memoryBudgetMb(rec, buffer), memoryNeededMb(rec.bitrateKbps, buffer.seconds))} MB memory${
               camMb > 0 ? ` · camera +${camMb} MB` : ""
             }`}
           />
@@ -392,7 +381,7 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
             storageKey="video-memory"
             summary={limit.warn ? <span className="text-warn">{limit.text}</span> : limit.text}
           >
-            <Row label="Memory limit">
+            <Row label="Limit">
               <div className="flex w-80 items-center gap-4">
                 <div className="min-w-0 flex-1">
                   {/* Let go, then written — the same reason as the length above. */}
@@ -438,6 +427,7 @@ function EstimateRow({ left, right }: { left: string; right: React.ReactNode }) 
 function SourceTile({
   name,
   meta,
+  title,
   chip,
   picked,
   warn,
@@ -445,6 +435,8 @@ function SourceTile({
 }: {
   name: string;
   meta: string;
+  /** Full text for the meta line when it is shortened. */
+  title?: string;
   chip?: string;
   picked: boolean;
   warn?: boolean;
@@ -466,15 +458,17 @@ function SourceTile({
       className={cn(
         "relative min-w-0 px-[18px] py-4 text-left",
         onPick && "cursor-pointer",
-        picked && "border-accent-bright shadow-[0_0_0_1px_var(--color-accent-bright)]",
+        picked && !warn && "border-accent-bright shadow-[0_0_0_1px_var(--color-accent-bright)]",
         warn && "border-warn/60 shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-warn)_60%,transparent)]",
       )}
     >
       {picked && (
         <span
           aria-hidden
-          className="absolute top-3.5 right-3.5 grid size-[22px] place-items-center rounded-full
-            bg-accent text-white"
+          className={cn(
+            "absolute top-3.5 right-3.5 grid size-[22px] place-items-center rounded-full text-white",
+            warn ? "bg-warn" : "bg-accent",
+          )}
         >
           <svg viewBox="0 0 12 12" className="size-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M2.5 6.5 5 9l4.5-5.5" />
@@ -485,7 +479,9 @@ function SourceTile({
         {name}
       </p>
       <p className={cn("mt-1 flex items-center gap-2 text-xs", warn ? "text-warn" : "text-ink-muted")}>
-        <span className="min-w-0 truncate">{meta}</span>
+        <span className="min-w-0 truncate" title={title}>
+          {meta}
+        </span>
         {chip && (
           <span className="shrink-0 rounded-pill bg-elevated px-2 py-px text-[11px] text-ink">
             {chip}

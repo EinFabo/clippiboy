@@ -24,6 +24,7 @@ import {
   IconPencil,
   IconPlus,
   IconSpeaker,
+  IconSpeakerOff,
   IconTrash,
 } from "@/components/icons";
 import { cn } from "@/lib/cn";
@@ -445,7 +446,7 @@ export function AudioMixer() {
                     variant="track"
                     className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 bg-white/[0.04] opacity-45"
                   />
-                  <div className="relative w-full">
+                  <div className="relative flex w-full items-center">
                     <Slider
                       clear
                       label={`Volume ${source.label}`}
@@ -483,9 +484,14 @@ export function AudioMixer() {
                       : "bg-elevated text-ink-faint hover:text-ink",
                   )}
                 >
-                  <IconSpeaker className="h-4 w-4" />
+                  {source.muted ? (
+                    <IconSpeakerOff className="h-4 w-4" />
+                  ) : (
+                    <IconSpeaker className="h-4 w-4" />
+                  )}
                 </button>
                 <button
+                  aria-label={`Own track for ${source.label}`}
                   aria-pressed={source.separateTrack}
                   title="Main mix, or an audio track of its own in the clip"
                   onClick={() =>

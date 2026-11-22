@@ -1,16 +1,9 @@
 import { formatBufferSeconds } from "./format.ts";
+import { nearestStep } from "./videoPlan.ts";
 import type { Clip } from "./types.ts";
 
-/** The quality steps by name, as the Video page words them. */
-export function qualityLabel(quality: number): string {
-  if (quality < 59) return "Smallest files";
-  if (quality < 66) return "Small";
-  if (quality < 74) return "Balanced";
-  if (quality < 82) return "High";
-  return "Highest";
-}
 
-export type BufferState = "protecting" | "waiting" | "off";
+export type BufferState = "protecting" | "waiting" | "recording" | "off";
 
 export interface BufferStatus {
   state: BufferState;
@@ -27,8 +20,13 @@ export function bufferStatus(input: {
   game: string | null;
   bufferedSeconds: number;
   bufferSeconds: number;
+  /** A recording is running: the buffer being off is then not "nothing saved". */
+  recording?: boolean;
 }): BufferStatus {
-  const { bufferActive, game, bufferedSeconds, bufferSeconds } = input;
+  const { bufferActive, game, bufferedSeconds, bufferSeconds, recording } = input;
+  if (!bufferActive && recording) {
+    return { state: "recording", title: "Buffer is off · recording", sub: "", fill: 0 };
+  }
   if (!bufferActive) {
     return { state: "off", title: "Buffer is off — nothing is being saved", sub: "", fill: 0 };
   }
@@ -63,9 +61,13 @@ export function saveStep(keyLabel: string | null): string {
   return keyLabel ? `Press ${keyLabel}` : "Save a clip";
 }
 
-/** The muted line beside the action row: what a clip will be made of. */
-export function videoSummary(rec: { height: number; fps: number; quality: number; encoder: string }, fixedBitrate: boolean): string {
-  return `${rec.height}p${rec.fps} · ${qualityLabel(rec.quality)} · ${rec.encoder.toUpperCase()}${
+/** The muted line beside the action row: what a clip will be made of, as the Video page words it. */
+export function videoSummary(
+  rec: { height: number; fps: number; quality: number },
+  encoder: string,
+  fixedBitrate: boolean,
+): string {
+  return `${rec.height}p${rec.fps} · ${nearestStep(rec.quality).label} · ${encoder}${
     fixedBitrate ? " · fixed bitrate" : ""
   }`;
 }

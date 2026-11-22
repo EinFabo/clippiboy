@@ -32,6 +32,11 @@ test("a stopped buffer says nothing is saved, whatever else is set", () => {
   assert.equal(s.title, "Buffer is off — nothing is being saved");
   assert.equal(s.fill, 0);
 });
+test("a stopped buffer with a recording running is not 'nothing saved'", () => {
+  const s = bufferStatus({ bufferActive: false, game: null, bufferedSeconds: 0, bufferSeconds: 120, recording: true });
+  assert.equal(s.state, "recording");
+  assert.equal(s.title, "Buffer is off · recording");
+});
 test("the fill stays between 0 and 1", () => {
   assert.equal(bufferStatus({ bufferActive: true, game: null, bufferedSeconds: 500, bufferSeconds: 120 }).fill, 1);
   assert.equal(bufferStatus({ bufferActive: true, game: null, bufferedSeconds: 5, bufferSeconds: 0 }).fill, 0);
@@ -57,8 +62,9 @@ test("the save step names the key, or goes without", () => {
   assert.equal(saveStep(null), "Save a clip");
 });
 test("video and audio are summed up in words", () => {
-  assert.equal(videoSummary({ height: 1080, fps: 60, quality: 70, encoder: "nvenc" }, false), "1080p60 · Balanced · NVENC");
-  assert.equal(videoSummary({ height: 1080, fps: 60, quality: 90, encoder: "x264" }, true), "1080p60 · Highest · X264 · fixed bitrate");
+  assert.equal(videoSummary({ height: 1080, fps: 60, quality: 70 }, "NVIDIA NVENC", false), "1080p60 · Balanced · NVIDIA NVENC");
+  assert.equal(videoSummary({ height: 1080, fps: 60, quality: 90 }, "x264", true), "1080p60 · Highest · x264 · fixed bitrate");
+  assert.equal(videoSummary({ height: 1080, fps: 60, quality: 50 }, "x264", false), "1080p60 · Smallest · x264");
   assert.equal(audioSummary(1), "1 audio source");
   assert.equal(audioSummary(3), "3 audio sources");
 });

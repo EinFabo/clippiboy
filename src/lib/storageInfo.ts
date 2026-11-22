@@ -4,6 +4,7 @@ import {
   isStale,
   parseStorageCache,
   readStillCurrent,
+  rerunOwed,
   STORAGE_CACHE_KEY,
   STORAGE_MAX_AGE_MS,
   type StorageCache,
@@ -125,6 +126,9 @@ export const useStorageInfo = create<StorageInfo>((set, get) => {
     },
     invalidate() {
       epoch++;
+      // The read in flight is dropped; a burst of changes owes one more walk, not one each.
+      usageAgain = rerunOwed(usageBusy, usageAgain);
+      trimsAgain = rerunOwed(trimsBusy, trimsAgain);
       keep({ at: null });
     },
   };

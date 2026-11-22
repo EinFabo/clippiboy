@@ -4,6 +4,7 @@ import { inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
 import { useFlip } from "@/lib/useFlip";
 import { onToast } from "@/lib/toastBus";
+import { isDuplicateToast } from "@/lib/toastDedupe";
 
 interface Notice {
   kind: "ok" | "error";
@@ -53,7 +54,12 @@ export function Toasts() {
 
   useEffect(() => {
     const timers: number[] = [];
+    // The core's `notice` and the caller's own toast can say the same thing.
+    let last: { kind: string; message: string; at: number } | null = null;
     const push = (notice: Notice) => {
+      const now = Date.now();
+      if (isDuplicateToast(last, notice, now)) return;
+      last = { kind: notice.kind, message: notice.message, at: now };
       const entry: Entry = { ...notice, id: nextId++ };
       // At most three at once: the oldest drop off first.
       setEntries((current) => [...current.filter((e) => !e.leaving), entry].slice(-MAX_SHOWN));

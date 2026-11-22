@@ -5,7 +5,7 @@ import { Card, Pill, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
 import { ShotViewer } from "@/components/ShotViewer";
-import { ShareMenuButton, copyEntries } from "@/components/clipMenu";
+import { ShareMenuButton, copyEntries, discordCopyState } from "@/components/clipMenu";
 import { IconCamera, IconCopy, IconRecord, IconScissors } from "@/components/icons";
 import { clipName, formatAgo, formatDuration, formatSize } from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
@@ -23,6 +23,9 @@ import {
   saveStep,
   videoSummary,
 } from "@/lib/overview";
+import { useDiscordCopies } from "@/lib/discordCopies";
+import { encoderShown } from "@/lib/videoPlan";
+import { fit } from "@/lib/fit";
 import type { Clip } from "@/lib/types";
 
 /** A hotkey as a small key chip; nothing when none is bound. */
@@ -56,6 +59,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     recordingProgress,
     toggleRecording,
     screenFallback,
+    targets,
+    encoders,
   } = useEngine(
     useShallow((s) => ({
       config: s.config,
@@ -76,6 +81,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
       recordingProgress: s.recordingProgress,
       toggleRecording: s.toggleRecording,
       screenFallback: s.screenFallback,
+      targets: s.targets,
+      encoders: s.encoders,
     })),
   );
   const saving = recordingSaving || recordingProgress !== null;
@@ -88,8 +95,18 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     game: detectedGame,
     bufferedSeconds,
     bufferSeconds: config.buffer.seconds,
+    recording,
   });
+  // Warned only when nothing at all is being saved; a recording is saving.
   const off = status.state === "off";
+  const bufferOff = !bufferActive;
+  // The resolution the capture really gets: the saved screen, else the primary one.
+  const rec = config.recording;
+  const source =
+    targets.find((t) => rec.targetId !== null && t.id === rec.targetId) ??
+    targets.find((t) => t.kind === "monitor" && t.isPrimary) ??
+    null;
+  const shownHeight = source ? fit(rec.height, source).height : rec.height;
   // Of every kind: the Overview shows what just happened, not only clips.
   const recent = useMemo(() => latestItems(clips), [clips]);
   // "Just now" has to go by itself: a timer to the minute, and a slow tick so
@@ -170,8 +187,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         )}
       >
         <div className="flex min-w-0 items-center gap-3.5">
-          {off ? (
-            <span className="h-2.5 w-2.5 shrink-0 rounded-pill bg-warn" />
+          {bufferOff ? (
+            <span className={cn("h-2.5 w-2.5 shrink-0 rounded-pill", off ? "bg-warn" : "bg-live")} />
           ) : (
             <LiveDot className="h-2.5 w-2.5" />
           )}
@@ -181,7 +198,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </div>
         </div>
         <div className="flex gap-2.5">
-          {off ? (
+          {bufferOff ? (
             <Button variant="primary" onClick={toggleBuffer}>
               Start buffer
             </Button>
@@ -199,7 +216,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
             </>
           )}
         </div>
-        {!off && <ProgressBar share={status.fill} className="col-span-full h-1.5" />}
+        {!bufferOff && <ProgressBar share={status.fill} className="col-span-full h-1.5" />}
       </Card>
 
       {/* Until now only the recording page said so, and nobody has that open
@@ -243,7 +260,10 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </Button>
           <p className="ml-auto text-[13px] text-ink-muted">
             <button className="hover:text-ink" onClick={() => onNavigate("recording")}>
-              {videoSummary(config.recording, !!rateControl && rateControl !== "quality")}
+              {videoSummary(
+                { ...rec, height: shownHeight },
+                encoderShown(encoders, rec.encoder),
+                !!rateControl && rateControl !== "quality")}
             </button>
             {" · "}
             <button className="hover:text-ink" onClick={() => onNavigate("audio")}>
@@ -351,8 +371,15 @@ function LatestCard({
   quick: boolean;
   onOpen: () => void;
 }) {
+  // Subscribed so the button follows a shrink that starts or ends.
+  const shrinking = useDiscordCopies((s) => s.busy.has(clip.id));
   const copies = quick ? copyEntries(clip) : [];
-  const copy = copies.find((e) => e.kind === "item" && e.label === "Copy for Discord") ?? copies[0];
+  // Prefer Discord's copy unless this clip cannot go there at all.
+  const discord =
+    discordCopyState(clip) === "tooLong"
+      ? undefined
+      : copies.find((e) => e.kind === "item" && e.label.startsWith("Copy for Discord"));
+  const copy = discord ?? copies.find((e) => e.kind === "item" && e.label.startsWith("Copy "));
   const kind = clip.screenshot ? "Screenshot" : clip.recording ? "Recording" : null;
   return (
     <Card interactive className="group overflow-hidden">
@@ -408,7 +435,7 @@ function LatestCard({
               disabled={copy.disabled}
               onClick={copy.onSelect}
             >
-              {copy.label}
+              {shrinking && copy === discord ? "Shrinking…" : copy.label}
             </Button>
           ) : (
             <Button size="sm" onClick={onOpen}>

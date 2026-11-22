@@ -288,7 +288,7 @@ export function FacetPopover({
             aria-label={`Search ${noun}`}
             data-no-ring
             className="h-[34px] w-full rounded-pill border border-line bg-surface pr-3 pl-8 text-[13px]
-              outline-none transition-colors placeholder:text-ink-faint focus:border-line-strong"
+              outline-none transition-colors placeholder:text-ink-faint focus:border-accent-bright/60"
           />
         </div>
       )}
@@ -311,10 +311,10 @@ export function FacetPopover({
       </div>
       {anyChecked && (
       <div className="mt-1 flex shrink-0 justify-end border-t border-line pt-1.5">
-        <Button variant="ghost" size="sm" className="h-[26px] px-2.5" disabled={!anyChecked}
+        <Button variant="ghost" size="sm" className="h-[26px] px-2.5"
           onClick={() => {
             onClear();
-            // The button disables itself; keep focus in the list.
+            // The button leaves with the last tick; keep focus in the list.
             (field.current ?? box.current?.querySelector<HTMLElement>("[data-facet-row]") ?? box.current)?.focus();
           }}
         >

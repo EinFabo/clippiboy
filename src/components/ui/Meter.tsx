@@ -128,7 +128,8 @@ export function Meter({
     <div
       className={cn(
         "w-full overflow-hidden rounded-pill",
-        variant === "bar" ? "h-1.5 bg-line" : "h-full",
+        // The track takes the height of whoever places it.
+        variant === "bar" && "h-1.5 bg-line",
         className,
       )}
     >

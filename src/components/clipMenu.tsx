@@ -22,6 +22,8 @@ import { api, inTauri } from "@/lib/ipc";
 import { useShare } from "@/lib/share";
 import { discordMb } from "@/lib/discord";
 import { toast } from "@/lib/toastBus";
+import { planExport } from "@/lib/exportPlan";
+import { isDiscordBusy, setDiscordBusy } from "@/lib/discordCopies";
 import { freeOn, timeLeft, useLinks } from "@/lib/links";
 import { postLabel, useWebhook, webhookApi } from "@/lib/webhook";
 import type { Clip } from "@/lib/types";
@@ -29,6 +31,24 @@ import type { Clip } from "@/lib/types";
 /** What "Copy for Discord" aims at, from the setting "Discord upload limit". */
 export function discordTarget(): number {
   return discordMb(useEngine.getState().config.discordLimit);
+}
+
+/** Whether "Copy for Discord" can run for a clip: now, not yet (shrinking), or never (too long). */
+export function discordCopyState(clip: Clip): "ok" | "busy" | "tooLong" {
+  if (isDiscordBusy(clip.id)) return "busy";
+  const mb = discordTarget();
+  return planExport(clip, mb * 1024 * 1024).tooLong ? "tooLong" : "ok";
+}
+
+/** Shrinks a clip to the Discord limit and copies it; the shrinking shows as busy meanwhile. */
+export async function copyForDiscord(clip: Clip): Promise<void> {
+  if (isDiscordBusy(clip.id)) return;
+  setDiscordBusy(clip.id, true);
+  try {
+    await run(api.exportForDiscord(clip.id, discordTarget()), "Copied · Ctrl+V in Discord");
+  } finally {
+    setDiscordBusy(clip.id, false);
+  }
 }
 
 /** Awaits a menu action: its failure is toasted, its success says `done` if given. */
@@ -148,6 +168,22 @@ export function copyEntries(clip: Clip): MenuEntry[] {
     disabled: !inTauri,
     onSelect: () => void run(api.copyClipFile(clip.id), "Clip copied"),
   });
+  if (!clip.screenshot) {
+    const state = discordCopyState(clip);
+    entries.push({
+      kind: "item",
+      label:
+        state === "busy"
+          ? "Copy for Discord · shrinking…"
+          : state === "tooLong"
+            ? `Copy for Discord · too long for ${discordTarget()} MB`
+            : "Copy for Discord",
+      shortcut: state === "ok" ? `Under ${discordTarget()} MB` : undefined,
+      icon: <IconCopy className={icon} />,
+      disabled: !inTauri || state !== "ok",
+      onSelect: () => void copyForDiscord(clip),
+    });
+  }
   if (clip.screenshot) {
     entries.push({
       kind: "item",

@@ -88,6 +88,11 @@ export function cameraMissing(
  * folder moved, "Clear all trims" ran) after the read had started: its
  * numbers may predate the change. `started` and `now` are invalidation counts.
  */
+/** An invalidation while a read runs: that read is dropped, so one more is owed after it. */
+export function rerunOwed(busy: boolean, already: boolean): boolean {
+  return busy || already;
+}
+
 export function readStillCurrent(started: number, now: number): boolean {
   return started === now;
 }

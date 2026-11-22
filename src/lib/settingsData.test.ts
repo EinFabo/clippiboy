@@ -6,6 +6,7 @@ import {
   isStale,
   parseStorageCache,
   readStillCurrent,
+  rerunOwed,
   STORAGE_MAX_AGE_MS,
 } from "./settingsData.ts";
 
@@ -52,4 +53,10 @@ test("cameraMissing: only after the list was read", () => {
 test("readStillCurrent: discarded once anything invalidated after the start", () => {
   assert.equal(readStillCurrent(3, 3), true);
   assert.equal(readStillCurrent(3, 4), false);
+});
+
+test("rerunOwed: a busy read owes one more, an idle one nothing, a burst stays one", () => {
+  assert.equal(rerunOwed(true, false), true);
+  assert.equal(rerunOwed(false, false), false);
+  assert.equal(rerunOwed(true, rerunOwed(true, false)), true);
 });

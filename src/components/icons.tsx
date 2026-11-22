@@ -94,6 +94,13 @@ export const IconSpeaker = ({ className = base }: P) => (
   </svg>
 );
 
+export const IconSpeakerOff = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinejoin="round">
+    <path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4v-5Z" />
+    <path d="M16 9.5l5 5M21 9.5l-5 5" strokeLinecap="round" />
+  </svg>
+);
+
 export const IconApp = ({ className = base }: P) => (
   <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor">
     <rect x="3" y="4" width="18" height="14" rx="2.5" />

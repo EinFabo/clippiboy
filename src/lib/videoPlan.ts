@@ -69,3 +69,29 @@ export function memoryLimitSummary(
   const holds = Math.max(1, Math.floor((seconds * limitMb) / needed));
   return { text: `${limitMb} MB · only about ${formatBufferSeconds(holds)} at this quality`, warn: true };
 }
+
+/** The quality steps offered, and what to call them. */
+export const QUALITY_STEPS: Array<{ value: number; label: string }> = [
+  { value: 55, label: "Smallest" },
+  { value: 62, label: "Small" },
+  { value: 70, label: "Balanced" },
+  { value: 78, label: "High" },
+  { value: 85, label: "Highest" },
+];
+
+/** The step the stored quality is closest to. */
+export function nearestStep(quality: number) {
+  return QUALITY_STEPS.reduce((best, step) =>
+    Math.abs(step.value - quality) < Math.abs(best.value - quality) ? step : best,
+  );
+}
+
+/** What the Video page calls the encoder in use: the chosen one's name, or x264 when it is not available. */
+export function encoderShown(
+  encoders: Array<{ id: string; name: string; available: boolean }>,
+  id: string,
+): string {
+  const chosen = encoders.find((e) => e.id === id);
+  if (chosen && !chosen.available) return encoders.find((e) => e.id === "x264")?.name ?? "x264";
+  return chosen?.name ?? id;
+}
