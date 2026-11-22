@@ -99,11 +99,14 @@ export function Slider({
   onRelease,
   label,
   disabled,
+  clear,
 }: {
   value: number;
   min: number;
   max: number;
   step?: number;
+  /** No track behind the fill, so something drawn behind the slider shows through. */
+  clear?: boolean;
   onChange: (v: number) => void;
   /**
    * Where the knob was let go — by the pointer or after a key. For settings
@@ -183,7 +186,7 @@ export function Slider({
         [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-pill
         [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow"
       style={{
-        background: `linear-gradient(90deg, var(--color-accent) ${pct}%, var(--color-line-strong) ${pct}%)`,
+        background: `linear-gradient(90deg, var(--color-accent) ${pct}%, ${clear ? "transparent" : "var(--color-line-strong)"} ${pct}%)`,
       }}
     />
   );

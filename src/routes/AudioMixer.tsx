@@ -1,9 +1,19 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
-import { Card, SectionTitle } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Slider, Toggle } from "@/components/ui/Controls";
+import { Segmented, Slider, Toggle } from "@/components/ui/Controls";
+import { FLOATING, useMenu } from "@/components/ui/Menu";
 import { Meter } from "@/components/ui/Meter";
 import {
   IconApp,
@@ -11,6 +21,7 @@ import {
   IconGrip,
   IconLayers,
   IconMic,
+  IconPencil,
   IconPlus,
   IconSpeaker,
   IconTrash,
@@ -18,6 +29,8 @@ import {
 import { cn } from "@/lib/cn";
 import { labelToSave } from "@/lib/draft";
 import { useFlip } from "@/lib/useFlip";
+import { appCaptureUnavailable, gainText, sourceStatus } from "@/lib/audioRows";
+import { placeMenu } from "@/lib/menuPlace";
 import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
 import type { AudioProcess, AudioSource, SourceKind } from "@/lib/types";
 
@@ -35,17 +48,19 @@ function wantsOwnTrack(kind: SourceKind): boolean {
 }
 
 /**
- * The name field of a source. It keeps its own draft and hands the name over
- * when the field is left or Enter is pressed — not on every keystroke, which
- * wrote the config (and could eat characters while the core's answer landed).
- * Escape puts the saved name back.
+ * The name field of a source, shown while it is being renamed. It keeps its own
+ * draft and hands the name over when the field is left or Enter is pressed —
+ * not on every keystroke, which wrote the config (and could eat characters
+ * while the core's answer landed). Escape puts the saved name back.
  */
 function LabelField({
   label,
   onSave,
+  onDone,
 }: {
   label: string;
   onSave: (label: string) => void;
+  onDone: () => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   // Escape blurs the field, and that would otherwise save what was cancelled.
@@ -53,17 +68,16 @@ function LabelField({
   const commit = () => {
     const next = labelToSave(draft, label);
     setDraft(null);
-    if (cancelled.current) {
-      cancelled.current = false;
-      return;
-    }
-    if (next !== null) onSave(next);
+    if (!cancelled.current && next !== null) onSave(next);
+    cancelled.current = false;
+    onDone();
   };
   return (
     <input
+      autoFocus
+      onFocus={(e) => e.currentTarget.select()}
       aria-label={`Name of ${label}`}
       value={draft ?? label}
-      onFocus={() => (cancelled.current = false)}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
@@ -73,8 +87,7 @@ function LabelField({
           e.currentTarget.blur();
         }
       }}
-      className="w-44 truncate rounded-inner bg-transparent text-sm font-medium
-        outline-none hover:bg-elevated focus:bg-elevated px-1.5 py-0.5"
+      className="w-full truncate rounded-inner bg-elevated px-1.5 py-0.5 text-sm font-medium outline-none"
     />
   );
 }
@@ -129,33 +142,6 @@ function sourceIcon(kind: SourceKind, leftovers: boolean) {
   return <IconApp className="h-4 w-4" />;
 }
 
-function sourceHint(
-  kind: SourceKind,
-  deviceName: (id: string) => string,
-  game: string | null,
-  /** The applications this source is actually tapping right now. */
-  tapped: string[],
-  leftovers: boolean,
-) {
-  switch (kind.type) {
-    case "game":
-      return game ? `Game · ${game}` : "Game · none detected right now";
-    case "inputDevice":
-      return `Input · ${deviceName(kind.deviceId)}`;
-    case "outputDevice":
-      if (!leftovers) return `Output (loopback) · ${deviceName(kind.deviceId)}`;
-      // Which applications it holds is the only thing worth reading here: the
-      // device alone no longer tells you what is in the track.
-      return tapped.length > 0
-        ? `${deviceName(kind.deviceId)} · ${tapped.join(", ")}`
-        : `${deviceName(kind.deviceId)} · nothing left to record right now`;
-    case "process":
-      return kind.mode === "include"
-        ? `Application · PID ${kind.pid}`
-        : `Everything except PID ${kind.pid}`;
-  }
-}
-
 /** A source on its way to a new place in the list. */
 interface Drag {
   /** The source being carried. */
@@ -193,19 +179,17 @@ export function AudioMixer() {
       patchConfig: s.patchConfig,
     })),
   );
+  const menu = useMenu();
   const [adding, setAdding] = useState(false);
+  const addButton = useRef<HTMLSpanElement>(null);
+  /** The source whose name is being edited. */
+  const [renaming, setRenaming] = useState<string | null>(null);
   /** The gain of the source whose knob is being dragged; written on release. */
   const [gainDraft, setGainDraft] = useState<{ id: string; gainDb: number } | null>(null);
   /** The source being carried, and the gap it is hovering over. */
   const [drag, setDrag] = useState<Drag | null>(null);
   const list = useRef<HTMLDivElement>(null);
 
-  const deviceName = useMemo(
-    // An empty id follows whatever Windows has as its default device.
-    () => (id: string) =>
-      id === "" ? "Windows default" : (devices.find((d) => d.id === id)?.name ?? id),
-    [devices],
-  );
   // Anti-cheat games cannot be named — `list_processes` needs to read their
   // memory and is refused. The bare PID is still better than nothing.
   const processName = useMemo(
@@ -214,7 +198,6 @@ export function AudioMixer() {
     [processes],
   );
 
-  const anySolo = config.sources.some((s) => s.solo);
   const leftovers = leftoversMode(config.sources);
   const order = config.sources.map((s) => s.id).join(",");
   // A row that has just been dropped somewhere else travels there instead of
@@ -265,54 +248,83 @@ export function AudioMixer() {
     patchConfig({ sources });
   };
 
+  /** The "⋯" menu of one row. */
+  const openMenu = (event: React.MouseEvent<HTMLButtonElement>, source: AudioSource) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    menu.open(
+      {
+        clientX: box.right,
+        clientY: box.bottom + 6,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      },
+      [
+        {
+          kind: "item",
+          label: "Rename",
+          icon: <IconPencil className="h-4 w-4" />,
+          onSelect: () => setRenaming(source.id),
+        },
+        {
+          kind: "item",
+          label: "Remove",
+          icon: <IconTrash className="h-4 w-4" />,
+          danger: true,
+          onSelect: () => void removeSource(source.id),
+        },
+      ],
+      { alignRight: true, anchor: box, gap: 6 },
+    );
+  };
+
   return (
-    <div className="space-y-8">
-      <header className="pt-10">
-        <h1 className="display text-4xl">Audio mixer</h1>
-        <p className="mt-3 max-w-lg text-[15px] leading-relaxed text-white/70">
-          Any number of sources at once, each into the main mix or onto a track
-          of its own in the clip.
-        </p>
+    <div className="space-y-6 pb-10">
+      <header className="flex items-end justify-between pt-10">
+        <h1 className="display text-4xl">Audio</h1>
+        <span ref={addButton}>
+          <Button
+            size="sm"
+            variant="primary"
+            icon={<IconPlus className="h-4 w-4" />}
+            onClick={() => setAdding((v) => !v)}
+          >
+            Add source
+          </Button>
+        </span>
       </header>
 
-      <section>
-        <SectionTitle
-          title="Sources"
-          action={
-            <Button
-              size="sm"
-              variant="primary"
-              icon={<IconPlus className="h-4 w-4" />}
-              onClick={() => setAdding((v) => !v)}
-            >
-              Add source
-            </Button>
-          }
+      {adding && (
+        <AddSourceList
+          anchor={addButton}
+          hasGame={config.sources.some((s) => s.kind.type === "game")}
+          captureBroken={appCaptureUnavailable(config.sources, sourceErrors)}
+          onClose={() => setAdding(false)}
+          onAdd={(s) => {
+            void upsertSource(s);
+            setAdding(false);
+          }}
         />
+      )}
 
-        <MixedInHint sources={config.sources} onFix={upsertSource} />
-
-        {adding && (
-          <AddSourcePanel
-            hasGame={config.sources.some((s) => s.kind.type === "game")}
-            onClose={() => setAdding(false)}
-            onAdd={(s) => {
-              upsertSource(s);
-              setAdding(false);
-            }}
-          />
-        )}
-
-        <div className="space-y-3" ref={list}>
-          {config.sources.map((source) => {
-            const dimmed = anySolo && !source.solo;
-            const tapped = (taps[source.id] ?? []).map(processName);
+      {config.sources.length > 0 && (
+        <div ref={list}>
+        <Card className="overflow-hidden">
+          {config.sources.map((source, index) => {
+            const status = sourceStatus(source, {
+              devices,
+              processes,
+              detectedGame,
+              error: sourceErrors[source.id],
+              warning: sourceWarnings[source.id],
+              tapped: (taps[source.id] ?? []).map(processName),
+              leftovers,
+            });
             const carried = drag?.id === source.id;
             const gap = drag?.over?.id === source.id ? drag.over.before : null;
             const shownGain =
               gainDraft?.id === source.id ? gainDraft.gainDb : source.gainDb;
             return (
-              <Card
+              <div
                 key={source.id}
                 data-flip={source.id}
                 onDragOver={(event) => hover(event, source.id)}
@@ -321,26 +333,28 @@ export function AudioMixer() {
                   if (drag) drop(drag);
                 }}
                 className={cn(
-                  "relative p-4 transition-opacity duration-200",
+                  "relative flex items-center gap-3.5 px-4 py-3 transition-[opacity,background-color] duration-200",
+                  index > 0 && "border-t border-line",
+                  status.tone === "warn" && "bg-warn/5",
+                  status.tone === "error" && "bg-live/5",
                   // Only one opacity, never two: `cn` just joins, so a second
-                  // one would not override the first — the stylesheet's own
-                  // order would decide.
+                  // one would not override the first.
                   carried
                     ? // The row being carried steps back; the drag image under
                       // the pointer is the one you are watching.
                       "opacity-30"
-                    : (!source.enabled || dimmed) && "opacity-45",
+                    : !source.enabled && "opacity-55",
                 )}
               >
                 {gap !== null && (
                   <span
                     className={cn(
-                      "pointer-events-none absolute inset-x-3 h-0.5 rounded-full bg-accent-bright",
-                      gap ? "-top-2" : "-bottom-2",
+                      "pointer-events-none absolute inset-x-3 z-10 h-0.5 rounded-full bg-accent-bright",
+                      gap ? "-top-px" : "-bottom-px",
                     )}
                   />
                 )}
-                <div className="flex items-center gap-4">
+                <span className="w-5 shrink-0">
                   {config.sources.length > 1 && (
                     <span
                       role="button"
@@ -378,72 +392,64 @@ export function AudioMixer() {
                         event.preventDefault();
                         nudge(source.id, delta);
                       }}
-                      className="relative -mr-1 -ml-1 shrink-0 cursor-grab text-ink-faint transition-colors after:absolute after:-inset-0.5 after:content-['']
+                      className="relative block cursor-grab text-ink-faint transition-colors after:absolute after:-inset-1 after:content-['']
                         hover:text-ink focus-visible:text-ink active:cursor-grabbing"
                     >
                       <IconGrip className="h-5 w-5" />
                     </span>
                   )}
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
-                    {sourceIcon(source.kind, leftovers)}
-                  </span>
+                </span>
+                <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
+                  {sourceIcon(source.kind, leftovers)}
+                </span>
 
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <LabelField
-                        label={source.label}
-                        onSave={(label) => upsertSource({ ...source, label })}
-                      />
-                      {source.separateTrack && (
-                        <span className="rounded-pill bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent-bright">
-                          own track
-                        </span>
-                      )}
-                      {/* It is the game source that switches every output
-                          device over to its leftovers, so the warning belongs
-                          on it rather than on some setting nobody sees. */}
-                      {source.kind.type === "game" && (
-                        <span
-                          title="Recording per application is new. If something ends up missing or doubled, this is where to look first."
-                          className="rounded-pill bg-warn/15 px-2 py-0.5 text-xs font-medium text-warn"
-                        >
-                          experimental
-                        </span>
-                      )}
-                    </div>
+                <div className="w-[190px] min-w-0 shrink-0">
+                  {renaming === source.id ? (
+                    <LabelField
+                      label={source.label}
+                      onSave={(label) => void upsertSource({ ...source, label })}
+                      onDone={() => setRenaming(null)}
+                    />
+                  ) : (
                     <p
-                      className={cn(
-                        "mt-0.5 truncate px-1.5 text-xs",
-                        sourceErrors[source.id]
-                          ? "text-live"
-                          : sourceWarnings[source.id]
-                            ? "text-warn"
-                            : "text-ink-faint",
-                      )}
+                      className="truncate px-1.5 py-0.5 text-sm font-medium"
+                      onDoubleClick={() => setRenaming(source.id)}
                     >
-                      {sourceErrors[source.id] ??
-                        sourceWarnings[source.id] ??
-                        sourceHint(
-                          source.kind,
-                          deviceName,
-                          detectedGame,
-                          tapped,
-                          leftovers,
-                        )}
+                      {source.label}
                     </p>
-                    <div className="mt-2.5 px-1.5">
-                      <Meter source={source.id} muted={source.muted} />
-                    </div>
-                  </div>
+                  )}
+                  <p
+                    title={status.text}
+                    className={cn(
+                      "truncate px-1.5 text-xs",
+                      status.tone === "error"
+                        ? "text-live"
+                        : status.tone === "warn"
+                          ? "text-warn"
+                          : "text-ink-faint",
+                    )}
+                  >
+                    {status.text}
+                  </p>
+                </div>
 
-                  <div className="flex w-52 shrink-0 items-center gap-3">
+                <div
+                  className={cn(
+                    "relative flex h-4 min-w-[110px] flex-1 items-center",
+                    status.tone === "warn" && "opacity-50",
+                  )}
+                >
+                  <Meter
+                    source={source.id}
+                    muted={source.muted}
+                    variant="track"
+                    className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 bg-white/[0.04] opacity-45"
+                  />
+                  <div className="relative w-full">
                     <Slider
+                      clear
                       label={`Volume ${source.label}`}
-                      value={
-                        gainDraft?.id === source.id
-                          ? gainDraft.gainDb
-                          : source.gainDb
-                      }
+                      value={shownGain}
                       min={-30}
                       max={12}
                       step={0.5}
@@ -453,83 +459,73 @@ export function AudioMixer() {
                       onCommit={(gainDb) => {
                         setGainDraft(null);
                         if (gainDb !== source.gainDb)
-                          upsertSource({ ...source, gainDb });
+                          void upsertSource({ ...source, gainDb });
                       }}
                       onRelease={() => setGainDraft(null)}
                     />
-                    <span className="w-14 shrink-0 text-right font-mono text-xs text-ink-muted">
-                      {shownGain > 0 ? "+" : ""}
-                      {shownGain.toFixed(1)} dB
-                    </span>
-                  </div>
-
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    <MiniToggle
-                      active={source.muted}
-                      activeClass="bg-live/20 text-live"
-                      onClick={() =>
-                        upsertSource({ ...source, muted: !source.muted })
-                      }
-                    >
-                      M
-                    </MiniToggle>
-                    <MiniToggle
-                      active={source.solo}
-                      activeClass="bg-accent/25 text-accent-bright"
-                      onClick={() =>
-                        upsertSource({ ...source, solo: !source.solo })
-                      }
-                    >
-                      S
-                    </MiniToggle>
-                    <MiniToggle
-                      active={source.separateTrack}
-                      activeClass="bg-accent/25 text-accent-bright"
-                      title="Own audio track in the MP4"
-                      onClick={() =>
-                        upsertSource({
-                          ...source,
-                          separateTrack: !source.separateTrack,
-                        })
-                      }
-                    >
-                      ⧉
-                    </MiniToggle>
-                    <span className="mx-1">
-                      <Toggle
-                        label={`${source.label} enabled`}
-                        checked={source.enabled}
-                        onChange={(enabled) =>
-                          upsertSource({ ...source, enabled })
-                        }
-                      />
-                    </span>
-                    <button
-                      aria-label="Remove source"
-                      onClick={() => removeSource(source.id)}
-                      className="grid h-8 w-8 place-items-center rounded-pill text-ink-faint
-                        transition-colors hover:bg-live/15 hover:text-live"
-                    >
-                      <IconTrash className="h-4 w-4" />
-                    </button>
                   </div>
                 </div>
-              </Card>
+                <span className="w-[60px] shrink-0 text-right font-mono text-xs text-ink-muted">
+                  {gainText(shownGain)}
+                </span>
+
+                <button
+                  aria-label={`Mute ${source.label}`}
+                  aria-pressed={source.muted}
+                  title={source.muted ? "Muted" : "Mute"}
+                  onClick={() =>
+                    void upsertSource({ ...source, muted: !source.muted })
+                  }
+                  className={cn(
+                    "grid h-[30px] w-[30px] shrink-0 place-items-center rounded-pill transition-colors duration-150",
+                    source.muted
+                      ? "bg-live/20 text-live"
+                      : "bg-elevated text-ink-faint hover:text-ink",
+                  )}
+                >
+                  <IconSpeaker className="h-4 w-4" />
+                </button>
+                <button
+                  aria-pressed={source.separateTrack}
+                  title="Main mix, or an audio track of its own in the clip"
+                  onClick={() =>
+                    void upsertSource({
+                      ...source,
+                      separateTrack: !source.separateTrack,
+                    })
+                  }
+                  className={cn(
+                    "inline-flex h-[26px] w-[84px] shrink-0 items-center justify-center rounded-pill border text-xs whitespace-nowrap transition-colors duration-150",
+                    source.separateTrack
+                      ? "border-accent/60 bg-accent/15 text-accent-bright"
+                      : "border-line-strong text-ink-faint hover:text-ink",
+                  )}
+                >
+                  {source.separateTrack ? "Own track" : "Main mix"}
+                </button>
+                <Toggle
+                  label={`${source.label} enabled`}
+                  checked={source.enabled}
+                  onChange={(enabled) => void upsertSource({ ...source, enabled })}
+                />
+                <button
+                  aria-label={`More for ${source.label}`}
+                  onClick={(event) => openMenu(event, source)}
+                  className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-pill text-lg leading-none text-ink-faint
+                    transition-colors hover:bg-elevated hover:text-ink"
+                >
+                  ⋯
+                </button>
+              </div>
             );
           })}
+        </Card>
         </div>
+      )}
 
-        {config.sources.length === 0 && (
-          <QuickSetup onAdd={upsertSource} onPick={() => setAdding(true)} />
-        )}
-      </section>
-
-      <p className="pb-4 text-xs text-ink-faint">
-        Game and application sources need process loopback (Windows 10 build
-        20348+).
-      </p>
-
-      <AvailableSources processes={processes} />
+      {config.sources.length === 0 && (
+        <QuickSetup onAdd={upsertSource} onPick={() => setAdding(true)} />
+      )}
     </div>
   );
 }
@@ -684,135 +680,41 @@ export function QuickSetup({
   );
 }
 
-function MiniToggle({
-  active,
-  activeClass,
-  onClick,
-  children,
-  title,
-}: {
-  active: boolean;
-  activeClass: string;
-  onClick: () => void;
-  children: React.ReactNode;
-  title?: string;
-}) {
-  return (
-    <button
-      title={title}
-      onClick={onClick}
-      className={cn(
-        "h-8 w-8 rounded-pill text-xs font-semibold transition-colors duration-150",
-        active ? activeClass : "bg-elevated text-ink-faint hover:text-ink",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
 
-function AvailableSources({
-  processes,
-}: {
-  processes: ReturnType<typeof useEngine.getState>["processes"];
-}) {
-  if (processes.length === 0) return null;
+/** Distance to the window edge, and the space between button and list. */
+const EDGE = 8;
+const GAP = 6;
+
+function Experimental() {
   return (
-    <p className="pb-10 text-xs text-ink-faint">
-      Applications detected with audio: {processes.map((p) => p.name).join(" · ")}
-    </p>
+    <span
+      title="Recording per application is new. If something ends up missing or doubled, this is where to look first."
+      className="rounded-pill bg-warn/15 px-2 py-0.5 text-[11px] font-medium text-warn"
+    >
+      experimental
+    </span>
   );
 }
 
 /**
- * Anyone who set ClippiBoy up before this change has microphone and apps in the
- * main mix — they cannot be separated in the clip afterwards. Switching silently
- * would be wrong (it changes what gets recorded), so we ask once.
+ * The list behind "Add source": Apps (the detected game on top, then the
+ * running applications with audio) and Devices (outputs, then inputs). A glass
+ * popover under its button, placed like every menu; Escape, a click outside or
+ * a resize closes it.
  */
-function MixedInHint({
-  sources,
-  onFix,
-}: {
-  sources: AudioSource[];
-  onFix: (source: AudioSource) => Promise<void>;
-}) {
-  const affected = sources.filter((s) => wantsOwnTrack(s.kind) && !s.separateTrack);
-  if (affected.length === 0) return null;
-
-  return (
-    <Card className="mb-4 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
-      <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-muted">
-        <span className="font-medium text-ink">
-          {affected.map((s) => s.label).join(", ")}
-        </span>{" "}
-        {affected.length === 1 ? "runs" : "run"} into the main mix. In finished
-        clips {affected.length === 1 ? "it" : "they"} can no longer be muted or
-        turned down individually.
-      </p>
-      <Button
-        size="sm"
-        className="shrink-0"
-        // One after another: each call gets the whole config back, so in
-        // parallel the last answer would swallow the other changes.
-        onClick={async () => {
-          for (const source of affected) {
-            await onFix({ ...source, separateTrack: true });
-          }
-        }}
-      >
-        Give them their own tracks
-      </Button>
-    </Card>
-  );
-}
-
-/** The one source that finds its process on its own. */
-function PickOne({
-  disabled,
-  icon,
-  title,
-  sub,
-  onPick,
-}: {
-  disabled: boolean;
-  icon: React.ReactNode;
-  title: string;
-  sub: string;
-  onPick: () => void;
-}) {
-  return (
-    <button
-      disabled={disabled}
-      onClick={onPick}
-      className={cn(
-        "mb-4 flex w-full items-center gap-3 rounded-inner border border-accent/30 bg-accent/10 px-4 py-3 text-left",
-        disabled
-          ? "cursor-not-allowed opacity-45"
-          : "transition-colors hover:bg-accent/20",
-      )}
-    >
-      {icon}
-      <span className="min-w-0">
-        <span className="flex items-center gap-2 text-sm font-medium">
-          {title}
-          <span className="rounded-pill bg-warn/15 px-2 py-0.5 text-xs font-medium text-warn">
-            experimental
-          </span>
-        </span>
-        <span className="block truncate text-xs text-ink-faint">{sub}</span>
-      </span>
-    </button>
-  );
-}
-
-function AddSourcePanel({
+function AddSourceList({
+  anchor,
+  hasGame,
+  captureBroken,
   onAdd,
   onClose,
-  hasGame,
 }: {
+  anchor: RefObject<HTMLElement | null>;
+  hasGame: boolean;
+  /** Application capture is refused on this Windows build. */
+  captureBroken: boolean;
   onAdd: (s: AudioSource) => void;
   onClose: () => void;
-  hasGame: boolean;
 }) {
   const { devices, processes, refreshSources, detectedGame } = useEngine(
     useShallow((s) => ({
@@ -822,124 +724,203 @@ function AddSourcePanel({
       detectedGame: s.detectedGame,
     })),
   );
+  const [tab, setTab] = useState<"apps" | "devices">("apps");
+  const box = useRef<HTMLDivElement>(null);
+  const [place, setPlace] = useState<{ left: number; top: number; maxHeight: number } | null>(
+    null,
+  );
   const outputs = devices.filter((d) => d.kind === "output");
   const inputs = devices.filter((d) => d.kind === "input");
 
-  return (
-    <Card className="mb-4 p-5">
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Pick a source</h3>
-        <div className="flex gap-2">
-          <Button size="sm" variant="ghost" onClick={refreshSources}>
-            Refresh
-          </Button>
-          <Button size="sm" variant="ghost" onClick={onClose}>
-            Close
-          </Button>
-        </div>
-      </div>
+  // The list is measured at its natural size, so a tab change re-places it.
+  useLayoutEffect(() => {
+    const el = box.current;
+    const button = anchor.current;
+    if (!el || !button) return;
+    const kept = el.style.maxHeight;
+    el.style.maxHeight = "none";
+    const p = placeMenu({
+      anchor: button.getBoundingClientRect(),
+      size: { width: el.offsetWidth, height: el.offsetHeight },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      margin: EDGE,
+      gap: GAP,
+      alignRight: true,
+      slide: false,
+    });
+    el.style.maxHeight = kept;
+    setPlace({ left: p.x, top: p.y, maxHeight: Math.min(el.offsetHeight, p.maxHeight) });
+  }, [anchor, tab, processes.length, devices.length]);
 
-      {/* Above the columns rather than in them: these two are not entries among
-          many but the sources that find their processes on their own. */}
-      <PickOne
-        disabled={hasGame}
-        icon={<IconGamepad className="h-4 w-4 shrink-0 text-accent-bright" />}
-        title="The detected game"
-        sub={
-          hasGame
-            ? "already added"
-            : detectedGame
-              ? `follows the game automatically · right now ${detectedGame}`
-              : "follows the game automatically · none detected right now"
-        }
-        onPick={() => onAdd(newSource("Game", { type: "game" }))}
-      />
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const onDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (box.current?.contains(target) || anchor.current?.contains(target)) return;
+      close.current();
+    };
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && box.current?.contains(event.target)) return;
+      close.current();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      anchor.current?.querySelector<HTMLElement>("button")?.focus();
+      close.current();
+    };
+    const onAway = () => close.current();
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", onAway);
+    window.addEventListener("blur", onAway);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", onAway);
+      window.removeEventListener("blur", onAway);
+    };
+  }, [anchor]);
 
-      <div className="grid grid-cols-3 gap-6">
-        <SourceColumn
-          title="Applications"
-          icon={<IconApp className="h-4 w-4" />}
-          entries={processes.map((p) => ({
-            key: String(p.pid),
-            label: p.name,
-            sub: p.exe,
-            onPick: () =>
-              onAdd(
-                newSource(p.name, {
-                  type: "process",
-                  pid: p.pid,
-                  // Stored alongside the pid: the pid is dead the moment the
-                  // application restarts, the exe name is not.
-                  exe: p.exe,
-                  mode: "include",
-                }),
-              ),
-          }))}
-        />
-        <SourceColumn
-          title="Outputs (loopback)"
-          icon={<IconSpeaker className="h-4 w-4" />}
-          entries={outputs.map((d) => ({
-            key: d.id,
-            label: d.name,
-            sub: d.isDefault ? "Default device" : "",
-            onPick: () =>
-              onAdd(newSource(d.name, { type: "outputDevice", deviceId: d.id })),
-          }))}
-        />
-        <SourceColumn
-          title="Inputs"
-          icon={<IconMic className="h-4 w-4" />}
-          entries={inputs.map((d) => ({
-            key: d.id,
-            label: d.name,
-            sub: d.isDefault ? "Default device" : "",
-            onPick: () =>
-              onAdd(newSource(d.name, { type: "inputDevice", deviceId: d.id })),
-          }))}
-        />
-      </div>
-    </Card>
-  );
-}
+  // A Discord or game started since the lists were read still shows up.
+  useEffect(() => {
+    void refreshSources();
+  }, [refreshSources]);
 
-function SourceColumn({
-  title,
-  icon,
-  entries,
-}: {
-  title: string;
-  icon: React.ReactNode;
-  entries: Array<{
-    key: string;
-    label: string;
-    sub: string;
-    onPick: () => void;
-  }>;
-}) {
-  return (
-    <div>
-      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-ink-muted">
+  const entry = (
+    key: string,
+    label: string,
+    sub: string,
+    kind: SourceKind,
+    icon: ReactNode,
+  ) => (
+    <button
+      key={key}
+      onClick={() => onAdd(newSource(label, kind))}
+      className="flex w-full items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-left transition-colors hover:bg-hover focus-visible:bg-hover"
+    >
+      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
         {icon}
-        {title}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[13px] font-medium">{label}</span>
+        {sub && <span className="block truncate text-xs text-ink-faint">{sub}</span>}
+      </span>
+    </button>
+  );
+  const heading = (text: string, extra?: ReactNode) => (
+    <div className="flex items-center gap-2 px-2.5 pt-2 pb-1 text-xs font-medium text-ink-muted">
+      {text}
+      {extra}
+    </div>
+  );
+  const empty = <p className="px-2.5 py-2 text-xs text-ink-faint">Nothing found</p>;
+
+  return createPortal(
+    <div
+      ref={box}
+      role="dialog"
+      aria-label="Add source"
+      style={{
+        left: place?.left ?? 0,
+        top: place?.top ?? 0,
+        maxHeight: place?.maxHeight,
+        background: FLOATING,
+        backdropFilter: "blur(20px)",
+      }}
+      className={cn(
+        "fixed z-[70] flex w-[380px] flex-col rounded-inner border border-white/10 p-1.5",
+        "shadow-[0_8px_32px_rgba(0,0,0,0.4)] origin-top-right",
+        "transition-[opacity,transform] duration-100 ease-[var(--ease-out-soft)]",
+        place ? "scale-100 opacity-100" : "scale-[0.97] opacity-0",
+      )}
+    >
+      <div className="flex shrink-0 items-center justify-between gap-2 p-0.5 pb-1.5">
+        <Segmented<"apps" | "devices">
+          value={tab}
+          onChange={setTab}
+          options={[
+            { key: "apps", label: "Apps" },
+            { key: "devices", label: "Devices" },
+          ]}
+        />
+        <Button size="sm" variant="ghost" onClick={() => void refreshSources()}>
+          Refresh
+        </Button>
       </div>
-      <div className="space-y-1">
-        {entries.map((e) => (
-          <button
-            key={e.key}
-            onClick={e.onPick}
-            className="w-full rounded-inner px-3 py-2 text-left transition-colors hover:bg-elevated"
-          >
-            <p className="truncate text-sm">{e.label}</p>
-            {e.sub && (
-              <p className="truncate text-xs text-ink-faint">{e.sub}</p>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        {tab === "apps" ? (
+          <>
+            {captureBroken && (
+              <p className="mx-1 mb-1 rounded-inner bg-live/10 px-2.5 py-2 text-xs text-live">
+                Application capture needs Windows 11 (build 20348 or newer).
+              </p>
             )}
-          </button>
-        ))}
-        {entries.length === 0 && (
-          <p className="px-3 py-2 text-xs text-ink-faint">nothing found</p>
+            {!hasGame && (
+              <div className="flex items-center gap-2.5 rounded-[10px] px-2.5 py-1.5">
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-pill bg-accent/15 text-accent-bright">
+                  <IconGamepad className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
+                  {detectedGame ? `Detected game: ${detectedGame}` : "Game · none detected"}
+                </span>
+                <Button
+                  size="sm"
+                  onClick={() => onAdd(newSource("Game", { type: "game" }))}
+                >
+                  Add
+                </Button>
+              </div>
+            )}
+            {heading("Applications", <Experimental />)}
+            {processes.length === 0
+              ? empty
+              : processes.map((p) =>
+                  entry(
+                    String(p.pid),
+                    p.name,
+                    p.exe,
+                    // Stored alongside the pid: the pid is dead the moment the
+                    // application restarts, the exe name is not.
+                    { type: "process", pid: p.pid, exe: p.exe, mode: "include" },
+                    <IconApp className="h-4 w-4" />,
+                  ),
+                )}
+          </>
+        ) : (
+          <>
+            {heading("Outputs (loopback)")}
+            {outputs.length === 0
+              ? empty
+              : outputs.map((d) =>
+                  entry(
+                    d.id,
+                    d.name,
+                    d.isDefault ? "Default device" : "",
+                    { type: "outputDevice", deviceId: d.id },
+                    <IconSpeaker className="h-4 w-4" />,
+                  ),
+                )}
+            {heading("Inputs")}
+            {inputs.length === 0
+              ? empty
+              : inputs.map((d) =>
+                  entry(
+                    d.id,
+                    d.name,
+                    d.isDefault ? "Default device" : "",
+                    { type: "inputDevice", deviceId: d.id },
+                    <IconMic className="h-4 w-4" />,
+                  ),
+                )}
+          </>
         )}
       </div>
-    </div>
+    </div>,
+    document.fullscreenElement ?? document.body,
   );
 }

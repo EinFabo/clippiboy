@@ -26,6 +26,7 @@ import { Recording } from "./routes/Recording";
 import { Friends } from "./routes/Friends";
 import { Settings } from "./routes/settings";
 import { OPEN_SETTINGS_EVENT } from "./lib/settingsLink";
+import { stuckSolo } from "./lib/audioRows";
 
 export default function App() {
   const [route, setRoute] = useState<Route>("dashboard");
@@ -44,6 +45,20 @@ export default function App() {
   useEffect(() => {
     void init();
   }, [init]);
+
+  // The Audio page has no Solo any more, and the core still honours it: a
+  // source saved with it on would silence the others in every recording. Written
+  // back as off, once per source.
+  const sources = useEngine((s) => s.config.sources);
+  const upsertSource = useEngine((s) => s.upsertSource);
+  const cleared = useRef(new Set<string>());
+  useEffect(() => {
+    for (const source of stuckSolo(sources)) {
+      if (cleared.current.has(source.id)) continue;
+      cleared.current.add(source.id);
+      void upsertSource({ ...source, solo: false });
+    }
+  }, [sources, upsertSource]);
 
   // `openSettings` from a link anywhere in the window.
   useEffect(() => {
