@@ -73,7 +73,7 @@ export default function App() {
   }, []);
 
   // "Open ClippiBoy" after "Add <name> as friend" on the website: the core
-  // brings the window up, the Friends page puts the code into its Add field.
+  // brings the window up, the Friends page opens Add friend with the code in it.
   const addSeq = useFriends((s) => s.add?.seq ?? 0);
   useEffect(() => {
     if (addSeq > 0) setRoute("friends");

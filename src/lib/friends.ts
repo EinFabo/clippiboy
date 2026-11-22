@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { inTauri } from "./ipc";
+import { nextDrop, signInFailed, type Drop } from "./friendsPage";
 import type { FriendPresence, FriendsView } from "./types";
 
 /**
@@ -42,6 +43,59 @@ export const useFriends = create<FriendsView>(() => empty);
 if (inTauri) {
   void listen<FriendsView>("friends-state", (event) => useFriends.setState(event.payload, true));
   void invoke<FriendsView>("friends_state").then((view) => useFriends.setState(view, true));
+}
+
+/**
+ * What the page knows beyond the core's view: when the hub was lost and who
+ * was online until then (the core clears presence at once), and why the last
+ * sign-in failed.
+ */
+export const useFriendsExtra = create<{ drop: Drop | null; signInError: string | null }>(() => ({
+  drop: null,
+  signInError: null,
+}));
+
+/** Cancel was pressed — the waiting flag going away is then no failure. */
+let signInCancelled = false;
+/** The last error notice from the core, which is where a failed sign-in says why. */
+let lastError: { message: string; at: number } | null = null;
+/** When the last sign-in failed — its notice comes just after the view. */
+let failedAt = 0;
+
+useFriends.subscribe((next, prev) => {
+  const drop = nextDrop(prev, next, Date.now(), useFriendsExtra.getState().drop);
+  if (drop !== useFriendsExtra.getState().drop) useFriendsExtra.setState({ drop });
+  if (signInFailed(prev, next, signInCancelled)) {
+    failedAt = Date.now();
+    const recent = lastError && failedAt - lastError.at < 3_000 ? lastError.message : null;
+    useFriendsExtra.setState({ signInError: recent ?? "The sign-in didn't finish." });
+  }
+  if (!next.signingIn) signInCancelled = false;
+  if (next.signedIn && useFriendsExtra.getState().signInError) useFriendsExtra.setState({ signInError: null });
+});
+
+if (inTauri) {
+  void listen<{ kind: string; message: string }>("notice", (event) => {
+    if (event.payload.kind !== "error") return;
+    lastError = { message: event.payload.message, at: Date.now() };
+    if (lastError.at - failedAt < 3_000 && !useFriends.getState().signedIn) {
+      useFriendsExtra.setState({ signInError: event.payload.message });
+    }
+  });
+}
+
+/** "Sign in with Discord" and "Open browser again": the browser opens, the core waits. */
+export function startSignIn(): void {
+  signInCancelled = false;
+  failedAt = 0;
+  useFriendsExtra.setState({ signInError: null });
+  friendsApi.signIn().catch((err) => useFriendsExtra.setState({ signInError: String(err) }));
+}
+
+/** "Cancel" while waiting for Discord. */
+export function cancelSignIn(): void {
+  signInCancelled = true;
+  void friendsApi.cancelSignIn();
 }
 
 /** Can a clip go to them right now? Online and not busy — like Quick Share,

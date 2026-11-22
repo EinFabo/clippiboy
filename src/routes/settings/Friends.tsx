@@ -29,43 +29,39 @@ export function FriendsTab() {
   return (
     <div className="space-y-8">
       <section>
-        <SectionTitle title="Privacy" />
+        <SectionTitle title="What friends see" />
         <Card className="divide-y divide-line">
-          <Row label="Appear offline" hint="You still see your friends; they see you as offline">
-            <Toggle checked={friends.invisible} onChange={(invisible) => patch({ invisible })} />
+          <Row label="Show what I'm playing">
+            <Toggle checked={friends.shareGame} onChange={(shareGame) => patch({ shareGame })} />
           </Row>
-          <Row label="Show what I'm playing" hint="Off: friends only see that you are online">
+          <Row label="Show ClippiBoy in my Discord status">
             <Toggle
-              checked={friends.shareGame}
-              disabled={friends.invisible}
-              onChange={(shareGame) => patch({ shareGame })}
+              checked={friends.discordStatus ?? true}
+              onChange={(discordStatus) => patch({ discordStatus })}
             />
           </Row>
-          <Row label="Show my name on share links" hint="Your Discord name and picture under clips you share as a link">
-            <Toggle checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
+        </Card>
+      </section>
+
+      <section>
+        <SectionTitle title="Requests" />
+        <Card className="divide-y divide-line">
+          <Row label="Accept friend requests">
+            <Toggle
+              checked={me?.allowRequests ?? true}
+              disabled={!signedIn}
+              onChange={(allow) => run(friendsApi.setAllowRequests(allow))}
+            />
           </Row>
-          <Row label="Friend requests from share links">
+          <Row label="Requests from my share links">
             <Toggle
               checked={friends.friendOnLinks ?? true}
               disabled={!friends.nameOnLinks}
               onChange={(friendOnLinks) => patch({ friendOnLinks })}
             />
           </Row>
-          <Row label="Show ClippiBoy in Discord status">
-            <Toggle
-              checked={friends.discordStatus ?? true}
-              onChange={(discordStatus) => patch({ discordStatus })}
-            />
-          </Row>
-          <Row
-            label="Accept friend requests"
-            hint={signedIn ? "Off: nobody can send you new requests" : "Sign in on the Friends page first"}
-          >
-            <Toggle
-              checked={me?.allowRequests ?? true}
-              disabled={!signedIn}
-              onChange={(allow) => run(friendsApi.setAllowRequests(allow))}
-            />
+          <Row label="My name on share links">
+            <Toggle checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
           </Row>
         </Card>
       </section>
@@ -73,10 +69,7 @@ export function FriendsTab() {
       <section>
         <SectionTitle title="Clips from friends" />
         <Card className="divide-y divide-line">
-          <Row
-            label="Who can send me clips"
-            hint="Straight from their PC to yours — you still say yes to each one"
-          >
+          <Row label="Who can send me clips">
             <Segmented<AcceptClips>
               value={friends.acceptClips}
               options={[
@@ -87,14 +80,8 @@ export function FriendsTab() {
               onChange={(acceptClips) => patch({ acceptClips })}
             />
           </Row>
-          <Row
-            label="Tag friends on my clips"
-            hint="Friends playing the same game when you clip go on it as a tag, like “with Luca”"
-          >
+          <Row label="Tag friends on my clips">
             <Toggle checked={friends.tagFriends} onChange={(tagFriends) => patch({ tagFriends })} />
-          </Row>
-          <Row label="Busy" hint="No notices pop up, and clips sent meanwhile are turned down">
-            <Toggle checked={friends.busy} onChange={(busy) => patch({ busy })} />
           </Row>
         </Card>
       </section>

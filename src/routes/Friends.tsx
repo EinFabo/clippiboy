@@ -1,103 +1,222 @@
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { cn } from "@/lib/cn";
-import { canReceive, formatCode, friendsApi, inviteLink, lastSeenText, playingFor, useFriends } from "@/lib/friends";
-import { shownCode, useStreamer } from "@/lib/streamer";
+import {
+  canReceive,
+  cancelSignIn,
+  formatCode,
+  friendsApi,
+  inviteLink,
+  lastSeenText,
+  playingFor,
+  startSignIn,
+  useFriends,
+  useFriendsExtra,
+} from "@/lib/friends";
+import {
+  STATUS_LABEL,
+  addAnswer,
+  awayOrder,
+  maskedCode,
+  myStatus,
+  newcomer,
+  seenWhileAway,
+  shortLink,
+  statusChoice,
+  statusPatch,
+  type AddOutcome,
+  type MyStatus,
+  type StatusChoice,
+} from "@/lib/friendsPage";
+import { openSettings } from "@/lib/settingsLink";
+import { useStreamer } from "@/lib/streamer";
 import { useShare } from "@/lib/share";
-import type { FriendPending, FriendPresence, FriendUser } from "@/lib/types";
+import { toast } from "@/lib/toastBus";
+import type { FriendMe, FriendPending, FriendPresence, FriendUser } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
-import { Card, SectionTitle } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 import { useMenu } from "@/components/ui/Menu";
+import { Popover } from "@/components/ui/Popover";
 import { useShallow } from "zustand/react/shallow";
-import { IconCheck, IconClose, IconCopy, IconGamepad, IconHeart, IconLink, IconPlus, IconSend } from "@/components/icons";
+import {
+  IconCheck,
+  IconClose,
+  IconCopy,
+  IconEye,
+  IconFriends,
+  IconGamepad,
+  IconHash,
+  IconHeart,
+  IconLink,
+  IconPlus,
+  IconRetry,
+  IconSend,
+  IconSettings,
+} from "@/components/icons";
 
 /** Shows what the core answered — a refusal from the server reads as it is. */
 function report(error: unknown) {
-  const message = typeof error === "string" ? error : "Something went wrong.";
-  window.dispatchEvent(new CustomEvent("cb-friends-error", { detail: message }));
+  toast("error", typeof error === "string" ? error : "Something went wrong.");
 }
+
+/** How long the hub may be away before the page says so — a start or a short
+ *  drop only shows "Connecting…" in the chip. */
+const AWAY_AFTER_MS = 4000;
 
 export function Friends() {
   const signedIn = useFriends((s) => s.signedIn);
+  return <div className="space-y-6 pb-12">{signedIn ? <SignedIn /> : <SignedOut />}</div>;
+}
+
+/** Title left, everything else on the right — built like Audio's. */
+function Header({ children }: { children?: ReactNode }) {
   return (
-    <div className="space-y-8 pb-12">
-      <header className="pt-10">
-        <h1 className="display text-4xl">Friends</h1>
-        <p className="mt-2 text-sm text-ink-muted">
-          See who is online and what they are playing.
-        </p>
-      </header>
-      {signedIn ? <SignedIn /> : <SignIn />}
-    </div>
+    <header className="flex items-center gap-2.5 pt-10">
+      <h1 className="display mr-auto text-4xl">Friends</h1>
+      {children}
+    </header>
   );
 }
 
 // --- Signed out ----------------------------------------------------------------
 
-function SignIn() {
+function SignedOut() {
   const signingIn = useFriends((s) => s.signingIn);
-  const [error, setError] = useState<string | null>(null);
-
-  const start = () => {
-    setError(null);
-    friendsApi.signIn().catch((err) => setError(String(err)));
-  };
+  const error = useFriendsExtra((s) => s.signInError);
 
   return (
-    <Card className="mx-auto flex max-w-md flex-col items-center gap-5 px-8 py-10 text-center">
-      <span className="grid h-14 w-14 place-items-center rounded-pill bg-[#5865f2]/15 text-[#8891f7]">
-        <DiscordGlyph className="h-7 w-7" />
-      </span>
-      {signingIn ? (
-        <>
-          <div className="space-y-1.5">
-            <p className="text-lg font-semibold">Waiting for Discord…</p>
-            <p className="text-sm text-ink-muted">
-              Finish signing in in your browser. ClippiBoy picks it up by itself.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="ghost" onClick={() => void friendsApi.cancelSignIn()}>
-              Cancel
-            </Button>
-            <Button onClick={start}>Open the browser again</Button>
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="space-y-1.5">
-            <p className="text-lg font-semibold">Play together, see it live</p>
-            <p className="text-sm text-ink-muted">
-              Sign in with Discord to add friends, see who is online and which game they
-              are in. ClippiBoy only reads your Discord name and picture.
-            </p>
-          </div>
-          <Button variant="primary" onClick={start} icon={<DiscordGlyph className="h-4 w-4" />}>
-            Sign in with Discord
-          </Button>
-        </>
-      )}
-      {error && <p className="text-sm text-live">{error}</p>}
-    </Card>
+    <>
+      <Header />
+      <div className="relative">
+        <GhostList />
+        <Card
+          className="absolute top-14 left-1/2 flex w-[440px] max-w-full -translate-x-1/2 flex-col items-center gap-3.5
+            px-8 pt-9 pb-8 text-center shadow-[0_24px_64px_rgba(0,0,0,0.55)]"
+        >
+          <span className="grid h-14 w-14 place-items-center rounded-pill bg-[#5865f2]/15 text-[#8891f7]">
+            <DiscordGlyph className="h-7 w-7" />
+          </span>
+          {signingIn ? (
+            <>
+              <div className="space-y-1">
+                <p className="text-lg font-semibold">Waiting for Discord…</p>
+                <p className="text-[13px] text-ink-muted">Finish in your browser.</p>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="ghost" onClick={cancelSignIn}>
+                  Cancel
+                </Button>
+                <Button onClick={startSignIn}>Open browser again</Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="space-y-1">
+                <p className="text-lg font-semibold">See who is playing</p>
+                <p className="text-[13px] text-ink-muted">ClippiBoy only reads your Discord name and picture.</p>
+              </div>
+              <Button
+                variant="primary"
+                onClick={startSignIn}
+                icon={error ? <IconRetry className="h-4 w-4" /> : <DiscordGlyph className="h-4 w-4" />}
+              >
+                {error ? "Try again" : "Sign in with Discord"}
+              </Button>
+              {error && <p className="text-[13px] text-live">{error}</p>}
+            </>
+          )}
+        </Card>
+      </div>
+    </>
+  );
+}
+
+/** What the list looks like once signed in, faint behind the sign-in card. */
+const GHOST: { title: string; rows: { name: string; status: Status; line: string; game?: boolean }[] }[] = [
+  {
+    title: "In game",
+    rows: [
+      { name: "Alex", status: "playing", line: "Valorant · 1 h 15 min", game: true },
+      { name: "Robin", status: "playing", line: "Counter-Strike 2 · 42 min", game: true },
+    ],
+  },
+  {
+    title: "Online",
+    rows: [
+      { name: "Sam", status: "online", line: "Online" },
+      { name: "Kim", status: "busy", line: "Busy" },
+    ],
+  },
+  {
+    title: "Offline",
+    rows: [
+      { name: "Chris", status: "offline", line: "Last seen 12 min ago" },
+      { name: "Jo", status: "offline", line: "Last seen yesterday" },
+      { name: "Max", status: "offline", line: "Last seen 5 days ago" },
+    ],
+  },
+];
+
+function GhostList() {
+  return (
+    <div aria-hidden inert className="pointer-events-none mt-4 space-y-6 opacity-[0.22] blur-[0.6px] select-none">
+      {GHOST.map((group) => (
+        <section key={group.title}>
+          <GroupTitle title={group.title} count={group.rows.length} />
+          <Card className="divide-y divide-line">
+            {group.rows.map((row) => (
+              <div key={row.name} className={cn("flex items-center gap-4 px-5 py-3.5", row.status === "offline" && "opacity-60")}>
+                <Avatar user={{ id: row.name, username: row.name, displayName: row.name, avatar: null }} status={row.status} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">{row.name}</p>
+                  <p
+                    className={cn(
+                      "flex items-center gap-1.5 text-xs",
+                      row.game ? "text-accent-bright" : row.status === "busy" ? "text-live" : "text-ink-muted",
+                    )}
+                  >
+                    {row.game && <IconGamepad className="h-3.5 w-3.5" />}
+                    {row.line}
+                  </p>
+                </div>
+                {row.status !== "offline" && row.status !== "busy" && <IconSend className="h-4 w-4 text-ink-muted" />}
+              </div>
+            ))}
+          </Card>
+        </section>
+      ))}
+    </div>
   );
 }
 
 // --- Signed in -----------------------------------------------------------------
+
+/** The last `clippiboy://add` link already put into the field. */
+let takenAddSeq = 0;
 
 function SignedIn() {
   const lists = useFriends((s) => s.lists);
   const presence = useFriends((s) => s.presence);
   const lastSeen = useFriends((s) => s.lastSeen);
   const connected = useFriends((s) => s.connected);
+  const me = useFriends((s) => s.me);
+  const add = useFriends((s) => s.add);
+  const drop = useFriendsExtra((s) => s.drop);
   const favorites = useEngine((s) => s.config.friends.favorites);
-  const [error, setError] = useState<string | null>(null);
+  const streamer = useStreamer((s) => s.active);
+  const away = useAfter(!connected, AWAY_AFTER_MS);
   const now = useNow();
 
+  const addButton = useRef<HTMLSpanElement>(null);
+  const [adding, setAdding] = useState<{ query: string; key: number } | null>(null);
+
+  // "Open ClippiBoy" after "Add <name> as friend" on the website: the code
+  // waits in the open popover, sending stays the user's click.
   useEffect(() => {
-    const onError = (event: Event) => setError((event as CustomEvent<string>).detail);
-    window.addEventListener("cb-friends-error", onError);
-    return () => window.removeEventListener("cb-friends-error", onError);
-  }, []);
+    if (!add || add.seq <= takenAddSeq) return;
+    takenAddSeq = add.seq;
+    setAdding({ query: formatCode(add.code), key: add.seq });
+  }, [add]);
 
   // Favourites first in every group; below that the server's alphabetical
   // order, and offline the ones seen most recently.
@@ -110,25 +229,58 @@ function SignedIn() {
     .filter((f) => !presence[f.id])
     .sort((a, b) => favorite(a, b) || (lastSeen[b.id] ?? 0) - (lastSeen[a.id] ?? 0));
 
+  // Unreachable: one greyed group with the last known state, nothing to send.
+  const awayList = away ? awayOrder(lists.friends, lastSeen, drop) : [];
+  const awaySeen: Record<string, number> = {};
+  for (const friend of awayList) {
+    const at = seenWhileAway(friend.id, lastSeen, drop);
+    if (at !== undefined) awaySeen[friend.id] = at;
+  }
+
   return (
     <>
-      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-        <Profile connected={connected} />
-        <AddFriend />
-      </div>
+      <Header>
+        {streamer && (
+          <span className="mr-1.5 rounded-pill bg-accent/20 px-2.5 py-[3px] text-xs font-medium text-accent-bright">
+            Streamer mode
+          </span>
+        )}
+        <StatusChip me={me} connected={connected} />
+        <span ref={addButton}>
+          <Button
+            variant="primary"
+            icon={<IconPlus className="h-4 w-4" />}
+            aria-expanded={adding !== null}
+            onClick={() => setAdding((open) => (open ? null : { query: "", key: Date.now() }))}
+          >
+            Add friend
+          </Button>
+        </span>
+      </Header>
 
-      {error && (
-        <Card className="flex items-center justify-between gap-4 border-live/40 bg-live/8 p-4 text-sm text-live">
-          {error}
-          <button aria-label="Dismiss" onClick={() => setError(null)}>
-            <IconClose className="h-4 w-4" />
-          </button>
+      {adding && (
+        <AddFriendPopover
+          key={adding.key}
+          anchor={addButton}
+          me={me}
+          initialQuery={adding.query}
+          onClose={() => setAdding(null)}
+        />
+      )}
+
+      {away && (
+        <Card className="flex items-center gap-4 px-5 py-4">
+          <span className="h-[7px] w-[7px] shrink-0 rounded-pill bg-warn shadow-[0_0_0_3px_rgba(245,158,11,0.2)]" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold">Can't reach the friends server</p>
+            <p className="mt-0.5 text-[13px] text-ink-muted">Trying again by itself</p>
+          </div>
         </Card>
       )}
 
       {(lists.incoming.length > 0 || lists.outgoing.length > 0) && (
         <section>
-          <SectionTitle title="Requests" />
+          <GroupTitle title="Requests" count={lists.incoming.length + lists.outgoing.length} />
           <Card className="divide-y divide-line">
             {lists.incoming.map((request) => (
               <RequestRow key={request.id} request={request} incoming />
@@ -141,9 +293,9 @@ function SignedIn() {
       )}
 
       {lists.friends.length === 0 ? (
-        <Card className="px-8 py-12 text-center text-sm text-ink-muted">
-          No friends yet. Send them your code or invite link, or add them by their Discord name.
-        </Card>
+        <EmptyCard me={me} streamer={streamer} onAdd={() => setAdding({ query: "", key: Date.now() })} />
+      ) : away ? (
+        <Group title="Friends" friends={awayList} presence={{}} lastSeen={awaySeen} now={now} />
       ) : (
         <>
           <Group title="In game" friends={playing} presence={presence} lastSeen={lastSeen} now={now} />
@@ -155,147 +307,353 @@ function SignedIn() {
   );
 }
 
-function Profile({ connected }: { connected: boolean }) {
-  const me = useFriends((s) => s.me);
-  const { config, patchConfig } = useEngine(useShallow((s) => ({ config: s.config.friends, patchConfig: s.patchConfig })));
-  const invisible = config.invisible;
-  const [copied, setCopied] = useState<"code" | "link" | null>(null);
-  const streamer = useStreamer((s) => s.active);
-  const [status, setStatus] = useState(config.status);
-  useEffect(() => setStatus(config.status), [config.status]);
-  if (!me) return <Card className="h-[112px] animate-pulse" />;
-
-  const saveStatus = () => {
-    const text = status.trim().slice(0, 60);
-    if (text !== config.status) void patchConfig({ friends: { ...config, status: text } });
+/** Copies and says so on the button for a moment. */
+function useCopy(): [string | null, (what: string, text: string) => void] {
+  const [copied, setCopied] = useState<string | null>(null);
+  const timer = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const copy = (what: string, text: string) => {
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(what);
+        window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => setCopied(null), 1500);
+      })
+      .catch(() => toast("error", "Could not copy to the clipboard."));
   };
-  const presenceStatus: Status = !connected ? "offline" : invisible ? "invisible" : config.busy ? "busy" : "online";
+  return [copied, copy];
+}
 
-  const copy = (what: "code" | "link") => {
-    const text = what === "code" ? formatCode(me.friendCode) : inviteLink(me.friendCode);
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(what);
-      window.setTimeout(() => setCopied(null), 1500);
-    });
-  };
-
+/** No friends yet: one's code and the two ways to bring someone in. */
+function EmptyCard({ me, streamer, onAdd }: { me: FriendMe | null; streamer: boolean; onAdd: () => void }) {
+  const [copied, copy] = useCopy();
   return (
-    <Card className="flex items-center gap-4 p-5">
-      <Avatar user={me} status={presenceStatus} size="lg" />
-      <div className="min-w-0 flex-1">
-        <p className="flex items-center gap-2">
-          <span className="truncate font-semibold">{me.displayName}</span>
-          <button
-            onClick={() => void patchConfig({ friends: { ...config, busy: !config.busy } })}
-            title={config.busy ? "Busy: no notices, clips are turned down" : "Set yourself busy"}
-            className={cn(
-              "shrink-0 rounded-pill border px-2 py-0.5 text-xs transition-colors",
-              config.busy ? "border-live/50 bg-live/10 text-live" : "border-line text-ink-muted hover:bg-hover",
-            )}
-          >
-            {config.busy ? "Busy" : "Available"}
-          </button>
-        </p>
-        <input
-          value={status}
-          maxLength={60}
-          onChange={(e) => setStatus(e.target.value)}
-          onBlur={saveStatus}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-          }}
-          placeholder={!connected ? "Connecting…" : invisible ? "Invisible — you look offline" : "What are you up to?"}
-          aria-label="Your status"
-          className="mt-0.5 w-full truncate bg-transparent text-xs text-ink-muted outline-none placeholder:text-ink-faint
-            focus:text-ink"
-        />
-      </div>
-      <div className="flex shrink-0 flex-col items-end gap-1.5">
+    <Card className="mx-auto mt-14 flex w-[440px] max-w-full flex-col items-center gap-3.5 px-8 pt-9 pb-8 text-center">
+      <span className="grid h-14 w-14 place-items-center rounded-pill bg-accent/15 text-accent-bright">
+        <IconFriends className="h-7 w-7" />
+      </span>
+      <p className="text-lg font-semibold">No friends yet</p>
+      {me && (
         <button
-          onClick={() => copy("code")}
+          onClick={() => copy("code", formatCode(me.friendCode))}
           title="Copy your friend code"
-          className="flex items-center gap-2 rounded-pill border border-line bg-elevated px-3.5 py-2
-            font-mono text-sm tracking-wider transition-colors hover:bg-hover"
+          className="flex h-9 items-center gap-2 rounded-pill border border-line bg-elevated px-3.5 font-mono text-sm
+            tracking-[0.08em] transition-colors hover:bg-hover"
         >
-          {shownCode(formatCode(me.friendCode), streamer)}
+          {streamer ? maskedCode(me.friendCode) : formatCode(me.friendCode)}
           {copied === "code" ? <IconCheck className="h-4 w-4 text-ok" /> : <IconCopy className="h-4 w-4 text-ink-muted" />}
         </button>
-        <button
-          onClick={() => copy("link")}
-          title={streamer ? "Copy your invite link" : inviteLink(me.friendCode)}
-          className="flex items-center gap-1.5 rounded-pill px-3 py-1 text-xs text-ink-muted transition-colors
-            hover:bg-hover hover:text-ink"
+      )}
+      <div className="flex gap-2">
+        <Button
+          variant="primary"
+          disabled={!me}
+          icon={copied === "link" ? <IconCheck className="h-4 w-4" /> : <IconLink className="h-4 w-4" />}
+          onClick={() => me && copy("link", inviteLink(me.friendCode))}
         >
-          {copied === "link" ? <IconCheck className="h-3.5 w-3.5 text-ok" /> : <IconLink className="h-3.5 w-3.5" />}
-          {copied === "link" ? "Copied" : "Invite link"}
-        </button>
+          {copied === "link" ? "Copied" : "Copy invite link"}
+        </Button>
+        <Button icon={<IconPlus className="h-4 w-4" />} onClick={onAdd}>
+          Add by name
+        </Button>
       </div>
     </Card>
   );
 }
 
-/** The last `clippiboy://add` link already put into the field. */
-let takenAddSeq = 0;
+// --- Status --------------------------------------------------------------------
 
-function AddFriend() {
-  const [query, setQuery] = useState("");
+const CHOICES: StatusChoice[] = ["online", "busy", "invisible"];
+
+/** The dot in the chip and the menu: the same colours as on the friends. */
+function StatusDot({ status }: { status: MyStatus }) {
+  return (
+    <span
+      className={cn(
+        "h-[7px] w-[7px] shrink-0 rounded-pill",
+        status === "online" && "bg-ok",
+        status === "busy" && "bg-live",
+        status === "invisible" && "shadow-[inset_0_0_0_1.5px_var(--color-ink-muted)]",
+        status === "connecting" && "bg-warn shadow-[0_0_0_3px_rgba(245,158,11,0.2)]",
+      )}
+    />
+  );
+}
+
+function StatusChip({ me, connected }: { me: FriendMe | null; connected: boolean }) {
+  const { config, patchConfig } = useEngine(useShallow((s) => ({ config: s.config.friends, patchConfig: s.patchConfig })));
+  const [open, setOpen] = useState(false);
+  const anchor = useRef<HTMLSpanElement>(null);
+  const status = myStatus(config, connected);
+
+  return (
+    <>
+      <span ref={anchor}>
+        <button
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-label={`Your status: ${STATUS_LABEL[status]}`}
+          onClick={() => setOpen((v) => !v)}
+          className="flex h-10 items-center gap-2 rounded-pill border border-line bg-surface pr-3 pl-[5px] text-[13px]
+            font-medium transition-colors hover:bg-elevated"
+        >
+          {me ? <Avatar user={me} size="sm" /> : <span className="h-[22px] w-[22px] rounded-pill bg-elevated" />}
+          <StatusDot status={status} />
+          {STATUS_LABEL[status]}
+          <svg viewBox="0 0 12 12" aria-hidden className="ml-0.5 h-2.5 w-2.5 text-ink-muted" fill="currentColor">
+            <path d="M2.5 4.5h7L6 8.5Z" />
+          </svg>
+        </button>
+      </span>
+      {open && (
+        <Popover anchor={anchor} label="Your status" onClose={() => setOpen(false)} className="w-[280px]">
+          <StatusMenu
+            current={statusChoice(config)}
+            status={config.status}
+            onPick={(choice) => {
+              setOpen(false);
+              void patchConfig({ friends: { ...useEngine.getState().config.friends, ...statusPatch(choice) } });
+            }}
+            onStatus={(text) => void patchConfig({ friends: { ...useEngine.getState().config.friends, status: text } })}
+            onSettings={() => {
+              setOpen(false);
+              openSettings("friends");
+            }}
+          />
+        </Popover>
+      )}
+    </>
+  );
+}
+
+function StatusMenu({
+  current,
+  status,
+  onPick,
+  onStatus,
+  onSettings,
+}: {
+  current: StatusChoice;
+  status: string;
+  onPick: (choice: StatusChoice) => void;
+  onStatus: (text: string) => void;
+  onSettings: () => void;
+}) {
+  const [text, setText] = useState(status);
+  // Saved on Enter, on leaving the field, and when the menu closes.
+  const latest = useRef({ text, status, onStatus });
+  latest.current = { text, status, onStatus };
+  const save = () => {
+    const { text, status, onStatus } = latest.current;
+    const clean = text.trim().slice(0, 60);
+    if (clean !== status) onStatus(clean);
+  };
+  useEffect(() => save, []);
+
+  const item = "flex h-9 w-full items-center gap-2.5 rounded-[10px] px-3 text-left text-[13px] font-medium transition-colors";
+  return (
+    <div className="p-1.5">
+      {CHOICES.map((choice) => (
+        <button
+          key={choice}
+          aria-pressed={current === choice}
+          onClick={() => onPick(choice)}
+          className={cn(item, current === choice ? "bg-white/8" : "hover:bg-hover")}
+        >
+          <StatusDot status={choice} />
+          <span className="flex-1">{STATUS_LABEL[choice]}</span>
+          {current === choice && <IconCheck className="h-4 w-4 text-ink-muted" />}
+        </button>
+      ))}
+      <div className="mx-2 my-1.5 border-t border-white/8" />
+      <input
+        value={text}
+        maxLength={60}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        placeholder="What are you up to?"
+        aria-label="Your status text"
+        className="h-[34px] w-full rounded-pill border border-line bg-surface px-3 text-[13px] outline-none
+          transition-colors placeholder:text-ink-faint focus:border-line-strong"
+      />
+      <div className="mx-2 my-1.5 border-t border-white/8" />
+      <button onClick={onSettings} className={cn(item, "hover:bg-hover")}>
+        <IconSettings className="h-4 w-4 text-ink-muted" />
+        Friends settings
+      </button>
+    </div>
+  );
+}
+
+// --- Add friend ----------------------------------------------------------------
+
+function AddFriendPopover({
+  anchor,
+  me,
+  initialQuery,
+  onClose,
+}: {
+  anchor: RefObject<HTMLElement | null>;
+  me: FriendMe | null;
+  initialQuery: string;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState(initialQuery);
   const [busy, setBusy] = useState(false);
-  const [answer, setAnswer] = useState<{ ok: boolean; text: string } | null>(null);
-  const add = useFriends((s) => s.add);
+  /** The outcome and who was already there, so the newcomer can be named. */
+  const [result, setResult] = useState<{ outcome: AddOutcome; before: Set<string> } | null>(null);
+  const lists = useFriends((s) => s.lists);
+  const streamer = useStreamer((s) => s.active);
+  const [revealed, setRevealed] = useState(false);
+  const [copied, copy] = useCopy();
   const input = useRef<HTMLInputElement>(null);
 
-  // "Open ClippiBoy" after "Add <name> as friend" on the website: the code
-  // waits in the field, sending stays the user's click.
   useEffect(() => {
-    if (!add || add.seq <= takenAddSeq) return;
-    takenAddSeq = add.seq;
-    setQuery(formatCode(add.code));
-    setAnswer(null);
     input.current?.focus();
-  }, [add]);
+    input.current?.select();
+  }, []);
+
+  // The eye shows the code for a few seconds, then streamer mode hides it again.
+  useEffect(() => {
+    if (!revealed) return;
+    const timer = window.setTimeout(() => setRevealed(false), 5000);
+    return () => window.clearTimeout(timer);
+  }, [revealed]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const text = query.trim();
     if (!text || busy) return;
+    const { friends, outgoing } = useFriends.getState().lists;
+    const before = new Set([...friends, ...outgoing].map((u) => u.id));
     setBusy(true);
-    setAnswer(null);
+    setResult(null);
     friendsApi
       .request(text)
       .then((status) => {
         setQuery("");
-        setAnswer({
-          ok: true,
-          text: status === "accepted" ? "They had asked you already — you are friends now." : "Request sent.",
-        });
+        setResult({ outcome: { ok: true, status }, before });
       })
-      .catch((err) => setAnswer({ ok: false, text: String(err) }))
+      .catch((err) => setResult({ outcome: { ok: false, error: String(err) }, before }))
       .finally(() => setBusy(false));
   };
 
+  const answer =
+    result &&
+    addAnswer(
+      result.outcome,
+      result.outcome.ok
+        ? (newcomer(result.before, result.outcome.status === "accepted" ? lists.friends : lists.outgoing)?.displayName ?? null)
+        : null,
+    );
+
+  const row = "flex h-10 items-center gap-2.5 px-1.5 text-[13px] text-ink/80";
+  const iconButton =
+    "grid h-7 w-7 shrink-0 place-items-center rounded-pill text-ink transition-colors hover:bg-hover";
+
   return (
-    <Card className="flex flex-col justify-center gap-3 p-5">
-      <form onSubmit={submit} className="flex gap-2">
-        <input
-          ref={input}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setAnswer(null);
-          }}
-          placeholder="Discord name or friend code"
-          aria-label="Discord name or friend code"
-          className="h-10 min-w-0 flex-1 rounded-pill border border-line bg-elevated px-4 text-sm
-            outline-none transition-colors placeholder:text-ink-faint focus:border-line-strong"
-        />
-        <Button type="submit" variant="primary" disabled={!query.trim() || busy} icon={<IconPlus className="h-4 w-4" />}>
-          Add
-        </Button>
-      </form>
-      <p className={cn("px-1 text-xs", answer ? (answer.ok ? "text-ok" : "text-live") : "text-ink-faint")}>
-        {answer?.text ?? "They need ClippiBoy and a sign-in with Discord too."}
-      </p>
-    </Card>
+    <Popover anchor={anchor} label="Add friend" onClose={onClose} className="w-[440px] max-w-[calc(100vw-16px)]">
+      <div className="p-3">
+        <form onSubmit={submit} className="flex gap-2">
+          <input
+            ref={input}
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setResult(null);
+            }}
+            placeholder="Discord name or friend code"
+            aria-label="Discord name or friend code"
+            className="h-10 min-w-0 flex-1 rounded-pill border border-line bg-surface px-4 text-sm outline-none
+              transition-colors placeholder:text-ink-faint focus:border-line-strong"
+          />
+          <Button type="submit" variant="primary" disabled={!query.trim() || busy}>
+            Add
+          </Button>
+        </form>
+        {answer && (
+          <p
+            role="status"
+            className={cn(
+              "mx-2 mt-2.5 flex items-center gap-1.5 text-xs",
+              answer.tone === "ok" ? "text-ok" : answer.tone === "info" ? "text-ink-muted" : "text-live",
+            )}
+          >
+            {answer.tone === "bad" ? <IconClose className="h-3.5 w-3.5 shrink-0" /> : <IconCheck className="h-3.5 w-3.5 shrink-0" />}
+            {answer.text}
+          </p>
+        )}
+        {me && (
+          <>
+            <div className="mx-1 my-2.5 border-t border-white/8" />
+            <div className={row}>
+              <IconLink className="h-4 w-4 shrink-0 text-ink-muted" />
+              Invite link
+              <span className="ml-auto truncate text-ink-muted">{streamer ? "Hidden" : shortLink(me.friendCode)}</span>
+              <button
+                aria-label="Copy invite link"
+                title="Copy invite link"
+                onClick={() => copy("link", inviteLink(me.friendCode))}
+                className={iconButton}
+              >
+                {copied === "link" ? <IconCheck className="h-[15px] w-[15px] text-ok" /> : <IconCopy className="h-[15px] w-[15px]" />}
+              </button>
+            </div>
+            <div className={row}>
+              <IconHash className="h-4 w-4 shrink-0 text-ink-muted" />
+              Your code
+              <span className="ml-auto font-mono text-ink tracking-[0.04em]">
+                {streamer && !revealed ? maskedCode(me.friendCode) : formatCode(me.friendCode)}
+              </span>
+              {streamer && (
+                <button
+                  aria-label="Show the code for a moment"
+                  title="Show the code for a moment"
+                  aria-pressed={revealed}
+                  onClick={() => setRevealed((v) => !v)}
+                  className={cn(iconButton, !revealed && "text-ink-muted")}
+                >
+                  <IconEye className="h-[15px] w-[15px]" />
+                </button>
+              )}
+              <button
+                aria-label="Copy your friend code"
+                title="Copy your friend code"
+                onClick={() => copy("code", formatCode(me.friendCode))}
+                className={iconButton}
+              >
+                {copied === "code" ? <IconCheck className="h-[15px] w-[15px] text-ok" /> : <IconCopy className="h-[15px] w-[15px]" />}
+              </button>
+            </div>
+            {!me.allowRequests && (
+              <>
+                <div className="mx-1 my-2.5 border-t border-white/8" />
+                <div className={cn(row, "text-ink-muted")}>
+                  <span className="flex-1">You don't accept requests right now</span>
+                  <Button size="sm" onClick={() => void friendsApi.setAllowRequests(true).catch(report)}>
+                    Turn on
+                  </Button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </Popover>
+  );
+}
+
+/** A group's small title with its count, like the day groups in Clips. */
+function GroupTitle({ title, count }: { title: string; count: number }) {
+  return (
+    <h2 className="mb-2.5 flex items-baseline gap-2.5 text-[15px] font-semibold text-ink/80">
+      {title}
+      <span className="text-[13px] font-normal text-ink-faint tabular-nums">{count}</span>
+    </h2>
   );
 }
 
@@ -348,10 +706,7 @@ function Group({
   if (friends.length === 0) return null;
   return (
     <section>
-      <SectionTitle
-        title={title}
-        action={<span className="pb-1 text-sm text-ink-faint tabular-nums">{friends.length}</span>}
-      />
+      <GroupTitle title={title} count={friends.length} />
       <Card className="divide-y divide-line">
         {friends.map((friend) => (
           <FriendRow
@@ -493,9 +848,9 @@ function FriendRow({
 
 type Status = "playing" | "online" | "busy" | "offline" | "invisible";
 
-export function Avatar({ user, status, size = "md" }: { user: FriendUser; status?: Status; size?: "md" | "lg" }) {
+export function Avatar({ user, status, size = "md" }: { user: FriendUser; status?: Status; size?: "sm" | "md" | "lg" }) {
   const [broken, setBroken] = useState(false);
-  const box = size === "lg" ? "h-14 w-14" : "h-10 w-10";
+  const box = size === "lg" ? "h-14 w-14" : size === "sm" ? "h-[22px] w-[22px] text-[11px]" : "h-10 w-10";
   return (
     <span className={cn("relative shrink-0", box)}>
       {user.avatar && !broken ? (
@@ -526,6 +881,18 @@ export function Avatar({ user, status, size = "md" }: { user: FriendUser; status
       )}
     </span>
   );
+}
+
+/** True once `active` has held for `ms` without a break. */
+function useAfter(active: boolean, ms: number): boolean {
+  const [late, setLate] = useState(false);
+  useEffect(() => {
+    setLate(false);
+    if (!active) return;
+    const timer = window.setTimeout(() => setLate(true), ms);
+    return () => window.clearTimeout(timer);
+  }, [active, ms]);
+  return active && late;
 }
 
 /** The clock for "42 min" — a minute is fine enough. */

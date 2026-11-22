@@ -297,3 +297,26 @@ export const IconPalette = ({ className = base }: P) => (
     <path d="M7.5 11v.1M10 7.5v.1M14.5 7.5v.1" />
   </svg>
 );
+
+/** An open eye — show what streamer mode hides, for a moment. */
+export const IconEye = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
+/** A hash — one's friend code. */
+export const IconHash = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round">
+    <path d="M9.5 3.5 7.5 20.5M16.5 3.5l-2 17M4 8.5h16.5M3.5 15.5H20" />
+  </svg>
+);
+
+/** A circling arrow — try again. */
+export const IconRetry = ({ className = base }: P) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className} strokeWidth="1.8" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 12a8 8 0 1 0 2.6-5.9" />
+    <path d="M4 4v4.5h4.5" />
+  </svg>
+);
