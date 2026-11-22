@@ -371,11 +371,10 @@ export const useEngine = create<EngineState>((set, get) => ({
         for (const s of get().config.sources) {
           const level = s.enabled && !s.muted ? Math.random() * 0.55 + 0.15 : 0;
           levels[s.id] = level;
-          // The core's power sum, roughly — the gain is in `level` already.
-          if (!s.separateTrack) {
-            left += level ** 2;
-            right += (level * (0.8 + Math.random() * 0.2)) ** 2;
-          }
+          // The core's power sum over every track, roughly — the gain is in
+          // `level` already.
+          left += level ** 2;
+          right += (level * (0.8 + Math.random() * 0.2)) ** 2;
         }
         set({ levels, mix: { l: Math.sqrt(left), r: Math.sqrt(right) } });
       }, 80);

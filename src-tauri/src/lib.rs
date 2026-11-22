@@ -1526,7 +1526,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 let levels = state.audio.levels(&sources);
                 if watched {
                     let _ = handle.emit_to("main", &levels_event("main"), &levels.sources);
-                    // The main track for the mixer's "In your clip" row, as an
+                    // The whole clip for the mixer's "In your clip" row, as an
                     // event of its own: the per-source map stays what the
                     // console reads, with nothing in it that is not a source.
                     let _ = handle.emit_to("main", MIX_EVENT, levels.mix);

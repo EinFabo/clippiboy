@@ -316,7 +316,7 @@ impl AudioEngine {
             out.insert(source.id.clone(), level);
         }
         Levels {
-            mix: main_mix_level(sources, &peaks),
+            mix: clip_level(sources, &peaks),
             sources: out,
         }
     }
@@ -464,19 +464,20 @@ pub struct MixLevel {
     pub r: f32,
 }
 
-/// The main track's level, worked out from the sources' peaks (left, right —
-/// before gain): `sqrt(Σ (peak·gain)²)` per side over every audible source
-/// that is not on a track of its own.
+/// The clip's level as a whole, worked out from the sources' peaks (left,
+/// right — before gain): `sqrt(Σ (peak·gain)²)` per side over every audible
+/// source, whatever track it lands on — all of them end up in the clip, and
+/// that is what the mixer's "In your clip" row shows.
 ///
-/// An approximation: the main track is summed only when a clip is saved
+/// An approximation: the tracks are only written when a clip is saved
 /// (`muxer::build`), so there is no mixed signal to measure while recording.
 /// Unrelated sounds add up like this; two copies of the same one would read
 /// 3 dB low, which a meter can live with. Each part is capped at 1.0, as
 /// `mix_window` clips every track before the sum.
-pub fn main_mix_level(sources: &[AudioSource], peaks: &HashMap<&str, (f32, f32)>) -> MixLevel {
+pub fn clip_level(sources: &[AudioSource], peaks: &HashMap<&str, (f32, f32)>) -> MixLevel {
     let (mut left, mut right) = (0.0f32, 0.0f32);
     for source in sources {
-        if source.separate_track || !audible(sources, source) {
+        if !audible(sources, source) {
             continue;
         }
         let Some((l, r)) = peaks.get(source.id.as_str()) else {
@@ -585,48 +586,53 @@ mod tests {
         }
     }
 
-    /// The main track's level is the power sum of the sources in it, after
-    /// their gain, side by side.
+    /// The clip's level is the power sum of its sources, after their gain,
+    /// side by side.
     #[test]
-    fn the_main_mix_level_is_the_power_sum_of_its_sources() {
+    fn the_clip_level_is_the_power_sum_of_its_sources() {
         let sources = vec![
             mixer_source("game", 0.0, false),
             mixer_source("music", -6.0, false),
         ];
         let peaks = HashMap::from([("game", (0.3, 0.4)), ("music", (0.8, 0.0))]);
-        let mix = main_mix_level(&sources, &peaks);
+        let mix = clip_level(&sources, &peaks);
         let music = 0.8 * gain_factor(-6.0);
         assert!((mix.l - (0.3f32.powi(2) + music.powi(2)).sqrt()).abs() < 1e-6);
         assert!((mix.r - 0.4).abs() < 1e-6);
     }
 
-    /// Only what lands in the main track counts: not a source on a track of its
-    /// own, not a muted, switched-off or soloed-out one, and not a source that
-    /// delivered nothing.
+    /// Only what lands in the clip counts: not a muted, switched-off or
+    /// soloed-out source, and not one that delivered nothing.
     #[test]
-    fn the_main_mix_level_leaves_out_what_is_not_in_the_main_track() {
+    fn the_clip_level_leaves_out_what_is_not_in_the_clip() {
         let mut muted = mixer_source("mic", 0.0, false);
         muted.muted = true;
         let mut off = mixer_source("off", 0.0, false);
         off.enabled = false;
-        let sources = vec![
-            mixer_source("discord", 0.0, true),
-            muted,
-            off,
-            mixer_source("silent", 0.0, false),
-        ];
+        let sources = vec![muted, off, mixer_source("silent", 0.0, false)];
         let peaks = HashMap::from([
-            ("discord", (0.9, 0.9)),
             ("mic", (0.9, 0.9)),
             ("off", (0.9, 0.9)),
         ]);
-        assert_eq!(main_mix_level(&sources, &peaks), MixLevel::default());
+        assert_eq!(clip_level(&sources, &peaks), MixLevel::default());
 
         let mut solo = mixer_source("solo", 0.0, false);
         solo.solo = true;
         let sources = vec![mixer_source("game", 0.0, false), solo];
         let peaks = HashMap::from([("game", (0.9, 0.9)), ("solo", (0.2, 0.2))]);
-        assert!((main_mix_level(&sources, &peaks).l - 0.2).abs() < 1e-6);
+        assert!((clip_level(&sources, &peaks).l - 0.2).abs() < 1e-6);
+    }
+
+    /// A source on a track of its own is in the clip as much as one in the
+    /// main track, and counts the same.
+    #[test]
+    fn a_source_on_its_own_track_counts_too() {
+        let sources = vec![
+            mixer_source("game", 0.0, true),
+            mixer_source("system", 0.0, false),
+        ];
+        let peaks = HashMap::from([("game", (0.3, 0.3)), ("system", (0.4, 0.4))]);
+        assert!((clip_level(&sources, &peaks).l - 0.5).abs() < 1e-6);
     }
 
     /// A source turned up past full scale is clipped in its track before the
@@ -635,7 +641,7 @@ mod tests {
     fn a_clipping_source_adds_no_more_than_full_scale() {
         let sources = vec![mixer_source("loud", 12.0, false)];
         let peaks = HashMap::from([("loud", (0.9, 0.1))]);
-        let mix = main_mix_level(&sources, &peaks);
+        let mix = clip_level(&sources, &peaks);
         assert!((mix.l - 1.0).abs() < 1e-6);
         assert!((mix.r - 0.1 * gain_factor(12.0)).abs() < 1e-6);
     }

@@ -184,15 +184,14 @@ function VolumeTrack({
 }
 
 /**
- * The first row of the list: what the clip's main track carries right now, in
- * the same columns as the sources below it. Left and right as two fine tracks,
- * the peak where the sources show their volume, and nothing to set. The level
- * is the core's estimate from the sources in the main track
- * (`audio::engine::main_mix_level`); sources on a track of their own are only
- * counted in the line below the name.
+ * The first row of the list: what the clip carries right now, all its tracks
+ * together, in the same columns as the sources below it. Left and right as two
+ * fine tracks, the peak where the sources show their volume, and nothing to
+ * set. The level is the core's estimate from every audible source
+ * (`audio::engine::clip_level`).
  */
 function ClipMixRow({ sources }: { sources: AudioSource[] }) {
-  const own = sources.filter((s) => s.enabled && s.separateTrack).length;
+  const on = sources.filter((s) => s.enabled).length;
   return (
     <div
       className="flex items-center gap-3.5 rounded-card border border-line px-4 py-3
@@ -205,14 +204,12 @@ function ClipMixRow({ sources }: { sources: AudioSource[] }) {
       <div className="w-[190px] min-w-0 shrink-0">
         <p className="truncate px-1.5 py-0.5 text-sm font-medium">In your clip</p>
         <p className="truncate px-1.5 text-xs text-ink-faint">
-          {own > 0
-            ? `Main track · ${own} own track${own === 1 ? "" : "s"}`
-            : "Main track"}
+          {`All tracks · ${on} source${on === 1 ? "" : "s"}`}
         </p>
       </div>
       <div
         role="img"
-        aria-label="Level of the main track, left and right"
+        aria-label="Level of the whole clip, left and right"
         className="flex min-w-[110px] flex-1 flex-col gap-[5px]"
       >
         {(["l", "r"] as const).map((side) => (
