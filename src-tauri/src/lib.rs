@@ -45,6 +45,7 @@ pub mod sounds;
 pub mod state;
 pub mod stems;
 pub mod streamer;
+pub mod stills;
 pub mod sweep;
 pub mod thumbs;
 pub mod tint;
@@ -2150,6 +2151,7 @@ pub fn run() {
             commands::list_audio_processes,
             commands::app_capture_supported,
             commands::list_capture_targets,
+            commands::capture_thumbs,
             commands::list_encoders,
             commands::get_config,
             commands::set_config,

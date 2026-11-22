@@ -1,9 +1,11 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { SLIDE, SlidingIndicator } from "@/components/ui/SlidingIndicator";
 import { IconApp, IconGamepad } from "@/components/icons";
 import { cn } from "@/lib/cn";
 import { layoutMonitors, numberedMonitors, orderedWindows, placeGhost } from "@/lib/monitorMap";
+import { animate, EASE_OUT_SOFT } from "@/lib/motion";
+import { useStills } from "@/lib/useStills";
 import type { CaptureTarget, TargetKind, TargetRect } from "@/lib/types";
 
 /** The saved source when it is not there: a screen unplugged, a window closed. */
@@ -116,6 +118,7 @@ export function SourcePicker({
       ) : (
         <MonitorMap
           monitors={monitors}
+          listed={targets}
           picked={picked}
           missing={missing}
           number={number}
@@ -221,12 +224,15 @@ const hz = (t: CaptureTarget) => (t.refreshHz ? ` · ${t.refreshHz} Hz` : "");
 
 function MonitorMap({
   monitors,
+  listed,
   picked,
   missing,
   number,
   onPick,
 }: {
   monitors: CaptureTarget[];
+  /** The target list as fetched: a new one asks for fresh stills at once. */
+  listed: CaptureTarget[];
   picked: CaptureTarget | null;
   missing: MissingSource | null;
   number: (t: CaptureTarget) => number;
@@ -243,6 +249,7 @@ function MonitorMap({
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  const stills = useStills(monitors.map((t) => t.id), listed);
 
   // The unplugged screen counts for the frame too, so it keeps its place
   // beside the others instead of being drawn over them.
@@ -274,7 +281,7 @@ function MonitorMap({
                   : "border-line-strong hover:border-ink-faint",
               )}
             >
-              {/* The slot for the screen's still image, under the number. */}
+              <Still src={stills[t.id]} dim={!on} />
               <span className="absolute bottom-2 left-2 inline-flex h-[22px] items-center rounded-pill bg-black/60 px-[9px] text-xs font-semibold text-ink">
                 {label}
               </span>
@@ -308,6 +315,71 @@ function MonitorMap({
         </Meta>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * A screen's still image, filling its outline. A new one fades in over the
+ * last once it has loaded, so an update never shows the bare surface; without
+ * one the plain surface stays. Dimmed a little unless the screen is picked.
+ */
+function Still({ src, dim }: { src: string | undefined; dim: boolean }) {
+  const [layers, setLayers] = useState<{ key: number; src: string }[]>([]);
+  const next = useRef(0);
+  useEffect(() => {
+    if (!src) setLayers([]);
+    else setLayers((now) => (now.at(-1)?.src === src ? now : [...now, { key: next.current++, src }]));
+  }, [src]);
+  if (layers.length === 0) return null;
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "absolute inset-0 transition-[filter] duration-200 ease-[var(--ease-out-soft)]",
+        dim && "saturate-75 brightness-85",
+      )}
+    >
+      {layers.map((layer) => (
+        <StillLayer
+          key={layer.key}
+          src={layer.src}
+          // Once it covers them, the ones beneath can go.
+          onShown={() => setLayers((now) => now.filter((other) => other.key >= layer.key))}
+          onFailed={() => setLayers((now) => now.filter((other) => other.key !== layer.key))}
+        />
+      ))}
+    </span>
+  );
+}
+
+function StillLayer({
+  src,
+  onShown,
+  onFailed,
+}: {
+  src: string;
+  onShown: () => void;
+  onFailed: () => void;
+}) {
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <img
+      src={src}
+      alt=""
+      draggable={false}
+      decoding="async"
+      onLoad={(event) => {
+        setLoaded(true);
+        const fade = animate(event.currentTarget, [{ opacity: 0 }, { opacity: 1 }], {
+          duration: 400,
+          easing: EASE_OUT_SOFT,
+        });
+        if (fade) void fade.finished.then(onShown, onShown);
+        else onShown();
+      }}
+      onError={onFailed}
+      className={cn("absolute inset-0 size-full object-cover", !loaded && "opacity-0")}
+    />
   );
 }
 

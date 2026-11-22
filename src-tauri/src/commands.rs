@@ -55,6 +55,13 @@ pub fn list_capture_targets(app: tauri::AppHandle) -> Vec<CaptureTarget> {
     targets
 }
 
+/// Small still images of the screens in `ids` for the monitor map — none in
+/// streamer mode or with the lock screen in front (see `stills.rs`).
+#[tauri::command(async)]
+pub fn capture_thumbs(ids: Vec<String>) -> Vec<crate::stills::Thumb> {
+    crate::stills::capture(&ids)
+}
+
 /// Async so the Media Foundation enumeration runs off the main thread. It
 /// looks again, so a driver installed while the app runs shows up.
 #[tauri::command(async)]

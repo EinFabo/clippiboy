@@ -6,6 +6,7 @@ import type {
   AudioProcess,
   CameraDevice,
   CaptureTarget,
+  CaptureThumb,
   Clip,
   ClipTrack,
   EncoderInfo,
@@ -37,6 +38,33 @@ export const mockTargets: CaptureTarget[] = [
   { kind: "window", id: "0x00120A", stableId: null, title: "Counter-Strike 2", width: 2560, height: 1440, isPrimary: false, refreshHz: 165, x: 0, y: 0, icon: null, isGame: true },
   { kind: "window", id: "0x00340C", stableId: null, title: "Discord", width: 1280, height: 860, isPrimary: false, refreshHz: 165, x: 0, y: 0, icon: null, isGame: false },
 ];
+
+/** Stand-in stills for the monitor map: a game on the first screen, a desktop on the second. */
+const stillSvg: Record<string, string> = {
+  "\\\\.\\DISPLAY1": `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180">
+    <defs>
+      <radialGradient id="sky" cx="25%" cy="20%" r="60%"><stop offset="0" stop-color="#4a6fa8"/><stop offset="1" stop-color="#4a6fa8" stop-opacity="0"/></radialGradient>
+      <radialGradient id="fire" cx="65%" cy="85%" r="45%"><stop offset="0" stop-color="#d9822b"/><stop offset="1" stop-color="#d9822b" stop-opacity="0"/></radialGradient>
+    </defs>
+    <rect width="320" height="180" fill="#1b2130"/><rect width="320" height="180" fill="url(#sky)"/><rect width="320" height="180" fill="url(#fire)"/>
+    <path d="M0 132 L70 104 L130 122 L210 92 L320 118 L320 180 L0 180Z" fill="#11141c" opacity=".85"/>
+  </svg>`,
+  "\\\\.\\DISPLAY2": `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180">
+    <defs><linearGradient id="wall" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2a2140"/><stop offset="1" stop-color="#101018"/></linearGradient></defs>
+    <rect width="320" height="180" fill="url(#wall)"/>
+    <rect x="28" y="22" width="150" height="104" rx="6" fill="#2b2b36"/><rect x="28" y="22" width="150" height="14" rx="6" fill="#3a3a48"/>
+    <rect x="150" y="58" width="140" height="92" rx="6" fill="#23232d"/><rect x="150" y="58" width="140" height="14" rx="6" fill="#5865f2" opacity=".8"/>
+    <rect y="168" width="320" height="12" fill="#0c0c12"/>
+  </svg>`,
+};
+
+/** What `capture_thumbs` answers in the browser: the stand-ins above, nothing for anything else. */
+export function mockThumbs(ids: string[]): CaptureThumb[] {
+  return ids.map((id) => ({
+    id,
+    jpeg: stillSvg[id] ? `data:image/svg+xml,${encodeURIComponent(stillSvg[id])}` : null,
+  }));
+}
 
 export const mockEncoders: EncoderInfo[] = [
   { id: "nvenc", name: "NVIDIA NVENC (H.264)", available: true, hardware: true },

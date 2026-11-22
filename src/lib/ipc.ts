@@ -14,6 +14,7 @@ import type {
   Tap,
   AudioSource,
   CaptureTarget,
+  CaptureThumb,
   Clip,
   ClipProgress,
   ClipTrack,
@@ -60,6 +61,8 @@ export const api = {
   appCaptureSupported: () => invoke<boolean>("app_capture_supported"),
   listAudioProcesses: () => invoke<AudioProcess[]>("list_audio_processes"),
   listCaptureTargets: () => invoke<CaptureTarget[]>("list_capture_targets"),
+  /** Small still images of the screens in `ids`, in that order. */
+  captureThumbs: (ids: string[]) => invoke<CaptureThumb[]>("capture_thumbs", { ids }),
   listEncoders: () => invoke<EncoderInfo[]>("list_encoders"),
 
   getConfig: () => invoke<AppConfig>("get_config"),

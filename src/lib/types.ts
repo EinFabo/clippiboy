@@ -124,6 +124,13 @@ export interface CaptureTarget {
   isGame: boolean;
 }
 
+/** A screen's small still image for the monitor map (`Thumb` in `stills.rs`). */
+export interface CaptureThumb {
+  id: string;
+  /** A JPEG data URL; `null` for a window, in streamer mode, or with the lock screen in front. */
+  jpeg: string | null;
+}
+
 /** Where the chosen monitor last stood on the desktop (`TargetRect` in `model.rs`). */
 export interface TargetRect {
   x: number;

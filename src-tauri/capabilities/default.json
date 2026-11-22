@@ -34,6 +34,7 @@
     "allow-list-audio-processes",
     "allow-app-capture-supported",
     "allow-list-capture-targets",
+    "allow-capture-thumbs",
     "allow-list-encoders",
     "allow-get-config",
     "allow-ui-error",

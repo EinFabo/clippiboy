@@ -21,6 +21,7 @@ fn main() {
         "list_audio_processes",
         "app_capture_supported",
         "list_capture_targets",
+        "capture_thumbs",
         "list_encoders",
         "get_config",
         "set_config",

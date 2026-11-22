@@ -393,6 +393,12 @@
           "markdownDescription": "Enables the capture_input command without any pre-configured scope."
         },
         {
+          "description": "Enables the capture_thumbs command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-capture-thumbs",
+          "markdownDescription": "Enables the capture_thumbs command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_update command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-update",
@@ -1033,6 +1039,12 @@
           "type": "string",
           "const": "deny-capture-input",
           "markdownDescription": "Denies the capture_input command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the capture_thumbs command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-capture-thumbs",
+          "markdownDescription": "Denies the capture_thumbs command without any pre-configured scope."
         },
         {
           "description": "Denies the check_update command without any pre-configured scope.",
