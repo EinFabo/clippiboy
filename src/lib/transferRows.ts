@@ -162,7 +162,9 @@ export function rowTransfer(
       text =
         running.length === 0
           ? `Getting ${waiting[0].name} ready${more(waiting.length - 1)}`
-          : `Waiting for an answer · ${running[0].name}${more(waiting.length)}`;
+          : running[0].stage === "asking"
+            ? `Waiting for an answer · ${running[0].name}${more(waiting.length)}`
+            : `Getting ${running[0].name} ready${more(waiting.length)}`;
     } else if (count > 1) text = `${sending ? "Sending" : "Receiving"} ${count} ${plural([...running, ...waiting])}`;
     else if (!sending) text = `Receiving ${running[0].name}`;
     else if (running[0].stage === "moving") text = `Sending ${running[0].name}`;
