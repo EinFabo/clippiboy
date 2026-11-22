@@ -55,11 +55,23 @@ pub fn list_capture_targets(app: tauri::AppHandle) -> Vec<CaptureTarget> {
     targets
 }
 
-/// Small still images of the screens in `ids` for the monitor map — none in
-/// streamer mode or with the lock screen in front (see `stills.rs`).
+/// Small still images of the screens in `ids` for the monitor map — only with
+/// the main window in front, never in streamer mode or with the lock screen
+/// up (see `stills.rs`).
 #[tauri::command(async)]
-pub fn capture_thumbs(ids: Vec<String>) -> Vec<crate::stills::Thumb> {
-    crate::stills::capture(&ids)
+pub fn capture_thumbs(app: tauri::AppHandle, ids: Vec<String>) -> Vec<crate::stills::Thumb> {
+    // Tauri hands out its own `windows` version's HWND — only the pointer counts.
+    #[cfg(windows)]
+    let main = {
+        use tauri::Manager;
+        app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize)
+    };
+    #[cfg(not(windows))]
+    let main = {
+        let _ = app;
+        None
+    };
+    crate::stills::capture(&ids, main)
 }
 
 /// Async so the Media Foundation enumeration runs off the main thread. It

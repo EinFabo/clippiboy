@@ -369,13 +369,21 @@ function StillLayer({
       draggable={false}
       decoding="async"
       onLoad={(event) => {
-        setLoaded(true);
-        const fade = animate(event.currentTarget, [{ opacity: 0 }, { opacity: 1 }], {
-          duration: 400,
-          easing: EASE_OUT_SOFT,
-        });
-        if (fade) void fade.finished.then(onShown, onShown);
-        else onShown();
+        const img = event.currentTarget;
+        // Decoded first, so the fade does not start on a picture still being
+        // painted; one that will not decode is shown all the same.
+        void img
+          .decode()
+          .catch(() => {})
+          .then(() => {
+            setLoaded(true);
+            const fade = animate(img, [{ opacity: 0 }, { opacity: 1 }], {
+              duration: 400,
+              easing: EASE_OUT_SOFT,
+            });
+            if (fade) void fade.finished.then(onShown, onShown);
+            else onShown();
+          });
       }}
       onError={onFailed}
       className={cn("absolute inset-0 size-full object-cover", !loaded && "opacity-0")}

@@ -7,8 +7,11 @@
 //! other, on the CPU. A window that keeps itself out of captures comes out
 //! black or missing, as in any other screenshot.
 //!
-//! Nothing is taken while the lock screen or a UAC prompt is in front, nor in
-//! streamer mode: then every screen answers with no picture.
+//! Nothing is taken unless ClippiBoy's main window is the one in front and
+//! not minimised — a game in front with the Video page still open behind it
+//! must not have its screen read every few seconds — nor while the lock
+//! screen or a UAC prompt is in front, nor in streamer mode: then every
+//! screen answers with no picture.
 
 use serde::Serialize;
 
@@ -89,18 +92,93 @@ pub fn thumbs_for(
         .collect()
 }
 
+/// What decides whether stills may be taken at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Moment {
+    /// Lock screen, sign-in or UAC prompt in front.
+    pub unrecordable: bool,
+    /// Streamer mode is in effect.
+    pub streamer: bool,
+    /// ClippiBoy's main window, raw; `None` when it is not there.
+    pub main: Option<isize>,
+    /// The window in front, raw; 0 for none.
+    pub foreground: isize,
+    /// The main window is minimised.
+    pub minimised: bool,
+}
+
+/// Stills only for someone looking at the Video page: the main window in
+/// front and open, the screen recordable, streamer mode off.
+pub fn may_grab(at: Moment) -> bool {
+    !at.unrecordable
+        && !at.streamer
+        && !at.minimised
+        && at.main.is_some_and(|main| main != 0 && main == at.foreground)
+}
+
 /// Stills of the screens named in `ids` (device names, `\\.\DISPLAY1`).
-pub fn capture(ids: &[String]) -> Vec<Thumb> {
-    let blocked = crate::capture::screen_unrecordable() || crate::streamer::active();
+/// `main` is ClippiBoy's main window, raw.
+pub fn capture(ids: &[String], main: Option<isize>) -> Vec<Thumb> {
+    let started = std::time::Instant::now();
+    let moment = Moment {
+        unrecordable: crate::capture::screen_unrecordable(),
+        streamer: crate::streamer::active(),
+        main,
+        foreground: foreground(),
+        minimised: main.is_some_and(minimised),
+    };
+    let blocked = !may_grab(moment);
     let monitors = if blocked || ids.is_empty() { Vec::new() } else { crate::capture::list_monitors() };
-    thumbs_for(ids, &monitors, blocked, grab)
+    let thumbs = thumbs_for(ids, &monitors, blocked, grab);
+    log::debug!(
+        "stills: {} of {} screens in {} ms{}",
+        thumbs.iter().filter(|t| t.jpeg.is_some()).count(),
+        ids.len(),
+        started.elapsed().as_millis(),
+        if blocked { " (not taken)" } else { "" },
+    );
+    thumbs
 }
 
 #[cfg(windows)]
 fn grab(rect: TargetRect) -> Option<String> {
+    let started = std::time::Instant::now();
     let (width, height) = thumb_size(rect.width, rect.height)?;
-    let bgra = unsafe { win::stretch(rect, width, height)? };
-    jpeg_data_url(width, height, &bgra_to_rgb(&bgra))
+    let bgra = unsafe { win::stretch(rect, width, height) };
+    let url = bgra.and_then(|bgra| jpeg_data_url(width, height, &bgra_to_rgb(&bgra)));
+    log::debug!(
+        "still of the screen at {},{} ({}x{}): {} in {} ms",
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        if url.is_some() { "taken" } else { "failed" },
+        started.elapsed().as_millis(),
+    );
+    url
+}
+
+#[cfg(windows)]
+fn foreground() -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow() }.0 as isize
+}
+
+#[cfg(windows)]
+fn minimised(window: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+    unsafe { IsIconic(HWND(window as *mut core::ffi::c_void)) }.as_bool()
+}
+
+#[cfg(not(windows))]
+fn foreground() -> isize {
+    0
+}
+
+#[cfg(not(windows))]
+fn minimised(_window: isize) -> bool {
+    false
 }
 
 #[cfg(not(windows))]
@@ -164,6 +242,10 @@ mod win {
             return None;
         }
         let previous = SelectObject(memory, bitmap);
+        if previous.is_invalid() {
+            let _ = DeleteObject(bitmap);
+            return None;
+        }
         // HALFTONE averages the pixels each one covers, so text and edges stay
         // readable; it wants the brush origin set after the mode.
         SetStretchBltMode(memory, HALFTONE);
@@ -279,6 +361,34 @@ mod tests {
         let ids = vec!["\\\\.\\DISPLAY1".to_string()];
         let thumbs = thumbs_for(&ids, &monitors, true, |_| panic!("no grab on the lock screen"));
         assert_eq!(thumbs, vec![Thumb { id: ids[0].clone(), jpeg: None }]);
+    }
+
+    const IN_FRONT: Moment = Moment {
+        unrecordable: false,
+        streamer: false,
+        main: Some(0x1234),
+        foreground: 0x1234,
+        minimised: false,
+    };
+
+    #[test]
+    fn stills_are_taken_with_the_main_window_in_front() {
+        assert!(may_grab(IN_FRONT));
+    }
+
+    #[test]
+    fn a_game_in_front_gets_no_stills_taken() {
+        assert!(!may_grab(Moment { foreground: 0x9999, ..IN_FRONT }));
+        assert!(!may_grab(Moment { foreground: 0, ..IN_FRONT }));
+    }
+
+    #[test]
+    fn no_stills_minimised_without_a_window_locked_or_streaming() {
+        assert!(!may_grab(Moment { minimised: true, ..IN_FRONT }));
+        assert!(!may_grab(Moment { main: None, ..IN_FRONT }));
+        assert!(!may_grab(Moment { main: Some(0), foreground: 0, ..IN_FRONT }));
+        assert!(!may_grab(Moment { unrecordable: true, ..IN_FRONT }));
+        assert!(!may_grab(Moment { streamer: true, ..IN_FRONT }));
     }
 
     #[test]
