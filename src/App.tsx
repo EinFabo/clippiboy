@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { listen } from "@tauri-apps/api/event";
 import { useEngine } from "./store";
 import { inTauri } from "./lib/ipc";
+import { useScrollingFlag } from "./lib/useScrollingFlag";
 import { useFriends } from "./lib/friends";
 // Pausiert einen Clip, sobald das Fenster in den Tray geht.
 import "./lib/hidden";
@@ -32,6 +33,8 @@ export default function App() {
    *  opens it there on arrival. */
   const [focusClip, setFocusClip] = useState<FocusClip | null>(null);
   const init = useEngine((s) => s.init);
+  const scroller = useRef<HTMLElement>(null);
+  useScrollingFlag(scroller);
 
   useEffect(() => {
     void init();
@@ -81,7 +84,7 @@ export default function App() {
         <TitleBar />
         <NavBar route={route} onNavigate={setRoute} />
 
-        <main className="relative h-full overflow-y-auto pt-24 pb-16">
+        <main ref={scroller} className="relative h-full overflow-y-auto pt-24 pb-16">
           {/* Outside the keyed wrapper: it belongs to no page and should not
               replay its entrance on every tab switch. */}
           <div className="mx-auto w-full max-w-[1180px] px-8">

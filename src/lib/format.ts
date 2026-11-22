@@ -15,17 +15,17 @@ export function formatSize(bytes: number): string {
   return `${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
-export function formatAgo(ts: number): string {
-  const min = Math.round((Date.now() - ts) / 60000);
+/** "November 20, 2026". Built once: `toLocaleDateString` with options builds a
+ *  new formatter on every call, and the gallery calls it for every tile. */
+const DAY = new Intl.DateTimeFormat("en-US", { day: "numeric", month: "long", year: "numeric" });
+
+export function formatAgo(ts: number, now = Date.now()): string {
+  const min = Math.round((now - ts) / 60000);
   if (min < 1) return "just now";
   if (min < 60) return `${min}m ago`;
   const h = Math.round(min / 60);
   if (h < 24) return `${h}h ago`;
-  return new Date(ts).toLocaleDateString("en-US", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
+  return DAY.format(ts);
 }
 
 export function formatBufferSeconds(s: number): string {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { create } from "zustand";
@@ -33,6 +33,8 @@ import { cn } from "@/lib/cn";
 import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { isTextField } from "@/lib/dom";
 import { useFlip } from "@/lib/useFlip";
+import { useStableHandler } from "@/lib/useStableHandler";
+import { sameData } from "@/lib/same";
 import { usePresence } from "@/lib/usePresence";
 import { useCountUp } from "@/lib/useCountUp";
 import { useClipSelection, type SelectMods } from "@/lib/useClipSelection";
@@ -97,21 +99,43 @@ const GRID_COLUMNS = 3;
  * `tabIndex` of its own is left alone.
  */
 function applyRoving(grid: HTMLElement, resting: string | null) {
+  for (const tile of grid.querySelectorAll<HTMLElement>("[data-flip]")) roveTile(tile, resting);
+}
+
+/** {@link applyRoving} for one tile. */
+function roveTile(tile: HTMLElement, resting: string | null) {
   const controls = "button, a[href], input, select, textarea, [tabindex], [data-roving]";
-  for (const tile of grid.querySelectorAll<HTMLElement>("[data-flip]")) {
-    const here = tile.dataset.flip === resting;
-    for (const control of tile.querySelectorAll<HTMLElement>(controls)) {
-      if (here) {
-        if (control.dataset.roving) {
-          control.removeAttribute("tabindex");
-          delete control.dataset.roving;
-        }
-      } else if (!control.hasAttribute("tabindex")) {
-        control.tabIndex = -1;
-        control.dataset.roving = "1";
+  const here = tile.dataset.flip === resting;
+  for (const control of tile.querySelectorAll<HTMLElement>(controls)) {
+    if (here) {
+      if (control.dataset.roving) {
+        control.removeAttribute("tabindex");
+        delete control.dataset.roving;
       }
+    } else if (!control.hasAttribute("tabindex")) {
+      control.tabIndex = -1;
+      control.dataset.roving = "1";
     }
   }
+}
+
+/** The tiles a batch of DOM changes touched: the ones changed inside, and the
+ *  ones that arrived whole. */
+function touchedTiles(records: MutationRecord[]): Set<HTMLElement> {
+  const tiles = new Set<HTMLElement>();
+  for (const record of records) {
+    const inside = record.target instanceof Element ? record.target.closest<HTMLElement>("[data-flip]") : null;
+    if (inside) {
+      tiles.add(inside);
+      continue;
+    }
+    for (const node of record.addedNodes) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (node.matches("[data-flip]")) tiles.add(node);
+      for (const tile of node.querySelectorAll<HTMLElement>("[data-flip]")) tiles.add(tile);
+    }
+  }
+  return tiles;
 }
 
 /**
@@ -283,16 +307,22 @@ export function Clips({
   const restingId = resting !== null && order.includes(resting) ? resting : (order[0] ?? null);
   const restingRef = useRef(restingId);
   restingRef.current = restingId;
+  /** Which tiles stand where, the leaving ones marked — changes only when one
+      comes, goes or moves. */
+  const tileOrder = tiles.map((tile) => (tile.leaving ? `${tile.key}!` : tile.key)).join();
+  const gridShown = !inTrash && tiles.length > 0;
   useLayoutEffect(() => {
     const node = grid.current;
     if (!node) return;
     applyRoving(node, restingId);
     // Tools that appear later (a question, the selection) are tiles' own
-    // buttons again.
-    const watch = new MutationObserver(() => applyRoving(node, restingId));
+    // buttons again — only the tiles that changed are looked at again.
+    const watch = new MutationObserver((records) => {
+      for (const tile of touchedTiles(records)) roveTile(tile, restingId);
+    });
     watch.observe(node, { childList: true, subtree: true });
     return () => watch.disconnect();
-  });
+  }, [restingId, tileOrder, gridShown]);
   const onGridKeyDown = (event: React.KeyboardEvent) => {
     const target = event.target as HTMLElement;
     if (!target.matches("[data-tile-open]")) return;
@@ -318,21 +348,23 @@ export function Clips({
 
   /** Where a tile stands in the live list — the player counts in those. */
   const positions = new Map(visible.map((clip, index) => [clip.id, index]));
-  /** Where it stands among all tiles — the arrival is staggered by it. */
-  const slots = new Map(tiles.map((tile, slot) => [tile.key, slot]));
 
   // Deleting one tile and filtering the rest are the same thing to the grid:
   // whatever stays has to travel to its new place instead of appearing there.
-  useFlip(grid, tiles.map((tile) => (tile.leaving ? `${tile.key}!` : tile.key)).join());
+  useFlip(grid, tileOrder);
 
-  // Which tiles arrive with an animation, decided once and then left alone —
-  // recomputing it every render would cut the animation off halfway.
-  const greeting = useRef<Set<string> | null>(null);
+  // Which tiles arrive with an animation, and how long each waits, decided
+  // once and then left alone — recomputing it every render would cut the
+  // animation off halfway. The wait is staggered by the tile's place among all
+  // tiles, capped, so a gallery of eighty clips does not crawl in.
+  const greeting = useRef<Map<string, number> | null>(null);
   const known = useRef<Set<string> | null>(null);
   const arrived = useRef(new Set<string>());
 
   if (greeting.current === null && tiles.length > 0) {
-    greeting.current = greeted ? new Set() : new Set(tiles.map((tile) => tile.key));
+    greeting.current = greeted
+      ? new Map()
+      : new Map(tiles.map((tile, slot) => [tile.key, Math.min(slot, 11) * 30]));
     greeted = true;
   }
   if (known.current === null) {
@@ -460,6 +492,41 @@ export function Clips({
     await fileClip(clip.id);
   };
 
+  // What the tiles call, by clip — one function each for the whole gallery, so
+  // a tile whose own props did not change is left alone when the gallery
+  // renders (a heart, a re-read library, the selection elsewhere).
+  const tileAsk = useCallback(
+    (id: string, what: Asking | null) => setAsking(what ? { id, what } : null),
+    [],
+  );
+  const tileRenaming = useCallback((id: string, on: boolean) => setRenaming(on ? id : null), []);
+  const tileThumb = useCallback((id: string, node: HTMLButtonElement | null) => {
+    if (node) thumbs.current.set(id, node);
+    else thumbs.current.delete(id);
+  }, []);
+  const tileExport = useCallback((clip: Clip) => setExporting(clip), []);
+  const tileSelect = useStableHandler((id: string, mods: SelectMods) => selection.select(id, mods));
+  const tileOpen = useStableHandler((id: string) => openAt(positions.get(id) ?? 0));
+  const tileFavorite = useStableHandler((clip: Clip) => void toggleFavorite(clip));
+  const tileDelete = useStableHandler((id: string) => void deleteClip(id));
+  const tileDiscard = useStableHandler(
+    (clip: Clip) => void (clip.originalAvailable ? discardClipOriginal(clip.id) : bakeClipCam(clip.id)),
+  );
+  const tileMenu = useStableHandler((event: React.MouseEvent, clip: Clip) => {
+    // If the cursor is in the name field the menu belongs to the text —
+    // `TextMenu` takes care of that on its own.
+    if (isTextField(event.target)) return;
+    clipMenu(event, clip, {
+      onOpen: () => openAt(positions.get(clip.id) ?? 0),
+      onRename: () => setRenaming(clip.id),
+      onDelete: () => setAsking({ id: clip.id, what: "delete" }),
+      onDiscardOriginal: () => setAsking({ id: clip.id, what: "discard" }),
+      onExport: () => setExporting(clip),
+    });
+  });
+  /** One clock for every tile's "5m ago" in this render. */
+  const now = Date.now();
+
   return (
     <div className="space-y-6">
       {/* While the viewer is up the gallery behind it is out of the tab order. */}
@@ -536,10 +603,7 @@ export function Clips({
               )}
               <div className="grid grid-cols-3 gap-4">
                 {group.items.map(({ item: clip, key, leaving }) => {
-                  const index = positions.get(clip.id) ?? 0;
-                  const slot = slots.get(key) ?? 0;
-                  // Capped, so a gallery of eighty clips does not crawl in.
-                  const wait = greeting.current?.has(key) ? Math.min(slot, 11) * 30 : null;
+                  const wait = greeting.current?.get(key) ?? null;
                   return (
                     <ClipCard
                       key={key}
@@ -548,37 +612,22 @@ export function Clips({
                       leaving={leaving}
                       arriving={wait !== null || arrived.current.has(key)}
                       delay={wait}
+                      ago={formatAgo(clip.createdAt, now)}
                       link={links[clip.id]}
                       asking={asking?.id === clip.id ? asking.what : null}
-                      onAsk={(what) => setAsking(what ? { id: clip.id, what } : null)}
+                      onAsk={tileAsk}
                       renaming={renaming === clip.id}
-                      onRenaming={(on) => setRenaming(on ? clip.id : null)}
-                      thumbRef={(node) => {
-                        if (node) thumbs.current.set(clip.id, node);
-                        else thumbs.current.delete(clip.id);
-                      }}
+                      onRenaming={tileRenaming}
+                      thumbRef={tileThumb}
                       selected={selection.selected.has(clip.id)}
                       selecting={selecting}
-                      onSelect={(mods) => selection.select(clip.id, mods)}
-                      onOpen={() => openAt(index)}
-                      onExport={() => setExporting(clip)}
-                      onFavorite={() => void toggleFavorite(clip)}
-                      onDelete={() => void deleteClip(clip.id)}
-                      onDiscard={() =>
-                        void (clip.originalAvailable ? discardClipOriginal(clip.id) : bakeClipCam(clip.id))
-                      }
-                      onContextMenu={(event) => {
-                        // If the cursor is in the name field the menu belongs to the
-                        // text — `TextMenu` takes care of that on its own.
-                        if (isTextField(event.target)) return;
-                        clipMenu(event, clip, {
-                          onOpen: () => openAt(index),
-                          onRename: () => setRenaming(clip.id),
-                          onDelete: () => setAsking({ id: clip.id, what: "delete" }),
-                          onDiscardOriginal: () => setAsking({ id: clip.id, what: "discard" }),
-                          onExport: () => setExporting(clip),
-                        });
-                      }}
+                      onSelect={tileSelect}
+                      onOpen={tileOpen}
+                      onExport={tileExport}
+                      onFavorite={tileFavorite}
+                      onDelete={tileDelete}
+                      onDiscard={tileDiscard}
+                      onContextMenu={tileMenu}
                     />
                   );
                 })}
@@ -654,7 +703,7 @@ export function Clips({
 }
 
 /** "Today · 3 clips" over a day's tiles. */
-function DayHeading({ label, count }: { label: string; count: number }) {
+const DayHeading = memo(function DayHeading({ label, count }: { label: string; count: number }) {
   return (
     <h2 className="mb-3 flex items-baseline gap-2.5 text-[15px] font-semibold text-ink/80">
       {label}
@@ -663,10 +712,54 @@ function DayHeading({ label, count }: { label: string; count: number }) {
       </span>
     </h2>
   );
-}
+});
 
 /** What a tile is asking about, in its own place over the thumbnail. */
 type Asking = "delete" | "discard";
+
+interface ClipCardProps {
+  clip: Clip;
+  /** The tile's key for `useFlip` — the presence key, the clip id. */
+  flipKey: string;
+  leaving: boolean;
+  /** Plays the arrival — the first greeting or a clip saved just now. */
+  arriving: boolean;
+  /** How long the arrival waits, for the staggered greeting. */
+  delay: number | null;
+  /** "5m ago" — worked out by the gallery, so the tile changes when the text does. */
+  ago: string;
+  link: Link | undefined;
+  asking: Asking | null;
+  onAsk: (id: string, what: Asking | null) => void;
+  renaming: boolean;
+  onRenaming: (id: string, on: boolean) => void;
+  thumbRef: (id: string, node: HTMLButtonElement | null) => void;
+  /** In the selection — a ring and a filled check. */
+  selected: boolean;
+  /** Something is selected somewhere: a click picks instead of opening. */
+  selecting: boolean;
+  /** Ctrl-click and Shift-click anywhere on the tile, any click on the picture
+   *  while a selection exists. */
+  onSelect: (id: string, mods: SelectMods) => void;
+  onOpen: (id: string) => void;
+  onExport: (clip: Clip) => void;
+  onFavorite: (clip: Clip) => void;
+  onDelete: (id: string) => void;
+  onDiscard: (clip: Clip) => void;
+  onContextMenu: (event: React.MouseEvent, clip: Clip) => void;
+}
+
+/**
+ * A tile renders again only when its own props change. The clip is compared
+ * by content: a re-read library hands over a new object for every clip, and
+ * the unchanged ones should stay as they are. The handlers are the gallery's
+ * shared ones and take the clip, so they never differ between renders.
+ */
+function sameCardProps(a: ClipCardProps, b: ClipCardProps): boolean {
+  const keys = Object.keys(a) as Array<keyof ClipCardProps>;
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => (key === "clip" ? sameData(a.clip, b.clip) : Object.is(a[key], b[key])));
+}
 
 /**
  * One tile of the gallery: thumbnail with its pills, the heart, folder and bin
@@ -675,12 +768,13 @@ type Asking = "delete" | "discard";
  * Everything it changes goes through its props, so the gallery stays the one
  * place that knows which tile is asking, renaming or open.
  */
-function ClipCard({
+const ClipCard = memo(function ClipCard({
   clip,
   flipKey,
   leaving,
   arriving,
   delay,
+  ago,
   link,
   asking,
   onAsk,
@@ -696,38 +790,23 @@ function ClipCard({
   onDelete,
   onDiscard,
   onContextMenu,
-}: {
-  clip: Clip;
-  /** The tile's key for `useFlip` — the presence key, the clip id. */
-  flipKey: string;
-  leaving: boolean;
-  /** Plays the arrival — the first greeting or a clip saved just now. */
-  arriving: boolean;
-  /** How long the arrival waits, for the staggered greeting. */
-  delay: number | null;
-  link: Link | undefined;
-  asking: Asking | null;
-  onAsk: (what: Asking | null) => void;
-  renaming: boolean;
-  onRenaming: (on: boolean) => void;
-  thumbRef: (node: HTMLButtonElement | null) => void;
-  /** In the selection — a ring and a filled check. */
-  selected: boolean;
-  /** Something is selected somewhere: a click picks instead of opening. */
-  selecting: boolean;
-  /** Ctrl-click and Shift-click anywhere on the tile, any click on the picture
-   *  while a selection exists. */
-  onSelect: (mods: SelectMods) => void;
-  onOpen: () => void;
-  onExport: () => void;
-  onFavorite: () => void;
-  onDelete: () => void;
-  onDiscard: () => void;
-  onContextMenu: (event: React.MouseEvent) => void;
-}) {
+}: ClipCardProps) {
+  const id = clip.id;
+  const thumb = useCallback((node: HTMLButtonElement | null) => thumbRef(id, node), [thumbRef, id]);
+  const editing = useCallback((on: boolean) => onRenaming(id, on), [onRenaming, id]);
+  // A focused control that goes away with a render — a question answered with
+  // Escape — takes the focus along without a blur, so the mark is checked here.
+  const box = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const node = box.current;
+    if (node?.hasAttribute("data-kbd-focus") && !node.contains(document.activeElement)) {
+      node.removeAttribute("data-kbd-focus");
+    }
+  });
   return (
     <Card
       data-flip={flipKey}
+      data-tile
       interactive={!leaving}
       className={cn(
         "group overflow-hidden",
@@ -735,7 +814,15 @@ function ClipCard({
         selected && "border-accent shadow-[0_0_0_1px_var(--color-accent)] hover:border-accent",
       )}
       style={delay !== null ? { animationDelay: `${delay}ms` } : undefined}
-      onContextMenu={onContextMenu}
+      onContextMenu={(event) => onContextMenu(event, clip)}
+      // Keyboard focus anywhere in the tile shows its tools. An attribute, not
+      // `:has(:focus-visible)`: a rule like that made every node added anywhere
+      // on the page restyle the whole document.
+      onFocus={(event) => {
+        box.current = event.currentTarget;
+        event.currentTarget.toggleAttribute("data-kbd-focus", event.target.matches(":focus-visible"));
+      }}
+      onBlur={(event) => event.currentTarget.removeAttribute("data-kbd-focus")}
       // Before the buttons inside see it, so Ctrl-click on Open or Share picks
       // the tile too instead of acting.
       onClickCapture={(event) => {
@@ -750,7 +837,7 @@ function ClipCard({
         if (asking && (event.target as HTMLElement).closest("[data-tile-tools]")) return;
         event.preventDefault();
         event.stopPropagation();
-        onSelect({ shift: event.shiftKey, toggle: true });
+        onSelect(id, { shift: event.shiftKey, toggle: true });
       }}
       // Shift-click would start a text selection across the tiles.
       onMouseDown={(event) => {
@@ -759,10 +846,10 @@ function ClipCard({
     >
       <div className="relative">
         <button
-          ref={thumbRef}
+          ref={thumb}
           data-tile-open
           data-ring-inset
-          onClick={onOpen}
+          onClick={() => onOpen(id)}
           aria-label={`${clip.screenshot ? "Open" : "Play"} ${
             clip.game ??
             (clip.screenshot ? "screenshot" : clip.recording ? "recording" : "clip")
@@ -856,13 +943,13 @@ function ClipCard({
               ? 'Favorite — the file lives in the "Favorites" folder'
               : "Add to favorites"
           }
-          onClick={onFavorite}
+          onClick={() => onFavorite(clip)}
           className={cn(
             "absolute top-3 left-3 grid h-8 w-8 place-items-center rounded-pill",
             "bg-black/50 backdrop-blur-md transition",
             clip.favorite
               ? "text-live"
-              : "text-white/70 opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100 hover:text-white",
+              : "text-white/70 opacity-0 group-hover:opacity-100 group-data-[kbd-focus]:opacity-100 hover:text-white",
           )}
         >
           <HeartBurst favorite={clip.favorite} />
@@ -890,7 +977,7 @@ function ClipCard({
             // the cursor has wandered off the tile.
             asking
               ? "opacity-100"
-              : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100",
+              : "opacity-0 group-hover:opacity-100 group-data-[kbd-focus]:opacity-100",
           )}
         >
           {asking === "delete" ? (
@@ -899,10 +986,10 @@ function ClipCard({
               // Its share link goes along — worth saying before, not after.
               question={link ? "Delete with its link?" : undefined}
               onConfirm={() => {
-                onAsk(null);
-                onDelete();
+                onAsk(id, null);
+                onDelete(id);
               }}
-              onCancel={() => onAsk(null)}
+              onCancel={() => onAsk(id, null)}
             />
           ) : asking === "discard" ? (
             <ConfirmDelete
@@ -913,17 +1000,17 @@ function ClipCard({
               confirmLabel={clip.originalAvailable ? "Throw away" : "Bake"}
               confirmTitle={freeSpaceTitle(clip)}
               onConfirm={() => {
-                onAsk(null);
-                onDiscard();
+                onAsk(id, null);
+                onDiscard(clip);
               }}
-              onCancel={() => onAsk(null)}
+              onCancel={() => onAsk(id, null)}
             />
           ) : (
             <>
               <IconAction label="Show in folder" onClick={() => inTauri && api.revealClip(clip.id)}>
                 <IconFolder className="h-4 w-4" />
               </IconAction>
-              <IconAction label="Delete clip" danger onClick={() => onAsk("delete")}>
+              <IconAction label="Delete clip" danger onClick={() => onAsk(id, "delete")}>
                 <IconTrash className="h-4 w-4" />
               </IconAction>
             </>
@@ -931,10 +1018,10 @@ function ClipCard({
         </div>
       </div>
       <div className="p-4">
-        <NameField clip={clip} editing={renaming} onEditing={onRenaming} />
+        <NameField clip={clip} editing={renaming} onEditing={editing} />
         <p className="mt-1 truncate text-xs text-ink-muted">
           {clip.game ? `${clip.game} · ` : ""}
-          {formatAgo(clip.createdAt)} ·{" "}
+          {ago} ·{" "}
           {/* A still is measured by its edges, not by "1080p" — that is
               a word about video. */}
           {clip.screenshot ? `${clip.width} × ${clip.height}` : `${clip.height}p`} ·{" "}
@@ -946,15 +1033,15 @@ function ClipCard({
         {/* Viewing and editing are one screen; everything that sends the
             clip somewhere is one menu beside it. */}
         <div className="mt-3 flex gap-2">
-          <Button size="sm" onClick={onOpen}>
+          <Button size="sm" onClick={() => onOpen(id)}>
             Open
           </Button>
-          <ShareMenuButton clip={clip} variant="secondary" onExport={onExport} />
+          <ShareMenuButton clip={clip} variant="secondary" onExport={() => onExport(clip)} />
         </div>
       </div>
     </Card>
   );
-}
+}, sameCardProps);
 
 /**
  * What the selected clips can do together: heart them, send them to a friend,

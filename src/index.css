@@ -79,3 +79,21 @@ button {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* The gallery's tiles take no pointer while the page scrolls (useScrollingFlag):
+   the hover look switching on and off under a still cursor was most of the
+   cost of a scroll. */
+main[data-scrolling] [data-tile] {
+  pointer-events: none;
+}
+
+/* A tile out of sight skips its layout and paint until it comes near. Per tile,
+   not per day: a day with containment becomes its tiles' offset parent and
+   clips them, and the gallery's travel animation (useFlip) would then see no
+   move when a whole day shifts. The card already clips its content, so the
+   paint containment changes nothing on screen. The height is a tile at the
+   widest window, without its border; once shown, the real one is remembered. */
+[data-tile] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 342px;
+}
