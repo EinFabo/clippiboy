@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -30,7 +30,7 @@ export function AboutTab() {
 
 /** Version, update check and installation. */
 function Updates() {
-  const [version, setVersion] = useState("0.1.0");
+  const version = useEngine((s) => s.appVersion);
   // Shared with the notice at the top of every page, so a check here and the
   // hourly one in the core land in the same place.
   const update = useEngine((s) => s.update);
@@ -43,11 +43,6 @@ function Updates() {
   const installUpdate = useEngine((s) => s.installUpdate);
   const installing = progress !== null;
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!inTauri) return;
-    api.appVersion().then(setVersion).catch(() => {});
-  }, []);
 
   const check = async () => {
     setState("checking");
@@ -76,7 +71,7 @@ function Updates() {
     <>
       <Card className="divide-y divide-line">
         <Row
-          label={`ClippiBoy ${version}`}
+          label={version ? `ClippiBoy ${version}` : "ClippiBoy"}
           hint={
             progress
               ? updateProgressText(progress)

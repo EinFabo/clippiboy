@@ -1,8 +1,10 @@
-import { Fragment, useRef } from "react";
+import { Fragment, useEffect, useRef } from "react";
 
 import { useEngine, type SettingsTab } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/cn";
+import { prefetchControllers } from "@/lib/controllersCache";
+import { useStorageInfo } from "@/lib/storageInfo";
 import { SLIDE, SlidingIndicator } from "@/components/ui/SlidingIndicator";
 import {
   IconBell,
@@ -72,6 +74,15 @@ export function Settings() {
   const shown = unlocked ? [...groups, [extra]] : groups;
   const Page = shown.flat().find(({ key }) => key === tab)?.page ?? HotkeysTab;
   const taps = useRef<number[]>([]);
+  const refreshCameras = useEngine((s) => s.refreshCameras);
+
+  // What the tabs show that is not in the store: asked as the page opens, so
+  // a tab finds it waiting instead of filling in after it is on screen.
+  useEffect(() => {
+    useStorageInfo.getState().prefetch();
+    void refreshCameras();
+    prefetchControllers();
+  }, [refreshCameras]);
 
   const tap = (at: number) => {
     taps.current = [...taps.current, at].slice(-5);
@@ -111,6 +122,7 @@ export function Settings() {
                   key={key}
                   {...{ [SLIDE]: key }}
                   onClick={() => setTab(key)}
+                  onPointerEnter={key === "storage" ? () => useStorageInfo.getState().prefetch() : undefined}
                   aria-current={tab === key ? "page" : undefined}
                   className={cn(
                     "relative flex h-9 items-center gap-2.5 rounded-pill px-3.5 text-[13px] font-medium",

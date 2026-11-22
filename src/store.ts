@@ -47,8 +47,12 @@ export type SettingsTab =
 interface EngineState {
   ready: boolean;
   config: AppConfig;
-  /** The cameras Windows lists; loaded when the Camera tab opens. */
+  /** The cameras Windows lists; loaded when Settings opens. */
   cameras: CameraDevice[];
+  /** The list was read at least once, so an empty one means "none", not "not asked". */
+  camerasLoaded: boolean;
+  /** The app's version, read once at the start; `null` until then. */
+  appVersion: string | null;
   refreshCameras: () => Promise<void>;
   /** What the webcam is doing; `null` while it is off. */
   camStatus: CamStatus | null;
@@ -275,15 +279,17 @@ export const useEngine = create<EngineState>((set, get) => ({
   bufferedSeconds: 0,
   screenFallback: null,
   cameras: [],
+  camerasLoaded: false,
+  appVersion: null,
   camStatus: null,
   vcamStatus: null,
   async refreshCameras() {
     if (!inTauri) {
-      set({ cameras: mock.mockCameras });
+      set({ cameras: mock.mockCameras, camerasLoaded: true });
       return;
     }
     try {
-      set({ cameras: await api.listCameras() });
+      set({ cameras: await api.listCameras(), camerasLoaded: true });
     } catch (err) {
       set({ lastError: `Cameras: ${String(err)}` });
     }
@@ -334,6 +340,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         encoders: mock.mockEncoders,
         clips: mock.mockClips,
         trash: mock.mockTrash,
+        appVersion: "0.1.0",
       });
       setInterval(() => {
         const levels: LevelMap = {};
@@ -445,6 +452,11 @@ export const useEngine = create<EngineState>((set, get) => ({
           set({ clips, trash });
         }),
       );
+      // Cheap and synchronous in the core; About shows it without a flash of a placeholder.
+      api
+        .appVersion()
+        .then((appVersion) => set({ appVersion }))
+        .catch(() => {});
       // Not part of the start: the gallery shows without it.
       api
         .listTrash()

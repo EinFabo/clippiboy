@@ -9,6 +9,8 @@ import { formatSize } from "@/lib/format";
 import { IconCheck, IconClose } from "@/components/icons";
 import { Segmented } from "@/components/ui/Controls";
 import { useCountUp } from "@/lib/useCountUp";
+import { bakeCardShown } from "@/lib/settingsData";
+import { useStorageInfo } from "@/lib/storageInfo";
 import type { StorageUsage, TrimOriginals } from "@/lib/types";
 import { Row, SettingsGroup } from "./shared";
 
@@ -65,93 +67,91 @@ function AutoDelete() {
  * hundred megabytes beside gigabytes of clips, which looked simply wrong.
  */
 function Storage() {
-  const [usage, setUsage] = useState<StorageUsage | null>(null);
-  // Bumped after "Clear all trims", so the rows read the folders again.
-  const [reads, setReads] = useState(0);
+  const { usage, trims, setTrims, prefetch } = useStorageInfo(
+    useShallow((s) => ({ usage: s.usage, trims: s.trims, setTrims: s.setTrims, prefetch: s.prefetch })),
+  );
+  // Settled on what was known when the tab opened, so the card neither pops in
+  // nor out while the numbers are read again behind it.
+  const [bakeShown, setBakeShown] = useState(() => bakeCardShown(usage?.facecamBytes ?? null));
 
+  // Reads what is missing or stale (Settings already asked as it opened).
   useEffect(() => {
-    if (!inTauri) return;
-    let cancelled = false;
-    void api
-      .storageUsage()
-      .then((value) => {
-        if (!cancelled) setUsage(value);
-      })
-      .catch(() => {
-        // Nothing to say: an unreadable folder is a missing number, not an error.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [reads]);
+    prefetch();
+  }, [prefetch]);
 
-  // "Clear all trims" does not wait for the count: walking the web views'
-  // cache can take a moment, and the button has nothing to do with it.
+  // After "Clear all trims" or "Bake all": read the folders again.
+  const reread = () => prefetch(true);
+
   return (
     <>
       <UsageCard usage={usage} />
-      <ClearTrims onCleared={() => setReads((n) => n + 1)} />
-      {usage && usage.facecamBytes > 0 && (
-        <BakeCams bytes={usage.facecamBytes} onBaked={() => setReads((n) => n + 1)} />
+      <ClearTrims found={trims} setFound={setTrims} onCleared={reread} />
+      {bakeShown && (
+        <BakeCams
+          bytes={usage?.facecamBytes ?? null}
+          onBaked={() => {
+            setBakeShown(false);
+            reread();
+          }}
+        />
       )}
     </>
   );
 }
 
 function UsageCard({ usage }: { usage: StorageUsage | null }) {
-  const rows: Array<[string, number, string]> = !usage ? [] : [
+  // Every row from the first frame; "—" stands for a number not read yet.
+  const rows: Array<[string, number | null, string]> = [
     [
       "Clips",
-      usage.clipsBytes,
+      usage?.clipsBytes ?? null,
       "Your clips, screenshots and recordings, wherever they were saved.",
     ],
     [
       "Recently deleted",
-      usage.trashBytes ?? 0,
+      usage ? (usage.trashBytes ?? 0) : null,
       "Deleted clips, kept for 30 days. Empty them in the gallery.",
     ],
     [
       "Untouched recordings",
-      usage.originalsBytes,
+      usage?.originalsBytes ?? null,
       "One per trimmed clip, so the trim can be undone. \u201cFree up space\u201d in the clip menu releases one, \u201cClear all trims\u201d below all of them.",
     ],
     [
       "Clean pictures for moving the cam",
-      usage.facecamBytes,
+      usage?.facecamBytes ?? null,
       "The clean picture and the cam of every clip with a facecam, so the cam can still be moved.",
     ],
     [
       "Screenshot edits",
-      usage.shotEditsBytes,
+      usage?.shotEditsBytes ?? null,
       "What an edit can go back to, and what lies under the watermark.",
     ],
     [
       "Individual audio tracks",
-      usage.tracksBytes,
+      usage?.tracksBytes ?? null,
       "Kept so the mix can still be changed after the fact.",
     ],
-    ["Thumbnails", usage.thumbsBytes, "One per clip."],
+    ["Thumbnails", usage?.thumbsBytes ?? null, "One per clip."],
     [
       "App cache",
-      usage.cacheBytes,
+      usage?.cacheBytes ?? null,
       "What the app's windows keep for themselves. Windows keeps it in check.",
     ],
     [
       "ffmpeg",
-      usage.toolsBytes,
+      usage?.toolsBytes ?? null,
       "Downloaded once on the first start to write clips.",
     ],
   ];
-  const total = rows.reduce((sum, [, bytes]) => sum + bytes, 0);
-  // Nothing to show until the numbers are in.
-  if (!usage) return null;
+  const total = usage ? rows.reduce((sum, [, bytes]) => sum + (bytes ?? 0), 0) : null;
 
   return (
     <Card className="mt-3 divide-y divide-line">
       <SettingsGroup
         title="Everything ClippiBoy takes"
         storageKey="storage.usage"
-        summary={<span className="font-mono">{formatSize(total)}</span>}
+        summary={<span className="font-mono">{total === null ? "—" : formatSize(total)}</span>}
       >
         {rows.map(([label, bytes, hint]) => (
           <div key={label} className="flex items-center justify-between gap-6 p-4">
@@ -159,7 +159,9 @@ function UsageCard({ usage }: { usage: StorageUsage | null }) {
               <p className="text-sm">{label}</p>
               <p className="mt-0.5 text-xs text-ink-faint">{hint}</p>
             </div>
-            <span className="shrink-0 font-mono text-sm text-ink-muted">{formatSize(bytes)}</span>
+            <span className="shrink-0 font-mono text-sm text-ink-muted">
+              {bytes === null ? "—" : formatSize(bytes)}
+            </span>
           </div>
         ))}
       </SettingsGroup>
@@ -179,21 +181,19 @@ const COUNT_MS = 900;
  * undone afterwards. Then the size it frees counts down to zero while a bar
  * drains, so the space visibly goes rather than a number just changing.
  */
-function ClearTrims({ onCleared }: { onCleared: () => void }) {
-  const [found, setFound] = useState<TrimOriginals | null>(null);
-
-  useEffect(() => {
-    void api
-      .trimOriginals()
-      .then(setFound)
-      .catch(() => setFound({ count: 0, bytes: 0 }));
-  }, []);
-
-  // Mounted only once the size is known, so it starts on that size rather than
-  // counting up to it from nothing.
-  if (!found) return null;
+function ClearTrims({
+  found,
+  setFound,
+  onCleared,
+}: {
+  found: TrimOriginals | null;
+  setFound: (found: TrimOriginals) => void;
+  onCleared: () => void;
+}) {
+  // Keyed on whether the size is known, so the card starts on that size
+  // rather than counting up to it from nothing when the answer arrives.
   return (
-    <ClearTrimsCard found={found} setFound={setFound} onCleared={onCleared} />
+    <ClearTrimsCard key={found ? "known" : "unknown"} found={found} setFound={setFound} onCleared={onCleared} />
   );
 }
 
@@ -202,7 +202,7 @@ function ClearTrimsCard({
   setFound,
   onCleared,
 }: {
-  found: TrimOriginals;
+  found: TrimOriginals | null;
   setFound: (found: TrimOriginals) => void;
   onCleared: () => void;
 }) {
@@ -214,12 +214,13 @@ function ClearTrimsCard({
   // Counts down to what is really left — a clip open in a player keeps its
   // original, and the number stops there instead of reaching zero and jumping
   // back. Threshold 0: a few bytes left are still a change worth showing.
-  const shownBytes = useCountUp(found.bytes, {
+  const shownBytes = useCountUp(found?.bytes ?? 0, {
     duration: COUNT_MS,
     threshold: 0,
   });
 
   const clear = async () => {
+    if (!found) return;
     setBusy(true);
     setError(null);
     try {
@@ -239,8 +240,9 @@ function ClearTrimsCard({
     }
   };
 
-  const nothing = found.count === 0;
-  const before = freed ? freed.bytes + found.bytes : found.bytes;
+  // Unknown yet: the same card with a dash and a button that waits.
+  const nothing = found ? found.count === 0 : true;
+  const before = freed ? freed.bytes + (found?.bytes ?? 0) : (found?.bytes ?? 0);
   const share = before > 0 ? shownBytes / before : 0;
 
   return (
@@ -249,14 +251,16 @@ function ClearTrimsCard({
         <div className="min-w-0">
           <p className="text-sm font-medium">Clear all trims</p>
           <p className="mt-0.5 text-xs text-ink-faint">
-            {nothing
+            {!found
+              ? "—"
+              : nothing
               ? "No trimmed clip keeps an untouched recording right now."
               : `${found.count} trimmed ${found.count === 1 ? "clip keeps its" : "clips keep their"} untouched recording.`}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-3">
           <span className="font-mono text-sm tabular-nums text-ink-muted">
-            {formatSize(shownBytes)}
+            {found ? formatSize(shownBytes) : "—"}
           </span>
           {!asking && (
             <Button
@@ -303,7 +307,7 @@ function ClearTrimsCard({
               disabled={busy}
               onClick={() => void clear()}
             >
-              {busy ? "Clearing…" : `Free up ${formatSize(found.bytes)}`}
+              {busy ? "Clearing…" : `Free up ${formatSize(found?.bytes ?? 0)}`}
             </Button>
           </div>
         </div>
@@ -322,7 +326,7 @@ function ClearTrimsCard({
           {freed.count === 0
             ? "Nothing could be cleared — is a clip open somewhere?"
             : `Freed ${formatSize(freed.bytes)} from ${freed.count} ${freed.count === 1 ? "clip" : "clips"}`}
-          {found.count > 0 &&
+          {found && found.count > 0 &&
             freed.count > 0 &&
             ` · ${found.count} still in use`}
         </p>
@@ -340,16 +344,9 @@ function ClipDir() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Only for the "Reset" button: without the comparison the UI would not know
-  // whether there is anything to reset at all.
-  const [fallback, setFallback] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!inTauri) return;
-    api
-      .defaultClipDir()
-      .then(setFallback)
-      .catch(() => {});
-  }, []);
+  // whether there is anything to reset at all. Read as Settings opens and
+  // remembered, so the button is there (or not) from the first frame.
+  const fallback = useStorageInfo((s) => s.defaultDir);
 
   const apply = async (dir: string) => {
     setBusy(true);
@@ -394,12 +391,14 @@ function ClipDir() {
           {config.clipDir}
         </p>
         <div className="flex shrink-0 gap-2">
-          {canReset && (
+          {/* Until the default is known its place is kept, unseen. */}
+          {(canReset || (fallback === null && inTauri)) && (
             <Button
               size="sm"
               variant="ghost"
-              disabled={busy}
-              onClick={() => apply(fallback)}
+              className={canReset ? undefined : "invisible"}
+              disabled={busy || !canReset}
+              onClick={() => canReset && apply(fallback)}
             >
               Reset
             </Button>
@@ -428,7 +427,7 @@ function ClipDir() {
  * can still be moved. This bakes the cam in where each file shows it and frees
  * that space; the cams can no longer be moved afterwards.
  */
-function BakeCams({ bytes, onBaked }: { bytes: number; onBaked: () => void }) {
+function BakeCams({ bytes, onBaked }: { bytes: number | null; onBaked: () => void }) {
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -457,9 +456,9 @@ function BakeCams({ bytes, onBaked }: { bytes: number; onBaked: () => void }) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <span className="font-mono text-sm tabular-nums text-ink-muted">{formatSize(bytes)}</span>
+          <span className="font-mono text-sm tabular-nums text-ink-muted">{bytes === null ? "—" : formatSize(bytes)}</span>
           {!asking && (
-            <Button size="sm" variant="danger" disabled={busy} onClick={() => setAsking(true)}>
+            <Button size="sm" variant="danger" disabled={busy || !bytes} onClick={() => setAsking(true)}>
               Bake all
             </Button>
           )}

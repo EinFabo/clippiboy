@@ -34,6 +34,7 @@ import {
   type PadFamily,
 } from "@/lib/hotkeyText";
 import { controllerSummary } from "@/lib/settingsSummary";
+import { cachedControllers, rememberControllers } from "@/lib/controllersCache";
 import { Row, SettingsGroup } from "./shared";
 import { StreamDeck } from "./StreamDeck";
 
@@ -181,7 +182,7 @@ const GUIDE_NOTE =
     asks while the window is hidden (in the tray, minimised). */
 function useControllers(): Controllers | null {
   const [controllers, setControllers] = useState<Controllers | null>(
-    inTauri ? null : { ready: true, unavailable: null, pads: [], family: "xbox", inUse: null },
+    inTauri ? cachedControllers() : { ready: true, unavailable: null, pads: [], family: "xbox", inUse: null },
   );
   useEffect(() => {
     if (!inTauri) return;
@@ -189,6 +190,7 @@ function useControllers(): Controllers | null {
     let unlisten: (() => void) | null = null;
     void events
       .onControllersChanged((next) => {
+        rememberControllers(next);
         if (!gone) setControllers(next);
       })
       .then((off) => {
@@ -200,6 +202,7 @@ function useControllers(): Controllers | null {
       api
         .watchControllers()
         .then((next) => {
+          rememberControllers(next);
           if (!gone) setControllers(next);
         })
         .catch(() => {});

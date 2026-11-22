@@ -10,6 +10,7 @@ import { camBox, layoutFromRect, snapLayout } from "@/lib/camGeometry";
 import { usePictureBox } from "@/lib/pictureBox";
 import { RectLayer } from "@/components/ui/RectLayer";
 import type { CamLayout, CamShape, FacecamConfig } from "@/lib/types";
+import { cameraMissing } from "@/lib/settingsData";
 import { camAppearsSummary, camPositionSummary } from "@/lib/settingsSummary";
 import { Row, SettingsGroup } from "./shared";
 
@@ -17,11 +18,12 @@ import { Row, SettingsGroup } from "./shared";
 const FIRST = "__first";
 
 export function FacecamTab() {
-  const { config, cameras, camStatus, vcamStatus, patchConfig, refreshCameras, setVirtualCamera, removeVirtualCamera } =
+  const { config, cameras, camerasLoaded, camStatus, vcamStatus, patchConfig, refreshCameras, setVirtualCamera, removeVirtualCamera } =
     useEngine(
       useShallow((s) => ({
         config: s.config,
         cameras: s.cameras,
+        camerasLoaded: s.camerasLoaded,
         camStatus: s.camStatus,
         vcamStatus: s.vcamStatus,
         patchConfig: s.patchConfig,
@@ -44,18 +46,29 @@ export function FacecamTab() {
   const patch = (p: Partial<FacecamConfig>) => patchConfig({ facecam: { ...cam, ...p } });
   const [delayDraft, setDelayDraft] = useState<number | null>(null);
 
-  // The list when the tab opens, never in the store's start.
+  // Settings reads the list when it opens (never in the store's start); this
+  // keeps it current while the tab is open.
   useEffect(() => {
     void refreshCameras();
   }, [refreshCameras]);
 
   const chosen = cam.deviceId ?? FIRST;
-  const known = cameras.some((c) => c.id === cam.deviceId);
+  const missing = cameraMissing(
+    cam.deviceId,
+    cameras.map((c) => c.id),
+    camerasLoaded,
+  );
   const cameraOptions = [
     { value: FIRST, label: "First camera" },
     ...cameras.map((c) => ({ value: c.id, label: c.name })),
-    ...(cam.deviceId && !known
-      ? [{ value: cam.deviceId, label: `${cam.deviceName ?? "Camera"} (not connected)` }]
+    // Until the list was read, the saved camera shows by name alone.
+    ...(cam.deviceId && !cameras.some((c) => c.id === cam.deviceId)
+      ? [
+          {
+            value: cam.deviceId,
+            label: `${cam.deviceName ?? "Camera"}${missing ? " (not connected)" : ""}`,
+          },
+        ]
       : []),
   ];
   const off = !cam.enabled;
