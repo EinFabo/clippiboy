@@ -290,8 +290,9 @@ impl Note {
     }
 }
 
-/// The applications another source records: the detected game (whether or not
-/// a source asks for it — it is the one thing that must never be swallowed) and
+/// The applications another source records: the detected game — when a Game
+/// source or an output device (which takes the leftovers, game included) records
+/// it; with neither, a launcher picked by hand is the only way it is heard — and
 /// every application picked by hand that runs. A tap on an ancestor of one of
 /// them would record it a second time.
 fn recorded_roots(
@@ -300,7 +301,15 @@ fn recorded_roots(
     tree: &HashMap<u32, (u32, String)>,
     own: u32,
 ) -> Vec<u32> {
-    let mut out: Vec<u32> = game_pid.map(|pid| app_root(pid, tree)).into_iter().collect();
+    let game_recorded = sources
+        .iter()
+        .filter(|s| s.enabled)
+        .any(|s| matches!(s.kind, SourceKind::Game | SourceKind::OutputDevice { .. }));
+    let mut out: Vec<u32> = game_pid
+        .filter(|_| game_recorded)
+        .map(|pid| app_root(pid, tree))
+        .into_iter()
+        .collect();
     for source in sources.iter().filter(|s| s.enabled) {
         if let SourceKind::Process {
             pid,
@@ -2202,8 +2211,12 @@ mod tests {
             notes.get("steam"),
             Some(&Note::mixer("is left out — it would record cs2 a second time".into()))
         );
-        // Even without a game source the detected game is not swallowed.
+        // Nothing else records the game: Steam is tapped and carries it, once.
         let streams = resolve_for(9999, true, &sources[1..2], Some(20), &nothing(), &tree, &ledger(""));
+        assert_eq!(pids_of(&streams, "steam"), vec![10]);
+        assert!(missing_app_notes(&sources[1..2], Some(20), &tree, 9999, true).is_empty());
+        // With only a Game source added, Steam is left out again.
+        let streams = resolve_for(9999, true, &sources[..2], Some(20), &nothing(), &tree, &ledger(""));
         assert!(pids_of(&streams, "steam").is_empty());
         // No game running: Steam is just an application.
         let streams = resolve_for(9999, true, &sources[1..2], None, &nothing(), &tree, &ledger(""));
