@@ -394,7 +394,11 @@ export function Transfers({ onFriendsPage: friendsPage = false }: { onFriendsPag
   const ended = useTransferMemory((s) => s.ended);
   const friends = useFriends((s) => s.lists.friends);
   // The main window keeps the core's list tidy — see `watchTransfers`.
-  useEffect(() => watchTransfers(), []);
+  useEffect(
+    () =>
+      watchTransfers((id) => useEngine.getState().clips.some((clip) => clip.id === id)),
+    [],
+  );
   const now = useTicking(transfers, ended);
   const friendIds = new Set(friends.map((f) => f.id));
   // What has ended while its row was on screen was seen there — leaving the

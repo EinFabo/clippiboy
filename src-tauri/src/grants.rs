@@ -282,8 +282,20 @@ const WINDOWS: [(&str, &str, &str); 3] = [
 ];
 /// Reachable by import but never called there: `installAccent` draws the
 /// tray icon only with `turning: true`, which only the main window passes
-/// (`src/lib/accent.ts:128-142`).
-const NOT_CALLED: [(&str, &str); 2] = [("console", "set_logo_icon"), ("overlay", "set_logo_icon")];
+/// (`src/lib/accent.ts:128-142`). The console imports `lib/share.ts` and
+/// `lib/friends.ts` for their stores and `shareApi.send`/`accept`/`decline`;
+/// the send queue and the transfer tidying in `share.ts` run only under
+/// `watchTransfers`, which only the main window's `Transfers` starts, and the
+/// sign-in helpers in `friends.ts` are only behind the Friends page's buttons.
+/// Not granted to the console, so the core would refuse them there anyway.
+const NOT_CALLED: [(&str, &str); 6] = [
+    ("console", "set_logo_icon"),
+    ("overlay", "set_logo_icon"),
+    ("console", "share_cancel"),
+    ("console", "share_dismiss"),
+    ("console", "friends_sign_in"),
+    ("console", "friends_cancel_sign_in"),
+];
 
 #[test]
 fn a_call_split_over_lines_is_still_seen() {

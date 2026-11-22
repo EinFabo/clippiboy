@@ -7,7 +7,6 @@ import { useFriends } from "./friends";
 import { toast } from "./toastBus";
 import { noteEnded, noun, toDismiss, type Ended } from "./transferRows";
 import { appeared, dropQueue, enqueue, step, stopQueue, type Queued, type SendQueue } from "./sendQueue";
-import { useEngine } from "../store";
 import type { Clip, FriendUser, Transfer } from "./types";
 
 /**
@@ -70,7 +69,10 @@ const dismissing = new Set<string>();
  * takes the cancelled ones off at once and the ended ones once their friend
  * has moved on. Failures stay until they are dismissed. Returns the stop.
  */
-export function watchTransfers(): () => void {
+export function watchTransfers(hasClip: (id: string) => boolean): () => void {
+  // The library comes in from the main window: importing its store here would
+  // pull the whole engine (and every command it calls) into the console too.
+  inLibrary = hasClip;
   const check = () => {
     runQueue();
     const { transfers } = useShare.getState();
@@ -136,11 +138,14 @@ function leftUnsent(left: Queued[], friendId: string): string {
     : `${left.length} more ${what}s weren't sent to ${friendName(friendId)}.`;
 }
 
+/** Whether a clip is still in the library — set by `watchTransfers`; until
+ *  then every clip counts as there. */
+let inLibrary: (id: string) => boolean = () => true;
+
 function runQueue(): void {
   const { queue } = useSendQueue.getState();
   const { transfers } = useShare.getState();
-  const library = new Set(useEngine.getState().clips.map((clip) => clip.id));
-  const next = step(queue, transfers, (id) => library.has(id));
+  const next = step(queue, transfers, inLibrary);
   if (next.queue !== queue) useSendQueue.setState({ queue: next.queue });
   for (const id of next.cancel) void shareApi.cancel(id).catch(() => {});
   if (next.skipped.length > 0)
