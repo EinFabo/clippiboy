@@ -5,6 +5,7 @@ import {
   cameraMissing,
   isStale,
   parseStorageCache,
+  readStillCurrent,
   STORAGE_MAX_AGE_MS,
 } from "./settingsData.ts";
 
@@ -46,4 +47,9 @@ test("cameraMissing: only after the list was read", () => {
   assert.equal(cameraMissing("a", [], true), true);
   assert.equal(cameraMissing("a", ["a"], true), false);
   assert.equal(cameraMissing(null, [], true), false);
+});
+
+test("readStillCurrent: discarded once anything invalidated after the start", () => {
+  assert.equal(readStillCurrent(3, 3), true);
+  assert.equal(readStillCurrent(3, 4), false);
 });

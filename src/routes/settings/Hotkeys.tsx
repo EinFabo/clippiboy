@@ -34,7 +34,7 @@ import {
   type PadFamily,
 } from "@/lib/hotkeyText";
 import { controllerSummary } from "@/lib/settingsSummary";
-import { cachedControllers, rememberControllers } from "@/lib/controllersCache";
+import { askControllers, cachedControllers, rememberControllers } from "@/lib/controllersCache";
 import { Row, SettingsGroup } from "./shared";
 import { StreamDeck } from "./StreamDeck";
 
@@ -199,13 +199,9 @@ function useControllers(): Controllers | null {
       });
     const ask = () => {
       if (document.visibilityState !== "visible") return;
-      api
-        .watchControllers()
-        .then((next) => {
-          rememberControllers(next);
-          if (!gone) setControllers(next);
-        })
-        .catch(() => {});
+      void askControllers().then((next) => {
+        if (next && !gone) setControllers(next);
+      });
     };
     ask();
     const timer = window.setInterval(ask, 3000);

@@ -82,3 +82,12 @@ export function cameraMissing(
 ): boolean {
   return loaded && deviceId !== null && !ids.includes(deviceId);
 }
+
+/**
+ * Does a read's answer still stand? Not when the data changed (a clip went, a
+ * folder moved, "Clear all trims" ran) after the read had started: its
+ * numbers may predate the change. `started` and `now` are invalidation counts.
+ */
+export function readStillCurrent(started: number, now: number): boolean {
+  return started === now;
+}

@@ -13,11 +13,25 @@ export function rememberControllers(value: Controllers) {
   last = { value, at: Date.now() };
 }
 
+let pending: Promise<Controllers | null> | null = null;
+
+/** One question at a time: the prefetch and the Hotkeys tab asking together share an answer. */
+export function askControllers(): Promise<Controllers | null> {
+  pending ??= api
+    .watchControllers()
+    .then((value) => {
+      rememberControllers(value);
+      return value;
+    })
+    .catch(() => null)
+    .finally(() => {
+      pending = null;
+    });
+  return pending;
+}
+
 /** Asked when Settings opens, so the Hotkeys tab finds an answer waiting. */
 export function prefetchControllers() {
   if (!inTauri) return;
-  api
-    .watchControllers()
-    .then(rememberControllers)
-    .catch(() => {});
+  void askControllers();
 }

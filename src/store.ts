@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useStorageInfo } from "./lib/storageInfo";
 import { coalesce } from "./lib/coalesce";
 import { Outbox } from "./lib/outbox";
 import { removeSourceWrite, sourceWrite } from "./lib/sourceWrite";
@@ -257,6 +258,8 @@ function fail(what: string, err: unknown): string {
   return message;
 }
 
+let camerasPending: Promise<void> | null = null;
+
 export const useEngine = create<EngineState>((set, get) => ({
   ready: false,
   config: mock.mockConfig,
@@ -288,11 +291,17 @@ export const useEngine = create<EngineState>((set, get) => ({
       set({ cameras: mock.mockCameras, camerasLoaded: true });
       return;
     }
-    try {
-      set({ cameras: await api.listCameras(), camerasLoaded: true });
-    } catch (err) {
-      set({ lastError: `Cameras: ${String(err)}` });
-    }
+    // Settings and the Camera tab ask together on one mount: one read serves both.
+    camerasPending ??= (async () => {
+      try {
+        set({ cameras: await api.listCameras(), camerasLoaded: true });
+      } catch (err) {
+        set({ lastError: `Cameras: ${String(err)}` });
+      } finally {
+        camerasPending = null;
+      }
+    })();
+    await camerasPending;
   },
   bufferBytes: 0,
   rateControl: null,
@@ -431,15 +440,17 @@ export const useEngine = create<EngineState>((set, get) => ({
       await events.onRecordingProgress((share) =>
         set({ recordingProgress: share >= 1 ? null : share }),
       );
-      await events.onClipSaved((clip) =>
+      await events.onClipSaved((clip) => {
+        useStorageInfo.getState().invalidate();
         set((st) => ({
           clips: [clip, ...st.clips.filter((c) => c.id !== clip.id)],
-        })),
-      );
+        }));
+      });
       // The console deletes, renames and hearts clips too; its changes land here.
-      await events.onClipDeleted((id) =>
-        set((st) => ({ clips: st.clips.filter((c) => c.id !== id) })),
-      );
+      await events.onClipDeleted((id) => {
+        useStorageInfo.getState().invalidate();
+        set((st) => ({ clips: st.clips.filter((c) => c.id !== id) }));
+      });
       // The core changed the settings without this window asking: the
       // console muted a source, a screen went away. Never an echo of a write
       // from here; held while a write is out, then the later revision wins.
@@ -448,6 +459,7 @@ export const useEngine = create<EngineState>((set, get) => ({
       // otherwise stack up full-list reads.
       await events.onClipsChanged(
         coalesce(async () => {
+          useStorageInfo.getState().invalidate();
           const [clips, trash] = await Promise.all([api.listClips(), api.listTrash()]);
           set({ clips, trash });
         }),

@@ -353,6 +353,8 @@ function ClipDir() {
     setError(null);
     try {
       await setClipDir(dir);
+      // The numbers were the old folder's.
+      useStorageInfo.getState().prefetch(true);
     } catch (err) {
       setError(String(err));
     } finally {
