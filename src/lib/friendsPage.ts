@@ -32,9 +32,21 @@ export function statusChoice(config: { busy: boolean; invisible: boolean }): Sta
   return config.invisible ? "invisible" : config.busy ? "busy" : "online";
 }
 
-/** The settings a pick in the menu writes. Exactly one of the two is on, or neither. */
-export function statusPatch(choice: StatusChoice): { busy: boolean; invisible: boolean } {
-  return { busy: choice === "busy", invisible: choice === "invisible" };
+/** The status line as it is saved: trimmed, at most 60 characters. */
+export function statusText(text: string): string {
+  return text.trim().slice(0, 60);
+}
+
+/**
+ * The settings a pick in the menu writes. Exactly one of the two is on, or
+ * neither. The status line typed in the menu goes along in the same patch —
+ * a second patch from the same snapshot would undo the pick.
+ */
+export function statusPatch(choice: StatusChoice): { busy: boolean; invisible: boolean };
+export function statusPatch(choice: StatusChoice, text: string): { busy: boolean; invisible: boolean; status: string };
+export function statusPatch(choice: StatusChoice, text?: string) {
+  const patch = { busy: choice === "busy", invisible: choice === "invisible" };
+  return text === undefined ? patch : { ...patch, status: statusText(text) };
 }
 
 /** What the server answers when there is nothing to do — said calmly, not in red. */

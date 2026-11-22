@@ -15,7 +15,7 @@ import {
   togglePick,
   type ClipFilter,
 } from "@/lib/sendPicker";
-import { awaitsAnswer, waitingFor } from "@/lib/sendQueue";
+import { awaitsAnswer, retrying, waitingFor } from "@/lib/sendQueue";
 import {
   isOver,
   megabytes,
@@ -449,6 +449,8 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
   const share = t.size > 0 ? t.moved / t.size : 0;
   const failed = transferKind(t) === "error";
   const canRetry = failed && !incoming && t.clipId !== null;
+  // Already queued to go again — a second click would send it twice.
+  const queued = useSendQueue((s) => retrying(s.queue, t.id));
 
   return (
     <div className="rounded-card border border-line bg-surface/95 p-4 shadow-2xl backdrop-blur">
@@ -497,6 +499,7 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
               size="sm"
               className="ml-auto"
               icon={<IconRetry className="h-3.5 w-3.5" />}
+              disabled={queued}
               onClick={() => retryTransfers([t])}
             >
               Retry

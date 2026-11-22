@@ -53,15 +53,15 @@ export function FriendsTab() {
               onChange={(allow) => run(friendsApi.setAllowRequests(allow))}
             />
           </Row>
+          <Row label="My name on share links">
+            <Toggle checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
+          </Row>
           <Row label="Requests from my share links">
             <Toggle
               checked={friends.friendOnLinks ?? true}
               disabled={!friends.nameOnLinks}
               onChange={(friendOnLinks) => patch({ friendOnLinks })}
             />
-          </Row>
-          <Row label="My name on share links">
-            <Toggle checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
           </Row>
         </Card>
       </section>

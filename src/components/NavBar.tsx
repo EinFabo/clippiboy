@@ -15,7 +15,7 @@ import { LiveDot } from "./ui/LiveDot";
 import { animate, EASE_SPRING } from "@/lib/motion";
 import { useEngine } from "@/store";
 import { useFriends } from "@/lib/friends";
-import { pendingCount } from "@/lib/friendsList";
+import { clipOffers } from "@/lib/friendsList";
 import { useShare } from "@/lib/share";
 
 export type Route = "dashboard" | "clips" | "audio" | "recording" | "friends" | "settings";
@@ -43,9 +43,10 @@ export function NavBar({
   const recordingSeconds = useEngine((s) => s.recordingSeconds);
   const recordingProgress = useEngine((s) => s.recordingProgress);
   // Only what waits for an answer: friend requests and clips offered.
-  const incoming = useFriends((s) => s.lists.incoming);
-  const transfers = useShare((s) => s.transfers);
-  const waiting = pendingCount(incoming, transfers);
+  // Counted inside the selectors, so a transfer's progress doesn't redraw the bar.
+  const requests = useFriends((s) => s.lists.incoming.length);
+  const offers = useShare((s) => clipOffers(s.transfers).length);
+  const waiting = requests + offers;
 
   return (
     <nav className="absolute inset-x-0 top-12 z-40 flex justify-center px-8">

@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { awaitsAnswer, dropQueue, enqueue, step, waitingFor, type Queued, type SendQueue } from "./sendQueue.ts";
+import {
+  appeared,
+  awaitsAnswer,
+  dropQueue,
+  enqueue,
+  retrying,
+  step,
+  stopQueue,
+  waitingFor,
+  type Queued,
+  type SendQueue,
+} from "./sendQueue.ts";
 import type { Transfer } from "./types.ts";
 
 const q = (clipId: string, over: Partial<Queued> = {}): Queued => ({
@@ -101,4 +112,61 @@ test("queue: an offer waiting for an answer holds the next one back", () => {
   assert.equal(awaitsAnswer([t({ stage: "moving" })], "1"), false);
   assert.equal(awaitsAnswer([t({ direction: "in" })], "1"), false);
   assert.equal(awaitsAnswer([t({})], "2"), false);
+});
+
+test("queue: nothing goes twice — handed over, on its way, or a second Retry", () => {
+  // The clip just handed to the core.
+  const handed = step(enqueue({}, "1", [q("a")]), []).queue;
+  assert.equal(enqueue(handed, "1", [q("a")]), handed);
+  // Still on its way to them, sent some other way.
+  for (const stage of ["preparing", "asking", "moving"] as const)
+    assert.deepEqual(enqueue({}, "1", [q("a")], [t({ stage })]), {}, stage);
+  // Over: it may go again.
+  assert.deepEqual(waitingFor(enqueue({}, "1", [q("a")], [t({ stage: "failed" })]), "1").length, 1);
+  // Retry clicked twice: the failure is queued once, and Retry knows it.
+  const once = enqueue({}, "1", [q("a", { replaces: "f" })]);
+  assert.equal(enqueue(once, "1", [q("a", { replaces: "f" })]), once);
+  assert.equal(retrying(once, "f"), true);
+  const sent = step(once, []).queue;
+  assert.equal(retrying(sent, "f"), true);
+  assert.equal(enqueue(sent, "1", [q("b", { replaces: "f" })]), sent);
+  assert.equal(retrying(sent, "g"), false);
+});
+
+test("queue: the X before the handed-over clip turns up cancels it when it does", () => {
+  let queue = step(enqueue({}, "1", [q("a"), q("b")]), []).queue;
+  queue = stopQueue(queue, "1");
+  assert.deepEqual(waitingFor(queue, "1"), []);
+  let s = step(queue, []);
+  assert.deepEqual(s.cancel, []);
+  s = step(queue, [t({ id: "ta", stage: "preparing" })]);
+  assert.deepEqual(s.cancel, ["ta"]);
+  assert.deepEqual(s.send, []);
+  assert.deepEqual(s.queue, {});
+  // Clips picked again after the X wait for the cancelled one to clear.
+  queue = enqueue(stopQueue(step(enqueue({}, "1", [q("a")]), []).queue, "1"), "1", [q("c")]);
+  s = step(queue, [t({ id: "ta", stage: "preparing" })]);
+  assert.deepEqual(s.cancel, ["ta"]);
+  assert.deepEqual(s.send, []);
+  s = step(s.queue, [t({ id: "ta", stage: "cancelled" })]);
+  assert.deepEqual(s.send.map((x) => x.item.clipId), ["c"]);
+  // Stopped once its transfer is known: the X cancels that itself, the chain just goes.
+  const known = step(step(enqueue({}, "1", [q("a"), q("b")]), []).queue, [t({ id: "ta" })]).queue;
+  assert.deepEqual(stopQueue(known, "1"), {});
+});
+
+test("queue: a clip gone from the library is skipped, the chain goes on", () => {
+  const s = step(enqueue({}, "1", [q("gone"), q("b")]), [], (id) => id !== "gone");
+  assert.deepEqual(s.skipped, [{ friendId: "1", item: q("gone") }]);
+  assert.deepEqual(s.send.map((x) => x.item.clipId), ["b"]);
+  const all = step(enqueue({}, "1", [q("gone")]), [], () => false);
+  assert.deepEqual(all.queue, {});
+  assert.deepEqual(all.send, []);
+});
+
+test("queue: a failed send reports only when its transfer never turned up", () => {
+  assert.equal(appeared([t({ id: "old" })], "1", "a", ["old"]), undefined);
+  assert.equal(appeared([t({ id: "old" }), t({ id: "new", stage: "failed" })], "1", "a", ["old"])?.id, "new");
+  assert.equal(appeared([t({ id: "new" })], "2", "a", []), undefined);
+  assert.equal(appeared([t({ id: "new", clipId: "b" })], "1", "a", []), undefined);
 });

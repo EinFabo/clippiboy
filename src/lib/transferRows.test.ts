@@ -178,8 +178,11 @@ test("row: clips still queued for the friend count in", () => {
   const queued = [{ name: "Retake B", screenshot: false, recording: false }];
   // Handed over, nothing in the list yet.
   assert.deepEqual(rowTransfer("1", [], {}, queued), { kind: "sending", ids: [], text: "Getting Retake B ready", share: null });
-  // One waiting for an answer, one behind it.
-  assert.equal(rowTransfer("1", [t({ stage: "asking" })], {}, queued)?.text, "Sending 2 clips");
+  assert.equal(rowTransfer("1", [], {}, [...queued, ...queued])?.text, "Getting Retake B ready · 1 more");
+  // One waiting for an answer, one behind it: still the first's answer.
+  assert.equal(rowTransfer("1", [t({ stage: "asking" })], {}, queued)?.text, "Waiting for an answer · Ace on Mirage · 1 more");
+  // Once one moves it is all one sending.
+  assert.equal(rowTransfer("1", [t({ moved: 10 }), t({ id: "b", stage: "asking" })], {}, queued)?.text, "Sending 3 clips");
   const shot = [{ name: "Scoreboard", screenshot: true, recording: false }];
   assert.equal(rowTransfer("1", [t({ moved: 50 })], {}, shot)?.text, "Sending 2 clips");
   assert.equal(rowTransfer("1", [t({ moved: 50 })], {}, shot)?.kind === "sending" && rowTransfer("1", [t({ moved: 50 })], {}, shot)?.share, 0.5);

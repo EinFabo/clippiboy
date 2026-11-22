@@ -156,8 +156,14 @@ export function rowTransfer(
     const moved = running.reduce((sum, t) => sum + t.moved, 0);
     const count = running.length + waiting.length;
     let text: string;
-    if (count > 1) text = `${sending ? "Sending" : "Receiving"} ${count} ${plural([...running, ...waiting])}`;
-    else if (running.length === 0) text = `Getting ${waiting[0].name} ready`;
+    if (waiting.length > 0 && moving.length === 0) {
+      // A chain that hasn't got going: the friend still has to say yes to the first.
+      const more = (n: number) => (n > 0 ? ` · ${n} more` : "");
+      text =
+        running.length === 0
+          ? `Getting ${waiting[0].name} ready${more(waiting.length - 1)}`
+          : `Waiting for an answer · ${running[0].name}${more(waiting.length)}`;
+    } else if (count > 1) text = `${sending ? "Sending" : "Receiving"} ${count} ${plural([...running, ...waiting])}`;
     else if (!sending) text = `Receiving ${running[0].name}`;
     else if (running[0].stage === "moving") text = `Sending ${running[0].name}`;
     else if (running[0].stage === "asking") text = `Waiting for an answer · ${running[0].name}`;

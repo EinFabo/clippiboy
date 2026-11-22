@@ -6,7 +6,8 @@ import { clipName } from "./format";
 import { useFriends } from "./friends";
 import { toast } from "./toastBus";
 import { noteEnded, noun, toDismiss, type Ended } from "./transferRows";
-import { dropQueue, enqueue, step, type Queued, type SendQueue } from "./sendQueue";
+import { appeared, dropQueue, enqueue, step, stopQueue, type Queued, type SendQueue } from "./sendQueue";
+import { useEngine } from "../store";
 import type { Clip, FriendUser, Transfer } from "./types";
 
 /**
@@ -113,12 +114,13 @@ export function sendClips(friendId: string, clips: Clip[]): void {
     screenshot: clip.screenshot,
     recording: clip.recording,
   }));
-  useSendQueue.setState((s) => ({ queue: enqueue(s.queue, friendId, items) }));
+  const { transfers } = useShare.getState();
+  useSendQueue.setState((s) => ({ queue: enqueue(s.queue, friendId, items, transfers) }));
 }
 
 /** Nothing more goes to this friend — the row's X. */
 export function stopSending(friendId: string): void {
-  useSendQueue.setState((s) => ({ queue: dropQueue(s.queue, friendId) }));
+  useSendQueue.setState((s) => ({ queue: stopQueue(s.queue, friendId) }));
 }
 
 function friendName(friendId: string): string {
@@ -136,19 +138,35 @@ function leftUnsent(left: Queued[], friendId: string): string {
 
 function runQueue(): void {
   const { queue } = useSendQueue.getState();
-  const next = step(queue, useShare.getState().transfers);
+  const { transfers } = useShare.getState();
+  const library = new Set(useEngine.getState().clips.map((clip) => clip.id));
+  const next = step(queue, transfers, (id) => library.has(id));
   if (next.queue !== queue) useSendQueue.setState({ queue: next.queue });
+  for (const id of next.cancel) void shareApi.cancel(id).catch(() => {});
+  if (next.skipped.length > 0)
+    toast(
+      "error",
+      next.skipped.length === 1
+        ? `${next.skipped[0].item.name} is no longer in your clips — skipped.`
+        : `${next.skipped.length} clips are no longer in your clips — skipped.`,
+    );
   for (const { friendId, left } of next.stopped) if (left.length > 0) toast("error", leftUnsent(left, friendId));
   for (const { friendId, item } of next.send) {
+    const known = transfers.map((t) => t.id);
     shareApi
       .send(item.clipId, friendId)
       .then(() => {
         if (item.replaces) void shareApi.dismiss(item.replaces).catch(() => {});
       })
       .catch((err) => {
-        // It could not start: the chain ends here, and says so.
-        const left = useSendQueue.getState().queue[friendId]?.items ?? [];
-        stopSending(friendId);
+        // Its transfer turned up and failed: the row says why, and the chain
+        // ends with that (`step`). Otherwise it never started — say it here.
+        if (appeared(useShare.getState().transfers, friendId, item.clipId, known)) return;
+        const entry = useSendQueue.getState().queue[friendId];
+        useSendQueue.setState((s) => ({ queue: dropQueue(s.queue, friendId) }));
+        // Called off with the row's X meanwhile: nothing to report.
+        if (entry?.cancelSent && entry.items.length === 0) return;
+        const left = entry?.items ?? [];
         const why = typeof err === "string" ? err : `Couldn't send it to ${friendName(friendId)}.`;
         toast("error", left.length > 0 ? `${why} ${leftUnsent(left, friendId)}` : why);
       });
@@ -165,7 +183,9 @@ export function retryTransfers(failed: Transfer[]): void {
     const item = { clipId: t.clipId, name: t.name, screenshot: t.screenshot, recording: t.recording, replaces: t.id };
     byFriend.set(t.friendId, [...(byFriend.get(t.friendId) ?? []), item]);
   }
-  for (const [friendId, items] of byFriend) useSendQueue.setState((s) => ({ queue: enqueue(s.queue, friendId, items) }));
+  const { transfers } = useShare.getState();
+  for (const [friendId, items] of byFriend)
+    useSendQueue.setState((s) => ({ queue: enqueue(s.queue, friendId, items, transfers) }));
 }
 
 /** What App listens for to open a clip in the gallery. */

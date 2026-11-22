@@ -23,6 +23,7 @@ import {
   shortLink,
   statusChoice,
   statusPatch,
+  statusText,
   type AddOutcome,
   type MyStatus,
   type StatusChoice,
@@ -39,7 +40,7 @@ import {
   useShare,
   useTransferMemory,
 } from "@/lib/share";
-import { waitingFor } from "@/lib/sendQueue";
+import { retrying, waitingFor } from "@/lib/sendQueue";
 import { ago, friendStatus, groupFriends, pendingRows, type FriendStatus } from "@/lib/friendsList";
 import { noun, rowTransfer, type Ended, type RowTransfer } from "@/lib/transferRows";
 import { readOpen, writeOpen } from "@/lib/groupState";
@@ -307,7 +308,7 @@ function SignedIn() {
       {lists.friends.length === 0 ? (
         <EmptyCard me={me} streamer={streamer} onAdd={() => setAdding({ query: "", key: Date.now() })} />
       ) : away ? (
-        <Group title="Friends" friends={awayList} presence={{}} lastSeen={awaySeen} now={now} transfers={[]} ended={ended} />
+        <Group title="Friends" friends={awayList} presence={{}} lastSeen={awaySeen} now={now} transfers={transfers} ended={ended} />
       ) : (
         <>
           <Group title="In game" friends={groups.playing} {...{ presence, lastSeen, now, transfers, ended }} />
@@ -423,9 +424,11 @@ function StatusChip({ me, connected }: { me: FriendMe | null; connected: boolean
           <StatusMenu
             current={statusChoice(config)}
             status={config.status}
-            onPick={(choice) => {
+            onPick={(choice, text) => {
               setOpen(false);
-              void patchConfig({ friends: { ...useEngine.getState().config.friends, ...statusPatch(choice) } });
+              // The text goes in the same patch: two patches from one snapshot
+              // would let the second undo the first.
+              void patchConfig({ friends: { ...useEngine.getState().config.friends, ...statusPatch(choice, text) } });
             }}
             onStatus={(text) => void patchConfig({ friends: { ...useEngine.getState().config.friends, status: text } })}
             onSettings={() => {
@@ -448,7 +451,8 @@ function StatusMenu({
 }: {
   current: StatusChoice;
   status: string;
-  onPick: (choice: StatusChoice) => void;
+  /** With the status text as it stands, saved together. */
+  onPick: (choice: StatusChoice, text: string) => void;
   onStatus: (text: string) => void;
   onSettings: () => void;
 }) {
@@ -456,10 +460,12 @@ function StatusMenu({
   // Saved on Enter, on leaving the field, and when the menu closes.
   const latest = useRef({ text, status, onStatus });
   latest.current = { text, status, onStatus };
+  // A pick saves the text along with it; closing must not save it again.
+  const picked = useRef(false);
   const save = () => {
     const { text, status, onStatus } = latest.current;
-    const clean = text.trim().slice(0, 60);
-    if (clean !== status) onStatus(clean);
+    if (picked.current) return;
+    if (statusText(text) !== status) onStatus(statusText(text));
   };
   useEffect(() => save, []);
 
@@ -470,7 +476,10 @@ function StatusMenu({
         <button
           key={choice}
           aria-pressed={current === choice}
-          onClick={() => onPick(choice)}
+          onClick={() => {
+            picked.current = true;
+            onPick(choice, text);
+          }}
           className={cn(item, current === choice ? "bg-white/8" : "hover:bg-hover")}
         >
           <StatusDot status={choice} />
@@ -1029,6 +1038,8 @@ function TransferActions({
   reachable: boolean;
 }) {
   const waiting = useSendQueue((s) => waitingFor(s.queue, friendId).length);
+  // Every failure already queued to go again — Retry is done.
+  const queued = useSendQueue((s) => t.kind === "error" && t.retry.every((x) => retrying(s.queue, x.id)));
   const closeButton = (label: string, onClick: () => void) => (
     <button aria-label={label} title={label} onClick={onClick} className={cn(ICON_BUTTON, "bg-elevated text-ink-muted")}>
       <IconClose className="h-3.5 w-3.5" />
@@ -1057,7 +1068,7 @@ function TransferActions({
           <Button
             size="sm"
             icon={<IconRetry className="h-3.5 w-3.5" />}
-            disabled={!reachable}
+            disabled={!reachable || queued}
             title={reachable ? undefined : "They aren't online right now"}
             onClick={() => retryTransfers(t.retry)}
           >

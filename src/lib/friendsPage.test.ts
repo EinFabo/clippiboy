@@ -12,6 +12,7 @@ import {
   signInFailed,
   statusChoice,
   statusPatch,
+  statusText,
 } from "./friendsPage.ts";
 import type { FriendUser } from "./types.ts";
 
@@ -35,6 +36,9 @@ test("status menu: a pick turns on at most one of busy and invisible", () => {
   assert.deepEqual(statusPatch("online"), { busy: false, invisible: false });
   assert.deepEqual(statusPatch("busy"), { busy: true, invisible: false });
   assert.deepEqual(statusPatch("invisible"), { busy: false, invisible: true });
+  // The text typed in the menu goes along with the pick, cleaned.
+  assert.deepEqual(statusPatch("busy", "  back at 8 "), { busy: true, invisible: false, status: "back at 8" });
+  assert.equal(statusText("x".repeat(70)).length, 60);
 });
 
 test("add answer: sent and accepted name the friend once known", () => {
