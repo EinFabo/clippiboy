@@ -5,58 +5,44 @@ import { Button } from "@/components/ui/Button";
 import { Card, SectionTitle } from "@/components/ui/Card";
 import { SourceTrouble } from "@/components/SourceTrouble";
 import type { Route } from "@/components/NavBar";
-import { Select, Slider } from "@/components/ui/Controls";
+import { Segmented, Select, Slider } from "@/components/ui/Controls";
+import { Row, SettingsGroup } from "@/routes/settings/shared";
 import { formatBufferSeconds } from "@/lib/format";
+import {
+  BUFFER_PRESETS,
+  bufferPreset,
+  bufferPresetLabel,
+  clipLength,
+  clipMegabytes,
+  megabytesPerMinute,
+  memoryBudgetMb,
+  memoryLimitSummary,
+  memoryNeededMb,
+} from "@/lib/videoPlan";
 import { cn } from "@/lib/cn";
 import { autoFit, fit, fpsChoices } from "@/lib/fit";
-import type { AppConfig, BufferConfig, CaptureTarget, EncoderId } from "@/lib/types";
+import type { AppConfig, CaptureTarget, EncoderId } from "@/lib/types";
 
 /** The usual steps; only what the source supports is offered. */
 const HEIGHTS = [720, 1080, 1440, 2160];
 
-/**
- * What the packet ring is allowed to hold, in megabytes.
- *
- * Mirrors `config::effective_memory_bytes`: `0` derives it from bitrate and
- * buffer length with half again on top for the peaks a variable bitrate makes.
- *
- * This used to be an estimate with nothing behind it. It is a real ceiling now —
- * with the encoder aiming at a quality rather than a bitrate, the length alone
- * no longer says how many bytes a buffer costs, so the ring drops the oldest
- * group of pictures when it runs over.
- */
-function memoryBudgetMb(rec: { bitrateKbps: number }, buffer: BufferConfig): number {
-  if (buffer.memoryMb > 0) return buffer.memoryMb;
-  const plain = (rec.bitrateKbps / 8 / 1024) * buffer.seconds;
-  return Math.max(64, Math.round((plain * 3) / 2));
-}
-
 /** The quality steps offered, and what to call them. */
 const QUALITY_STEPS: Array<{ value: number; label: string }> = [
-  { value: 55, label: "Smallest files" },
+  { value: 55, label: "Smallest" },
   { value: 62, label: "Small" },
   { value: 70, label: "Balanced" },
   { value: 78, label: "High" },
   { value: 85, label: "Highest" },
 ];
 
-/**
- * How long a saved clip is. Mirrors `config::effective_clip_seconds`: `0` means
- * the whole buffer, and nothing can be longer than what is buffered.
- */
-function clipLength(buffer: BufferConfig): number {
-  if (buffer.clipSeconds === 0) return buffer.seconds;
-  return Math.min(buffer.clipSeconds, buffer.seconds);
+/** The step the stored quality is closest to. */
+function nearestStep(quality: number) {
+  return QUALITY_STEPS.reduce((best, step) =>
+    Math.abs(step.value - quality) < Math.abs(best.value - quality) ? step : best,
+  );
 }
 
-/**
- * What the finished file costs. The picture is copied straight out of the
- * buffer, so its bitrate is exactly the recording bitrate — the only thing on
- * top is the one AAC track carrying the mix.
- */
-function clipMegabytes(bitrateKbps: number, seconds: number): number {
-  return Math.round(((bitrateKbps + 192) / 8 / 1024) * seconds);
-}
+type BufferChoice = "30" | "60" | "120" | "300" | "custom";
 
 export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   // `useShallow`, siehe `SourceTrouble`.
@@ -74,6 +60,8 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const [secondsDraft, setSecondsDraft] = useState<number | null>(null);
   const [clipDraft, setClipDraft] = useState<number | null>(null);
   const [memoryDraft, setMemoryDraft] = useState<number | null>(null);
+  /** "Custom" was clicked while the length still sits on a step. */
+  const [customOpen, setCustomOpen] = useState(false);
 
   // Windows come and go: when ClippiBoy started the game usually was not
   // running yet, so the list is fetched again when the page opens.
@@ -163,6 +151,35 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
     rec.fps,
   ]);
 
+  const pickTarget = (t: CaptureTarget) =>
+    setRec({ targetKind: t.kind, targetId: t.id, targetStableId: t.stableId });
+
+  const quality = nearestStep(rec.quality);
+  const encoder = encoders.find((e) => e.id === rec.encoder);
+  const encoderMissing = encoder !== undefined && !encoder.available;
+  const resolutionLabel = `${source ? fit(rec.height, source).height : rec.height}p`;
+
+  const buffer = config.buffer;
+  const bufferShown = secondsDraft ?? buffer.seconds;
+  const preset = bufferPreset(buffer.seconds);
+  const bufferChoice: BufferChoice =
+    preset === null || customOpen ? "custom" : (String(preset) as BufferChoice);
+  const writeSeconds = (seconds: number) => {
+    if (seconds === buffer.seconds) return;
+    void patchConfig({
+      buffer: {
+        ...buffer,
+        seconds,
+        // A clip can never outlast the buffer it is cut from.
+        clipSeconds: Math.min(buffer.clipSeconds, seconds),
+      },
+    });
+  };
+
+  const camMb = config.facecam.enabled && config.facecam.inClips ? camMemoryMb(config) : 0;
+  const limitMb = memoryDraft ?? memoryBudgetMb(rec, buffer);
+  const limit = memoryLimitSummary(limitMb, rec.bitrateKbps, buffer.seconds);
+
   return (
     <div className="space-y-8 pb-12">
       <header className="pt-10">
@@ -180,67 +197,31 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
             </Button>
           }
         />
-
-        <p className="mb-4 text-xs text-ink-faint">
-          A change takes effect immediately — if the buffer is running it
-          restarts on the new source, and the seconds buffered so far are gone.
-        </p>
-
-        {missing && (
-          <p
-            className="mb-3 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2
-              text-xs text-ink-muted"
-          >
-            The screen you picked is not connected
-            {rec.targetId ? ` (${rec.targetId})` : ""} — recording runs on the
-            primary one until it is back. Pick another to change that for good.
-          </p>
-        )}
-
-        <h3 className="mb-2 text-xs font-medium text-ink-muted">Monitors</h3>
-        <div className="grid grid-cols-2 gap-3">
-          {monitors.map((t) => (
-            <TargetCard
-              key={t.id}
-              target={t}
-              picked={isPicked(t)}
-              onPick={() =>
-                setRec({
-                  targetKind: t.kind,
-                  targetId: t.id,
-                  targetStableId: t.stableId,
-                })
-              }
+        {/* One grid, monitors first. A long window list scrolls inside it. */}
+        <div className="-m-1 grid max-h-80 grid-cols-3 gap-3 overflow-y-auto p-1">
+          {missing && (
+            <SourceTile
+              name={rec.targetId ?? "Screen"}
+              meta="Not connected · recording uses the primary screen"
+              picked
+              warn
             />
-          ))}
-          {monitors.length === 0 && (
-            <p className="text-xs text-ink-faint">
-              No monitor found — ClippiBoy then takes the primary screen.
-            </p>
           )}
-        </div>
-
-        <h3 className="mb-2 mt-6 text-xs font-medium text-ink-muted">
-          Windows
-        </h3>
-        <div className="grid max-h-72 grid-cols-2 gap-3 overflow-y-auto pr-1">
-          {windows.map((t) => (
-            <TargetCard
+          {[...monitors, ...windows].map((t) => (
+            <SourceTile
               key={t.id}
-              target={t}
-              picked={isPicked(t)}
-              onPick={() =>
-                setRec({
-                  targetKind: t.kind,
-                  targetId: t.id,
-                  targetStableId: t.stableId,
-                })
-              }
+              name={t.kind === "monitor" ? t.title.replace(/ — \d+×\d+$/, "") : t.title}
+              meta={`${t.kind === "window" ? "Window · " : ""}${t.width}×${t.height}${
+                t.refreshHz ? ` · ${t.refreshHz} Hz` : ""
+              }`}
+              chip={t.kind === "monitor" && t.isPrimary ? "Primary" : undefined}
+              picked={!missing && isPicked(t)}
+              onPick={() => pickTarget(t)}
             />
           ))}
-          {windows.length === 0 && (
-            <p className="text-xs text-ink-faint">
-              No capturable window open. Start the game and hit "Refresh".
+          {targets.length === 0 && (
+            <p className="col-span-3 text-xs text-ink-faint">
+              No monitor or window found. Start the game and hit "Refresh".
             </p>
           )}
         </div>
@@ -249,247 +230,269 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
       <section>
         <SectionTitle title="Quality" />
         <Card className="divide-y divide-line">
-          <Row
-            label="Resolution"
-            hint={source ? `${source.width}×${source.height} available` : undefined}
-          >
-            <Select
-              value={String(rec.height)}
-              options={heights.map((h) => {
-                const size = fit(h, source);
-                return {
-                  value: String(h),
-                  label:
-                    source && h === source.height
-                      ? `${size.width} × ${size.height} (source)`
-                      : `${size.width} × ${size.height}`,
-                };
-              })}
+          <Row label="Resolution">
+            <Segmented<string>
+              value={heights.includes(rec.height) ? String(rec.height) : null}
+              options={heights.map((h) => ({
+                key: String(h),
+                label: `${fit(h, source).height}p`,
+              }))}
               onChange={(v) => setRec(fit(Number(v), source))}
             />
           </Row>
-          <Row
-            label="Frame rate"
-            hint={
-              source?.refreshHz
-                ? `The source shows ${source.refreshHz} Hz — more frames would only be repeats`
-                : "The source's refresh rate is not known"
-            }
-          >
-            <Select
-              value={String(rec.fps)}
-              options={rates.map((fps) => ({
-                value: String(fps),
-                label:
-                  fps === source?.refreshHz
-                    ? `${fps} FPS (source)`
-                    : `${fps} FPS`,
-              }))}
+          <Row label="Frame rate">
+            <Segmented<string>
+              value={rates.includes(rec.fps) ? String(rec.fps) : null}
+              options={rates.map((fps) => ({ key: String(fps), label: String(fps) }))}
               onChange={(v) => setRec({ fps: Number(v) })}
             />
           </Row>
-          <Row
-            label="Quality"
-            hint="The encoder spends bits where the picture needs them — a menu screen costs a fraction of a firefight"
-          >
-            <Select
-              value={String(
-                QUALITY_STEPS.reduce((best, step) =>
-                  Math.abs(step.value - rec.quality) <
-                  Math.abs(best.value - rec.quality)
-                    ? step
-                    : best,
-                ).value,
-              )}
+          <Row label="Quality">
+            <Segmented<string>
+              value={String(quality.value)}
               options={QUALITY_STEPS.map((step) => ({
-                value: String(step.value),
+                key: String(step.value),
                 label: step.label,
               }))}
               onChange={(v) => setRec({ quality: Number(v) })}
             />
           </Row>
-          <Row
-            label="Encoder"
-            hint="Hardware encoders keep the CPU free — the fallback is x264"
+          <EstimateRow
+            left={`${resolutionLabel} · ${rec.fps} fps · ${quality.label}`}
+            right={<b>about {megabytesPerMinute(rec.bitrateKbps)} MB per minute</b>}
+          />
+          <SettingsGroup
+            title="Advanced"
+            storageKey="video-advanced"
+            summary={
+              encoderMissing ? (
+                <span className="text-warn">
+                  {encoder.name} not available · x264 is used
+                </span>
+              ) : (
+                `${encoder?.name ?? rec.encoder} · keyframe every ${rec.keyframeSeconds} s`
+              )
+            }
           >
-            <Select
-              value={rec.encoder}
-              options={encoders.map((e) => ({
-                value: e.id as EncoderId,
-                label: e.available ? e.name : `${e.name} (not available)`,
-              }))}
-              onChange={(encoder) => setRec({ encoder })}
-            />
-          </Row>
-          <Row
-            label="Keyframe interval"
-            hint="Determines how precisely a clip can be trimmed"
-          >
-            <Select
-              value={String(rec.keyframeSeconds)}
-              options={[
-                { value: "1", label: "1 second" },
-                { value: "2", label: "2 seconds" },
-                { value: "4", label: "4 seconds" },
-              ]}
-              onChange={(v) => setRec({ keyframeSeconds: Number(v) })}
-            />
-          </Row>
+            <Row label="Encoder">
+              <Select
+                value={rec.encoder}
+                options={encoders.map((e) => ({
+                  value: e.id as EncoderId,
+                  label: e.available ? e.name : `${e.name} (not available)`,
+                }))}
+                onChange={(next) => setRec({ encoder: next })}
+              />
+            </Row>
+            <Row label="Keyframe interval">
+              <Select
+                value={String(rec.keyframeSeconds)}
+                options={[
+                  { value: "1", label: "1 second" },
+                  { value: "2", label: "2 seconds" },
+                  { value: "4", label: "4 seconds" },
+                ]}
+                onChange={(v) => setRec({ keyframeSeconds: Number(v) })}
+              />
+            </Row>
+          </SettingsGroup>
         </Card>
       </section>
 
       <section>
         <SectionTitle title="Replay buffer" />
         <Card className="divide-y divide-line">
-          <div className="p-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Buffer length</p>
-                <p className="mt-1 text-xs text-ink-muted">
-                  How far back you can still reach
-                </p>
-              </div>
-              <span className="font-mono text-sm text-ink-muted">
-                {formatBufferSeconds(secondsDraft ?? config.buffer.seconds)}
-              </span>
-            </div>
-            <div className="mt-4">
-              {/* Written when the knob is let go. Every step on the way used to
-                  reach the core, and a drag that passed below the value it
-                  ended on shrank the buffer there — what lay beyond was gone. */}
-              <Slider
-                label="Buffer length"
-                value={secondsDraft ?? config.buffer.seconds}
-                min={15}
-                max={600}
-                step={15}
-                onChange={setSecondsDraft}
-                onRelease={() => setSecondsDraft(null)}
-                onCommit={(seconds) => {
-                  setSecondsDraft(null);
-                  if (seconds === config.buffer.seconds) return;
-                  void patchConfig({
-                    buffer: {
-                      ...config.buffer,
-                      seconds,
-                      // A clip can never outlast the buffer it is cut from.
-                      clipSeconds: Math.min(config.buffer.clipSeconds, seconds),
-                    },
-                  });
+          <Row label="Keep the last">
+            <div className="flex flex-col items-end gap-4">
+              <Segmented<BufferChoice>
+                value={bufferChoice}
+                options={[
+                  ...BUFFER_PRESETS.map((p) => ({
+                    key: String(p) as BufferChoice,
+                    label: bufferPresetLabel(p),
+                  })),
+                  { key: "custom" as BufferChoice, label: "Custom" },
+                ]}
+                onChange={(key) => {
+                  if (key === "custom") {
+                    setCustomOpen(true);
+                    return;
+                  }
+                  setCustomOpen(false);
+                  writeSeconds(Number(key));
                 }}
               />
+              {bufferChoice === "custom" && (
+                <div className="flex w-full items-center gap-4">
+                  {/* Written when the knob is let go. Every step on the way used
+                      to reach the core, and a drag that passed below the value
+                      it ended on shrank the buffer there — what lay beyond was
+                      gone. */}
+                  <div className="min-w-0 flex-1">
+                    <Slider
+                      label="Buffer length"
+                      value={bufferShown}
+                      min={15}
+                      max={600}
+                      step={15}
+                      onChange={setSecondsDraft}
+                      onRelease={() => setSecondsDraft(null)}
+                      onCommit={(seconds) => {
+                        setSecondsDraft(null);
+                        writeSeconds(seconds);
+                      }}
+                    />
+                  </div>
+                  <span className="min-w-14 text-right font-mono text-sm text-ink-muted">
+                    {formatBufferSeconds(bufferShown)}
+                  </span>
+                </div>
+              )}
             </div>
-          </div>
-
-          <div className="p-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Clip length</p>
-                <p className="mt-1 text-xs text-ink-muted">
-                  What a save actually writes ·{" "}
-                  {clipMegabytes(rec.bitrateKbps, clipLength(config.buffer))} MB
-                  per clip
-                </p>
+          </Row>
+          <Row label="A save writes">
+            <div className="flex w-80 items-center gap-4">
+              <div className="min-w-0 flex-1">
+                <Slider
+                  label="Clip length"
+                  value={clipDraft ?? clipLength(buffer)}
+                  min={5}
+                  max={buffer.seconds}
+                  step={5}
+                  onChange={setClipDraft}
+                  onRelease={() => setClipDraft(null)}
+                  onCommit={(value) => {
+                    setClipDraft(null);
+                    if (value === clipLength(buffer)) return;
+                    void patchConfig({
+                      buffer: {
+                        ...buffer,
+                        // At the top end store 0, not the number: a longer buffer
+                        // later then carries the clip length along instead of
+                        // leaving it standing where it was.
+                        clipSeconds: value >= buffer.seconds ? 0 : value,
+                      },
+                    });
+                  }}
+                />
               </div>
-              <span className="font-mono text-sm text-ink-muted">
-                {formatBufferSeconds(clipDraft ?? clipLength(config.buffer))}
+              <span className="min-w-14 text-right font-mono text-sm text-ink-muted">
+                {formatBufferSeconds(clipDraft ?? clipLength(buffer))}
               </span>
             </div>
-            <div className="mt-4">
-              <Slider
-                label="Clip length"
-                value={clipDraft ?? clipLength(config.buffer)}
-                min={5}
-                max={config.buffer.seconds}
-                step={5}
-                onChange={setClipDraft}
-                onRelease={() => setClipDraft(null)}
-                onCommit={(value) => {
-                  setClipDraft(null);
-                  if (value === clipLength(config.buffer)) return;
-                  void patchConfig({
-                    buffer: {
-                      ...config.buffer,
-                      // At the top end store 0, not the number: a longer buffer
-                      // later then carries the clip length along instead of
-                      // leaving it standing where it was.
-                      clipSeconds: value >= config.buffer.seconds ? 0 : value,
-                    },
-                  });
-                }}
-              />
-            </div>
-            <p className="mt-3 text-xs text-ink-faint">
-              A long buffer is insurance against pressing the key late. It does
-              not have to mean a long clip — the buffer keeps the last{" "}
-              {formatBufferSeconds(config.buffer.seconds)}, the save takes the
-              last {formatBufferSeconds(clipLength(config.buffer))} of it.
-            </p>
-          </div>
-
-          <div className="p-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Memory budget</p>
-                <p className="mt-1 text-xs text-ink-muted">
-                  What the buffer may occupy in RAM
-                </p>
+          </Row>
+          <EstimateRow
+            left={`About ${clipMegabytes(rec.bitrateKbps, clipLength(buffer))} MB per clip`}
+            right={`Uses up to ${memoryNeededMb(rec.bitrateKbps, buffer.seconds)} MB memory${
+              camMb > 0 ? ` · camera +${camMb} MB` : ""
+            }`}
+          />
+          <SettingsGroup
+            title="Memory limit"
+            storageKey="video-memory"
+            summary={limit.warn ? <span className="text-warn">{limit.text}</span> : limit.text}
+          >
+            <Row label="Memory limit">
+              <div className="flex w-80 items-center gap-4">
+                <div className="min-w-0 flex-1">
+                  {/* Let go, then written — the same reason as the length above. */}
+                  <Slider
+                    label="Memory limit"
+                    value={limitMb}
+                    min={64}
+                    max={4096}
+                    step={64}
+                    onChange={setMemoryDraft}
+                    onRelease={() => setMemoryDraft(null)}
+                    onCommit={(memoryMb) => {
+                      setMemoryDraft(null);
+                      void patchConfig({ buffer: { ...buffer, memoryMb } });
+                    }}
+                  />
+                </div>
+                <span className="min-w-16 text-right font-mono text-sm text-ink-muted">
+                  {limitMb} MB
+                </span>
               </div>
-              <span className="font-mono text-sm text-ink-muted">
-                {memoryDraft ?? memoryBudgetMb(rec, config.buffer)} MB
-              </span>
-            </div>
-            <div className="mt-4">
-              {/* Let go, then written — the same reason as the length above. */}
-              <Slider
-                label="Memory budget"
-                value={memoryDraft ?? memoryBudgetMb(rec, config.buffer)}
-                min={64}
-                max={4096}
-                step={64}
-                onChange={setMemoryDraft}
-                onRelease={() => setMemoryDraft(null)}
-                onCommit={(memoryMb) => {
-                  setMemoryDraft(null);
-                  void patchConfig({ buffer: { ...config.buffer, memoryMb } });
-                }}
-              />
-            </div>
-            <p className="mt-3 text-xs text-ink-faint">
-              The encoder aims at a quality, not at a fixed bitrate, so how much
-              a minute costs depends on what is on screen. This is the hard
-              ceiling: run into it in a busy scene and the buffer holds less than
-              its full length rather than taking the machine down with it.
-            </p>
-            {config.facecam.enabled && config.facecam.inClips && (
-              <p className="mt-2 text-xs text-ink-muted">
-                Camera: {camMemoryMb(config)} MB on top
-              </p>
-            )}
-          </div>
+            </Row>
+          </SettingsGroup>
         </Card>
       </section>
     </div>
   );
 }
 
-function Row({
-  label,
-  hint,
-  children,
+/** The one line that says what the settings above cost. */
+function EstimateRow({ left, right }: { left: string; right: React.ReactNode }) {
+  return (
+    <div
+      className="flex items-center justify-between gap-6 bg-accent/5 px-5 py-3 text-[13px]
+        text-ink-muted [&_b]:font-semibold [&_b]:text-ink"
+    >
+      <span className="min-w-0">{left}</span>
+      <span className="min-w-0 text-right">{right}</span>
+    </div>
+  );
+}
+
+function SourceTile({
+  name,
+  meta,
+  chip,
+  picked,
+  warn,
+  onPick,
 }: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
+  name: string;
+  meta: string;
+  chip?: string;
+  picked: boolean;
+  warn?: boolean;
+  onPick?: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-6 p-5">
-      <div className="min-w-0">
-        <p className="text-sm font-medium">{label}</p>
-        {hint && <p className="mt-1 text-xs text-ink-muted">{hint}</p>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
+    <Card
+      role="button"
+      tabIndex={0}
+      aria-pressed={picked}
+      interactive={onPick !== undefined}
+      onClick={onPick}
+      onKeyDown={(e) => {
+        if (onPick && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onPick();
+        }
+      }}
+      className={cn(
+        "relative min-w-0 px-[18px] py-4 text-left",
+        onPick && "cursor-pointer",
+        picked && "border-accent-bright shadow-[0_0_0_1px_var(--color-accent-bright)]",
+        warn && "border-warn/60 shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-warn)_60%,transparent)]",
+      )}
+    >
+      {picked && (
+        <span
+          aria-hidden
+          className="absolute top-3.5 right-3.5 grid size-[22px] place-items-center rounded-full
+            bg-accent text-white"
+        >
+          <svg viewBox="0 0 12 12" className="size-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2.5 6.5 5 9l4.5-5.5" />
+          </svg>
+        </span>
+      )}
+      <p className={cn("truncate text-sm font-medium", picked && "pr-8")} title={name}>
+        {name}
+      </p>
+      <p className={cn("mt-1 flex items-center gap-2 text-xs", warn ? "text-warn" : "text-ink-muted")}>
+        <span className="min-w-0 truncate">{meta}</span>
+        {chip && (
+          <span className="shrink-0 rounded-pill bg-elevated px-2 py-px text-[11px] text-ink">
+            {chip}
+          </span>
+        )}
+      </p>
+    </Card>
   );
 }
 
