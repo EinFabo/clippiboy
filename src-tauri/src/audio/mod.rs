@@ -6,6 +6,7 @@ pub mod devices;
 pub mod engine;
 pub mod resample;
 pub mod ring;
+pub mod watch;
 
 use std::collections::HashMap;
 

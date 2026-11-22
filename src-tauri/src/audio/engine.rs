@@ -36,6 +36,12 @@ pub struct AudioEngine {
     applying: std::sync::atomic::AtomicBool,
     /// The last non-empty (output, input) default ids, for [`crate::audio::keep_good`].
     last_defaults: Mutex<(String, String)>,
+    /// The newest sources and game of a refresh, for refreshes the session
+    /// watcher asks for between two ticks.
+    last_request: Mutex<Option<(Vec<AudioSource>, Option<u32>)>>,
+    /// Present only while application sources make the leftovers; tells the
+    /// engine at once when an application opens an audio session.
+    watcher: Mutex<Option<crate::audio::watch::Watcher>>,
 }
 
 fn fingerprint(kind: &SourceKind) -> String {
@@ -192,12 +198,14 @@ impl AudioEngine {
         self.refresh(sources, game_pid, true);
     }
 
-    fn refresh(self: &Arc<Self>, sources: Vec<AudioSource>, game_pid: Option<u32>, force: bool) {
+    /// `false` when dropped because another refresh is running.
+    fn refresh(self: &Arc<Self>, sources: Vec<AudioSource>, game_pid: Option<u32>, force: bool) -> bool {
+        *self.last_request.lock() = Some((sources.clone(), game_pid));
         // A second call while one is running is dropped: every caller repeats
         // within two seconds, and two `apply`s in parallel would fight over the
         // same streams.
         if self.applying.swap(true, Ordering::SeqCst) {
-            return;
+            return false;
         }
         let engine = self.clone();
         std::thread::spawn(move || {
@@ -209,6 +217,7 @@ impl AudioEngine {
                 crate::audio::keep_good(&mut engine.last_defaults.lock(), now)
             };
             let sources = crate::audio::pin_defaults(&sources, &output, &input);
+            engine.sync_watcher(&sources);
             let ledger = crate::audio::Leftovers {
                 default_device: output,
                 previous: engine.assignments(),
@@ -227,9 +236,49 @@ impl AudioEngine {
             }
             engine.applying.store(false, Ordering::SeqCst);
         });
+        true
+    }
+
+    /// Watch the output devices for new sessions while the leftovers are in
+    /// force, and not at all otherwise. Called from the refresh thread, which
+    /// has the sources with their default devices already pinned.
+    fn sync_watcher(self: &Arc<Self>, sources: &[AudioSource]) {
+        let mut devices: Vec<String> = Vec::new();
+        if crate::audio::records_single_applications(sources) {
+            for source in sources.iter().filter(|s| s.enabled) {
+                if let SourceKind::OutputDevice { device_id } = &source.kind {
+                    if !device_id.is_empty() {
+                        devices.push(device_id.clone());
+                    }
+                }
+            }
+        }
+        let mut watcher = self.watcher.lock();
+        if devices.is_empty() {
+            *watcher = None;
+            return;
+        }
+        let watcher = watcher.get_or_insert_with(|| {
+            let engine = Arc::downgrade(self);
+            crate::audio::watch::Watcher::start(move || {
+                let Some(engine) = engine.upgrade() else { return };
+                // A refresh that is still running would drop this one — and
+                // what it enumerated may predate the new session.
+                for _ in 0..8 {
+                    let request = engine.last_request.lock().clone();
+                    let Some((sources, game_pid)) = request else { return };
+                    if engine.refresh(sources, game_pid, false) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            })
+        });
+        watcher.set_devices(devices);
     }
 
     pub fn stop_all(&self) {
+        *self.watcher.lock() = None;
         let mut running = self.running.lock();
         for (_, mut run) in running.drain() {
             if let Some(handle) = run.handle.take() {
