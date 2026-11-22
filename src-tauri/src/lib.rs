@@ -1523,14 +1523,23 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             if watched || console_watched || logging {
                 let levels = state.audio.levels(&sources);
                 if watched {
-                    let _ = handle.emit_to("main", &levels_event("main"), &levels);
+                    let _ = handle.emit_to("main", &levels_event("main"), &levels.sources);
+                    // The main track for the mixer's "In your clip" row, as an
+                    // event of its own: the per-source map stays what the
+                    // console reads, with nothing in it that is not a source.
+                    let _ = handle.emit_to("main", MIX_EVENT, levels.mix);
                 }
                 if console_watched {
-                    let _ = handle.emit_to(console::LABEL, &levels_event(console::LABEL), &levels);
+                    let _ = handle.emit_to(
+                        console::LABEL,
+                        &levels_event(console::LABEL),
+                        &levels.sources,
+                    );
                 }
                 // Diagnostics: with CLIPPIBOY_LOG_LEVELS=1 the levels get logged.
                 if tick % 20 == 0 && logging {
                     let summary: Vec<String> = levels
+                        .sources
                         .iter()
                         .map(|(id, level)| format!("{id}={level:.3}"))
                         .collect();
@@ -2260,6 +2269,9 @@ pub fn run() {
         }
     });
 }
+
+/// The main track's level (left, right), for the main window only.
+pub const MIX_EVENT: &str = "audio-mix:main";
 
 /// The level stream's event name for one window. Each window listens to its
 /// own name, so a hidden window never handles a packet meant for the other.

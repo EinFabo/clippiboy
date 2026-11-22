@@ -102,3 +102,14 @@ main[data-scrolling] [data-tile] {
   content-visibility: auto;
   contain-intrinsic-size: auto 342px;
 }
+
+/* The volume knob in the audio mixer while its source is about to clip — a warm
+   ring, set by the level meter (Meter's `hot`). */
+.cb-vol input[type="range"]::-webkit-slider-thumb {
+  transition: box-shadow 150ms var(--ease-out-soft);
+}
+.cb-vol[data-hot] input[type="range"]::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--color-warn) 55%, transparent),
+    0 1px 4px rgb(0 0 0 / 0.5);
+}

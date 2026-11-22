@@ -1,15 +1,44 @@
-import { useEffect, useRef } from "react";
+import { type RefObject, useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
-import { decayLevel, levelPct, riseLevel } from "@/lib/meter";
-import { useEngine } from "@/store";
+import {
+  decayLevel,
+  type HeldPeak,
+  holdPeak,
+  hotUntil,
+  levelPct,
+  peakDbText,
+  riseLevel,
+} from "@/lib/meter";
+import { type EngineState, useEngine } from "@/store";
+
+/** Where a meter takes its level from: one source, or the clip's main track. */
+export type LevelFeed = { source: string } | { mix: "l" | "r" | "peak" };
+
+function reader(feed: LevelFeed): (s: EngineState) => number {
+  if ("source" in feed) return (s) => s.levels[feed.source] ?? 0;
+  const side = feed.mix;
+  return side === "peak" ? (s) => Math.max(s.mix.l, s.mix.r) : (s) => s.mix[side];
+}
+
+const feedKey = (feed: LevelFeed) =>
+  "source" in feed ? `source:${feed.source}` : `mix:${feed.mix}`;
 
 type Entry = {
-  id: string;
+  read: (s: EngineState) => number;
   muted: boolean;
-  fill: HTMLDivElement;
+  /** The level as drawn: rises at once, falls softly. */
   shown: number;
+  /** The bar, moved by a transform. */
+  fill?: HTMLElement;
   pct: number;
+  /** Gets `data-hot` while the level is about to clip. */
+  hotTarget?: HTMLElement | null;
+  hotUntil: number;
   hot: boolean;
+  /** A peak written out as dB. */
+  text?: HTMLElement;
+  held: HeldPeak;
+  label: string;
 };
 
 // One store subscription and one frame loop serve every meter on the page. The
@@ -20,18 +49,29 @@ let unsubscribe: (() => void) | null = null;
 let frame = 0;
 let last = 0;
 
-function draw(e: Entry) {
-  const pct = levelPct(e.shown);
-  if (pct !== e.pct) {
-    e.pct = pct;
-    e.fill.style.transform = `scaleX(${pct / 100})`;
+function draw(e: Entry, now: number) {
+  if (e.fill) {
+    const pct = levelPct(e.shown);
+    if (pct !== e.pct) {
+      e.pct = pct;
+      // Slid in from the left rather than scaled, so its rounded tip and its
+      // glow keep their shape at any level.
+      e.fill.style.transform = `translateX(${pct - 100}%)`;
+    }
   }
-  const hot = pct > 92;
-  if (hot !== e.hot) {
-    e.hot = hot;
-    e.fill.style.background = hot
-      ? "var(--color-live)"
-      : "linear-gradient(90deg, var(--color-ok), var(--color-accent-bright))";
+  if (e.hotTarget) {
+    const hot = now < e.hotUntil;
+    if (hot !== e.hot) {
+      e.hot = hot;
+      e.hotTarget.toggleAttribute("data-hot", hot);
+    }
+  }
+  if (e.text) {
+    const label = peakDbText(e.held.level);
+    if (label !== e.label) {
+      e.label = label;
+      e.text.textContent = label;
+    }
   }
 }
 
@@ -41,8 +81,9 @@ function tick(now: number) {
   let moving = false;
   for (const e of entries) {
     if (e.shown > 0) e.shown = decayLevel(e.shown, dt);
-    draw(e);
-    if (e.shown > 0) moving = true;
+    draw(e, now);
+    // A warning still on has to be taken off once its hold is over.
+    if (e.shown > 0 || e.hot) moving = true;
   }
   if (moving) frame = requestAnimationFrame(tick);
   else {
@@ -55,21 +96,24 @@ function wake() {
   if (!frame) frame = requestAnimationFrame(tick);
 }
 
+function feed(e: Entry, s: EngineState, now: number) {
+  const level = e.muted ? 0 : e.read(s);
+  e.shown = riseLevel(e.shown, level);
+  e.hotUntil = hotUntil(e.hotUntil, level, now);
+  e.held = holdPeak(e.held, level, now);
+}
+
 function register(e: Entry) {
   entries.add(e);
-  draw(e);
   unsubscribe ??= useEngine.subscribe((s, prev) => {
-    if (s.levels === prev.levels) return;
-    for (const m of entries) {
-      m.shown = riseLevel(m.shown, m.muted ? 0 : (s.levels[m.id] ?? 0));
-    }
+    if (s.levels === prev.levels && s.mix === prev.mix) return;
+    const now = performance.now();
+    for (const m of entries) feed(m, s, now);
     wake();
   });
-  const level = useEngine.getState().levels[e.id] ?? 0;
-  if (level > 0 && !e.muted) {
-    e.shown = level;
-    wake();
-  }
+  feed(e, useEngine.getState(), performance.now());
+  draw(e, performance.now());
+  if (e.shown > 0) wake();
 }
 
 function unregister(e: Entry) {
@@ -82,62 +126,93 @@ function unregister(e: Entry) {
   last = 0;
 }
 
+function newEntry(read: Entry["read"], muted: boolean): Entry {
+  return {
+    read,
+    muted,
+    shown: 0,
+    pct: -1,
+    hotUntil: 0,
+    hot: false,
+    held: { level: 0, at: 0 },
+    label: "",
+  };
+}
+
 /**
- * The level bar of one audio source: rises instantly, falls softly. Reads its
- * level from the store itself (by `source` id) and draws outside React.
+ * The live level inside a slider's track: a bright bar with a soft glow that
+ * rises instantly and falls softly. Fills its parent (the track) and takes no
+ * pointer, so the slider above it stays the control. Reads its level from the
+ * store itself and draws outside React.
  *
- * `variant="bar"` is the standalone 6 px pill. `variant="track"` has no height or
- * background of its own and fills its parent, for drawing behind another
- * control; `className` sizes either one.
+ * `hot` gets a `data-hot` attribute while the level is about to clip.
  */
 export function Meter({
-  source,
+  of,
   muted = false,
-  variant = "bar",
+  hot,
   className,
 }: {
-  source: string;
+  of: LevelFeed;
   muted?: boolean;
-  variant?: "bar" | "track";
+  hot?: RefObject<HTMLElement | null>;
   className?: string;
 }) {
   const fill = useRef<HTMLDivElement>(null);
   const entry = useRef<Entry | null>(null);
+  const key = feedKey(of);
 
   useEffect(() => {
-    const e: Entry = {
-      id: source,
-      muted,
-      fill: fill.current!,
-      shown: 0,
-      pct: -1,
-      hot: false,
-    };
+    const e = newEntry(reader(of), muted);
+    e.fill = fill.current!;
+    e.hotTarget = hot?.current;
     entry.current = e;
     register(e);
-    return () => unregister(e);
+    return () => {
+      unregister(e);
+      e.hotTarget?.removeAttribute("data-hot");
+    };
     // `muted` is handled below without tearing the entry down.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source]);
+  }, [key]);
 
   useEffect(() => {
-    if (entry.current) entry.current.muted = muted;
+    const e = entry.current;
+    if (!e) return;
+    e.muted = muted;
+    // Muted means nothing reaches the clip: no warning to hold on to.
+    if (muted) e.hotUntil = 0;
   }, [muted]);
 
   return (
     <div
-      className={cn(
-        "w-full overflow-hidden rounded-pill",
-        // The track takes the height of whoever places it.
-        variant === "bar" && "h-1.5 bg-line",
-        className,
-      )}
+      className={cn("pointer-events-none absolute inset-0", className)}
+      style={{
+        filter:
+          "drop-shadow(0 0 5px color-mix(in srgb, var(--color-accent-bright) 45%, transparent))",
+      }}
     >
-      <div
-        ref={fill}
-        className="h-full origin-left rounded-pill"
-        style={{ transform: "scaleX(0)", willChange: "transform" }}
-      />
+      <div className="h-full w-full overflow-hidden rounded-pill">
+        <div
+          ref={fill}
+          className="h-full w-full rounded-pill bg-gradient-to-r from-accent to-accent-bright"
+          style={{ transform: "translateX(-100%)", willChange: "transform" }}
+        />
+      </div>
     </div>
   );
+}
+
+/** A level's peak in dB as text, held a second so it can be read. */
+export function PeakText({ of, className }: { of: LevelFeed; className?: string }) {
+  const text = useRef<HTMLSpanElement>(null);
+  const key = feedKey(of);
+  useEffect(() => {
+    const e = newEntry(reader(of), false);
+    e.text = text.current!;
+    register(e);
+    return () => unregister(e);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return <span ref={text} className={className} />;
 }

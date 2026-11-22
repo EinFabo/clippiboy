@@ -20,6 +20,7 @@ import type {
   EncoderInfo,
   EngineStatus,
   LevelMap,
+  MixLevel,
   StorageUsage,
   Trashed,
   TrimOriginals,
@@ -258,6 +259,9 @@ export const events = {
   onLevels: (cb: (levels: LevelMap) => void): Promise<UnlistenFn> =>
     // Window-scoped: only the main window's own stream, under its own name.
     listen<LevelMap>("audio-levels:main", (e) => cb(e.payload), { target: "main" }),
+  /** The main track's level beside the sources', for the mixer. */
+  onMix: (cb: (mix: MixLevel) => void): Promise<UnlistenFn> =>
+    listen<MixLevel>("audio-mix:main", (e) => cb(e.payload), { target: "main" }),
   onStatus: (cb: (s: EngineStatus) => void): Promise<UnlistenFn> =>
     listen<EngineStatus>("engine-status", (e) => cb(e.payload)),
   onClipSaved: (cb: (c: Clip) => void): Promise<UnlistenFn> =>

@@ -105,7 +105,8 @@ export function Slider({
   min: number;
   max: number;
   step?: number;
-  /** No track behind the fill, so something drawn behind the slider shows through. */
+  /** Neither track nor fill: whoever places the slider draws both behind it
+   *  (the audio mixer's level track), and only the knob is the slider's own. */
   clear?: boolean;
   onChange: (v: number) => void;
   /**
@@ -186,7 +187,9 @@ export function Slider({
         [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-pill
         [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow"
       style={{
-        background: `linear-gradient(90deg, var(--color-accent) ${pct}%, ${clear ? "transparent" : "var(--color-line-strong)"} ${pct}%)`,
+        background: clear
+          ? "transparent"
+          : `linear-gradient(90deg, var(--color-accent) ${pct}%, var(--color-line-strong) ${pct}%)`,
       }}
     />
   );

@@ -25,6 +25,7 @@ import type {
   Trashed,
   EncoderInfo,
   LevelMap,
+  MixLevel,
   RateControl,
   ShotRect,
   ShotStep,
@@ -47,7 +48,7 @@ export type SettingsTab =
   | "about"
   | "colors";
 
-interface EngineState {
+export interface EngineState {
   ready: boolean;
   config: AppConfig;
   /** The cameras Windows lists; loaded when Settings opens. */
@@ -73,6 +74,8 @@ interface EngineState {
   /** Recently deleted, the latest deletion first. */
   trash: Trashed[];
   levels: LevelMap;
+  /** The clip's main track, beside `levels`. */
+  mix: MixLevel;
   sourceErrors: Record<string, string>;
   /** The source runs, but doubled or on a fallback clock — not an error, but
    *  something you want to know before recording. */
@@ -275,6 +278,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   clips: [],
   trash: [],
   levels: {},
+  mix: { l: 0, r: 0 },
   sourceErrors: {},
   sourceWarnings: {},
   taps: {},
@@ -358,11 +362,18 @@ export const useEngine = create<EngineState>((set, get) => ({
       });
       setInterval(() => {
         const levels: LevelMap = {};
+        let left = 0;
+        let right = 0;
         for (const s of get().config.sources) {
-          levels[s.id] =
-            s.enabled && !s.muted ? Math.random() * 0.55 + 0.15 : 0;
+          const level = s.enabled && !s.muted ? Math.random() * 0.55 + 0.15 : 0;
+          levels[s.id] = level;
+          // The core's power sum, roughly — the gain is in `level` already.
+          if (!s.separateTrack) {
+            left += level ** 2;
+            right += (level * (0.8 + Math.random() * 0.2)) ** 2;
+          }
         }
-        set({ levels });
+        set({ levels, mix: { l: Math.sqrt(left), r: Math.sqrt(right) } });
       }, 80);
       return;
     }
@@ -429,6 +440,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         .catch(() => {});
 
       await events.onLevels((levels) => set({ levels }));
+      await events.onMix((mix) => set({ mix }));
       // The engine tick arrives every second, mostly unchanged; set only what moved.
       const setChanged = (patch: Partial<EngineState>) => {
         const part = changedPart(get(), patch);

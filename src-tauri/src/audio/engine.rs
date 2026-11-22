@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::Serialize;
 
 use crate::audio::capture::{self, StreamHandle, CHANNELS, SAMPLE_RATE};
 use crate::audio::ring::SampleRing;
@@ -287,29 +288,37 @@ impl AudioEngine {
         }
     }
 
-    /// Peak level per source (0.0–1.0), with gain and mute taken into account.
+    /// Peak level per source, with gain and mute taken into account, and the
+    /// main track's level beside them.
     ///
     /// The loudest of a source's streams wins — the meter shows a level, not a
-    /// sum. Every ring is read even for a muted source, because `take_peak`
-    /// resets: skipping it would make the meter jump on unmute.
-    pub fn levels(&self, sources: &[AudioSource]) -> HashMap<String, f32> {
+    /// sum. Not capped at 1.0: above it the source clips in the clip, and the
+    /// mixer says so on the knob. Every ring is read even for a muted source,
+    /// because `take_peaks` resets: skipping it would make the meter jump on
+    /// unmute.
+    pub fn levels(&self, sources: &[AudioSource]) -> Levels {
         let running = self.running.lock();
-        let mut peaks: HashMap<&str, f32> = HashMap::new();
+        let mut peaks: HashMap<&str, (f32, f32)> = HashMap::new();
         for run in running.values() {
-            let peak = run.ring.take_peak();
-            let slot = peaks.entry(run.source_id.as_str()).or_insert(0.0);
-            *slot = slot.max(peak);
+            let (left, right) = run.ring.take_peaks();
+            let slot = peaks.entry(run.source_id.as_str()).or_insert((0.0, 0.0));
+            *slot = (slot.0.max(left), slot.1.max(right));
         }
 
         let mut out = HashMap::with_capacity(sources.len());
         for source in sources {
             let level = match peaks.get(source.id.as_str()) {
-                Some(peak) if !source.muted => (peak * gain_factor(source.gain_db)).min(1.0),
+                Some((left, right)) if !source.muted => {
+                    left.max(*right) * gain_factor(source.gain_db)
+                }
                 _ => 0.0,
             };
             out.insert(source.id.clone(), level);
         }
-        out
+        Levels {
+            mix: main_mix_level(sources, &peaks),
+            sources: out,
+        }
     }
 
     pub fn errors(&self) -> HashMap<String, String> {
@@ -440,6 +449,49 @@ impl AudioEngine {
     }
 }
 
+/// What the meters show, once per tick.
+pub struct Levels {
+    /// Per source id, after gain; 0 when muted.
+    pub sources: HashMap<String, f32>,
+    /// The main track of the clip.
+    pub mix: MixLevel,
+}
+
+/// The level of the clip's main track, left and right.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct MixLevel {
+    pub l: f32,
+    pub r: f32,
+}
+
+/// The main track's level, worked out from the sources' peaks (left, right —
+/// before gain): `sqrt(Σ (peak·gain)²)` per side over every audible source
+/// that is not on a track of its own.
+///
+/// An approximation: the main track is summed only when a clip is saved
+/// (`muxer::build`), so there is no mixed signal to measure while recording.
+/// Unrelated sounds add up like this; two copies of the same one would read
+/// 3 dB low, which a meter can live with. Each part is capped at 1.0, as
+/// `mix_window` clips every track before the sum.
+pub fn main_mix_level(sources: &[AudioSource], peaks: &HashMap<&str, (f32, f32)>) -> MixLevel {
+    let (mut left, mut right) = (0.0f32, 0.0f32);
+    for source in sources {
+        if source.separate_track || !audible(sources, source) {
+            continue;
+        }
+        let Some((l, r)) = peaks.get(source.id.as_str()) else {
+            continue;
+        };
+        let gain = gain_factor(source.gain_db);
+        left += (l * gain).min(1.0).powi(2);
+        right += (r * gain).min(1.0).powi(2);
+    }
+    MixLevel {
+        l: left.sqrt(),
+        r: right.sqrt(),
+    }
+}
+
 /// Adds every stream belonging to `source_id` into `target`, scaled by `gain`.
 fn add_streams(
     running: &HashMap<String, Running>,
@@ -516,5 +568,75 @@ mod tests {
         assert_ne!(stream_key(&stream("rest", 1)), stream_key(&stream("rest", 2)));
         assert_ne!(stream_key(&stream("rest", 1)), stream_key(&stream("game", 1)));
         assert_eq!(stream_key(&stream("rest", 1)), stream_key(&stream("rest", 1)));
+    }
+
+    fn mixer_source(id: &str, gain_db: f32, separate_track: bool) -> AudioSource {
+        AudioSource {
+            id: id.into(),
+            label: id.into(),
+            kind: SourceKind::InputDevice {
+                device_id: "d".into(),
+            },
+            enabled: true,
+            gain_db,
+            muted: false,
+            solo: false,
+            separate_track,
+        }
+    }
+
+    /// The main track's level is the power sum of the sources in it, after
+    /// their gain, side by side.
+    #[test]
+    fn the_main_mix_level_is_the_power_sum_of_its_sources() {
+        let sources = vec![
+            mixer_source("game", 0.0, false),
+            mixer_source("music", -6.0, false),
+        ];
+        let peaks = HashMap::from([("game", (0.3, 0.4)), ("music", (0.8, 0.0))]);
+        let mix = main_mix_level(&sources, &peaks);
+        let music = 0.8 * gain_factor(-6.0);
+        assert!((mix.l - (0.3f32.powi(2) + music.powi(2)).sqrt()).abs() < 1e-6);
+        assert!((mix.r - 0.4).abs() < 1e-6);
+    }
+
+    /// Only what lands in the main track counts: not a source on a track of its
+    /// own, not a muted, switched-off or soloed-out one, and not a source that
+    /// delivered nothing.
+    #[test]
+    fn the_main_mix_level_leaves_out_what_is_not_in_the_main_track() {
+        let mut muted = mixer_source("mic", 0.0, false);
+        muted.muted = true;
+        let mut off = mixer_source("off", 0.0, false);
+        off.enabled = false;
+        let sources = vec![
+            mixer_source("discord", 0.0, true),
+            muted,
+            off,
+            mixer_source("silent", 0.0, false),
+        ];
+        let peaks = HashMap::from([
+            ("discord", (0.9, 0.9)),
+            ("mic", (0.9, 0.9)),
+            ("off", (0.9, 0.9)),
+        ]);
+        assert_eq!(main_mix_level(&sources, &peaks), MixLevel::default());
+
+        let mut solo = mixer_source("solo", 0.0, false);
+        solo.solo = true;
+        let sources = vec![mixer_source("game", 0.0, false), solo];
+        let peaks = HashMap::from([("game", (0.9, 0.9)), ("solo", (0.2, 0.2))]);
+        assert!((main_mix_level(&sources, &peaks).l - 0.2).abs() < 1e-6);
+    }
+
+    /// A source turned up past full scale is clipped in its track before the
+    /// sum, so it adds no more than 1.0.
+    #[test]
+    fn a_clipping_source_adds_no_more_than_full_scale() {
+        let sources = vec![mixer_source("loud", 12.0, false)];
+        let peaks = HashMap::from([("loud", (0.9, 0.1))]);
+        let mix = main_mix_level(&sources, &peaks);
+        assert!((mix.l - 1.0).abs() < 1e-6);
+        assert!((mix.r - 0.1 * gain_factor(12.0)).abs() < 1e-6);
     }
 }

@@ -73,8 +73,9 @@ pub struct SampleRing {
     sample_rate: u32,
     channels: usize,
     capacity: usize,
-    /// Peak level as f32 bits so the UI can read it without a lock.
-    peak: AtomicU32,
+    /// Peak level of the left and the right channel as f32 bits, so the UI can
+    /// read them without a lock. A mono ring feeds both.
+    peak: [AtomicU32; 2],
 }
 
 impl SampleRing {
@@ -89,7 +90,7 @@ impl SampleRing {
             sample_rate,
             channels,
             capacity,
-            peak: AtomicU32::new(0),
+            peak: [AtomicU32::new(0), AtomicU32::new(0)],
         }
     }
 
@@ -120,16 +121,20 @@ impl SampleRing {
             return;
         }
 
-        let mut peak = 0.0f32;
-        for sample in block {
-            let value = sample.abs();
-            if value > peak {
-                peak = value;
-            }
+        // Interleaved: the first channel is left, every further one counts as
+        // right; a single channel is both.
+        let mut peak = [0.0f32; 2];
+        for (index, sample) in block.iter().enumerate() {
+            let side = usize::from(index % self.channels > 0);
+            peak[side] = peak[side].max(sample.abs());
         }
-        let previous = f32::from_bits(self.peak.load(Ordering::Relaxed));
-        if peak > previous {
-            self.peak.store(peak.to_bits(), Ordering::Relaxed);
+        if self.channels == 1 {
+            peak[1] = peak[0];
+        }
+        for (slot, value) in self.peak.iter().zip(peak) {
+            if value > f32::from_bits(slot.load(Ordering::Relaxed)) {
+                slot.store(value.to_bits(), Ordering::Relaxed);
+            }
         }
 
         let mut inner = self.inner.lock();
@@ -226,9 +231,11 @@ impl SampleRing {
         Some(inner.start_100ns + self.frames_to_100ns(held))
     }
 
-    /// Peak level since the last call (0.0–1.0), reset afterwards.
-    pub fn take_peak(&self) -> f32 {
-        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    /// Peak level of left and right since the last call (0.0–1.0), reset
+    /// afterwards.
+    pub fn take_peaks(&self) -> (f32, f32) {
+        let take = |slot: &AtomicU32| f32::from_bits(slot.swap(0, Ordering::Relaxed));
+        (take(&self.peak[0]), take(&self.peak[1]))
     }
 
     pub fn clear(&self) {
@@ -259,8 +266,19 @@ mod tests {
     fn peak_is_reported_once_and_then_reset() {
         let ring = SampleRing::new(RATE, 2);
         ring.write(&[0.1, -0.7, 0.3, 0.2], 0);
-        assert!((ring.take_peak() - 0.7).abs() < 1e-6);
-        assert_eq!(ring.take_peak(), 0.0);
+        let (left, right) = ring.take_peaks();
+        assert!((left - 0.3).abs() < 1e-6);
+        assert!((right - 0.7).abs() < 1e-6);
+        assert_eq!(ring.take_peaks(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_mono_ring_reports_its_peak_on_both_sides() {
+        let ring = SampleRing::new(RATE, 1);
+        ring.write(&[0.2, -0.5], 0);
+        let (left, right) = ring.take_peaks();
+        assert!((left - 0.5).abs() < 1e-6);
+        assert_eq!(left, right);
     }
 
     #[test]

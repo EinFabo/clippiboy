@@ -13,9 +13,10 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Segmented, Slider, Toggle } from "@/components/ui/Controls";
 import { FLOATING, useMenu } from "@/components/ui/Menu";
-import { Meter } from "@/components/ui/Meter";
+import { Meter, PeakText } from "@/components/ui/Meter";
 import {
   IconApp,
+  IconClips,
   IconGamepad,
   IconGrip,
   IconLayers,
@@ -142,6 +143,105 @@ function sourceIcon(kind: SourceKind, leftovers: boolean) {
       <IconSpeaker className="h-4 w-4" />
     );
   return <IconApp className="h-4 w-4" />;
+}
+
+/** The volume slider's range, in dB. */
+const GAIN_MIN = -30;
+const GAIN_MAX = 12;
+/** The slider's knob is 14 px wide: its centre runs from 7 px to the width less 7 px. */
+const THUMB_PX = 14;
+
+/**
+ * A source's volume as one track: the part up to the knob in the dark accent
+ * (what is set), the live level after that volume bright inside it (what lands
+ * in the clip), and the slider's own knob above both — the input stays the
+ * control, for the pointer and the keyboard alike. The knob gets a warm ring
+ * while the level is about to clip (`.cb-vol[data-hot]` in index.css). Muted or
+ * off, the bright part stays away and the track dark.
+ */
+function VolumeTrack({
+  source,
+  gainDb,
+  min,
+  max,
+  className,
+  children,
+}: {
+  source: AudioSource;
+  gainDb: number;
+  min: number;
+  max: number;
+  className?: string;
+  children: ReactNode;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const share = (gainDb - min) / (max - min);
+  return (
+    <div
+      ref={box}
+      className={cn("cb-vol relative flex h-4 min-w-[110px] flex-1 items-center", className)}
+    >
+      <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-pill bg-line">
+        <div
+          className="absolute inset-y-0 left-0 rounded-pill bg-accent-deep"
+          // Up to the knob's centre, which the browser keeps inside the track.
+          style={{ width: `calc(${THUMB_PX / 2}px + (100% - ${THUMB_PX}px) * ${share})` }}
+        />
+        <Meter
+          of={{ source: source.id }}
+          muted={source.muted || !source.enabled}
+          hot={box}
+        />
+      </div>
+      <div className="relative flex w-full items-center">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * The first row of the list: what the clip's main track carries right now, in
+ * the same columns as the sources below it. Left and right as two fine tracks,
+ * the peak where the sources show their volume, and nothing to set. The level
+ * is the core's estimate from the sources in the main track
+ * (`audio::engine::main_mix_level`); sources on a track of their own are only
+ * counted in the line below the name.
+ */
+function ClipMixRow({ sources }: { sources: AudioSource[] }) {
+  const own = sources.filter((s) => s.enabled && s.separateTrack).length;
+  return (
+    <div className="flex items-center gap-3.5 bg-accent/[0.06] px-4 py-3">
+      <span className="w-5 shrink-0" />
+      <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
+        <IconClips className="h-4 w-4" />
+      </span>
+      <div className="w-[190px] min-w-0 shrink-0">
+        <p className="truncate px-1.5 py-0.5 text-sm font-medium">In your clip</p>
+        <p className="truncate px-1.5 text-xs text-ink-faint">
+          {own > 0
+            ? `Main track · ${own} own track${own === 1 ? "" : "s"}`
+            : "Main track"}
+        </p>
+      </div>
+      <div
+        role="img"
+        aria-label="Level of the main track, left and right"
+        className="flex min-w-[110px] flex-1 flex-col gap-[5px]"
+      >
+        {(["l", "r"] as const).map((side) => (
+          <div key={side} className="relative h-1 rounded-pill bg-line">
+            <Meter of={{ mix: side }} />
+          </div>
+        ))}
+      </div>
+      <PeakText
+        of={{ mix: "peak" }}
+        className="w-[60px] shrink-0 text-right font-mono text-xs text-ink-muted"
+      />
+      {/* No controls here, but the room of the source rows' own (mute 30, track
+          84, switch 44, menu 30 and three gaps of 14), so the columns line up. */}
+      <span aria-hidden className="w-[230px] shrink-0" />
+    </div>
+  );
 }
 
 /** A source on its way to a new place in the list. */
@@ -303,7 +403,8 @@ export function AudioMixer() {
       {config.sources.length > 0 && (
         <div ref={list}>
         <Card className="overflow-hidden">
-          {config.sources.map((source, index) => {
+          <ClipMixRow sources={config.sources} />
+          {config.sources.map((source) => {
             const status = sourceStatus(source, {
               devices,
               processes,
@@ -327,8 +428,7 @@ export function AudioMixer() {
                   if (drag) drop(drag);
                 }}
                 className={cn(
-                  "relative flex items-center gap-3.5 px-4 py-3 transition-[opacity,background-color] duration-200",
-                  index > 0 && "border-t border-line",
+                  "relative flex items-center gap-3.5 border-t border-line px-4 py-3 transition-[opacity,background-color] duration-200",
                   status.tone === "warn" && "bg-warn/5",
                   status.tone === "error" && "bg-live/5",
                   // Only one opacity, never two: `cn` just joins, so a second
@@ -427,38 +527,31 @@ export function AudioMixer() {
                   </p>
                 </div>
 
-                <div
-                  className={cn(
-                    "relative flex h-4 min-w-[110px] flex-1 items-center",
-                    status.tone === "warn" && "opacity-50",
-                  )}
+                <VolumeTrack
+                  source={source}
+                  gainDb={shownGain}
+                  min={GAIN_MIN}
+                  max={GAIN_MAX}
+                  className={cn(status.tone === "warn" && "opacity-50")}
                 >
-                  <Meter
-                    source={source.id}
-                    muted={source.muted}
-                    variant="track"
-                    className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 bg-white/[0.04] opacity-45"
+                  <Slider
+                    clear
+                    label={`Volume ${source.label}`}
+                    value={shownGain}
+                    min={GAIN_MIN}
+                    max={GAIN_MAX}
+                    step={0.5}
+                    onChange={(gainDb) =>
+                      setGainDraft({ id: source.id, gainDb })
+                    }
+                    onCommit={(gainDb) => {
+                      setGainDraft(null);
+                      if (gainDb !== source.gainDb)
+                        void upsertSource({ ...source, gainDb });
+                    }}
+                    onRelease={() => setGainDraft(null)}
                   />
-                  <div className="relative flex w-full items-center">
-                    <Slider
-                      clear
-                      label={`Volume ${source.label}`}
-                      value={shownGain}
-                      min={-30}
-                      max={12}
-                      step={0.5}
-                      onChange={(gainDb) =>
-                        setGainDraft({ id: source.id, gainDb })
-                      }
-                      onCommit={(gainDb) => {
-                        setGainDraft(null);
-                        if (gainDb !== source.gainDb)
-                          void upsertSource({ ...source, gainDb });
-                      }}
-                      onRelease={() => setGainDraft(null)}
-                    />
-                  </div>
-                </div>
+                </VolumeTrack>
                 <span className="w-[60px] shrink-0 text-right font-mono text-xs text-ink-muted">
                   {gainText(shownGain)}
                 </span>

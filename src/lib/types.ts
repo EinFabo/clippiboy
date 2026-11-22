@@ -763,6 +763,13 @@ export interface OverlayBanner {
 
 export type LevelMap = Record<string, number>;
 
+/** The level of the clip's main track, left and right — a power sum over the
+ *  sources in it, worked out by the core (`audio::engine::main_mix_level`). */
+export interface MixLevel {
+  l: number;
+  r: number;
+}
+
 /** What `check_update` reports about a newer version. */
 export interface UpdateInfo {
   version: string;
