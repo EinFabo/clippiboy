@@ -122,23 +122,10 @@ function linkEntries(clip: Clip): MenuEntry[] {
 }
 
 /**
- * The entries that send a clip somewhere — shared by the right-click menu and
- * the "Share" button in the player, so the two cannot drift apart. Read when a
- * menu opens, like {@link linkEntries}.
+ * The entries that put the clip on the clipboard — the top of the share menu,
+ * and where the Overview takes its quickest copy action from.
  */
-export function shareEntries(
-  clip: Clip,
-  {
-    onExport,
-    onSend,
-    dividerBeforeExport = false,
-  }: {
-    onExport?: () => void;
-    onSend: (clip: Clip) => void;
-    /** The Share button sets the export apart; the right-click menu does not. */
-    dividerBeforeExport?: boolean;
-  },
-): MenuEntry[] {
+export function copyEntries(clip: Clip): MenuEntry[] {
   const entries: MenuEntry[] = [];
   // The picture first: on a screenshot that is the one you actually want —
   // in a chat window a pasted file is an attachment, a pasted picture is a
@@ -172,6 +159,28 @@ export function shareEntries(
         void run(api.exportShotForDiscord(clip.id, discordTarget()), "Copied · Ctrl+V in Discord"),
     });
   }
+  return entries;
+}
+
+/**
+ * The entries that send a clip somewhere — shared by the right-click menu and
+ * the "Share" button in the player, so the two cannot drift apart. Read when a
+ * menu opens, like {@link linkEntries}.
+ */
+export function shareEntries(
+  clip: Clip,
+  {
+    onExport,
+    onSend,
+    dividerBeforeExport = false,
+  }: {
+    onExport?: () => void;
+    onSend: (clip: Clip) => void;
+    /** The Share button sets the export apart; the right-click menu does not. */
+    dividerBeforeExport?: boolean;
+  },
+): MenuEntry[] {
+  const entries: MenuEntry[] = copyEntries(clip);
   entries.push({
     kind: "item",
     label: "Send to a friend…",

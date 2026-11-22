@@ -4,14 +4,10 @@ import { useEngine } from "@/store";
 import { Card, Pill, SectionTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ClipPlayer } from "@/components/ClipPlayer";
-import { IconArrowUpRight, IconCamera, IconRecord, IconScissors } from "@/components/icons";
-import {
-  clipName,
-  formatAgo,
-  formatBufferSeconds,
-  formatDuration,
-  formatSize,
-} from "@/lib/format";
+import { ShotViewer } from "@/components/ShotViewer";
+import { ShareMenuButton, copyEntries } from "@/components/clipMenu";
+import { IconCamera, IconCopy, IconRecord, IconScissors } from "@/components/icons";
+import { clipName, formatAgo, formatDuration, formatSize } from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
 import type { Route } from "@/components/NavBar";
 import { SourceTrouble } from "@/components/SourceTrouble";
@@ -19,18 +15,24 @@ import { cn } from "@/lib/cn";
 import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { LiveDot } from "@/components/ui/LiveDot";
 import { ProgressBar } from "@/components/ui/ProgressBar";
-import { useCountUp } from "@/lib/useCountUp";
+import {
+  audioSummary,
+  bufferStatus,
+  justNowLeft,
+  latestItems,
+  saveStep,
+  videoSummary,
+} from "@/lib/overview";
+import type { Clip } from "@/lib/types";
 
-/**
- * The quality steps by name. Kept in step with `QUALITY_STEPS` in the recording
- * settings — the tile is a shortcut to that page, so it should say the same word.
- */
-function qualityLabel(quality: number): string {
-  if (quality < 59) return "Smallest files";
-  if (quality < 66) return "Small";
-  if (quality < 74) return "Balanced";
-  if (quality < 82) return "High";
-  return "Highest";
+/** A hotkey as a small key chip; nothing when none is bound. */
+function Key({ binding }: { binding: ReturnType<typeof shownHotkey> }) {
+  if (!binding.value) return null;
+  return (
+    <kbd className="ml-0.5 rounded-[6px] border border-current px-1.5 py-px font-mono text-[11px] font-normal opacity-70">
+      {hotkeyLabel(binding.value, binding.family)}
+    </kbd>
+  );
 }
 
 export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
@@ -79,13 +81,35 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const saving = recordingSaving || recordingProgress !== null;
   // Named as the pad last used goes, else the keyboard's.
   const saveKey = shownHotkey(config, "saveClip");
+  const screenshotKey = shownHotkey(config, "screenshot");
   const recordKey = shownHotkey(config, "record");
-  // Recordings only. The player below is the video one, and "Latest clips" says
-  // what it shows — screenshots have their own place in the gallery.
-  const recent = useMemo(
-    () => clips.filter((clip) => !clip.screenshot && !clip.recording).slice(0, 3),
-    [clips],
-  );
+  const status = bufferStatus({
+    bufferActive,
+    game: detectedGame,
+    bufferedSeconds,
+    bufferSeconds: config.buffer.seconds,
+  });
+  const off = status.state === "off";
+  // Of every kind: the Overview shows what just happened, not only clips.
+  const recent = useMemo(() => latestItems(clips), [clips]);
+  // "Just now" has to go by itself: a timer to the minute, and a slow tick so
+  // the "5m ago" texts do not stand still.
+  const [now, setNow] = useState(() => Date.now());
+  const newest = recent[0];
+  const newestAt = newest?.createdAt;
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  useEffect(() => {
+    if (newestAt === undefined) return;
+    const left = justNowLeft(newestAt, Date.now());
+    setNow(Date.now());
+    if (left === null) return;
+    const id = setTimeout(() => setNow(Date.now()), left + 50);
+    return () => clearTimeout(id);
+  }, [newestAt]);
+  const newestFresh = newestAt !== undefined && justNowLeft(newestAt, now) !== null;
   /**
    * The player's clips, by id, as they stood when it opened — and the one on
    * screen. By position, as before, a clip saved meanwhile (hotkey, console,
@@ -109,104 +133,74 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     if (playing && shownIndex < 0) setPlaying(null);
   }, [playing, shownIndex]);
 
+  const open = (clip: Clip) =>
+    setPlaying({ ids: recent.map((c) => c.id), shown: clip.id, seen: [clip.id] });
+  const shown = playlist[shownIndex];
+  const thinned = (index: number) =>
+    setPlaying((was) => {
+      // Read off the ids in the update, not off this render's list: a delete
+      // right before has already taken its id out. Thinned to the items still
+      // there, as `playlist` is.
+      const id = was?.ids.filter((other) => clips.some((clip) => clip.id === other))[index];
+      return was && id ? { ...was, shown: id, seen: [...was.seen, id] } : was;
+    });
+  const closePlayer = () => {
+    // A heart set in the player moves the file into the favourites — once the
+    // player has let go of it, as in the gallery.
+    for (const id of new Set(playing?.seen ?? [])) {
+      if (clips.some((clip) => clip.id === id)) void fileClip(id);
+    }
+    setPlaying(null);
+  };
+  const deleteFromPlayer = (id: string) => {
+    setPlaying((was) => was && { ...was, ids: was.ids.filter((other) => other !== id) });
+    void deleteClip(id);
+  };
+
   return (
-    <div className="space-y-12">
-      <header className="pt-10 pb-4 text-center">
-        <h1 className="display text-5xl">ClippiBoy</h1>
-        <p className="mx-auto mt-4 max-w-md text-[15px] leading-relaxed text-white/70">
-          Runs in the background, listens to every audio source separately, and
-          saves — after the fact — exactly the moment that was worth it.
-        </p>
-        <div className="mt-7 flex justify-center gap-3">
-          <Button
-            variant={bufferActive ? "secondary" : "primary"}
-            onClick={toggleBuffer}
-          >
-            {bufferActive ? "Stop buffer" : "Start buffer"}
-          </Button>
-          <Button
-            variant="secondary"
-            icon={<IconScissors className="h-4 w-4" />}
-            onClick={saveClip}
-            disabled={!bufferActive}
-          >
-            Save clip
-          </Button>
-          {/* No `disabled` on this one: a screenshot brings its own capture
-              session and does not care whether the buffer is running. */}
-          <Button
-            variant="secondary"
-            icon={<IconCamera className="h-4 w-4" />}
-            onClick={takeScreenshot}
-          >
-            Screenshot
-          </Button>
-          {/* Works without the buffer too: it brings the capture up itself. */}
-          <Button
-            variant="secondary"
-            icon={<IconRecord className={cn("h-4 w-4", recording && "text-live")} />}
-            onClick={toggleRecording}
-            disabled={saving}
-          >
-            {saving
-              ? `Saving recording… ${Math.round((recordingProgress ?? 0) * 100)} %`
-              : recording
-                ? `Stop · ${formatDuration(recordingSeconds * 1000)}`
-                : "Record"}
-          </Button>
-        </div>
-        {saving && (
-          <ProgressBar share={recordingProgress ?? 0} className="mx-auto mt-4 w-72" />
-        )}
-        {recording && (
-          <p className="mt-3 text-xs text-ink-muted tabular-nums">
-            ~{formatSize(recordingBytes)}
-            {recordKey.value && (
-              <>
-                {" "}·{" "}
-                <kbd className="rounded-inner border border-line bg-elevated px-1.5 py-0.5">
-                  {hotkeyLabel(recordKey.value, recordKey.family)}
-                </kbd>{" "}
-                stops it
-              </>
-            )}
-          </p>
-        )}
+    <div className="space-y-6">
+      <header className="pt-10">
+        <h1 className="display text-4xl">ClippiBoy</h1>
       </header>
 
-      <section className="grid grid-cols-4 gap-4">
-        <Stat
-          label="Replay buffer"
-          count={bufferActive ? bufferedSeconds : 0}
-          format={(s) => (bufferActive ? formatBufferSeconds(Math.round(s)) : "off")}
-          hint={`of ${formatBufferSeconds(config.buffer.seconds)}`}
-          live={bufferActive}
-        />
-        <Stat
-          label="Detected game"
-          value={detectedGame ?? "none"}
-          hint={
-            detectedGame
-              ? "Its name goes on the next clip"
-              : "No game in the foreground"
-          }
-        />
-        <Stat
-          label="Video"
-          value={`${config.recording.height}p${config.recording.fps}`}
-          hint={`${qualityLabel(config.recording.quality)} · ${config.recording.encoder.toUpperCase()}${
-            rateControl && rateControl !== "quality" ? " · fixed bitrate" : ""
-          }`}
-          onClick={() => onNavigate("recording")}
-        />
-        <Stat
-          label="Audio sources"
-          count={config.sources.filter((s) => s.enabled).length}
-          format={(n) => String(Math.round(n))}
-          hint={`${config.sources.filter((s) => s.separateTrack).length} on their own track`}
-          onClick={() => onNavigate("audio")}
-        />
-      </section>
+      <Card
+        className={cn(
+          "grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-3.5 px-6 py-5",
+          off && "border-warn/40 bg-warn/10",
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-3.5">
+          {off ? (
+            <span className="h-2.5 w-2.5 shrink-0 rounded-pill bg-warn" />
+          ) : (
+            <LiveDot className="h-2.5 w-2.5" />
+          )}
+          <div className="min-w-0">
+            <p className={cn("display truncate text-xl", off && "text-warn")}>{status.title}</p>
+            {status.sub && <p className="mt-0.5 text-[13px] text-ink-muted tabular-nums">{status.sub}</p>}
+          </div>
+        </div>
+        <div className="flex gap-2.5">
+          {off ? (
+            <Button variant="primary" onClick={toggleBuffer}>
+              Start buffer
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="primary"
+                icon={<IconScissors className="h-4 w-4" />}
+                onClick={saveClip}
+              >
+                Save clip
+                <Key binding={saveKey} />
+              </Button>
+              <Button onClick={toggleBuffer}>Stop</Button>
+            </>
+          )}
+        </div>
+        {!off && <ProgressBar share={status.fill} className="col-span-full h-1.5" />}
+      </Card>
 
       {/* Until now only the recording page said so, and nobody has that open
           while playing. The core moves the capture back by itself once the
@@ -226,9 +220,58 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
       <SourceTrouble onOpenMixer={() => onNavigate("audio")} />
 
-      <section>
+      <div>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* No `disabled` on this one: a screenshot brings its own capture
+              session and does not care whether the buffer is running. */}
+          <Button icon={<IconCamera className="h-4 w-4" />} onClick={takeScreenshot}>
+            Screenshot
+            <Key binding={screenshotKey} />
+          </Button>
+          {/* Works without the buffer too: it brings the capture up itself. */}
+          <Button
+            icon={<IconRecord className={cn("h-4 w-4", recording ? "text-live" : "text-live/80")} />}
+            onClick={toggleRecording}
+            disabled={saving}
+          >
+            {saving
+              ? `Saving recording… ${Math.round((recordingProgress ?? 0) * 100)} %`
+              : recording
+                ? `Stop · ${formatDuration(recordingSeconds * 1000)}`
+                : "Record"}
+            {!saving && !recording && <Key binding={recordKey} />}
+          </Button>
+          <p className="ml-auto text-[13px] text-ink-muted">
+            <button className="hover:text-ink" onClick={() => onNavigate("recording")}>
+              {videoSummary(config.recording, !!rateControl && rateControl !== "quality")}
+            </button>
+            {" · "}
+            <button className="hover:text-ink" onClick={() => onNavigate("audio")}>
+              {audioSummary(config.sources.filter((src) => src.enabled).length)}
+              <span className="ml-1 text-ink">›</span>
+            </button>
+          </p>
+        </div>
+        {saving && <ProgressBar share={recordingProgress ?? 0} className="mt-3 w-72" />}
+        {recording && (
+          <p className="mt-3 text-xs text-ink-muted tabular-nums">
+            ~{formatSize(recordingBytes)}
+            {recordKey.value && (
+              <>
+                {" "}·{" "}
+                <kbd className="rounded-inner border border-line bg-elevated px-1.5 py-0.5">
+                  {hotkeyLabel(recordKey.value, recordKey.family)}
+                </kbd>{" "}
+                stops it
+              </>
+            )}
+          </p>
+        )}
+      </div>
+
+      <section className="pt-4">
         <SectionTitle
-          title="Latest clips"
+          title="Latest"
           action={
             <Button size="sm" variant="ghost" onClick={() => onNavigate("clips")}>
               See all
@@ -236,138 +279,145 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           }
         />
         {recent.length === 0 ? (
-          <Card className="grid h-44 place-items-center text-sm text-ink-muted">
-            {saveKey.value ? (
-              <>
-                No clips yet — start the buffer and press{" "}
-                <kbd className="mx-1 rounded-inner border border-line bg-elevated px-2 py-0.5 text-xs">
-                  {hotkeyLabel(saveKey.value, saveKey.family)}
-                </kbd>
-              </>
-            ) : (
-              "No clips yet — start the buffer, then save one"
-            )}
+          <Card className="p-6">
+            <ol className="flex flex-wrap items-center gap-x-8 gap-y-3 text-sm">
+              {["Start the buffer", "Play", saveStep(saveKey.value ? hotkeyLabel(saveKey.value, saveKey.family) : null)].map(
+                (step, i) => (
+                  <li key={step} className="flex items-center gap-3">
+                    <span className="grid h-6 w-6 place-items-center rounded-pill border border-line text-xs text-ink-muted">
+                      {i + 1}
+                    </span>
+                    {step}
+                  </li>
+                ),
+              )}
+            </ol>
           </Card>
         ) : (
           <div className="grid grid-cols-3 gap-4">
-            {recent.map((clip) => (
-              <Card
+            {recent.map((clip, i) => (
+              <LatestCard
                 key={clip.id}
-                interactive
-                onClick={() =>
-                  setPlaying({ ids: recent.map((c) => c.id), shown: clip.id, seen: [clip.id] })
-                }
-                className="cursor-pointer overflow-hidden"
-              >
-                <div className="relative aspect-video bg-gradient-to-br from-accent-deep/40 to-black">
-                  {clip.thumbPath && (
-                    <img
-                      src={fileUrl(clip.thumbPath)}
-                      loading="lazy"
-                      decoding="async"
-                      alt=""
-                      className="h-full w-full object-cover"
-                    />
-                  )}
-                  {/* One row for both pills: a long game name truncates rather
-                      than sliding under the duration. */}
-                  <div className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
-                    <Pill className="min-w-0">
-                      <span className="min-w-0 truncate">{clip.game ?? "Unknown"}</span>
-                    </Pill>
-                    <Pill className="shrink-0">{formatDuration(clip.durationMs)}</Pill>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between p-4">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">
-                      {clipName(clip)}
-                    </p>
-                    <p className="mt-1 text-xs text-ink-muted">
-                      {formatAgo(clip.createdAt)}
-                    </p>
-                  </div>
-                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-pill border border-line text-ink-muted">
-                    <IconArrowUpRight className="h-4 w-4" />
-                  </span>
-                </div>
-              </Card>
+                clip={clip}
+                ago={formatAgo(clip.createdAt, now)}
+                fresh={i === 0 && newestFresh}
+                quick={i === 0}
+                onOpen={() => open(clip)}
+              />
             ))}
           </div>
         )}
       </section>
 
-      {playing !== null && shownIndex >= 0 && (
-        <ClipPlayer
-          clips={playlist}
-          index={shownIndex}
-          // Read off the ids in the update, not off this render's list: a
-          // delete right before has already taken its id out. Thinned to the
-          // clips still there, as `playlist` is: one deleted elsewhere (the
-          // console) would push every position after it along by one.
-          onIndexChange={(index) =>
-            setPlaying((was) => {
-              const shown = was?.ids.filter((id) => clips.some((clip) => clip.id === id))[index];
-              return was && shown ? { ...was, shown, seen: [...was.seen, shown] } : was;
-            })
-          }
-          onClose={() => {
-            // A heart set in the player moves the file into the favourites —
-            // once the player has let go of it, as in the gallery. From here
-            // that never happened, and the file stayed where it was.
-            for (const id of new Set(playing.seen)) {
-              if (clips.some((clip) => clip.id === id)) void fileClip(id);
-            }
-            setPlaying(null);
-          }}
-          onDelete={(id) => {
-            setPlaying((was) => was && { ...was, ids: was.ids.filter((other) => other !== id) });
-            void deleteClip(id);
-          }}
-          onOpenMixer={() => onNavigate("audio")}
-        />
-      )}
+      {playing !== null &&
+        shownIndex >= 0 &&
+        (shown?.screenshot ? (
+          <ShotViewer
+            clips={playlist}
+            index={shownIndex}
+            onIndexChange={thinned}
+            onClose={closePlayer}
+            onDelete={deleteFromPlayer}
+          />
+        ) : (
+          <ClipPlayer
+            clips={playlist}
+            index={shownIndex}
+            onIndexChange={thinned}
+            onClose={closePlayer}
+            onDelete={deleteFromPlayer}
+            onOpenMixer={() => onNavigate("audio")}
+          />
+        ))}
     </div>
   );
 }
 
 /**
- * A number with its name. Either a finished string, or — where the value is
- * worth watching move — a raw number plus how to write it, so it can run up to
- * a new reading instead of jumping to it.
+ * One of the newest items, in the gallery's look: thumbnail with its pills, the
+ * name and a line of facts, and two buttons. The newest has its quickest copy
+ * action first; the others Open.
  */
-function Stat(
-  props: {
-    label: string;
-    hint: string;
-    live?: boolean;
-    onClick?: () => void;
-  } & ({ value: string } | { count: number; format: (n: number) => string }),
-) {
-  const { label, hint, live, onClick } = props;
+function LatestCard({
+  clip,
+  ago,
+  fresh,
+  quick,
+  onOpen,
+}: {
+  clip: Clip;
+  ago: string;
+  fresh: boolean;
+  quick: boolean;
+  onOpen: () => void;
+}) {
+  const copies = quick ? copyEntries(clip) : [];
+  const copy = copies.find((e) => e.kind === "item" && e.label === "Copy for Discord") ?? copies[0];
+  const kind = clip.screenshot ? "Screenshot" : clip.recording ? "Recording" : null;
   return (
-    <Card
-      interactive={!!onClick}
-      onClick={onClick}
-      className={cn("p-5", onClick && "cursor-pointer")}
-    >
-      <div className="flex items-center gap-2 text-xs font-medium text-ink-muted">
-        {live && <LiveDot />}
-        {label}
-      </div>
-      <p className="display mt-3 truncate text-3xl">
-        {"count" in props ? (
-          <Counted value={props.count} format={props.format} />
-        ) : (
-          props.value
+    <Card interactive className="group overflow-hidden">
+      <button
+        onClick={onOpen}
+        aria-label={`${clip.screenshot ? "Open" : "Play"} ${clip.game ?? kind ?? "clip"}`}
+        className="relative block aspect-video w-full bg-gradient-to-br from-accent-deep/40 to-black"
+      >
+        {clip.thumbPath && (
+          <img
+            src={`${fileUrl(clip.thumbPath)}?v=${clip.sizeBytes}`}
+            loading="lazy"
+            decoding="async"
+            alt=""
+            className="h-full w-full object-cover"
+          />
         )}
-      </p>
-      <p className="mt-1 text-xs text-ink-faint">{hint}</p>
+        {/* One row for both pills: a long game name truncates rather than
+            sliding under the duration. */}
+        <span className="absolute inset-x-3 bottom-3 flex items-end justify-between gap-2">
+          <Pill className="min-w-0">
+            <span className="min-w-0 truncate">{clip.game ?? "Unknown"}</span>
+          </Pill>
+          {clip.screenshot ? (
+            <Pill title="Screenshot" className="shrink-0">
+              <IconCamera className="h-3 w-3" />
+            </Pill>
+          ) : clip.recording ? (
+            <Pill title="Recording" className="shrink-0">
+              <IconRecord className="h-3 w-3 text-live" />
+              {formatDuration(clip.durationMs)}
+            </Pill>
+          ) : (
+            <Pill className="shrink-0">{formatDuration(clip.durationMs)}</Pill>
+          )}
+        </span>
+        {fresh && (
+          <span className="absolute top-3 right-3 inline-flex h-[22px] items-center rounded-pill bg-accent px-2.5 text-[11px] font-semibold">
+            Just now
+          </span>
+        )}
+      </button>
+      <div className="p-4">
+        <p className="truncate text-sm font-medium">{clipName(clip)}</p>
+        <p className="mt-1 truncate text-xs text-ink-muted">
+          {kind ?? clip.game ?? "Clip"} · {ago}
+        </p>
+        <div className="mt-3 flex gap-2">
+          {copy && copy.kind === "item" ? (
+            <Button
+              size="sm"
+              icon={<IconCopy className="h-4 w-4" />}
+              disabled={copy.disabled}
+              onClick={copy.onSelect}
+            >
+              {copy.label}
+            </Button>
+          ) : (
+            <Button size="sm" onClick={onOpen}>
+              Open
+            </Button>
+          )}
+          <ShareMenuButton clip={clip} variant="secondary" />
+        </div>
+      </div>
     </Card>
   );
-}
-
-/** Its own component so only the number re-renders while it is running. */
-function Counted({ value, format }: { value: number; format: (n: number) => string }) {
-  return <>{format(useCountUp(value))}</>;
 }
