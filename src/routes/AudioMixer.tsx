@@ -3,7 +3,6 @@ import {
   type RefObject,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -34,6 +33,8 @@ import { gainText, sourceStatus } from "@/lib/audioRows";
 import { placeMenu } from "@/lib/menuPlace";
 import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
 import type { AudioProcess, AudioSource, SourceKind } from "@/lib/types";
+import { appRows } from "@/lib/appPicker";
+import { api, inTauri } from "@/lib/ipc";
 
 /**
  * Does the source get a track of its own by default?
@@ -191,13 +192,6 @@ export function AudioMixer() {
   const [drag, setDrag] = useState<Drag | null>(null);
   const list = useRef<HTMLDivElement>(null);
 
-  // Anti-cheat games cannot be named — `list_processes` needs to read their
-  // memory and is refused. The bare PID is still better than nothing.
-  const processName = useMemo(
-    () => (pid: number) =>
-      processes.find((p) => p.pid === pid)?.name ?? `PID ${pid}`,
-    [processes],
-  );
 
   const leftovers = leftoversMode(config.sources);
   const order = config.sources.map((s) => s.id).join(",");
@@ -316,7 +310,7 @@ export function AudioMixer() {
               detectedGame,
               error: sourceErrors[source.id],
               warning: sourceWarnings[source.id],
-              tapped: (taps[source.id] ?? []).map(processName),
+              tapped: (taps[source.id] ?? []).map((t) => t.name),
               leftovers,
             });
             const carried = drag?.id === source.id;
@@ -720,8 +714,9 @@ function AddSourceList({
   onAdd: (s: AudioSource) => void;
   onClose: () => void;
 }) {
-  const { devices, processes, refreshSources, detectedGame, appCapture } = useEngine(
+  const { devices, processes, refreshSources, detectedGame, appCapture, sources } = useEngine(
     useShallow((s) => ({
+      sources: s.config.sources,
       appCapture: s.appCapture,
       devices: s.devices,
       processes: s.processes,
@@ -791,9 +786,22 @@ function AddSourceList({
     };
   }, [anchor]);
 
-  // A Discord or game started since the lists were read still shows up.
+  // A Discord or game started since the lists were read still shows up, and
+  // one that starts while the list is open appears without a click.
   useEffect(() => {
     void refreshSources();
+    if (!inTauri) return;
+    const timer = window.setInterval(() => {
+      void api
+        .listAudioProcesses()
+        .then((next) => {
+          if (JSON.stringify(next) !== JSON.stringify(useEngine.getState().processes)) {
+            useEngine.setState({ processes: next });
+          }
+        })
+        .catch(() => {});
+    }, 2000);
+    return () => window.clearInterval(timer);
   }, [refreshSources]);
 
   const entry = (
@@ -802,11 +810,16 @@ function AddSourceList({
     sub: string,
     kind: SourceKind,
     icon: ReactNode,
+    added = false,
   ) => (
     <button
       key={key}
+      disabled={added}
       onClick={() => onAdd(newSource(label, kind))}
-      className="flex w-full items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-left transition-colors hover:bg-hover focus-visible:bg-hover"
+      className={cn(
+        "flex w-full items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-left transition-colors",
+        added ? "cursor-default opacity-60" : "hover:bg-hover focus-visible:bg-hover",
+      )}
     >
       <span className="grid h-7 w-7 shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
         {icon}
@@ -815,6 +828,7 @@ function AddSourceList({
         <span className="block truncate text-[13px] font-medium">{label}</span>
         {sub && <span className="block truncate text-xs text-ink-faint">{sub}</span>}
       </span>
+      {added && <span className="shrink-0 text-xs text-ink-muted">Added</span>}
     </button>
   );
   const heading = (text: string, extra?: ReactNode) => (
@@ -886,15 +900,16 @@ function AddSourceList({
               ? null
               : processes.length === 0
               ? empty
-              : processes.map((p) =>
+              : appRows(processes, sources, detectedGame).map(({ process: p, added, sub }) =>
                   entry(
                     String(p.pid),
                     p.name,
-                    p.exe,
+                    sub,
                     // Stored alongside the pid: the pid is dead the moment the
                     // application restarts, the exe name is not.
                     { type: "process", pid: p.pid, exe: p.exe, mode: "include" },
                     <IconApp className="h-4 w-4" />,
+                    added,
                   ),
                 )}
           </>

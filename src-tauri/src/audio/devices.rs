@@ -1,6 +1,8 @@
 //! Enumeration of audio endpoints (inputs and outputs) and of processes that
 //! currently hold an audio session.
 
+#[cfg(windows)]
+use crate::audio::SeenSession;
 use crate::model::{AudioDevice, AudioProcess, DeviceKind};
 
 #[cfg(windows)]
@@ -257,55 +259,50 @@ mod win {
         // anti-cheat. Its "PID 1234" stand-in was stored as the exe and could
         // never be found again.
         let tree = process_tree();
-        let mut seen: Vec<u32> = Vec::new();
-        let mut out = Vec::new();
+        let mut seen: Vec<SeenSession> = Vec::new();
         for device in &devices {
             let Some(sessions) = sessions_of(device) else {
                 continue;
             };
-            collect_processes(&sessions, &tree, &mut seen, &mut out);
+            collect_sessions(&sessions, &mut seen);
         }
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        out
+        crate::audio::group_apps(&seen, &tree, std::process::id())
     }
 
-    fn collect_processes(
-        sessions: &IAudioSessionEnumerator,
-        tree: &HashMap<u32, (u32, String)>,
-        seen: &mut Vec<u32>,
-        out: &mut Vec<AudioProcess>,
-    ) {
+    fn collect_sessions(sessions: &IAudioSessionEnumerator, seen: &mut Vec<SeenSession>) {
         unsafe {
             let count = sessions.GetCount().unwrap_or(0);
             for index in 0..count {
                 let Ok(control) = sessions.GetSession(index) else {
                     continue;
                 };
+                let active = control
+                    .GetState()
+                    .map(|state| state == AudioSessionStateActive)
+                    .unwrap_or(false);
                 let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
                     continue;
                 };
                 let Ok(pid) = control2.GetProcessId() else {
                     continue;
                 };
-                if pid == 0 || seen.contains(&pid) {
+                if pid == 0 {
                     continue;
                 }
-                seen.push(pid);
-
-                let exe = process_name(pid)
-                    .or_else(|| tree.get(&pid).map(|(_, name)| name.clone()))
-                    .unwrap_or_else(|| format!("PID {pid}"));
+                if let Some(known) = seen.iter_mut().find(|s| s.pid == pid) {
+                    known.active |= active;
+                    continue;
+                }
                 let display = control2
                     .GetDisplayName()
                     .ok()
                     .and_then(|s| s.to_string().ok())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| exe.trim_end_matches(".exe").to_string());
-
-                out.push(AudioProcess {
+                    .filter(|s| !s.is_empty());
+                seen.push(SeenSession {
                     pid,
-                    name: display,
-                    exe,
+                    active,
+                    display,
+                    exe: process_name(pid),
                 });
             }
         }

@@ -16,9 +16,20 @@ export interface AudioDevice {
 }
 
 export interface AudioProcess {
+  /** The application's root process. */
   pid: number;
   name: string;
   exe: string;
+  /** Processes of the application holding an audio session. */
+  count?: number;
+  /** Any of them playing sound right now. */
+  active?: boolean;
+}
+
+/** A process a source taps, named by the core. */
+export interface Tap {
+  pid: number;
+  name: string;
 }
 
 /** The mixer's source types. */

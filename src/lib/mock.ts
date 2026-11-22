@@ -25,7 +25,7 @@ export const mockCameras: CameraDevice[] = [
 ];
 
 export const mockProcesses: AudioProcess[] = [
-  { pid: 4321, name: "Discord", exe: "Discord.exe" },
+  { pid: 4321, name: "Discord", exe: "Discord.exe", count: 2, active: true },
   { pid: 8899, name: "Counter-Strike 2", exe: "cs2.exe" },
   { pid: 1122, name: "Spotify", exe: "Spotify.exe" },
   { pid: 7654, name: "Chrome", exe: "chrome.exe" },

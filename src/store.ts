@@ -18,6 +18,7 @@ import type {
   PortraitLayout,
   VcamStatus,
   AudioProcess,
+  Tap,
   AudioSource,
   CaptureTarget,
   Clip,
@@ -78,7 +79,7 @@ interface EngineState {
   sourceWarnings: Record<string, string>;
   /** Which processes each source taps. Only the leftovers have no other way of
    *  showing what is actually in the track. */
-  taps: Record<string, number[]>;
+  taps: Record<string, Tap[]>;
   bufferActive: boolean;
   /** A recording started by hand is running. */
   recording: boolean;

@@ -62,6 +62,205 @@ pub fn app_root(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
     current
 }
 
+/// The application the user means by `pid`: [`app_root`], and where that root
+/// is a known audio helper, on up to whoever started it. The web view of an
+/// application plays the sound, the application is what the picker lists and a
+/// source follows. Only for choosing and finding; the leftovers keep
+/// [`app_root`], where a launcher's helper is deliberately its own entry.
+pub fn app_of(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
+    let mut current = app_root(pid, tree);
+    for _ in 0..8 {
+        let Some((parent, exe)) = tree.get(&current) else {
+            break;
+        };
+        match tree.get(parent) {
+            // Never up into the shell.
+            Some((_, parent_exe))
+                if is_audio_helper(exe) && !parent_exe.eq_ignore_ascii_case("explorer.exe") =>
+            {
+                current = app_root(*parent, tree)
+            }
+            _ => break,
+        }
+    }
+    current
+}
+
+/// Executables that only ever play sound on behalf of another application —
+/// embedded browsers. Picking one by itself would record whichever program
+/// happens to host a web view.
+const AUDIO_HELPERS: &[&str] = &[
+    "msedgewebview2.exe",
+    "steamwebhelper.exe",
+    "epicwebhelper.exe",
+    "cefsharp.browsersubprocess.exe",
+    "cefsubprocess.exe",
+    "crashpad_handler.exe",
+];
+
+pub fn is_audio_helper(exe: &str) -> bool {
+    AUDIO_HELPERS.iter().any(|name| name.eq_ignore_ascii_case(exe))
+}
+
+/// Does `pid` sit in the process tree of `root` (or is it `root`)?
+pub fn in_tree_of(pid: u32, root: u32, tree: &HashMap<u32, (u32, String)>) -> bool {
+    pid == root || ancestors(pid, tree).contains(&root)
+}
+
+/// One process holding an audio session, as the enumeration saw it.
+#[derive(Debug, Clone)]
+pub struct SeenSession {
+    pub pid: u32,
+    pub active: bool,
+    /// What the session calls itself; often empty.
+    pub display: Option<String>,
+    /// The exe read from the process itself, where Windows allowed it.
+    pub exe: Option<String>,
+}
+
+/// The sessions as the picker shows them: one entry per application.
+///
+/// Sessions are grouped by [`app_root`], so Discord's two utility children are
+/// one row, and the row carries the root's pid and exe — what a source has to
+/// store to find the application again. ClippiBoy's own process tree (its web
+/// views play the player's audio) is never listed.
+pub fn group_apps(
+    sessions: &[SeenSession],
+    tree: &HashMap<u32, (u32, String)>,
+    own: u32,
+) -> Vec<crate::model::AudioProcess> {
+    struct Group {
+        root: u32,
+        exe: String,
+        pids: Vec<u32>,
+        active: bool,
+        display: Option<String>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for session in sessions {
+        let root = app_of(session.pid, tree);
+        if in_tree_of(session.pid, own, tree) || in_tree_of(root, own, tree) {
+            continue;
+        }
+        let exe = tree
+            .get(&root)
+            .map(|(_, name)| name.clone())
+            .or_else(|| {
+                // The root is not in the snapshot: only the session itself
+                // can say what it is.
+                (root == session.pid).then(|| session.exe.clone()).flatten()
+            })
+            .unwrap_or_else(|| format!("PID {root}"));
+        let own_session = root == session.pid
+            || session
+                .exe
+                .as_deref()
+                .or_else(|| tree.get(&session.pid).map(|(_, name)| name.as_str()))
+                .is_some_and(|name| name.eq_ignore_ascii_case(&exe));
+        // Names a helper session gives itself describe the helper, not the app.
+        let display = session
+            .display
+            .clone()
+            .filter(|name| own_session && !name.is_empty() && !name.starts_with('@'));
+        let index = match groups.iter().position(|g| g.root == root) {
+            Some(index) => index,
+            None => {
+                groups.push(Group {
+                    root,
+                    exe,
+                    pids: Vec::new(),
+                    active: false,
+                    display: None,
+                });
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[index];
+        if !group.pids.contains(&session.pid) {
+            group.pids.push(session.pid);
+        }
+        group.active |= session.active;
+        if group.display.is_none() || session.pid == root {
+            group.display = display.or(group.display.take());
+        }
+    }
+    let mut out: Vec<crate::model::AudioProcess> = groups
+        .into_iter()
+        .map(|group| crate::model::AudioProcess {
+            pid: group.root,
+            name: group
+                .display
+                .unwrap_or_else(|| group.exe.trim_end_matches(".exe").to_string()),
+            exe: group.exe,
+            count: group.pids.len() as u32,
+            active: group.active,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+/// A tapped process, named for the UI.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tap {
+    pub pid: u32,
+    pub name: String,
+}
+
+/// The taps with the name of each tapped process, so the UI never has to show
+/// a bare pid. The name is the exe without its extension.
+pub fn name_taps(
+    taps: &HashMap<String, Vec<u32>>,
+    tree: &HashMap<u32, (u32, String)>,
+) -> HashMap<String, Vec<Tap>> {
+    taps.iter()
+        .map(|(id, pids)| {
+            let named = pids
+                .iter()
+                .map(|pid| Tap {
+                    pid: *pid,
+                    name: tree
+                        .get(pid)
+                        .map(|(_, exe)| exe.trim_end_matches(".exe").to_string())
+                        .unwrap_or_else(|| format!("PID {pid}")),
+                })
+                .collect();
+            (id.clone(), named)
+        })
+        .collect()
+}
+
+/// The note for every application source nothing matches while the buffer
+/// runs: that track is written, and it is silence.
+pub fn missing_app_notes(
+    sources: &[AudioSource],
+    tree: &HashMap<u32, (u32, String)>,
+    own: u32,
+    buffering: bool,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if !buffering {
+        return out;
+    }
+    for source in sources.iter().filter(|s| s.enabled) {
+        if let SourceKind::Process {
+            pid,
+            exe,
+            mode: ProcessMode::Include,
+        } = &source.kind
+        {
+            if live_pid(own, *pid, exe.as_deref(), tree).is_none() {
+                out.insert(
+                    source.id.clone(),
+                    format!("{} is not running — this track stays silent", source.label),
+                );
+            }
+        }
+    }
+    out
+}
+
 /// Is anything being recorded application by application right now?
 ///
 /// This is the whole switch. As long as nothing is, an output device is simply
@@ -215,7 +414,12 @@ pub fn sessions_by_device(sources: &[AudioSource]) -> HashMap<String, Vec<(u32, 
 /// Pids say nothing about age on Windows, and taking the lowest one often
 /// landed on a child without the voice session — a silent Discord track after
 /// every restart. The lowest pid only breaks the tie between several roots.
-fn live_pid(pid: u32, exe: Option<&str>, tree: &HashMap<u32, (u32, String)>) -> Option<u32> {
+fn live_pid(
+    own: u32,
+    pid: u32,
+    exe: Option<&str>,
+    tree: &HashMap<u32, (u32, String)>,
+) -> Option<u32> {
     // "PID 1234" is what the picker stored where it could not read the name —
     // a game behind anti-cheat. No process is called that, so searching by it
     // dropped the source even while the application ran.
@@ -223,11 +427,16 @@ fn live_pid(pid: u32, exe: Option<&str>, tree: &HashMap<u32, (u32, String)>) -> 
     let matches_exe = |name: &str| {
         exe.is_some_and(|want| name.eq_ignore_ascii_case(want))
     };
+    // ClippiBoy's own web views are never what a source means.
+    let outside = |pid: u32| !in_tree_of(pid, own, tree);
     match tree.get(&pid) {
         // Nothing to compare the name with: the pid as it stands.
         Some(_) if exe.is_none() => return Some(pid),
         // Still there and still itself.
-        Some((_, name)) if matches_exe(name) => return Some(app_root(pid, tree)),
+        Some((_, name)) if matches_exe(name) && outside(pid) => {
+            let root = app_of(pid, tree);
+            return outside(root).then_some(root);
+        }
         // The pid is taken by something else, or gone. Fall through.
         _ => {}
     }
@@ -237,11 +446,15 @@ fn live_pid(pid: u32, exe: Option<&str>, tree: &HashMap<u32, (u32, String)>) -> 
         // stream if that pid is dead.
         return Some(pid);
     };
+    // A bare helper name says nothing about whose helper it was.
+    if is_audio_helper(exe) {
+        return None;
+    }
     let found = tree
         .iter()
         .filter(|(_, (_, name))| name.eq_ignore_ascii_case(exe))
-        .map(|(pid, _)| *pid)
-        .filter(|pid| app_root(*pid, tree) == *pid)
+        .map(|(pid, _)| app_of(*pid, tree))
+        .filter(|root| outside(*root))
         .min();
     if let Some(now) = found {
         log::info!("'{exe}' is {now} now (was {pid}) — the source follows it");
@@ -443,7 +656,7 @@ fn resolve_for(
                 exe,
                 mode: ProcessMode::Include,
             } => taken.extend(
-                live_pid(*pid, exe.as_deref(), tree).map(|pid| app_root(pid, tree)),
+                live_pid(own, *pid, exe.as_deref(), tree).map(|pid| app_root(pid, tree)),
             ),
             _ => {}
         }
@@ -460,6 +673,10 @@ fn resolve_for(
     };
 
     let mut out = Vec::with_capacity(sources.len());
+    // The applications a source of its own taps, so two sources that end up on
+    // the same one (two entries for Discord, or a game that is also picked by
+    // hand) are not both given a tap: that records it twice, about 6 dB louder.
+    let mut tapped: Vec<u32> = Vec::new();
     for source in enabled() {
         let include = |pid: u32| Stream {
             source_id: source.id.clone(),
@@ -482,7 +699,13 @@ fn resolve_for(
             // Without process loopback an application cannot be tapped; the
             // source stays (with its note) and records nothing.
             kind if !supported && is_app_source(kind) => {}
-            SourceKind::Game => out.extend(game_pid.map(|pid| include(app_root(pid, tree)))),
+            SourceKind::Game => {
+                if let Some(root) = game_pid.map(|pid| app_root(pid, tree)) {
+                    if claim(&mut tapped, root, &source.label) {
+                        out.push(include(root));
+                    }
+                }
+            }
             SourceKind::OutputDevice { .. } if leftovers_mode => out.extend(leftovers()),
             // Only ever read from an old configuration; `config::migrate_sources`
             // turns it into a plain output device before it gets here.
@@ -490,7 +713,10 @@ fn resolve_for(
             // An application picked by hand: the stored pid is only a starting
             // point. Restarting Discord used to leave this source dead for good.
             SourceKind::Process { pid, exe, mode } => {
-                if let Some(now) = live_pid(*pid, exe.as_deref(), tree) {
+                if let Some(now) = live_pid(own, *pid, exe.as_deref(), tree) {
+                    if !claim(&mut tapped, app_root(now, tree), &source.label) {
+                        continue;
+                    }
                     out.push(Stream {
                         source_id: source.id.clone(),
                         kind: SourceKind::Process {
@@ -508,6 +734,16 @@ fn resolve_for(
         }
     }
     out
+}
+
+/// Marks `root` as tapped; false (and a log line) when another source has it.
+fn claim(tapped: &mut Vec<u32>, root: u32, label: &str) -> bool {
+    if tapped.contains(&root) {
+        log::info!("'{label}' is already recorded by another source (process {root}) — tapped once");
+        return false;
+    }
+    tapped.push(root);
+    true
 }
 
 /// What is wrong with the sources as *configured* — before any stream is built.
@@ -1447,5 +1683,141 @@ mod tests {
                 source.id
             );
         }
+    }
+
+    // ---- the picker's grouping and helper processes ----
+
+    fn seen(pid: u32, active: bool, display: Option<&str>) -> SeenSession {
+        SeenSession {
+            pid,
+            active,
+            display: display.map(str::to_string),
+            exe: None,
+        }
+    }
+
+    /// Discord's two sessions are one application, listed under its root.
+    #[test]
+    fn two_sessions_of_one_application_are_one_row() {
+        let sessions = [seen(2584, false, None), seen(30988, true, None)];
+        let rows = group_apps(&sessions, &discord(), 9999);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 5556);
+        assert_eq!(rows[0].exe, "Discord.exe");
+        assert_eq!(rows[0].count, 2);
+        assert!(rows[0].active);
+        assert_eq!(rows[0].name, "Discord");
+    }
+
+    /// An embedded web view plays for the application that hosts it.
+    #[test]
+    fn a_helper_is_listed_as_the_application_that_started_it() {
+        let tree = tree(&[
+            (10, 1, "Spotify.exe"),
+            (11, 10, "Spotify.exe"),
+            (12, 11, "msedgewebview2.exe"),
+            (13, 12, "msedgewebview2.exe"),
+        ]);
+        let rows = group_apps(&[seen(13, true, Some("Edge WebView"))], &tree, 9999);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 10);
+        assert_eq!(rows[0].exe, "Spotify.exe");
+        assert_eq!(rows[0].name, "Spotify", "a helper's own name is not the app's");
+        assert_eq!(app_of(13, &tree), 10);
+        // The leftovers' notion of a root is unchanged: the helper's own.
+        assert_eq!(app_root(13, &tree), 12);
+    }
+
+    /// The helper walk stops at the shell.
+    #[test]
+    fn a_helper_never_climbs_into_the_shell() {
+        let tree = tree(&[(5, 1, "explorer.exe"), (6, 5, "msedgewebview2.exe")]);
+        assert_eq!(app_of(6, &tree), 6);
+    }
+
+    /// ClippiBoy's own web views are never listed or picked.
+    #[test]
+    fn clippiboys_own_tree_is_left_out() {
+        let tree = tree(&[
+            (100, 1, "clippiboy.exe"),
+            (101, 100, "msedgewebview2.exe"),
+            (102, 101, "msedgewebview2.exe"),
+            (200, 1, "Spotify.exe"),
+        ]);
+        let rows = group_apps(&[seen(102, true, None), seen(200, true, None)], &tree, 100);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].exe, "Spotify.exe");
+    }
+
+    /// A source stored with a webview exe is not rebound to some app's web view,
+    /// and a namesake inside ClippiBoy's tree is not taken either.
+    #[test]
+    fn a_source_never_finds_a_process_of_clippiboys_own_tree() {
+        let tree = tree(&[
+            (100, 1, "clippiboy.exe"),
+            (101, 100, "msedgewebview2.exe"),
+            (300, 1, "msedgewebview2.exe"),
+        ]);
+        assert_eq!(live_pid(100, 7, Some("msedgewebview2.exe"), &tree), None);
+        // Stored pid is alive but inside our tree: it is not followed.
+        let tree2 = self::tree(&[(100, 1, "clippiboy.exe"), (101, 100, "chat.exe"), (400, 1, "chat.exe")]);
+        assert_eq!(live_pid(100, 101, Some("chat.exe"), &tree2), Some(400));
+    }
+
+    /// Display names like "@%SystemRoot%\..." are resource references.
+    #[test]
+    fn resource_display_names_fall_back_to_the_exe() {
+        let tree = tree(&[(10, 1, "Game.exe")]);
+        let rows = group_apps(&[seen(10, false, Some("@%SystemRoot%\\x.dll,-1"))], &tree, 9999);
+        assert_eq!(rows[0].name, "Game");
+    }
+
+    /// Two sources on the same application tap it once.
+    #[test]
+    fn a_pid_tapped_by_two_sources_is_tapped_once() {
+        let sources = vec![
+            app_source("a", 30988, Some("Discord.exe")),
+            app_source("b", 2584, Some("Discord.exe")),
+        ];
+        let streams = resolve_for(9999, true, &sources, None, &nothing(), &discord(), &ledger(""));
+        assert_eq!(pid_of(&streams, "a"), Some(5556));
+        assert_eq!(pid_of(&streams, "b"), None);
+    }
+
+    #[test]
+    fn a_game_and_a_picked_process_tap_the_application_once() {
+        let sources = vec![
+            of_kind("game", SourceKind::Game),
+            app_source("chat", 5556, Some("Discord.exe")),
+        ];
+        let streams =
+            resolve_for(9999, true, &sources, Some(30988), &nothing(), &discord(), &ledger(""));
+        assert_eq!(pid_of(&streams, "game"), Some(5556));
+        assert_eq!(pid_of(&streams, "chat"), None);
+    }
+
+    #[test]
+    fn a_missing_application_gets_a_note_only_while_buffering() {
+        let mut gone = app_source("chat", 4321, Some("Discord.exe"));
+        gone.label = "Discord".into();
+        let sources = vec![gone];
+        let tree = tree(&[(4321, 1, "notepad.exe")]);
+        let notes = missing_app_notes(&sources, &tree, 9999, true);
+        assert_eq!(
+            notes.get("chat").map(String::as_str),
+            Some("Discord is not running — this track stays silent")
+        );
+        assert!(missing_app_notes(&sources, &tree, 9999, false).is_empty());
+        assert!(missing_app_notes(&sources, &discord(), 9999, true).is_empty());
+    }
+
+    #[test]
+    fn taps_are_named_by_their_exe() {
+        let taps: HashMap<String, Vec<u32>> = [("chat".to_string(), vec![5556, 999])]
+            .into_iter()
+            .collect();
+        let named = name_taps(&taps, &discord());
+        assert_eq!(named["chat"][0], Tap { pid: 5556, name: "Discord".into() });
+        assert_eq!(named["chat"][1].name, "PID 999");
     }
 }

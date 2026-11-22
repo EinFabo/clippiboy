@@ -11,6 +11,7 @@ import type {
   AppConfig,
   AudioDevice,
   AudioProcess,
+  Tap,
   AudioSource,
   CaptureTarget,
   Clip,
@@ -309,7 +310,7 @@ export const events = {
    * device to look at, so this is the only way to see what is in the track.
    */
   onAudioTaps: (
-    cb: (taps: Record<string, number[]>) => void,
+    cb: (taps: Record<string, Tap[]>) => void,
   ): Promise<UnlistenFn> =>
-    listen<Record<string, number[]>>("audio-taps", (e) => cb(e.payload)),
+    listen<Record<string, Tap[]>>("audio-taps", (e) => cb(e.payload)),
 };

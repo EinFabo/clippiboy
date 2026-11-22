@@ -31,6 +31,12 @@ pub struct AudioProcess {
     pub pid: u32,
     pub name: String,
     pub exe: String,
+    /// How many processes of the application hold an audio session.
+    #[serde(default)]
+    pub count: u32,
+    /// Is any of them rendering sound right now?
+    #[serde(default)]
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

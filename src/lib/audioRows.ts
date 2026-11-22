@@ -67,15 +67,17 @@ export function sourceStatus(source: AudioSource, ctx: StatusContext): SourceSta
       break;
     case "process": {
       const found = ctx.processes.find((p) => p.pid === kind.pid || sameExe(p.exe, kind.exe));
+      // Running means the core taps it, not that the list saw a session.
+      const tappedNow = ctx.tapped[0];
       if (kind.mode === "exclude") {
         status = {
           text: `Everything except ${found?.name ?? kind.exe ?? `PID ${kind.pid}`}`,
           tone: "plain",
         };
       } else {
-        status = found
-          ? { text: `${found.name} · running`, tone: "plain" }
-          : { text: "Not running · waiting", tone: "warn" };
+        status = tappedNow || found
+          ? { text: `${found?.name ?? tappedNow} · running`, tone: "plain" }
+          : { text: ctx.warning ?? "Not running · waiting", tone: "warn" };
       }
       break;
     }

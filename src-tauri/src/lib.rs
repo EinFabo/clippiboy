@@ -1575,6 +1575,12 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                         tick_game.held.is_some(),
                         state.is_buffering(),
                     );
+                    notes.extend(audio::missing_app_notes(
+                        &sources,
+                        &audio::devices::process_tree(),
+                        std::process::id(),
+                        state.is_buffering(),
+                    ));
                     notes.extend(audio::app_capture_notes(&sources, audio::app_capture_ok()));
                     *state.source_notes.lock() = notes;
                 }
@@ -1667,7 +1673,13 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                         .map(|(id, note)| (id.clone(), note.clone())),
                 );
                 let _ = handle.emit("audio-warnings", warnings);
-                let _ = handle.emit("audio-taps", state.audio.taps());
+                let taps = state.audio.taps();
+                let named = if taps.is_empty() {
+                    Default::default()
+                } else {
+                    audio::name_taps(&taps, &audio::devices::process_tree())
+                };
+                let _ = handle.emit("audio-taps", named);
             }
         }
     });
