@@ -54,6 +54,24 @@ export function layoutMonitors(
 
 const round = (n: number) => Math.round(n * 10) / 10;
 
+const overlaps = (a: DeskRect, b: DeskRect) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+/**
+ * Where the unplugged screen is drawn. Its last place, unless a connected
+ * screen has moved there since — the primary one unplugged, the rest shift to
+ * 0,0 — in which case it stands right of all of them, at their top, rather
+ * than as a dashed frame across a live one.
+ */
+export function placeGhost(live: DeskRect[], ghost: DeskRect): DeskRect {
+  if (!live.some((r) => overlaps(r, ghost))) return ghost;
+  return {
+    ...ghost,
+    x: Math.max(...live.map((r) => r.x + r.width)),
+    y: Math.min(...live.map((r) => r.y)),
+  };
+}
+
 /** A monitor's place as the config keeps it; `null` for a window. */
 export function rectOf(t: CaptureTarget): TargetRect | null {
   return t.kind === "monitor" ? { x: t.x, y: t.y, width: t.width, height: t.height } : null;

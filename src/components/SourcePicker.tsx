@@ -3,7 +3,7 @@ import { Card } from "@/components/ui/Card";
 import { SLIDE, SlidingIndicator } from "@/components/ui/SlidingIndicator";
 import { IconApp, IconGamepad } from "@/components/icons";
 import { cn } from "@/lib/cn";
-import { layoutMonitors, numberedMonitors, orderedWindows } from "@/lib/monitorMap";
+import { layoutMonitors, numberedMonitors, orderedWindows, placeGhost } from "@/lib/monitorMap";
 import type { CaptureTarget, TargetKind, TargetRect } from "@/lib/types";
 
 /** The saved source when it is not there: a screen unplugged, a window closed. */
@@ -246,24 +246,13 @@ function MonitorMap({
 
   // The unplugged screen counts for the frame too, so it keeps its place
   // beside the others instead of being drawn over them.
-  const ghost = missing?.kind === "monitor" ? missing.rect : null;
+  const ghost =
+    missing?.kind === "monitor" && missing.rect ? placeGhost(monitors, missing.rect) : null;
   const boxes = layoutMonitors([...monitors, ...(ghost ? [ghost] : [])], size);
 
   return (
     <div className="relative">
       <div ref={area} className="absolute inset-x-10 top-8 bottom-16">
-        {ghost && boxes[monitors.length] && (
-          <div
-            role="img"
-            aria-label="Saved screen, not connected"
-            style={boxes[monitors.length]}
-            className="absolute rounded-inner border border-dashed border-ink-faint/70"
-          >
-            <span className="absolute bottom-2 left-2 inline-flex h-[22px] items-center rounded-pill bg-black/60 px-[9px] text-xs font-semibold text-warn">
-              Not connected
-            </span>
-          </div>
-        )}
         {monitors.map((t, at) => {
           const box = boxes[at];
           if (!box) return null;
@@ -293,6 +282,19 @@ function MonitorMap({
             </button>
           );
         })}
+        {/* After the live screens, and not in the way of a click on them. */}
+        {ghost && boxes[monitors.length] && (
+          <div
+            role="img"
+            aria-label="Saved screen, not connected"
+            style={boxes[monitors.length]}
+            className="pointer-events-none absolute rounded-inner border border-dashed border-ink-faint/70"
+          >
+            <span className="absolute bottom-2 left-2 inline-flex h-[22px] items-center rounded-pill bg-black/60 px-[9px] text-xs font-semibold text-warn">
+              Not connected
+            </span>
+          </div>
+        )}
       </div>
       {picked ? (
         <Meta>

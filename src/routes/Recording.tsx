@@ -148,6 +148,9 @@ export function Recording({ onNavigate }: { onNavigate: (r: Route) => void }) {
   // map then draws it there. Displays rearranged since it was picked would
   // otherwise leave it at a place it no longer has.
   const savedRect = saved?.kind === "monitor" ? rectOf(saved) : null;
+  // Keyed on the screen's numbers only: `rec.targetRect` is compared inside, so
+  // once written it matches and nothing is written again; `setRec` is new each
+  // render and would re-run this for nothing (the fit effect above does the same).
   useEffect(() => {
     if (savedRect && !sameRect(savedRect, rec.targetRect)) setRec({ targetRect: savedRect });
   }, [savedRect?.x, savedRect?.y, savedRect?.width, savedRect?.height]);

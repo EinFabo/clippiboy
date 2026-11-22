@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { layoutMonitors, numberedMonitors, orderedWindows, rectOf, sameRect } from "./monitorMap.ts";
+import { layoutMonitors, numberedMonitors, placeGhost, orderedWindows, rectOf, sameRect } from "./monitorMap.ts";
 import type { CaptureTarget } from "./types.ts";
 
 const primary = { x: 0, y: 0, width: 2560, height: 1440 };
@@ -85,4 +85,16 @@ test("a monitor's rect is what the config keeps, a window has none", () => {
   assert.ok(sameRect(rectOf(screen), { x: -1920, y: 180, width: 1920, height: 1080 }));
   assert.ok(!sameRect(rectOf(screen), null));
   assert.ok(sameRect(null, null));
+});
+
+test("an unplugged screen keeps its place when nothing has moved there", () => {
+  const ghost = { x: -1920, y: 180, width: 1920, height: 1080 };
+  assert.deepEqual(placeGhost([primary], ghost), ghost);
+});
+
+test("an unplugged screen whose place a live one took stands beside them instead", () => {
+  // The old primary is gone; the second screen became primary at 0,0.
+  const live = [{ x: 0, y: 0, width: 1920, height: 1080 }];
+  const ghost = { x: 0, y: 0, width: 2560, height: 1440 };
+  assert.deepEqual(placeGhost(live, ghost), { x: 1920, y: 0, width: 2560, height: 1440 });
 });

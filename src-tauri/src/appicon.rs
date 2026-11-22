@@ -3,29 +3,50 @@
 //! A window is drawn with the icon of the program behind it: its exe path from
 //! the process, the shell's own icon for that file (`IShellItemImageFactory`),
 //! as a small PNG data URL the page can put straight into an `<img>`. Each exe
-//! is looked at once per run — the answer, a missing one included, is kept.
+//! is looked at once per run — the answer, "this program has no icon"
+//! included, is kept; a lookup that failed is tried again on the next list.
 //! A game behind an anti-cheat may refuse to be opened; it gets no icon and
-//! the page draws its generic one.
+//! the page draws its generic one, but it is still marked as the game.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 
-use crate::model::{CaptureTarget, TargetKind};
+use crate::model::CaptureTarget;
+#[cfg(windows)]
+use crate::model::TargetKind;
 
 /// Edge length the shell is asked for. The list shows the icon at 22 px and
 /// the window card at 64 px, so this is sharp on both at 200 % scaling too.
 #[cfg_attr(not(windows), allow(dead_code))]
 const ICON_SIZE: i32 = 64;
 
+/// How long one list may wait for icons. A cold shell can take its time over
+/// a program it has not drawn yet; the list comes back with what is ready and
+/// the rest follows on the next refresh.
+#[cfg_attr(not(windows), allow(dead_code))]
+const ICON_BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// More entries than this and the cache starts over — no machine runs that
 /// many different programs with windows, it is only a ceiling.
+#[cfg_attr(not(windows), allow(dead_code))]
 const CACHE_LIMIT: usize = 512;
 
-fn cache() -> &'static Mutex<HashMap<String, Option<String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+type Cache = HashMap<String, Option<String>>;
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Exes a lookup is running for, so a second list asked meanwhile does not
+/// start the same ones again.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pending() -> &'static Mutex<HashSet<String>> {
+    static PENDING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// The cache's key for an exe: Windows paths do not care about case, and one
@@ -34,12 +55,74 @@ pub fn cache_key(path: &str) -> String {
     path.to_lowercase()
 }
 
+/// The process behind a window. `path` is `None` when the process will not be
+/// opened — the pid alone still tells whether it is the game.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Process {
+    pub pid: u32,
+    pub path: Option<String>,
+}
+
+/// What one look at an exe found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    Icon(String),
+    /// The shell answered and has nothing to draw — worth remembering.
+    NoIcon,
+    /// Something on the way failed; asked again next time.
+    Failed,
+}
+
+impl Lookup {
+    /// What goes into the cache, if anything.
+    pub fn cached(self) -> Option<Option<String>> {
+        match self {
+            Lookup::Icon(url) => Some(Some(url)),
+            Lookup::NoIcon => Some(None),
+            Lookup::Failed => None,
+        }
+    }
+}
+
+/// The exes still to look at: one per program however many windows it has,
+/// none that is known or already being looked at.
+pub fn to_look_up(
+    processes: &[Option<Process>],
+    known: &Cache,
+    pending: &HashSet<String>,
+) -> Vec<String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for path in processes.iter().flatten().filter_map(|p| p.path.as_ref()) {
+        let key = cache_key(path);
+        if !known.contains_key(&key) && !pending.contains(&key) {
+            out.entry(key).or_insert_with(|| path.clone());
+        }
+    }
+    out.into_values().collect()
+}
+
+/// One window's icon and game mark. The mark goes by the pid alone, so a game
+/// that refuses to be opened is still marked.
+pub fn dress(
+    target: &mut CaptureTarget,
+    process: Option<&Process>,
+    known: &Cache,
+    game_pid: Option<u32>,
+) {
+    let Some(process) = process else { return };
+    target.is_game = game_pid == Some(process.pid);
+    target.icon = process
+        .path
+        .as_deref()
+        .and_then(|path| known.get(&cache_key(path)).cloned().flatten());
+}
+
 /// Adds the icon and the game mark to every window. `game_pid` is the process
 /// the game detection is bound to.
 #[cfg(windows)]
 pub fn dress_windows(targets: &mut [CaptureTarget], game_pid: Option<u32>) {
-    // The exe of every window first: cheap, and it shows which ones are new.
-    let paths: Vec<Option<(u32, String)>> = targets
+    // The process of every window first: cheap, and it shows which exes are new.
+    let processes: Vec<Option<Process>> = targets
         .iter()
         .map(|t| match t.kind {
             TargetKind::Window => win::process_of(&t.id),
@@ -47,39 +130,39 @@ pub fn dress_windows(targets: &mut [CaptureTarget], game_pid: Option<u32>) {
         })
         .collect();
 
-    let missing: Vec<String> = {
+    let missing = {
         let known = cache().lock();
-        // One lookup per program, however many windows it has open.
-        let mut missing: HashMap<String, String> = HashMap::new();
-        for (_, path) in paths.iter().flatten() {
-            let key = cache_key(path);
-            if !known.contains_key(&key) {
-                missing.entry(key).or_insert_with(|| path.clone());
-            }
-        }
-        missing.into_values().collect()
+        let mut pending = pending().lock();
+        let missing = to_look_up(&processes, &known, &pending);
+        pending.extend(missing.iter().map(|path| cache_key(path)));
+        missing
     };
     if !missing.is_empty() {
-        let found = win::icons(missing);
-        let mut known = cache().lock();
-        if known.len() + found.len() > CACHE_LIMIT {
-            known.clear();
-        }
-        for (path, icon) in found {
-            known.insert(cache_key(&path), icon);
-        }
+        win::look_up(missing, ICON_BUDGET);
     }
 
     let known = cache().lock();
-    for (target, process) in targets.iter_mut().zip(paths) {
-        let Some((pid, path)) = process else { continue };
-        target.icon = known.get(&cache_key(&path)).cloned().flatten();
-        target.is_game = game_pid == Some(pid);
+    for (target, process) in targets.iter_mut().zip(&processes) {
+        dress(target, process.as_ref(), &known, game_pid);
     }
 }
 
 #[cfg(not(windows))]
 pub fn dress_windows(_targets: &mut [CaptureTarget], _game_pid: Option<u32>) {}
+
+/// A finished lookup into the cache, and off the pending list.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn settle(path: &str, found: Lookup) {
+    let key = cache_key(path);
+    if let Some(entry) = found.cached() {
+        let mut known = cache().lock();
+        if known.len() >= CACHE_LIMIT {
+            known.clear();
+        }
+        known.insert(key.clone(), entry);
+    }
+    pending().lock().remove(&key);
+}
 
 /// Says once which DPI awareness the target list is read under. Under
 /// per-monitor v2 (what tao sets for the process) `rcMonitor` and the sizes are
@@ -175,8 +258,8 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
     /// The process behind a window id (`0x1A2B`, see `capture::window_proc`)
-    /// and the full path of its exe.
-    pub fn process_of(id: &str) -> Option<(u32, String)> {
+    /// and, if it lets itself be asked, the full path of its exe.
+    pub fn process_of(id: &str) -> Option<super::Process> {
         let raw = usize::from_str_radix(id.trim_start_matches("0x"), 16).ok()?;
         let hwnd = HWND(raw as *mut _);
         let mut pid = 0u32;
@@ -184,6 +267,10 @@ mod win {
         if pid == 0 {
             return None;
         }
+        Some(super::Process { pid, path: exe_path(pid) })
+    }
+
+    fn exe_path(pid: u32) -> Option<String> {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
             let mut buf = [0u16; MAX_PATH as usize * 2];
@@ -196,54 +283,65 @@ mod win {
             );
             let _ = CloseHandle(handle);
             result.ok()?;
-            Some((pid, String::from_utf16_lossy(&buf[..len as usize])))
+            Some(String::from_utf16_lossy(&buf[..len as usize]))
         }
     }
 
-    /// The icon of each exe. On a thread of its own: the shell wants a
-    /// single-threaded apartment, and the command runs on a pool thread whose
-    /// apartment is not ours to choose.
-    pub fn icons(paths: Vec<String>) -> Vec<(String, Option<String>)> {
+    /// Looks the exes up, for at most `budget`. On a thread of its own: the
+    /// shell wants a single-threaded apartment, and the command runs on a pool
+    /// thread whose apartment is not ours to choose. Each answer goes into the
+    /// cache as it comes — one that arrives after the budget is there for the
+    /// next list; exes not begun by then are left for it.
+    pub fn look_up(paths: Vec<String>, budget: std::time::Duration) {
+        let deadline = std::time::Instant::now() + budget;
+        let (done, wait) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let com = unsafe {
                 CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
             }
             .is_ok();
-            let found = paths
-                .into_iter()
-                .map(|path| {
-                    let icon = icon_of(&path);
-                    if icon.is_none() {
-                        log::debug!("no icon for {path}");
-                    }
-                    (path, icon)
-                })
-                .collect();
+            for path in paths {
+                let found = if com && std::time::Instant::now() < deadline {
+                    icon_of(&path)
+                } else {
+                    super::Lookup::Failed
+                };
+                if found != super::Lookup::Failed {
+                    log::debug!("icon lookup for {path}: {}", matches!(found, super::Lookup::Icon(_)));
+                }
+                super::settle(&path, found);
+            }
             if com {
                 unsafe { CoUninitialize() };
             }
-            found
-        })
-        .join()
-        .unwrap_or_default()
+            let _ = done.send(());
+        });
+        let _ = wait.recv_timeout(budget);
     }
 
-    fn icon_of(path: &str) -> Option<String> {
+    fn icon_of(path: &str) -> super::Lookup {
+        use super::Lookup;
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
-            let factory: IShellItemImageFactory =
-                SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>).ok()?;
-            let bitmap = factory
-                .GetImage(
-                    SIZE { cx: super::ICON_SIZE, cy: super::ICON_SIZE },
-                    SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
-                )
-                .ok()?;
+            let Ok(factory) = SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(
+                PCWSTR(wide.as_ptr()),
+                None::<&IBindCtx>,
+            ) else {
+                return Lookup::Failed;
+            };
+            let Ok(bitmap) = factory.GetImage(
+                SIZE { cx: super::ICON_SIZE, cy: super::ICON_SIZE },
+                SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+            ) else {
+                return Lookup::NoIcon;
+            };
             let pixels = read_bitmap(bitmap);
             let _ = DeleteObject(bitmap);
-            let (width, height, mut pixels) = pixels?;
+            let Some((width, height, mut pixels)) = pixels else {
+                return Lookup::Failed;
+            };
             super::bgra_premultiplied_to_rgba(&mut pixels);
-            super::png_data_url(width, height, &pixels)
+            super::png_data_url(width, height, &pixels).map_or(Lookup::Failed, Lookup::Icon)
         }
     }
 
@@ -331,6 +429,71 @@ mod tests {
             cache_key(r"C:\Games\CS2\cs2.exe"),
             cache_key(r"c:\games\cs2\CS2.EXE")
         );
+    }
+
+    fn window(pid_hint: &str) -> CaptureTarget {
+        CaptureTarget {
+            kind: crate::model::TargetKind::Window,
+            id: pid_hint.into(),
+            stable_id: None,
+            title: "Valorant".into(),
+            width: 1920,
+            height: 1080,
+            is_primary: false,
+            refresh_hz: None,
+            x: 0,
+            y: 0,
+            icon: None,
+            is_game: false,
+        }
+    }
+
+    /// Vanguard will not let the process be opened: no path, no icon — but the
+    /// pid is still the game's, and the window is marked.
+    #[test]
+    fn a_game_that_refuses_to_be_opened_is_still_the_game() {
+        let mut target = window("0x1");
+        let process = Process { pid: 42, path: None };
+        dress(&mut target, Some(&process), &Cache::new(), Some(42));
+        assert!(target.is_game);
+        assert_eq!(target.icon, None);
+    }
+
+    #[test]
+    fn the_icon_comes_from_the_cache_whatever_the_case_of_the_path() {
+        let mut target = window("0x1");
+        let mut known = Cache::new();
+        known.insert(cache_key(r"C:\Apps\Discord.exe"), Some("data:x".into()));
+        let process = Process { pid: 7, path: Some(r"c:\apps\DISCORD.EXE".into()) };
+        dress(&mut target, Some(&process), &known, Some(42));
+        assert_eq!(target.icon.as_deref(), Some("data:x"));
+        assert!(!target.is_game);
+    }
+
+    #[test]
+    fn each_program_is_looked_up_once_and_never_twice_at_a_time() {
+        let at = |pid, path: &str| Some(Process { pid, path: Some(path.into()) });
+        let processes = vec![
+            at(1, r"C:\A\one.exe"),
+            at(2, r"c:\a\ONE.exe"),
+            at(3, r"C:\B\known.exe"),
+            at(4, r"C:\C\running.exe"),
+            Some(Process { pid: 5, path: None }),
+            None,
+        ];
+        let mut known = Cache::new();
+        known.insert(cache_key(r"C:\B\known.exe"), None);
+        let pending: HashSet<String> = [cache_key(r"C:\C\running.exe")].into();
+        let missing = to_look_up(&processes, &known, &pending);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(cache_key(&missing[0]), cache_key(r"C:\A\one.exe"));
+    }
+
+    #[test]
+    fn only_a_real_answer_is_kept() {
+        assert_eq!(Lookup::Icon("u".into()).cached(), Some(Some("u".into())));
+        assert_eq!(Lookup::NoIcon.cached(), Some(None));
+        assert_eq!(Lookup::Failed.cached(), None);
     }
 
     #[test]
