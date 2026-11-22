@@ -22,11 +22,17 @@ interface Spot {
  * ids, not the array. The gallery rebuilds its `visible` array on every
  * keystroke, and comparing arrays by identity would restart every animation
  * for a search that did not actually change the result.
+ *
+ * `hold`, while true, takes a change as it comes without animating it: for a
+ * change something else already moves on screen — a row lifted and put down
+ * (`useReorder`) is shown in its new place before the order is written, and a
+ * second journey from the old place would make it jump back first.
  */
 export function useFlip(
   container: RefObject<HTMLElement | null>,
   signature: string,
   duration = 260,
+  hold?: RefObject<boolean>,
 ) {
   const before = useRef(new Map<string, Spot>());
   const running = useRef(new Map<string, Animation>());
@@ -60,7 +66,7 @@ export function useFlip(
       if (key) after.set(key, { left: node.offsetLeft, top: node.offsetTop });
     }
 
-    if (!prefersReducedMotion()) {
+    if (!prefersReducedMotion() && !hold?.current) {
       for (const node of nodes) {
         const key = node.getAttribute(KEY);
         const from = key ? before.current.get(key) : undefined;
@@ -92,7 +98,7 @@ export function useFlip(
     before.current = after;
     // Deliberately no cleanup that cancels: React runs it before the next
     // effect, and the offsets above would then always read zero.
-  }, [container, signature, duration]);
+  }, [container, signature, duration, hold]);
 }
 
 /**

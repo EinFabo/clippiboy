@@ -29,7 +29,7 @@ import {
 } from "@/components/icons";
 import { cn } from "@/lib/cn";
 import { labelToSave } from "@/lib/draft";
-import { useFlip } from "@/lib/useFlip";
+import { useReorder } from "@/lib/useReorder";
 import { gainText, sourceStatus } from "@/lib/audioRows";
 import { placeMenu } from "@/lib/menuPlace";
 import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
@@ -210,7 +210,10 @@ function VolumeTrack({
 function ClipMixRow({ sources }: { sources: AudioSource[] }) {
   const own = sources.filter((s) => s.enabled && s.separateTrack).length;
   return (
-    <div className="flex items-center gap-3.5 bg-accent/[0.06] px-4 py-3">
+    <div
+      className="flex items-center gap-3.5 rounded-card border border-line px-4 py-3
+        bg-[color-mix(in_srgb,var(--color-accent)_6%,var(--color-surface))]"
+    >
       <span className="w-5 shrink-0" />
       <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
         <IconClips className="h-4 w-4" />
@@ -243,14 +246,6 @@ function ClipMixRow({ sources }: { sources: AudioSource[] }) {
       <span aria-hidden className="w-[230px] shrink-0" />
     </div>
   );
-}
-
-/** A source on its way to a new place in the list. */
-interface Drag {
-  /** The source being carried. */
-  id: string;
-  /** The gap it is over right now — above or below that row. */
-  over: { id: string; before: boolean } | null;
 }
 
 export function AudioMixer() {
@@ -289,59 +284,45 @@ export function AudioMixer() {
   const [renaming, setRenaming] = useState<string | null>(null);
   /** The gain of the source whose knob is being dragged; written on release. */
   const [gainDraft, setGainDraft] = useState<{ id: string; gainDb: number } | null>(null);
-  /** The source being carried, and the gap it is hovering over. */
-  const [drag, setDrag] = useState<Drag | null>(null);
   const list = useRef<HTMLDivElement>(null);
-
+  /** What a screen reader hears after a move. */
+  const [moved, setMoved] = useState("");
 
   const leftovers = leftoversMode(config.sources);
-  const order = config.sources.map((s) => s.id).join(",");
-  // A row that has just been dropped somewhere else travels there instead of
-  // appearing there — otherwise nothing but the numbers would tell you the drop
-  // landed at all.
-  useFlip(list, order);
 
   /**
-   * Put the carried source down in the gap it is hovering over.
+   * Write a new order of the sources.
    *
    * The order is not cosmetic: it is the order of the tracks in the clip, and
    * several ⊘ sources are served from the top down — so it decides which of them
    * gets an application that plays on both.
    */
-  const drop = ({ id, over }: Drag) => {
-    setDrag(null);
-    if (!over) return;
-    const rest = config.sources.filter((s) => s.id !== id);
-    const source = config.sources.find((s) => s.id === id);
-    const at = rest.findIndex((s) => s.id === over.id);
-    if (!source || at < 0) return;
-    rest.splice(over.before ? at : at + 1, 0, source);
-    // Dropping a row back where it came from is not a change and must not cost
-    // a config write — the core restarts the audio engine for one.
-    if (rest.every((s, index) => s.id === config.sources[index].id)) return;
-    patchConfig({ sources: rest });
+  const reorder = (ids: string[], movedId: string) => {
+    const byId = new Map(config.sources.map((s) => [s.id, s]));
+    const sources = ids.flatMap((id) => byId.get(id) ?? []);
+    if (sources.length !== config.sources.length) return;
+    setMoved(`Moved to position ${ids.indexOf(movedId) + 1} of ${ids.length}`);
+    void patchConfig({ sources });
   };
 
-  /** Which half of the row the pointer is on — that is the gap it means. */
-  const hover = (event: React.DragEvent, id: string) => {
-    if (!drag) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    const box = event.currentTarget.getBoundingClientRect();
-    const before = event.clientY < box.top + box.height / 2;
-    if (drag.over?.id === id && drag.over.before === before) return;
-    setDrag({ ...drag, over: { id, before } });
-  };
+  // Lifted by the grip and put down elsewhere; the hook moves the rows and
+  // hands over the new order once, on release. Any other change of the order
+  // (the arrow keys below) travels there instead of appearing there.
+  const { grip } = useReorder({
+    container: list,
+    ids: config.sources.map((s) => s.id),
+    onMove: reorder,
+  });
 
   /** Move by keyboard — a drag handle nobody can reach with Tab is half a
       control. `delta` is one row up or down. */
   const nudge = (id: string, delta: number) => {
-    const from = config.sources.findIndex((s) => s.id === id);
+    const ids = config.sources.map((s) => s.id);
+    const from = ids.indexOf(id);
     const to = from + delta;
-    if (from < 0 || to < 0 || to >= config.sources.length) return;
-    const sources = [...config.sources];
-    [sources[from], sources[to]] = [sources[to], sources[from]];
-    patchConfig({ sources });
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    [ids[from], ids[to]] = [ids[to], ids[from]];
+    reorder(ids, id);
   };
 
   /** The "⋯" menu of one row. */
@@ -402,8 +383,16 @@ export function AudioMixer() {
       )}
 
       {config.sources.length > 0 && (
-        <div ref={list}>
-        <Card className="overflow-hidden">
+        // Each source a card of its own, so one can be lifted out of the list;
+        // "In your clip" above them stays where it is.
+        <div ref={list} className="relative flex flex-col gap-2.5">
+          {/* Where a lifted source would land (`useReorder`). */}
+          <div
+            data-reorder-slot
+            hidden
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 rounded-card border-[1.5px] border-dashed border-accent/45 bg-accent/5"
+          />
           <ClipMixRow sources={config.sources} />
           {config.sources.map((source) => {
             const status = sourceStatus(source, {
@@ -415,204 +404,183 @@ export function AudioMixer() {
               tapped: (taps[source.id] ?? []).map((t) => t.name),
               leftovers,
             });
-            const carried = drag?.id === source.id;
-            const gap = drag?.over?.id === source.id ? drag.over.before : null;
             const shownGain =
               gainDraft?.id === source.id ? gainDraft.gainDb : source.gainDb;
             return (
               <div
                 key={source.id}
                 data-flip={source.id}
-                onDragOver={(event) => hover(event, source.id)}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  if (drag) drop(drag);
-                }}
                 className={cn(
-                  "relative flex items-center gap-3.5 border-t border-line px-4 py-3 transition-[opacity,background-color] duration-200",
-                  status.tone === "warn" && "bg-warn/5",
-                  status.tone === "error" && "bg-live/5",
-                  // Only one opacity, never two: `cn` just joins, so a second
-                  // one would not override the first.
-                  carried
-                    ? // The row being carried steps back; the drag image under
-                      // the pointer is the one you are watching.
-                      "opacity-30"
-                    : !source.enabled && "opacity-55",
+                  // Opaque, tints mixed in rather than laid over: a lifted card
+                  // passes over the others and must not show them through.
+                  "group relative rounded-card border border-line px-4 py-3",
+                  "transition-[background-color,border-color,box-shadow] duration-200",
+                  status.tone === "warn"
+                    ? "bg-[color-mix(in_srgb,var(--color-warn)_5%,var(--color-surface))]"
+                    : status.tone === "error"
+                      ? "bg-[color-mix(in_srgb,var(--color-live)_5%,var(--color-surface))]"
+                      : "bg-surface",
+                  // Lifted by its grip (`useReorder`): an accent ring and a
+                  // deep shadow, as if it hovered above the list.
+                  "data-[lifted]:border-accent data-[lifted]:bg-elevated",
+                  "data-[lifted]:shadow-[0_0_0_1px_var(--color-accent),0_18px_40px_rgba(0,0,0,0.5)]",
                 )}
               >
-                {gap !== null && (
-                  <span
-                    className={cn(
-                      "pointer-events-none absolute inset-x-3 z-10 h-0.5 rounded-full bg-accent-bright",
-                      gap ? "-top-px" : "-bottom-px",
-                    )}
-                  />
-                )}
-                <span className="w-5 shrink-0">
-                  {config.sources.length > 1 && (
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Move ${source.label}`}
-                      title="Drag to reorder — the order of the tracks in the clip"
-                      draggable
-                      onDragStart={(event) => {
-                        // The handle is what is dragged, but the row is what
-                        // should hang under the pointer.
-                        const row = event.currentTarget.closest<HTMLElement>(
-                          "[data-flip]",
-                        );
-                        if (row) {
-                          event.dataTransfer.setDragImage(
-                            row,
-                            32,
-                            row.offsetHeight / 2,
-                          );
-                        }
-                        event.dataTransfer.effectAllowed = "move";
-                        // Firefox starts no drag at all without a payload.
-                        event.dataTransfer.setData("text/plain", source.id);
-                        setDrag({ id: source.id, over: null });
-                      }}
-                      onDragEnd={() => setDrag(null)}
-                      onKeyDown={(event) => {
-                        const delta =
-                          event.key === "ArrowUp"
-                            ? -1
-                            : event.key === "ArrowDown"
-                              ? 1
-                              : 0;
-                        if (delta === 0) return;
-                        event.preventDefault();
-                        nudge(source.id, delta);
-                      }}
-                      className="relative block cursor-grab text-ink-faint transition-colors after:absolute after:-inset-1 after:content-['']
-                        hover:text-ink focus-visible:text-ink active:cursor-grabbing"
-                    >
-                      <IconGrip className="h-5 w-5" />
-                    </span>
+                {/* A source that is off fades its content, not the card. */}
+                <div
+                  className={cn(
+                    "flex items-center gap-3.5 transition-opacity duration-200",
+                    !source.enabled && "opacity-55",
                   )}
-                </span>
-                <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
-                  {sourceIcon(source.kind, leftovers)}
-                </span>
-
-                <div className="w-[190px] min-w-0 shrink-0">
-                  {renaming === source.id ? (
-                    <LabelField
-                      label={source.label}
-                      onSave={(label) => void upsertSource({ ...source, label })}
-                      onDone={() => setRenaming(null)}
-                    />
-                  ) : (
-                    <p
-                      className="truncate px-1.5 py-0.5 text-sm font-medium"
-                      onDoubleClick={() => setRenaming(source.id)}
-                    >
-                      {source.label}
-                    </p>
-                  )}
-                  <p
-                    title={status.text}
-                    className={cn(
-                      "truncate px-1.5 text-xs",
-                      status.tone === "error"
-                        ? "text-live"
-                        : status.tone === "warn"
-                          ? "text-warn"
-                          : "text-ink-faint",
-                    )}
-                  >
-                    {status.text}
-                  </p>
-                </div>
-
-                <VolumeTrack
-                  source={source}
-                  gainDb={shownGain}
-                  min={GAIN_MIN}
-                  max={GAIN_MAX}
-                  className={cn(status.tone === "warn" && "opacity-50")}
                 >
-                  <Slider
-                    clear
-                    label={`Volume ${source.label}`}
-                    value={shownGain}
+                  <span className="w-5 shrink-0">
+                    {config.sources.length > 1 && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Move ${source.label}`}
+                        title="Drag to reorder — the order of the tracks in the clip"
+                        {...grip(source.id)}
+                        onKeyDown={(event) => {
+                          const delta =
+                            event.key === "ArrowUp"
+                              ? -1
+                              : event.key === "ArrowDown"
+                                ? 1
+                                : 0;
+                          if (delta === 0) return;
+                          event.preventDefault();
+                          nudge(source.id, delta);
+                        }}
+                        className="relative block cursor-grab text-ink-faint transition-colors after:absolute after:-inset-1 after:content-['']
+                          hover:text-ink focus-visible:text-ink active:cursor-grabbing group-data-[lifted]:text-accent-bright"
+                      >
+                        <IconGrip className="h-5 w-5" />
+                      </span>
+                    )}
+                  </span>
+                  <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-pill bg-elevated text-ink-muted">
+                    {sourceIcon(source.kind, leftovers)}
+                  </span>
+
+                  <div className="w-[190px] min-w-0 shrink-0">
+                    {renaming === source.id ? (
+                      <LabelField
+                        label={source.label}
+                        onSave={(label) => void upsertSource({ ...source, label })}
+                        onDone={() => setRenaming(null)}
+                      />
+                    ) : (
+                      <p
+                        className="truncate px-1.5 py-0.5 text-sm font-medium"
+                        onDoubleClick={() => setRenaming(source.id)}
+                      >
+                        {source.label}
+                      </p>
+                    )}
+                    <p
+                      title={status.text}
+                      className={cn(
+                        "truncate px-1.5 text-xs",
+                        status.tone === "error"
+                          ? "text-live"
+                          : status.tone === "warn"
+                            ? "text-warn"
+                            : "text-ink-faint",
+                      )}
+                    >
+                      {status.text}
+                    </p>
+                  </div>
+
+                  <VolumeTrack
+                    source={source}
+                    gainDb={shownGain}
                     min={GAIN_MIN}
                     max={GAIN_MAX}
-                    step={0.5}
-                    onChange={(gainDb) =>
-                      setGainDraft({ id: source.id, gainDb })
-                    }
-                    onCommit={(gainDb) => {
-                      setGainDraft(null);
-                      if (gainDb !== source.gainDb)
-                        void upsertSource({ ...source, gainDb });
-                    }}
-                    onRelease={() => setGainDraft(null)}
-                  />
-                </VolumeTrack>
-                <span className="w-[60px] shrink-0 text-right font-mono text-xs text-ink-muted">
-                  {gainText(shownGain)}
-                </span>
+                    className={cn(status.tone === "warn" && "opacity-50")}
+                  >
+                    <Slider
+                      clear
+                      label={`Volume ${source.label}`}
+                      value={shownGain}
+                      min={GAIN_MIN}
+                      max={GAIN_MAX}
+                      step={0.5}
+                      onChange={(gainDb) =>
+                        setGainDraft({ id: source.id, gainDb })
+                      }
+                      onCommit={(gainDb) => {
+                        setGainDraft(null);
+                        if (gainDb !== source.gainDb)
+                          void upsertSource({ ...source, gainDb });
+                      }}
+                      onRelease={() => setGainDraft(null)}
+                    />
+                  </VolumeTrack>
+                  <span className="w-[60px] shrink-0 text-right font-mono text-xs text-ink-muted">
+                    {gainText(shownGain)}
+                  </span>
 
-                <button
-                  aria-label={`Mute ${source.label}`}
-                  aria-pressed={source.muted}
-                  title={source.muted ? "Muted" : "Mute"}
-                  onClick={() =>
-                    void upsertSource({ ...source, muted: !source.muted })
-                  }
-                  className={cn(
-                    "grid h-[30px] w-[30px] shrink-0 place-items-center rounded-pill transition-colors duration-150",
-                    source.muted
-                      ? "bg-live/20 text-live"
-                      : "bg-elevated text-ink-faint hover:text-ink",
-                  )}
-                >
-                  {source.muted ? (
-                    <IconSpeakerOff className="h-4 w-4" />
-                  ) : (
-                    <IconSpeaker className="h-4 w-4" />
-                  )}
-                </button>
-                <button
-                  aria-label={`Own track for ${source.label}`}
-                  aria-pressed={source.separateTrack}
-                  title="Main mix, or an audio track of its own in the clip"
-                  onClick={() =>
-                    void upsertSource({
-                      ...source,
-                      separateTrack: !source.separateTrack,
-                    })
-                  }
-                  className={cn(
-                    "inline-flex h-[26px] w-[84px] shrink-0 items-center justify-center rounded-pill border text-xs whitespace-nowrap transition-colors duration-150",
-                    source.separateTrack
-                      ? "border-accent/60 bg-accent/15 text-accent-bright"
-                      : "border-line-strong text-ink-faint hover:text-ink",
-                  )}
-                >
-                  {source.separateTrack ? "Own track" : "Main mix"}
-                </button>
-                <Toggle
-                  label={`${source.label} enabled`}
-                  checked={source.enabled}
-                  onChange={(enabled) => void upsertSource({ ...source, enabled })}
-                />
-                <button
-                  aria-label={`More for ${source.label}`}
-                  onClick={(event) => openMenu(event, source)}
-                  className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-pill text-lg leading-none text-ink-faint
-                    transition-colors hover:bg-elevated hover:text-ink"
-                >
-                  ⋯
-                </button>
+                  <button
+                    aria-label={`Mute ${source.label}`}
+                    aria-pressed={source.muted}
+                    title={source.muted ? "Muted" : "Mute"}
+                    onClick={() =>
+                      void upsertSource({ ...source, muted: !source.muted })
+                    }
+                    className={cn(
+                      "grid h-[30px] w-[30px] shrink-0 place-items-center rounded-pill transition-colors duration-150",
+                      source.muted
+                        ? "bg-live/20 text-live"
+                        : "bg-elevated text-ink-faint hover:text-ink",
+                    )}
+                  >
+                    {source.muted ? (
+                      <IconSpeakerOff className="h-4 w-4" />
+                    ) : (
+                      <IconSpeaker className="h-4 w-4" />
+                    )}
+                  </button>
+                  <button
+                    aria-label={`Own track for ${source.label}`}
+                    aria-pressed={source.separateTrack}
+                    title="Main mix, or an audio track of its own in the clip"
+                    onClick={() =>
+                      void upsertSource({
+                        ...source,
+                        separateTrack: !source.separateTrack,
+                      })
+                    }
+                    className={cn(
+                      "inline-flex h-[26px] w-[84px] shrink-0 items-center justify-center rounded-pill border text-xs whitespace-nowrap transition-colors duration-150",
+                      source.separateTrack
+                        ? "border-accent/60 bg-accent/15 text-accent-bright"
+                        : "border-line-strong text-ink-faint hover:text-ink",
+                    )}
+                  >
+                    {source.separateTrack ? "Own track" : "Main mix"}
+                  </button>
+                  <Toggle
+                    label={`${source.label} enabled`}
+                    checked={source.enabled}
+                    onChange={(enabled) => void upsertSource({ ...source, enabled })}
+                  />
+                  <button
+                    aria-label={`More for ${source.label}`}
+                    onClick={(event) => openMenu(event, source)}
+                    className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-pill text-lg leading-none text-ink-faint
+                      transition-colors hover:bg-elevated hover:text-ink"
+                  >
+                    ⋯
+                  </button>
+                </div>
               </div>
             );
           })}
-        </Card>
+          <p aria-live="polite" className="sr-only">
+            {moved}
+          </p>
         </div>
       )}
 
