@@ -1,10 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
 import { placeMenu } from "@/lib/menuPlace";
-import { facetHasSearch, searchFacet, type FacetValue } from "@/lib/clipFilter";
+import { facetHasSearch, pickedFirst, searchFacet, type FacetValue } from "@/lib/clipFilter";
 import { Button } from "@/components/ui/Button";
-import { useMenu } from "@/components/ui/Menu";
+import { FLOATING, useMenu } from "@/components/ui/Menu";
 import { IconCheck, IconClose, IconSearch } from "@/components/icons";
 
 /** Distance to the window edge, as for every menu. */
@@ -19,7 +19,7 @@ export interface FacetRow extends FacetValue {
 /**
  * The list behind "Game ▾" and "Tags ▾": a tick per value with its count, a
  * search field on top once the list is long, "No game" apart at the end and
- * Clear at the bottom. The Share menu's glass, placed like every menu.
+ * Clear at the bottom. The Share menu's surface, placed like every menu.
  *
  * Not the shared `Menu`: that one keeps the focus where it was and its
  * entries as they were when it opened, and this list has a field to type in
@@ -63,7 +63,19 @@ export function FacetPopover({
   >(null);
 
   const searchable = facetHasSearch(values.length + (noGame ? 1 : 0));
-  const shown = searchFacet(values, query);
+  // The order is fixed when it opens: the picks first, then count order. Ticks
+  // made while it is up change the rows, not their places.
+  const order = useRef<string[] | null>(null);
+  if (order.current === null) {
+    order.current = pickedFirst(values, values.filter((v) => v.checked).map((v) => v.name)).map(
+      (v) => v.name,
+    );
+  }
+  const ranked = useMemo(() => {
+    const at = new Map(order.current!.map((name, i) => [name, i]));
+    return [...values].sort((a, b) => (at.get(a.name) ?? 1e9) - (at.get(b.name) ?? 1e9));
+  }, [values]);
+  const shown = searchFacet(ranked, query);
   const showNoGame = noGame && searchFacet([{ name: "No game" }], query).length > 0;
   const anyChecked = values.some((v) => v.checked) || !!noGame?.checked;
 
@@ -254,7 +266,7 @@ export function FacetPopover({
         top: place ? place.top : 0,
         bottom: place?.bottom,
         maxHeight: place?.maxHeight,
-        background: "var(--glass)",
+        background: FLOATING,
         backdropFilter: "blur(20px)",
       }}
       className={cn(
@@ -274,6 +286,7 @@ export function FacetPopover({
             onChange={(event) => setQuery(event.target.value)}
             placeholder={`Search ${noun}`}
             aria-label={`Search ${noun}`}
+            data-no-ring
             className="h-[34px] w-full rounded-pill border border-line bg-surface pr-3 pl-8 text-[13px]
               outline-none transition-colors placeholder:text-ink-faint focus:border-line-strong"
           />
@@ -296,6 +309,7 @@ export function FacetPopover({
           <p className="px-2.5 py-2 text-[13px] text-ink-faint">Nothing matches</p>
         )}
       </div>
+      {anyChecked && (
       <div className="mt-1 flex shrink-0 justify-end border-t border-line pt-1.5">
         <Button variant="ghost" size="sm" className="h-[26px] px-2.5" disabled={!anyChecked}
           onClick={() => {
@@ -307,6 +321,7 @@ export function FacetPopover({
           Clear
         </Button>
       </div>
+      )}
     </div>,
     document.fullscreenElement ?? document.body,
   );

@@ -66,6 +66,11 @@ button {
   outline-offset: 2px;
 }
 
+/* A field focused for the user on open: its own border change is the cue. */
+input[data-no-ring]:focus-visible {
+  outline: none;
+}
+
 /* Where the ring has no room outside — a picture that fills its card. */
 [data-ring-inset]:focus-visible {
   outline-offset: -2px;

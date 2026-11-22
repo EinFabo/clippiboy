@@ -8,6 +8,7 @@ import {
   facetLabel,
   gameFacet,
   searchFacet,
+  pickedFirst,
   tagFacet,
   groupByDay,
   isFiltered,
@@ -343,4 +344,17 @@ test("button label: the facet, the one name, or how many", () => {
   assert.equal(facetLabel("tag", ["clutch"]), "clutch");
   assert.equal(facetLabel("game", ["CS2", "No game"]), "2 games");
   assert.equal(facetLabel("tag", ["ace", "clutch", "funny"]), "3 tags");
+});
+
+test("picked values come first in their own order, the rest follows", () => {
+  const values = [
+    { name: "A", count: 9 },
+    { name: "B", count: 7 },
+    { name: "C", count: 5 },
+    { name: "D", count: 3 },
+    { name: "E", count: 1 },
+  ];
+  assert.deepEqual(pickedFirst(values, ["D", "B"]).map((v) => v.name), ["B", "D", "A", "C", "E"]);
+  assert.deepEqual(pickedFirst(values, []).map((v) => v.name), ["A", "B", "C", "D", "E"]);
+  assert.deepEqual(pickedFirst(values, ["Gone"]).map((v) => v.name), ["A", "B", "C", "D", "E"]);
 });

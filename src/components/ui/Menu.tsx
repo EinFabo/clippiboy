@@ -119,6 +119,9 @@ export function MenuProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/** The floating surfaces' fill: the elevated colour, nearly opaque, so nothing behind reads through. */
+export const FLOATING = "color-mix(in srgb, var(--color-elevated) 96%, transparent)";
+
 /** Distance to the window edge so the menu does not stick to it. */
 const EDGE = 8;
 
@@ -256,13 +259,13 @@ function Surface({
         left: at.x,
         top: at.y,
         maxHeight,
-        ...(glass && { background: "var(--glass)", backdropFilter: "blur(20px)" }),
+        ...(glass && { background: FLOATING, backdropFilter: "blur(20px)" }),
       }}
       className={cn(
         "fixed z-[75] flex min-w-[224px] flex-col py-1.5",
         glass
           ? "rounded-inner border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
-          : "rounded-inner border border-line bg-elevated/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.55)]",
+          : "rounded-inner border border-line bg-elevated/[0.96] backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.55)]",
         "origin-top-left transition-[opacity,transform] duration-100 ease-[var(--ease-out-soft)]",
         shown ? "scale-100 opacity-100" : "scale-[0.97] opacity-0",
       )}

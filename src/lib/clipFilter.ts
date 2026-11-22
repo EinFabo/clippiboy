@@ -263,6 +263,19 @@ export function tagFacet(clips: Facetable[], kind: ClipKind, chosen: string[]): 
   return sortFacet(counts);
 }
 
+/**
+ * The list as it stands when it opens: the picked values first, as one block,
+ * then the rest — each part keeps the incoming (count, name) order. Taken once
+ * per opening, so ticking rows while it is up moves nothing.
+ */
+export function pickedFirst<T extends { name: string }>(values: T[], chosen: string[]): T[] {
+  const picked = new Set(chosen);
+  return [
+    ...values.filter((v) => picked.has(v.name)),
+    ...values.filter((v) => !picked.has(v.name)),
+  ];
+}
+
 /** What the search field at the top of a list leaves of it. */
 export function searchFacet<T extends { name: string }>(values: T[], query: string): T[] {
   const needle = query.trim().toLowerCase();
