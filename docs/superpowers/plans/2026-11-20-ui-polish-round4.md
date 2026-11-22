@@ -158,3 +158,38 @@ Owner approved the mockup "B · Audio" (same file) and decided: **Solo is remove
 - Empty state (no sources): today's QuickSetup card stays.
 - The name "Mikrofon" in the mock is a Windows device label; leave names as the user/Windows sets them.
 - Pure helpers (status line text, solo clean-up decision) in `src/lib/` with tests. No config schema changes.
+
+## Task 8: Overview, compact variant (B)
+
+Owner chose variant **B · Kompakt** of the mockup "Runde 5 · Overview" in `.superpowers/ui-compromise/mockups-r5.html`
+(section `<section class="r5">`, frame `data-view="b"`; classes `.card.stat`, `.stl`, `.stt`, `.sts`, `.stbar`, `.str`,
+`.kb`, `.acts2`, `.cfg`, `.newb`). Page: `src/routes/Dashboard.tsx`. Same look and building blocks.
+
+- **Header:** the page H1 "ClippiBoy" at the normal page-title size and position like the other pages; no tagline,
+  no centred hero block. The hero gradient behind the page stays (it is global).
+- **Status card** (one wide `Card`) answering "am I protected right now?":
+  - buffer on + game detected: live dot, "Buffering <game>", sub line "<buffered> of <length> ready to save", a fill
+    bar (buffered / length), primary white "Save clip" with the save hotkey as a small key chip, secondary "Stop";
+  - buffer on, no game: "Ready · waiting for a game" (sub line with the buffered time as today), same buttons;
+  - buffer off: warn-tinted card (existing warn colour), "Buffer is off — nothing is being saved", primary "Start
+    buffer"; no Save clip;
+  - recording running / saving: today's Record state (Stop · time, size, saving progress) shows in the card's sub line
+    or under it — nothing of today's recording feedback may be lost.
+  Hotkey chips use today's `shownHotkey`/`hotkeyLabel`; with no hotkey bound, no chip.
+- **Warnings** (unplugged screen with "Choose screen", `SourceTrouble`) directly under the status card, before
+  everything else.
+- **Action row** under the card: Screenshot and Record (secondary buttons with their hotkey chips; Record keeps its
+  red dot and states), and right-aligned a muted link line "<resolution><fps> · <quality> · <encoder> · <N> audio
+  sources ›": the video part navigates to Video, the audio part to Audio (two links in one line is fine). This
+  replaces the four stat tiles; "Detected game" lives in the status card.
+- **Latest:** heading "Latest" with "See all" (to Clips); the 3 newest items of **all** types (clips, recordings,
+  screenshots) with the gallery's card look (type shown as today's pills/badges); the newest item, if younger than
+  1 minute, gets a small accent "Just now" badge on the thumbnail. Card buttons: the newest gets its quickest copy
+  action first ("Copy for Discord" when the share menu offers it for that item, otherwise its "Copy clip"/"Copy
+  picture" entry) plus the `ShareMenuButton`; the others get "Open" + Share. Clicking opens the player or, for a
+  screenshot, the screenshot viewer, as the gallery does.
+- **Empty state** (no items yet): a card with three short steps "Start the buffer · Play · Press <save hotkey>"
+  replacing today's single line; it disappears with the first item.
+- Reuse existing pieces (gallery card component if it can be shared without coupling the Overview to gallery
+  state; otherwise a small shared card). Pure helpers (status text/state choice, latest-items selection, "just now")
+  in `src/lib/` with tests. No config changes.
