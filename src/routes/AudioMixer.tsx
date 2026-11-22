@@ -30,7 +30,7 @@ import {
 import { cn } from "@/lib/cn";
 import { labelToSave } from "@/lib/draft";
 import { useFlip } from "@/lib/useFlip";
-import { appCaptureUnavailable, gainText, sourceStatus } from "@/lib/audioRows";
+import { gainText, sourceStatus } from "@/lib/audioRows";
 import { placeMenu } from "@/lib/menuPlace";
 import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
 import type { AudioProcess, AudioSource, SourceKind } from "@/lib/types";
@@ -298,7 +298,6 @@ export function AudioMixer() {
         <AddSourceList
           anchor={addButton}
           hasGame={config.sources.some((s) => s.kind.type === "game")}
-          captureBroken={appCaptureUnavailable(config.sources, sourceErrors)}
           onClose={() => setAdding(false)}
           onAdd={(s) => {
             void upsertSource(s);
@@ -563,7 +562,9 @@ export function QuickSetup({
   useEffect(() => {
     void refreshSources();
   }, [refreshSources]);
-  const discord = runningDiscord(processes);
+  const appCapture = useEngine((s) => s.appCapture);
+  // Discord has its own track only through per-app capture.
+  const discord = appCapture ? runningDiscord(processes) : undefined;
   const discordAdded = hasDiscordSource(sources);
   const output = devices.find((d) => d.kind === "output" && d.isDefault);
   const input = devices.find((d) => d.kind === "input" && d.isDefault);
@@ -625,7 +626,7 @@ export function QuickSetup({
       device: input.name,
     });
   }
-  if (discord || discordAdded) {
+  if (appCapture && (discord || discordAdded)) {
     rows.push({
       on: withDiscord,
       set: setWithDiscord,
@@ -711,19 +712,17 @@ function Experimental() {
 function AddSourceList({
   anchor,
   hasGame,
-  captureBroken,
   onAdd,
   onClose,
 }: {
   anchor: RefObject<HTMLElement | null>;
   hasGame: boolean;
-  /** Application capture is refused on this Windows build. */
-  captureBroken: boolean;
   onAdd: (s: AudioSource) => void;
   onClose: () => void;
 }) {
-  const { devices, processes, refreshSources, detectedGame } = useEngine(
+  const { devices, processes, refreshSources, detectedGame, appCapture } = useEngine(
     useShallow((s) => ({
+      appCapture: s.appCapture,
       devices: s.devices,
       processes: s.processes,
       refreshSources: s.refreshSources,
@@ -861,12 +860,12 @@ function AddSourceList({
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {tab === "apps" ? (
           <>
-            {captureBroken && (
-              <p className="mx-1 mb-1 rounded-inner bg-live/10 px-2.5 py-2 text-xs text-live">
-                Application capture needs Windows 10 build 20348 or newer.
+            {!appCapture && (
+              <p className="mx-1 my-1 px-2.5 py-2 text-xs text-ink-muted">
+                Per-app audio needs Windows 11
               </p>
             )}
-            {!hasGame && (
+            {appCapture && !hasGame && (
               <div className="flex items-center gap-2.5 rounded-[10px] px-2.5 py-1.5">
                 <span className="grid h-7 w-7 shrink-0 place-items-center rounded-pill bg-accent/15 text-accent-bright">
                   <IconGamepad className="h-4 w-4" />
@@ -882,8 +881,10 @@ function AddSourceList({
                 </Button>
               </div>
             )}
-            {heading("Applications", <Experimental />)}
-            {processes.length === 0
+            {appCapture && heading("Applications", <Experimental />)}
+            {!appCapture
+              ? null
+              : processes.length === 0
               ? empty
               : processes.map((p) =>
                   entry(

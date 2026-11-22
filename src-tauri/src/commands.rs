@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tauri::State;
 
-use crate::audio::devices;
+use crate::audio::{self, devices};
 use crate::capture;
 use crate::clips::Library;
 use crate::edit;
@@ -34,6 +34,12 @@ pub fn list_cameras() -> Vec<crate::model::CameraDevice> {
 #[tauri::command(async)]
 pub fn list_audio_processes() -> Vec<AudioProcess> {
     devices::list_processes()
+}
+
+/// Can a single application be recorded on this Windows (build 20348+)?
+#[tauri::command]
+pub fn app_capture_supported() -> bool {
+    audio::app_capture_ok()
 }
 
 #[tauri::command(async)]

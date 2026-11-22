@@ -64,6 +64,8 @@ interface EngineState {
   removeVirtualCamera: () => Promise<void>;
   devices: AudioDevice[];
   processes: AudioProcess[];
+  /** Can a single application be recorded here (Windows 11)? Browser mode: yes. */
+  appCapture: boolean;
   targets: CaptureTarget[];
   encoders: EncoderInfo[];
   clips: Clip[];
@@ -266,6 +268,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   config: mock.mockConfig,
   devices: [],
   processes: [],
+  appCapture: true,
   targets: [],
   encoders: [],
   clips: [],
@@ -419,6 +422,10 @@ export const useEngine = create<EngineState>((set, get) => ({
         clips,
       });
       if (configRead) configLoaded = true;
+      void api
+        .appCaptureSupported()
+        .then((appCapture) => set({ appCapture }))
+        .catch(() => {});
 
       await events.onLevels((levels) => set({ levels }));
       // The engine tick arrives every second, mostly unchanged; set only what moved.

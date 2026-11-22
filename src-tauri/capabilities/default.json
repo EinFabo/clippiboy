@@ -32,6 +32,7 @@
     "allow-retry-recording-cam",
     "allow-bake-all-cams",
     "allow-list-audio-processes",
+    "allow-app-capture-supported",
     "allow-list-capture-targets",
     "allow-list-encoders",
     "allow-get-config",

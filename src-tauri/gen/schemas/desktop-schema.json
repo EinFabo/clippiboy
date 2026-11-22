@@ -351,6 +351,12 @@
           "markdownDescription": "Enables the add_audio_source command without any pre-configured scope."
         },
         {
+          "description": "Enables the app_capture_supported command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-app-capture-supported",
+          "markdownDescription": "Enables the app_capture_supported command without any pre-configured scope."
+        },
+        {
           "description": "Enables the app_version command without any pre-configured scope.",
           "type": "string",
           "const": "allow-app-version",
@@ -985,6 +991,12 @@
           "type": "string",
           "const": "deny-add-audio-source",
           "markdownDescription": "Denies the add_audio_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the app_capture_supported command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-app-capture-supported",
+          "markdownDescription": "Denies the app_capture_supported command without any pre-configured scope."
         },
         {
           "description": "Denies the app_version command without any pre-configured scope.",

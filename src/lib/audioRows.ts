@@ -110,25 +110,6 @@ export function sourceStatus(source: AudioSource, ctx: StatusContext): SourceSta
   return status;
 }
 
-/**
- * Is application capture refused on this machine? There is no flag and the
- * core has no message of its own for it: a Windows without process loopback
- * fails like any other source that cannot start ("audio source not available:
- * <HRESULT>"), which a source that is merely not running can produce too. So
- * only an error that names the Windows build counts; anything vaguer would
- * claim an old Windows for a plain missing app.
- */
-export function appCaptureUnavailable(
-  sources: AudioSource[],
-  errors: Record<string, string>,
-): boolean {
-  return sources.some(
-    (s) =>
-      (s.kind.type === "game" || s.kind.type === "process") &&
-      /\b20348\b/.test(errors[s.id] ?? ""),
-  );
-}
-
 /** "+2.0 dB", "0.0 dB", "−3.5 dB". */
 export function gainText(gainDb: number): string {
   return `${gainDb > 0 ? "+" : ""}${gainDb.toFixed(1)} dB`;

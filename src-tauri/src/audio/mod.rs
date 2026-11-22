@@ -71,7 +71,62 @@ pub fn app_root(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
 /// rather than stored: there is nothing here a user could get wrong, and nothing
 /// that can drift out of step with the sources.
 pub fn records_single_applications(sources: &[AudioSource]) -> bool {
-    sources.iter().filter(|s| s.enabled).any(|source| {
+    records_single_applications_on(sources, app_capture_ok())
+}
+
+/// The first Windows build with process loopback — Windows 11. Before it a
+/// per-application tap cannot be opened at all.
+const APP_CAPTURE_MIN_BUILD: u32 = 20348;
+
+/// Can a single application be recorded on this Windows build?
+pub fn app_capture_supported(build: u32) -> bool {
+    build >= APP_CAPTURE_MIN_BUILD
+}
+
+/// [`app_capture_supported`] for the machine we run on, read once. Where the
+/// build cannot be read, assume it works: that is what the app did before.
+pub fn app_capture_ok() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| os_build().map_or(true, app_capture_supported))
+}
+
+#[cfg(windows)]
+fn os_build() -> Option<u32> {
+    use windows::Wdk::System::SystemServices::RtlGetVersion;
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a valid, correctly sized OSVERSIONINFOW.
+    let status = unsafe { RtlGetVersion(&mut info) };
+    status.is_ok().then_some(info.dwBuildNumber)
+}
+
+#[cfg(not(windows))]
+fn os_build() -> Option<u32> {
+    None
+}
+
+/// The note on every Game or Process source where per-app capture does not
+/// exist. Empty where it does.
+pub fn app_capture_notes(sources: &[AudioSource], supported: bool) -> HashMap<String, String> {
+    if supported {
+        return HashMap::new();
+    }
+    sources
+        .iter()
+        .filter(|s| s.enabled && is_app_source(&s.kind))
+        .map(|s| (s.id.clone(), "Per-app audio needs Windows 11".to_string()))
+        .collect()
+}
+
+fn is_app_source(kind: &SourceKind) -> bool {
+    matches!(kind, SourceKind::Game | SourceKind::Process { .. })
+}
+
+fn records_single_applications_on(sources: &[AudioSource], supported: bool) -> bool {
+    supported && sources.iter().filter(|s| s.enabled).any(|source| {
         matches!(
             source.kind,
             SourceKind::Game
@@ -347,13 +402,22 @@ pub fn resolve(
     tree: &HashMap<u32, (u32, String)>,
     ledger: &Leftovers,
 ) -> Vec<Stream> {
-    resolve_for(std::process::id(), sources, game_pid, playing, tree, ledger)
+    resolve_for(
+        std::process::id(),
+        app_capture_ok(),
+        sources,
+        game_pid,
+        playing,
+        tree,
+        ledger,
+    )
 }
 
 /// [`resolve`] with ClippiBoy's own process given, so a test's made-up pids
 /// can never be taken for it.
 fn resolve_for(
     own: u32,
+    supported: bool,
     sources: &[AudioSource],
     game_pid: Option<u32>,
     playing: &HashMap<String, Vec<(u32, bool)>>,
@@ -388,8 +452,12 @@ fn resolve_for(
     // Which output device each application belongs to, decided once for all of
     // them so no two can claim the same one. Empty unless something is recorded
     // application by application — then a device is simply itself.
-    let leftovers_mode = records_single_applications(sources);
-    let home = ledger.assign(sources, playing, tree, &taken);
+    let leftovers_mode = records_single_applications_on(sources, supported);
+    let home = if supported {
+        ledger.assign(sources, playing, tree, &taken)
+    } else {
+        Vec::new()
+    };
 
     let mut out = Vec::with_capacity(sources.len());
     for source in enabled() {
@@ -411,6 +479,9 @@ fn resolve_for(
         };
 
         match &source.kind {
+            // Without process loopback an application cannot be tapped; the
+            // source stays (with its note) and records nothing.
+            kind if !supported && is_app_source(kind) => {}
             SourceKind::Game => out.extend(game_pid.map(|pid| include(app_root(pid, tree)))),
             SourceKind::OutputDevice { .. } if leftovers_mode => out.extend(leftovers()),
             // Only ever read from an old configuration; `config::migrate_sources`
@@ -895,7 +966,7 @@ mod tests {
         tree: &HashMap<u32, (u32, String)>,
         ledger: &Leftovers,
     ) -> Vec<Stream> {
-        resolve_for(NOT_US, sources, game_pid, playing, tree, ledger)
+        resolve_for(NOT_US, true, sources, game_pid, playing, tree, ledger)
     }
 
     fn ledger(default_device: &str) -> Leftovers {
@@ -1214,6 +1285,59 @@ mod tests {
         assert_eq!(pids_of(&streams, "rest"), vec![12604]);
     }
 
+    #[test]
+    fn app_capture_needs_windows_11_build() {
+        assert!(!app_capture_supported(19045));
+        assert!(!app_capture_supported(20347));
+        assert!(app_capture_supported(20348));
+        assert!(app_capture_supported(22631));
+    }
+
+    /// Windows 10: devices are recorded whole and the application sources
+    /// record nothing, so desktop and game sound stay in the clip.
+    #[test]
+    fn without_process_loopback_devices_stay_whole() {
+        let sources = vec![
+            recording_by_app(),
+            of_kind("proc", SourceKind::Process {
+                pid: 77,
+                exe: None,
+                mode: ProcessMode::Include,
+            }),
+            of_kind("spk", SourceKind::OutputDevice { device_id: "spk".into() }),
+        ];
+        let procs = tree(&[(5000, 4, "game.exe"), (77, 4, "discord.exe")]);
+        let streams = resolve_for(
+            NOT_US,
+            false,
+            &sources,
+            Some(5000),
+            &playing(&[("spk", &idle(&[5000, 77, 900]))]),
+            &procs,
+            &ledger("spk"),
+        );
+        assert!(streams.iter().all(|s| s.source_id == "spk"));
+        assert_eq!(streams.len(), 1);
+        assert!(matches!(
+            streams[0].kind,
+            SourceKind::OutputDevice { ref device_id } if device_id == "spk"
+        ));
+        assert!(!records_single_applications_on(&sources, false));
+        assert!(records_single_applications_on(&sources, true));
+    }
+
+    #[test]
+    fn unsupported_application_sources_get_a_note() {
+        let sources = vec![
+            of_kind("game", SourceKind::Game),
+            of_kind("spk", SourceKind::OutputDevice { device_id: "spk".into() }),
+        ];
+        let notes = app_capture_notes(&sources, false);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes["game"], "Per-app audio needs Windows 11");
+        assert!(app_capture_notes(&sources, true).is_empty());
+    }
+
     /// The tests' own process is never one of their made-up applications: on a
     /// fresh CI machine the test binary ran as pid 5000 — the game of
     /// `a_rebound_application_is_not_recorded_twice` — and was left out as
@@ -1223,6 +1347,7 @@ mod tests {
         let sources = vec![recording_by_app(), of_kind("rest", leftovers("spk"))];
         let streams = resolve_for(
             5000,
+            true,
             &sources,
             None,
             &playing(&[("spk", &idle(&[5000, 5004]))]),

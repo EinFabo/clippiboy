@@ -1575,6 +1575,8 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                         tick_game.held.is_some(),
                         state.is_buffering(),
                     );
+                    let mut notes = notes;
+                    notes.extend(audio::app_capture_notes(&sources, audio::app_capture_ok()));
                     *state.source_notes.lock() = notes;
                 }
                 apply_auto_buffer(&handle, tick_game.playing);
@@ -2093,6 +2095,7 @@ pub fn run() {
             commands::retry_recording_cam,
             commands::bake_all_cams,
             commands::list_audio_processes,
+            commands::app_capture_supported,
             commands::list_capture_targets,
             commands::list_encoders,
             commands::get_config,

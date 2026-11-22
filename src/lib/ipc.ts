@@ -54,6 +54,8 @@ export const api = {
   removeVirtualCamera: () => invoke<AppConfig>("remove_virtual_camera"),
   /** Whether a clip has a live share link (deleting the clip takes it down). */
   linkExists: (id: string) => invoke<boolean>("link_exists", { id }),
+  /** False before Windows 11 (build 20348): no per-application capture there. */
+  appCaptureSupported: () => invoke<boolean>("app_capture_supported"),
   listAudioProcesses: () => invoke<AudioProcess[]>("list_audio_processes"),
   listCaptureTargets: () => invoke<CaptureTarget[]>("list_capture_targets"),
   listEncoders: () => invoke<EncoderInfo[]>("list_encoders"),

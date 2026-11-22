@@ -19,6 +19,7 @@ fn main() {
         "retry_recording_cam",
         "bake_all_cams",
         "list_audio_processes",
+        "app_capture_supported",
         "list_capture_targets",
         "list_encoders",
         "get_config",
