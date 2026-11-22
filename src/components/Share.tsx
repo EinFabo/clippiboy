@@ -1,17 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { UploadCard, useLinkUploads } from "./Links";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
 import { canReceive, useFriends } from "@/lib/friends";
 import { clipName, formatDuration } from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
-import { isOver, megabytes, shareApi, useShare } from "@/lib/share";
+import { isOver, megabytes, retryTransfers, shareApi, useShare, useTransferMemory, watchTransfers } from "@/lib/share";
+import { cardLeft, noun, onFriendsPage, transferKind, type Ended } from "@/lib/transferRows";
 import type { Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Avatar } from "@/routes/Friends";
 import { Button } from "@/components/ui/Button";
 import { ProgressBar } from "@/components/ui/ProgressBar";
-import { IconCheck, IconClose, IconGamepad, IconHeart, IconSend } from "@/components/icons";
+import { IconCheck, IconClose, IconGamepad, IconHeart, IconRetry, IconSend } from "@/components/icons";
 
 /**
  * "Send to a friend": the friends who are online right now, favourites first.
@@ -253,14 +254,28 @@ export function ClipPicker() {
   );
 }
 
-/** Offers waiting for an answer and clips on their way, bottom right on every page. */
-export function Transfers() {
+/**
+ * Offers waiting for an answer and clips on their way, bottom right. On the
+ * Friends page these stand in the friend's row instead, so only the ones that
+ * have no row there (and link uploads) stay as cards.
+ */
+export function Transfers({ onFriendsPage: friendsPage = false }: { onFriendsPage?: boolean }) {
   const transfers = useShare((s) => s.transfers);
-  // Called off by one side or the other — nothing left to show.
-  useEffect(() => {
-    for (const t of transfers) if (t.stage === "cancelled") void shareApi.dismiss(t.id);
-  }, [transfers]);
-  const shown = transfers.filter((t) => t.stage !== "cancelled");
+  const ended = useTransferMemory((s) => s.ended);
+  const friends = useFriends((s) => s.lists.friends);
+  // The main window keeps the core's list tidy — see `watchTransfers`.
+  useEffect(() => watchTransfers(), []);
+  const now = useTicking(transfers, ended);
+  const friendIds = new Set(friends.map((f) => f.id));
+  // What has ended while its row was on screen was seen there — leaving the
+  // page does not bring it back as a card.
+  const seenInRow = useRef(new Set<string>());
+  if (friendsPage)
+    for (const t of transfers) if (transferKind(t) === "ended" && onFriendsPage(t, friendIds)) seenInRow.current.add(t.id);
+  for (const id of seenInRow.current) if (!transfers.some((t) => t.id === id)) seenInRow.current.delete(id);
+  const shown = transfers.filter(
+    (t) => cardLeft(t, ended, now) > 0 && !seenInRow.current.has(t.id) && !(friendsPage && onFriendsPage(t, friendIds)),
+  );
   const uploads = useLinkUploads();
   if (shown.length === 0 && uploads.length === 0) return null;
 
@@ -280,20 +295,21 @@ export function Transfers() {
   );
 }
 
-/** How long a finished card stays: long enough to read, a failure longer. */
-function lingerMs(t: Transfer): number {
-  return t.stage === "failed" ? 15_000 : 6_000;
+/** The clock for the cards: renders again when the next ended card is due to go. */
+function useTicking(transfers: Transfer[], ended: Record<string, Ended>): number {
+  const [, setTick] = useState(0);
+  const now = Date.now();
+  useEffect(() => {
+    const at = Date.now();
+    const next = Math.min(...transfers.map((t) => cardLeft(t, ended, at)).filter((left) => left > 0 && left < Infinity));
+    if (!Number.isFinite(next)) return;
+    const timer = window.setTimeout(() => setTick((n) => n + 1), next + 50);
+    return () => window.clearTimeout(timer);
+  });
+  return now;
 }
 
 function TransferCard({ transfer: t }: { transfer: Transfer }) {
-  const over = isOver(t);
-  // Finished cards go by themselves — they piled up before.
-  useEffect(() => {
-    if (!over) return;
-    const timer = window.setTimeout(() => void shareApi.dismiss(t.id), lingerMs(t));
-    return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [over, t.id, t.stage]);
   const [busy, setBusy] = useState(false);
   const run = (action: Promise<void>) => {
     setBusy(true);
@@ -301,6 +317,8 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
   };
   const incoming = t.direction === "in";
   const share = t.size > 0 ? t.moved / t.size : 0;
+  const failed = transferKind(t) === "error";
+  const canRetry = failed && !incoming && t.clipId !== null;
 
   return (
     <div className="rounded-card border border-line bg-surface/95 p-4 shadow-2xl backdrop-blur">
@@ -322,6 +340,16 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
             <IconClose className="h-3.5 w-3.5" />
           </button>
         )}
+        {failed && (
+          <button
+            aria-label="Dismiss"
+            title="Dismiss"
+            onClick={() => void shareApi.dismiss(t.id)}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-pill text-ink-muted hover:bg-hover hover:text-ink"
+          >
+            <IconClose className="h-3.5 w-3.5" />
+          </button>
+        )}
         {t.stage === "done" && <IconCheck className="h-4 w-4 shrink-0 text-ok" />}
       </div>
 
@@ -331,7 +359,21 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
           <span className="text-xs text-ink-muted tabular-nums">{Math.floor(share * 100)} %</span>
         </div>
       )}
-      {t.stage === "failed" && t.error && <p className="mt-2 text-xs text-live">{t.error}</p>}
+      {failed && (t.error || canRetry) && (
+        <div className="mt-2 flex items-center gap-3">
+          {t.error && <p className="min-w-0 flex-1 text-xs text-live">{t.error}</p>}
+          {canRetry && (
+            <Button
+              size="sm"
+              className="ml-auto"
+              icon={<IconRetry className="h-3.5 w-3.5" />}
+              onClick={() => retryTransfers([t])}
+            >
+              Retry
+            </Button>
+          )}
+        </div>
+      )}
       {incoming && t.stage === "asking" && (
         <div className="mt-3 flex justify-end gap-2">
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(shareApi.decline(t.id))}>
@@ -344,11 +386,6 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
       )}
     </div>
   );
-}
-
-/** What to call it in a sentence — never "clip" for a screenshot or a recording. */
-function noun(t: Transfer): string {
-  return t.screenshot ? "screenshot" : t.recording ? "recording" : "clip";
 }
 
 function headline(t: Transfer): string {

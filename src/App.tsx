@@ -26,6 +26,7 @@ import { Recording } from "./routes/Recording";
 import { Friends } from "./routes/Friends";
 import { Settings } from "./routes/settings";
 import { OPEN_SETTINGS_EVENT } from "./lib/settingsLink";
+import { OPEN_CLIP_EVENT } from "./lib/share";
 import { SOLO_CLEAR_ATTEMPTS, soloToClear } from "./lib/audioRows";
 
 export default function App() {
@@ -78,6 +79,16 @@ export default function App() {
   useEffect(() => {
     if (addSeq > 0) setRoute("friends");
   }, [addSeq]);
+
+  // "Open" on a clip a friend sent, from the Friends page.
+  useEffect(() => {
+    const open = (event: Event) => {
+      setRoute("clips");
+      setFocusClip({ id: (event as CustomEvent<string>).detail, at: 0 });
+    };
+    window.addEventListener(OPEN_CLIP_EVENT, open);
+    return () => window.removeEventListener(OPEN_CLIP_EVENT, open);
+  }, []);
 
   // "Open in the app" from the console over the game: the core brings the
   // window up and says which clip was meant.
@@ -139,7 +150,7 @@ export default function App() {
           </div>
         </main>
         <Toasts />
-        <Transfers />
+        <Transfers onFriendsPage={route === "friends"} />
         <SharePicker />
         <ClipPicker />
         <Setup />

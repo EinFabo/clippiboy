@@ -15,6 +15,8 @@ import { LiveDot } from "./ui/LiveDot";
 import { animate, EASE_SPRING } from "@/lib/motion";
 import { useEngine } from "@/store";
 import { useFriends } from "@/lib/friends";
+import { pendingCount } from "@/lib/friendsList";
+import { useShare } from "@/lib/share";
 
 export type Route = "dashboard" | "clips" | "audio" | "recording" | "friends" | "settings";
 
@@ -40,7 +42,10 @@ export function NavBar({
   const recording = useEngine((s) => s.recording);
   const recordingSeconds = useEngine((s) => s.recordingSeconds);
   const recordingProgress = useEngine((s) => s.recordingProgress);
-  const requests = useFriends((s) => s.lists.incoming.length);
+  // Only what waits for an answer: friend requests and clips offered.
+  const incoming = useFriends((s) => s.lists.incoming);
+  const transfers = useShare((s) => s.transfers);
+  const waiting = pendingCount(incoming, transfers);
 
   return (
     <nav className="absolute inset-x-0 top-12 z-40 flex justify-center px-8">
@@ -67,12 +72,12 @@ export function NavBar({
           >
             <Icon className="h-4 w-4" />
             {label}
-            {id === "friends" && requests > 0 && (
+            {id === "friends" && waiting > 0 && (
               <span
-                title={`${requests} friend request${requests === 1 ? "" : "s"}`}
+                title={`${waiting} waiting for your answer`}
                 className="grid h-4.5 min-w-4.5 place-items-center rounded-pill bg-accent px-1 text-[11px] font-semibold text-white tabular-nums"
               >
-                {requests}
+                {waiting}
               </span>
             )}
           </button>

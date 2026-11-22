@@ -1,0 +1,204 @@
+import type { FriendPresence, Transfer } from "./types";
+
+/**
+ * How clips on their way show up: in the friend's row on the Friends page,
+ * as cards bottom right everywhere else — and how long each stays.
+ *
+ * - An offer waits in "Pending" (a card elsewhere) until it is answered.
+ * - A running transfer shows its bar.
+ * - A failure stays, with Retry where that makes sense, until it is dismissed.
+ * - Anything else that ended ("has your clip", "said no") stays in the row until
+ *   the friend's state changes; its card goes after a few seconds.
+ * - Cancelled, or an offer one declined oneself: nothing left to show.
+ */
+
+export type TransferKind = "offer" | "active" | "error" | "ended" | "gone";
+
+export function transferKind(t: Transfer): TransferKind {
+  if (t.stage === "cancelled") return "gone";
+  if (t.direction === "in") {
+    if (t.stage === "asking") return "offer";
+    if (t.stage === "declined") return "gone";
+    if (t.stage === "failed") return "error";
+    if (t.stage === "done" || t.stage === "expired") return "ended";
+    return "active";
+  }
+  if (t.stage === "failed" || t.stage === "expired") return "error";
+  if (t.stage === "done" || t.stage === "declined") return "ended";
+  return "active";
+}
+
+/** What "the friend's state" is: whether and what they play, busy, their line. */
+export function presenceSig(presence: FriendPresence | null | undefined): string {
+  if (!presence) return "offline";
+  return `${presence.busy ? "busy" : "on"}|${presence.game ?? ""}|${presence.status ?? ""}`;
+}
+
+/** When a transfer ended and how its friend stood at that moment. */
+export interface Ended {
+  at: number;
+  sig: string;
+}
+
+/**
+ * Notes the transfers that have just ended and forgets the ones gone from the
+ * list. Returns `ended` itself when nothing changed.
+ */
+export function noteEnded(
+  transfers: Transfer[],
+  ended: Record<string, Ended>,
+  presence: Record<string, FriendPresence>,
+  now: number,
+): Record<string, Ended> {
+  const next: Record<string, Ended> = {};
+  let changed = false;
+  for (const t of transfers) {
+    const kind = transferKind(t);
+    if (kind === "offer" || kind === "active") continue;
+    const known = ended[t.id];
+    if (known) next[t.id] = known;
+    else {
+      next[t.id] = { at: now, sig: presenceSig(presence[t.friendId]) };
+      changed = true;
+    }
+  }
+  if (Object.keys(ended).length !== Object.keys(next).length) changed = true;
+  return changed ? next : ended;
+}
+
+/** Transfers to take off the core's list: the gone ones, and the ended ones
+ *  whose friend has moved on since. */
+export function toDismiss(
+  transfers: Transfer[],
+  ended: Record<string, Ended>,
+  presence: Record<string, FriendPresence>,
+): string[] {
+  return transfers
+    .filter((t) => {
+      const kind = transferKind(t);
+      if (kind === "gone") return true;
+      if (kind !== "ended") return false;
+      const known = ended[t.id];
+      return known !== undefined && known.sig !== presenceSig(presence[t.friendId]);
+    })
+    .map((t) => t.id);
+}
+
+/** How long a card for an ended transfer stays on the other pages. */
+export const CARD_ENDED_MS = 6_000;
+
+/** Milliseconds a card has left: `Infinity` while it stays, 0 once it is gone. */
+export function cardLeft(t: Transfer, ended: Record<string, Ended>, now: number): number {
+  const kind = transferKind(t);
+  if (kind === "gone") return 0;
+  if (kind !== "ended") return Infinity;
+  const at = ended[t.id]?.at ?? now;
+  return Math.max(0, CARD_ENDED_MS - (now - at));
+}
+
+/** Whether the Friends page shows it itself — an offer in "Pending", the rest
+ *  in the row of a friend on the list. */
+export function onFriendsPage(t: Transfer, friendIds: ReadonlySet<string>): boolean {
+  return transferKind(t) === "offer" || friendIds.has(t.friendId);
+}
+
+/** What a row says about the clips going to or coming from that friend. */
+export type RowTransfer =
+  | { kind: "sending"; ids: string[]; text: string; share: number | null }
+  | { kind: "receiving"; ids: string[]; text: string; share: number | null }
+  | { kind: "error"; ids: string[]; text: string; retry: Transfer[] }
+  | { kind: "done"; ids: string[]; text: string; tone: "ok" | "muted"; at: number; open: string | null };
+
+/** What to call it in a sentence — never "clip" for a screenshot or a recording. */
+export function noun(t: Pick<Transfer, "screenshot" | "recording">): string {
+  return t.screenshot ? "screenshot" : t.recording ? "recording" : "clip";
+}
+
+function plural(ts: Transfer[]): string {
+  const nouns = new Set(ts.map(noun));
+  return `${nouns.size === 1 ? [...nouns][0] : "clip"}s`;
+}
+
+/** "The connection dropped." → "the connection dropped", to follow a "·". */
+export function reason(t: Transfer): string {
+  if (t.direction === "out" && t.stage === "expired") return "no answer";
+  const text = (t.error ?? "").trim().replace(/\.$/, "");
+  if (!text) return "it didn't go through";
+  const first = text.split(/\s/, 1)[0];
+  return /^[A-Z][a-z]*$/.test(first) ? text[0].toLowerCase() + text.slice(1) : text;
+}
+
+/**
+ * The row's transfer line for one friend: running first, then failures, then
+ * what has ended — the newest of those.
+ */
+export function rowTransfer(
+  friendId: string,
+  transfers: Transfer[],
+  ended: Record<string, Ended>,
+): RowTransfer | null {
+  const mine = transfers.filter((t) => t.friendId === friendId);
+  const by = (kind: TransferKind) => mine.filter((t) => transferKind(t) === kind);
+
+  const active = by("active");
+  const out = active.filter((t) => t.direction === "out");
+  const running = out.length > 0 ? out : active;
+  if (running.length > 0) {
+    const sending = running[0].direction === "out";
+    const moving = running.filter((t) => t.stage === "moving");
+    const size = running.reduce((sum, t) => sum + t.size, 0);
+    const moved = running.reduce((sum, t) => sum + t.moved, 0);
+    let text: string;
+    if (running.length > 1) text = `${sending ? "Sending" : "Receiving"} ${running.length} ${plural(running)}`;
+    else if (!sending) text = `Receiving ${running[0].name}`;
+    else if (running[0].stage === "moving") text = `Sending ${running[0].name}`;
+    else if (running[0].stage === "asking") text = `Waiting for an answer · ${running[0].name}`;
+    else text = `Getting ${running[0].name} ready`;
+    return {
+      kind: sending ? "sending" : "receiving",
+      ids: running.map((t) => t.id),
+      text,
+      share: moving.length > 0 && size > 0 ? moved / size : null,
+    };
+  }
+
+  const errors = by("error");
+  if (errors.length > 0) {
+    const first = errors[0];
+    const allOut = errors.every((t) => t.direction === "out");
+    let text: string;
+    if (errors.length > 1)
+      text = allOut ? `Couldn't send ${errors.length} ${plural(errors)}` : `${errors.length} ${plural(errors)} didn't go through`;
+    else text = first.direction === "out" ? `Couldn't send ${first.name} · ${reason(first)}` : `${first.name} didn't arrive · ${reason(first)}`;
+    return {
+      kind: "error",
+      ids: errors.map((t) => t.id),
+      text,
+      retry: errors.filter((t) => t.direction === "out" && t.clipId !== null),
+    };
+  }
+
+  const over = by("ended").sort((a, b) => (ended[b.id]?.at ?? 0) - (ended[a.id]?.at ?? 0));
+  if (over.length > 0) {
+    const newest = over[0];
+    const same = over.filter((t) => t.direction === newest.direction && t.stage === newest.stage).length - 1;
+    const more = same > 0 ? ` and ${same} more` : "";
+    const lead =
+      newest.direction === "out"
+        ? newest.stage === "done"
+          ? "Has your"
+          : "Said no to"
+        : newest.stage === "done"
+          ? "Sent you"
+          : "Missed";
+    return {
+      kind: "done",
+      ids: over.map((t) => t.id),
+      text: `${lead} ${newest.name}${more}`,
+      tone: newest.stage === "done" ? "ok" : "muted",
+      at: ended[newest.id]?.at ?? 0,
+      open: newest.direction === "in" && newest.stage === "done" ? newest.clipId : null,
+    };
+  }
+  return null;
+}

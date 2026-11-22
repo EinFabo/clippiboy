@@ -29,17 +29,24 @@ import {
 } from "@/lib/friendsPage";
 import { openSettings } from "@/lib/settingsLink";
 import { useStreamer } from "@/lib/streamer";
-import { useShare } from "@/lib/share";
+import { megabytes, openClip, retryTransfers, shareApi, useShare, useTransferMemory } from "@/lib/share";
+import { ago, friendStatus, groupFriends, pendingRows, type FriendStatus } from "@/lib/friendsList";
+import { noun, rowTransfer, type Ended, type RowTransfer } from "@/lib/transferRows";
+import { readOpen, writeOpen } from "@/lib/groupState";
+import { formatDuration } from "@/lib/format";
 import { toast } from "@/lib/toastBus";
-import type { FriendMe, FriendPending, FriendPresence, FriendUser } from "@/lib/types";
+import type { FriendMe, FriendPending, FriendPresence, FriendUser, Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
+import { ProgressBar } from "@/components/ui/ProgressBar";
 import { useMenu } from "@/components/ui/Menu";
 import { Popover } from "@/components/ui/Popover";
 import { useShallow } from "zustand/react/shallow";
 import {
   IconCheck,
+  IconClips,
   IconClose,
   IconCopy,
   IconEye,
@@ -218,16 +225,10 @@ function SignedIn() {
     setAdding({ query: formatCode(add.code), key: add.seq });
   }, [add]);
 
-  // Favourites first in every group; below that the server's alphabetical
-  // order, and offline the ones seen most recently.
-  const favorite = (a: FriendUser, b: FriendUser) =>
-    Number(favorites.includes(b.id)) - Number(favorites.includes(a.id));
-  const sorted = [...lists.friends].sort(favorite);
-  const playing = sorted.filter((f) => presence[f.id]?.game);
-  const online = sorted.filter((f) => presence[f.id] && !presence[f.id].game);
-  const offline = sorted
-    .filter((f) => !presence[f.id])
-    .sort((a, b) => favorite(a, b) || (lastSeen[b.id] ?? 0) - (lastSeen[a.id] ?? 0));
+  const transfers = useShare((s) => s.transfers);
+  const ended = useTransferMemory((s) => s.ended);
+  const groups = groupFriends(lists.friends, presence, lastSeen, favorites);
+  const pending = pendingRows(lists.incoming, lists.outgoing, transfers);
 
   // Unreachable: one greyed group with the last known state, nothing to send.
   const awayList = away ? awayOrder(lists.friends, lastSeen, drop) : [];
@@ -278,16 +279,17 @@ function SignedIn() {
         </Card>
       )}
 
-      {(lists.incoming.length > 0 || lists.outgoing.length > 0) && (
+      {pending.length > 0 && (
         <section>
-          <GroupTitle title="Requests" count={lists.incoming.length + lists.outgoing.length} />
+          <GroupTitle title="Pending" count={pending.length} />
           <Card className="divide-y divide-line">
-            {lists.incoming.map((request) => (
-              <RequestRow key={request.id} request={request} incoming />
-            ))}
-            {lists.outgoing.map((request) => (
-              <RequestRow key={request.id} request={request} incoming={false} />
-            ))}
+            {pending.map((row) =>
+              row.kind === "offer" ? (
+                <OfferRow key={`offer-${row.transfer.id}`} transfer={row.transfer} presence={presence} />
+              ) : (
+                <RequestRow key={`${row.kind}-${row.request.id}`} request={row.request} incoming={row.kind === "request"} now={now} />
+              ),
+            )}
           </Card>
         </section>
       )}
@@ -295,12 +297,12 @@ function SignedIn() {
       {lists.friends.length === 0 ? (
         <EmptyCard me={me} streamer={streamer} onAdd={() => setAdding({ query: "", key: Date.now() })} />
       ) : away ? (
-        <Group title="Friends" friends={awayList} presence={{}} lastSeen={awaySeen} now={now} />
+        <Group title="Friends" friends={awayList} presence={{}} lastSeen={awaySeen} now={now} transfers={[]} ended={ended} />
       ) : (
         <>
-          <Group title="In game" friends={playing} presence={presence} lastSeen={lastSeen} now={now} />
-          <Group title="Online" friends={online} presence={presence} lastSeen={lastSeen} now={now} />
-          <Group title="Offline" friends={offline} presence={presence} lastSeen={lastSeen} now={now} />
+          <Group title="In game" friends={groups.playing} {...{ presence, lastSeen, now, transfers, ended }} />
+          <Group title="Online" friends={groups.online} {...{ presence, lastSeen, now, transfers, ended }} />
+          <Group title="Offline" friends={groups.offline} collapsible {...{ presence, lastSeen, now, transfers, ended }} />
         </>
       )}
     </>
@@ -648,30 +650,71 @@ function AddFriendPopover({
 }
 
 /** A group's small title with its count, like the day groups in Clips. */
-function GroupTitle({ title, count }: { title: string; count: number }) {
+function GroupTitle({ title, count, children }: { title: string; count: number; children?: ReactNode }) {
   return (
-    <h2 className="mb-2.5 flex items-baseline gap-2.5 text-[15px] font-semibold text-ink/80">
-      {title}
-      <span className="text-[13px] font-normal text-ink-faint tabular-nums">{count}</span>
-    </h2>
+    <div className="mb-2.5 flex items-center gap-2.5">
+      <h2 className="flex items-baseline gap-2.5 text-[15px] font-semibold text-ink/80">
+        {title}
+        <span className="text-[13px] font-normal text-ink-faint tabular-nums">{count}</span>
+      </h2>
+      {children}
+    </div>
   );
 }
 
-function RequestRow({ request, incoming }: { request: FriendPending; incoming: boolean }) {
+/** Round chevron like a settings group's, for the Offline group. */
+function Chevron({ open, label, onClick }: { open: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-label={label}
+      title={open ? "Hide offline" : "Show offline"}
+      onClick={onClick}
+      className="ml-auto grid size-6 shrink-0 place-items-center rounded-pill border border-line bg-elevated
+        text-ink-muted transition-colors hover:bg-hover hover:text-ink"
+    >
+      <svg
+        viewBox="0 0 12 12"
+        aria-hidden
+        className={cn(
+          "size-2.5 transition-transform duration-200 ease-[var(--ease-out-soft)] motion-reduce:transition-none",
+          open && "rotate-180",
+        )}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M2.5 4.5 6 8l3.5-3.5" />
+      </svg>
+    </button>
+  );
+}
+
+const ROW = "flex min-h-[62px] items-center gap-3.5 px-5 py-2.5";
+/** Round icon button in a row. */
+const ICON_BUTTON =
+  "grid h-[30px] w-[30px] shrink-0 place-items-center rounded-pill transition-colors hover:bg-hover hover:text-ink";
+
+function RequestRow({ request, incoming, now }: { request: FriendPending; incoming: boolean; now: number }) {
   const [busy, setBusy] = useState(false);
   const run = (action: Promise<void>) => {
     setBusy(true);
     action.catch(report).finally(() => setBusy(false));
   };
   return (
-    <div className="flex items-center gap-4 px-5 py-3.5">
-      <Avatar user={request} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{request.displayName}</p>
-        <p className="truncate text-xs text-ink-muted">
-          {incoming ? "wants to be your friend" : "waiting for an answer"}
-        </p>
-      </div>
+    <div className={ROW}>
+      <span className={cn("contents", !incoming && "[&>*]:opacity-55")}>
+        <Avatar user={request} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{request.displayName}</p>
+          <p className="mt-0.5 truncate text-xs text-ink-muted">
+            {incoming ? "Friend request" : "Request sent"} · {ago(request.since, now)}
+          </p>
+        </div>
+      </span>
       {incoming ? (
         <div className="flex gap-2">
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(friendsApi.remove(request.id))}>
@@ -682,10 +725,56 @@ function RequestRow({ request, incoming }: { request: FriendPending; incoming: b
           </Button>
         </div>
       ) : (
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(friendsApi.remove(request.id))}>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          className="opacity-70 hover:opacity-100"
+          onClick={() => run(friendsApi.remove(request.id))}
+        >
           Withdraw
         </Button>
       )}
+    </div>
+  );
+}
+
+/** A clip someone wants to send: who, what, and the answer. */
+function OfferRow({ transfer: t, presence }: { transfer: Transfer; presence: Record<string, FriendPresence> }) {
+  const friend = useFriends((s) => s.lists.friends.find((f) => f.id === t.friendId));
+  const [busy, setBusy] = useState(false);
+  const run = (action: Promise<void>) => {
+    setBusy(true);
+    action.catch(report).finally(() => setBusy(false));
+  };
+  const user = friend ?? { id: t.friendId, username: t.friendName, displayName: t.friendName, avatar: null };
+  const what = noun(t);
+  return (
+    <div className={ROW}>
+      <Avatar user={user} status={friendStatus(presence[t.friendId])} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{user.displayName}</p>
+        <p className="mt-0.5 truncate text-xs text-ink-muted">
+          Wants to send you a {what} · {t.name} · {megabytes(t.size)}
+        </p>
+      </div>
+      {/* The offer carries no picture — a still in the clip's colours of the
+          gallery stands in for one. */}
+      <span
+        aria-hidden
+        className="grid h-9 w-16 shrink-0 place-items-center rounded-lg bg-[linear-gradient(135deg,#34183a_0%,#160b1c_50%,#000_100%)]
+          text-[10px] font-semibold text-white/70"
+      >
+        {!t.screenshot && t.durationMs > 0 ? formatDuration(t.durationMs) : null}
+      </span>
+      <div className="flex gap-2">
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(shareApi.decline(t.id))}>
+          Decline
+        </Button>
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => run(shareApi.accept(t.id))}>
+          Accept
+        </Button>
+      </div>
     </div>
   );
 }
@@ -696,28 +785,46 @@ function Group({
   presence,
   lastSeen,
   now,
+  transfers,
+  ended,
+  collapsible = false,
 }: {
   title: string;
   friends: FriendUser[];
   presence: Record<string, FriendPresence>;
   lastSeen: Record<string, number>;
   now: number;
+  transfers: Transfer[];
+  ended: Record<string, Ended>;
+  /** Folds away like the console's "N offline"; the choice is remembered. */
+  collapsible?: boolean;
 }) {
+  const storageKey = `friends.${title.toLowerCase()}`;
+  const [open, setOpen] = useState(() => !collapsible || readOpen(storageKey, true));
   if (friends.length === 0) return null;
+  const toggle = () => {
+    setOpen(!open);
+    writeOpen(storageKey, !open);
+  };
   return (
     <section>
-      <GroupTitle title={title} count={friends.length} />
-      <Card className="divide-y divide-line">
-        {friends.map((friend) => (
-          <FriendRow
-            key={friend.id}
-            friend={friend}
-            presence={presence[friend.id] ?? null}
-            lastSeen={lastSeen[friend.id]}
-            now={now}
-          />
-        ))}
-      </Card>
+      <GroupTitle title={title} count={friends.length}>
+        {collapsible && <Chevron open={open} label={title} onClick={toggle} />}
+      </GroupTitle>
+      {open && (
+        <Card className="divide-y divide-line">
+          {friends.map((friend) => (
+            <FriendRow
+              key={friend.id}
+              friend={friend}
+              presence={presence[friend.id] ?? null}
+              lastSeen={lastSeen[friend.id]}
+              now={now}
+              transfer={rowTransfer(friend.id, transfers, ended)}
+            />
+          ))}
+        </Card>
+      )}
     </section>
   );
 }
@@ -727,17 +834,20 @@ function FriendRow({
   presence,
   lastSeen,
   now,
+  transfer,
 }: {
   friend: FriendUser;
   presence: FriendPresence | null;
   lastSeen: number | undefined;
   now: number;
+  transfer: RowTransfer | null;
 }) {
   const menu = useMenu();
   const { config, patchConfig } = useEngine(useShallow((s) => ({ config: s.config.friends, patchConfig: s.patchConfig })));
   const favorite = config.favorites.includes(friend.id);
-  const status: Status = !presence ? "offline" : presence.busy ? "busy" : presence.game ? "playing" : "online";
+  const status: Status = friendStatus(presence);
   const duration = presence?.game ? playingFor(presence.since, now) : null;
+  const [removing, setRemoving] = useState(false);
 
   const toggleFavorite = () =>
     void patchConfig({
@@ -780,7 +890,8 @@ function FriendRow({
         kind: "item",
         label: "Remove friend",
         icon: <IconClose className="h-4 w-4" />,
-        onSelect: () => void friendsApi.remove(friend.id).catch(report),
+        // Asks once, in the row, like Delete on a clip.
+        onSelect: () => setRemoving(true),
       },
       {
         kind: "item",
@@ -790,63 +901,161 @@ function FriendRow({
       },
     ]);
 
-  return (
-    <div
-      onContextMenu={openMenu}
-      className={cn("group flex items-center gap-4 px-5 py-3.5", status === "offline" && "opacity-60")}
+  const running = transfer?.kind === "sending" || transfer?.kind === "receiving";
+  const failed = transfer?.kind === "error";
+  const sendButton = reachable && !running && !failed && (
+    <button
+      aria-label={`Send a clip to ${friend.displayName}`}
+      title="Send a clip"
+      onClick={() => chooseFor(friend)}
+      className={cn(ICON_BUTTON, "bg-elevated text-ink")}
     >
-      <Avatar user={friend} status={status} />
-      <div className="min-w-0 flex-1">
-        <p className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-          <span className="truncate">{friend.displayName}</span>
-          {favorite && <IconHeart filled className="h-3.5 w-3.5 shrink-0 text-accent-bright" />}
-          {presence?.status && (
-            <span className="truncate text-xs font-normal text-ink-muted">— {presence.status}</span>
+      <IconSend className="h-[15px] w-[15px]" />
+    </button>
+  );
+  const moreButton = !running && !failed && (
+    <button
+      aria-label={`More for ${friend.displayName}`}
+      onClick={openMenu}
+      className={cn(ICON_BUTTON, "text-ink-muted", status === "offline" && "opacity-55")}
+    >
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+        <circle cx="5" cy="12" r="1.8" />
+        <circle cx="12" cy="12" r="1.8" />
+        <circle cx="19" cy="12" r="1.8" />
+      </svg>
+    </button>
+  );
+
+  return (
+    <div onContextMenu={openMenu} className={ROW}>
+      <span className={cn("contents", status === "offline" && "[&>*]:opacity-55")}>
+        <Avatar user={friend} status={status} />
+        <div className="min-w-0 flex-1">
+          <p className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+            <span className="truncate">{friend.displayName}</span>
+            {favorite && <IconHeart filled className="h-3.5 w-3.5 shrink-0 text-accent-bright" />}
+            {presence?.status && (
+              <span className="truncate text-xs font-normal text-ink-muted">— {presence.status}</span>
+            )}
+          </p>
+          {transfer ? (
+            <TransferLine transfer={transfer} now={now} />
+          ) : presence?.game ? (
+            <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-accent-bright">
+              <IconGamepad className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{presence.game}</span>
+              {duration && <span className="shrink-0 text-ink-muted">· {duration}</span>}
+              {presence.busy && <span className="shrink-0 text-live">· Busy</span>}
+            </p>
+          ) : (
+            <p className={cn("mt-0.5 truncate text-xs", status === "busy" ? "text-live" : "text-ink-muted")}>
+              {status === "busy" ? "Busy" : status === "online" ? "Online" : lastSeenText(lastSeen, now)}
+            </p>
           )}
-        </p>
-        {presence?.game ? (
-          <p className="flex min-w-0 items-center gap-1.5 text-xs text-accent-bright">
-            <IconGamepad className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">{presence.game}</span>
-            {duration && <span className="shrink-0 text-ink-muted">· {duration}</span>}
-            {presence.busy && <span className="shrink-0 text-live">· Busy</span>}
-          </p>
-        ) : (
-          <p className={cn("truncate text-xs", status === "busy" ? "text-live" : "text-ink-muted")}>
-            {status === "busy" ? "Busy" : status === "online" ? "Online" : lastSeenText(lastSeen, now)}
-          </p>
-        )}
-      </div>
-      {reachable && (
-        <button
-          aria-label={`Send a clip to ${friend.displayName}`}
-          title="Send a clip"
-          onClick={() => chooseFor(friend)}
-          className="grid h-8 w-8 place-items-center rounded-pill text-ink-muted opacity-0 transition
-            hover:bg-hover hover:text-ink group-hover:opacity-100 focus-visible:opacity-100"
-        >
-          <IconSend className="h-4 w-4" />
-        </button>
+        </div>
+      </span>
+      {removing ? (
+        <ConfirmDelete
+          question={`Remove ${friend.displayName}?`}
+          origin="right"
+          confirmLabel="Remove friend"
+          confirmTitle="Remove — you would have to add each other again"
+          cancelLabel="Keep"
+          cancelTitle="Keep — Escape does the same"
+          onConfirm={() => {
+            setRemoving(false);
+            void friendsApi.remove(friend.id).catch(report);
+          }}
+          onCancel={() => setRemoving(false)}
+        />
+      ) : (
+        <>
+          {transfer && <TransferActions transfer={transfer} reachable={reachable} />}
+          {sendButton}
+          {moreButton}
+        </>
       )}
-      <button
-        aria-label={`More for ${friend.displayName}`}
-        onClick={openMenu}
-        className="grid h-8 w-8 place-items-center rounded-pill text-ink-muted opacity-0 transition
-          hover:bg-hover hover:text-ink group-hover:opacity-100 focus-visible:opacity-100"
-      >
-        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
-          <circle cx="5" cy="12" r="1.8" />
-          <circle cx="12" cy="12" r="1.8" />
-          <circle cx="19" cy="12" r="1.8" />
-        </svg>
-      </button>
     </div>
   );
 }
 
+/** The line under the name while a clip goes to or comes from that friend. */
+function TransferLine({ transfer: t, now }: { transfer: RowTransfer; now: number }) {
+  const line = "mt-0.5 flex min-w-0 items-center gap-1.5 text-xs";
+  if (t.kind === "sending" || t.kind === "receiving")
+    return (
+      <p className={cn(line, "text-accent-bright")}>
+        {t.kind === "sending" ? <IconSend className="h-3.5 w-3.5 shrink-0" /> : <IconClips className="h-3.5 w-3.5 shrink-0" />}
+        <span className="truncate">{t.text}</span>
+      </p>
+    );
+  if (t.kind === "error")
+    return (
+      <p className={cn(line, "text-live")}>
+        <span className="truncate">{t.text}</span>
+      </p>
+    );
+  return (
+    <p className={cn(line, t.tone === "ok" ? "text-ok" : "text-ink-muted")}>
+      {t.tone === "ok" && <IconCheck className="h-3.5 w-3.5 shrink-0" />}
+      <span className="truncate">
+        {t.text} · {ago(t.at, now)}
+      </span>
+    </p>
+  );
+}
+
+/** On the right of the row: the bar and its X, Retry and its X, or Open. */
+function TransferActions({ transfer: t, reachable }: { transfer: RowTransfer; reachable: boolean }) {
+  const closeButton = (label: string, onClick: () => void) => (
+    <button aria-label={label} title={label} onClick={onClick} className={cn(ICON_BUTTON, "bg-elevated text-ink-muted")}>
+      <IconClose className="h-3.5 w-3.5" />
+    </button>
+  );
+  if (t.kind === "sending" || t.kind === "receiving")
+    return (
+      <>
+        {t.share !== null && (
+          <span className="flex w-[200px] shrink-0 items-center gap-2.5 font-mono text-xs text-ink-muted tabular-nums">
+            <ProgressBar share={t.share} className="flex-1" />
+            {Math.floor(t.share * 100)} %
+          </span>
+        )}
+        {closeButton(t.ids.length > 1 ? "Cancel all" : "Cancel", () => {
+          for (const id of t.ids) void shareApi.cancel(id);
+        })}
+      </>
+    );
+  if (t.kind === "error")
+    return (
+      <>
+        {t.retry.length > 0 && (
+          <Button
+            size="sm"
+            icon={<IconRetry className="h-3.5 w-3.5" />}
+            disabled={!reachable}
+            title={reachable ? undefined : "They aren't online right now"}
+            onClick={() => retryTransfers(t.retry)}
+          >
+            Retry
+          </Button>
+        )}
+        {closeButton("Dismiss", () => {
+          for (const id of t.ids) void shareApi.dismiss(id);
+        })}
+      </>
+    );
+  return t.open ? (
+    <Button size="sm" variant="ghost" onClick={() => openClip(t.open!)}>
+      Open
+    </Button>
+  ) : null;
+}
+
 // --- Bits ----------------------------------------------------------------------
 
-type Status = "playing" | "online" | "busy" | "offline" | "invisible";
+type Status = FriendStatus | "invisible";
 
 export function Avatar({ user, status, size = "md" }: { user: FriendUser; status?: Status; size?: "sm" | "md" | "lg" }) {
   const [broken, setBroken] = useState(false);
