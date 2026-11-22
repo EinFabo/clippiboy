@@ -58,21 +58,12 @@ if (!latest) {
 
 const setup = latest.assets.find(isSetup);
 const plugin = latest.assets.find((a) => /\.streamDeckPlugin$/i.test(a.name));
-// Every installer ever downloaded, not just this version's — otherwise the count
-// starts over at every release. The `.sig` and `latest.json` beside it are
-// fetched by the updater, not by people, and are left out.
-const downloads = list
-  .flatMap((r) => r.assets)
-  .filter(isSetup)
-  .reduce((sum, a) => sum + a.download_count, 0);
-
 const release = {
   version: latest.tag_name.replace(/^v/, ""),
   publishedAt: latest.published_at,
   url: latest.html_url,
   setup: { url: setup.browser_download_url, size: setup.size },
   plugin: plugin ? { url: plugin.browser_download_url } : null,
-  downloads,
 };
 await writeFile("site/release.json", JSON.stringify(release, null, 2) + "\n");
 
@@ -84,7 +75,6 @@ const date = new Date(release.publishedAt).toLocaleDateString("en-GB", {
   year: "numeric",
   timeZone: "UTC",
 });
-const count = downloads.toLocaleString("en-US");
 
 let html = await readFile("site/index.html", "utf8");
 const swap = (pattern, replacement) => {
@@ -96,9 +86,8 @@ const swap = (pattern, replacement) => {
 // serves this release; main.js carries a ?ref= of the page over to them.
 if (release.plugin) swap(/(data-plugin href=")[^"]*"/g, `$1${escape(release.plugin.url)}"`);
 swap(/(<span data-version>)[^<]*(<\/span>)/, `$1Version ${escape(release.version)}, ${mb} MB$2`);
-if (downloads > 0) {
-  swap(/<span data-downloads hidden>[^<]*<\/span>/, `<span data-downloads> · ${count} downloads</span>`);
-}
+// The download count is not baked: main.js asks clippiboy.com/stats.json, which
+// counts real downloads (GitHub's counter would add every auto-update).
 swap(
   /(<p data-release>)[\s\S]*?(<\/p>)/,
   `$1ClippiBoy ${escape(release.version)}, released ${date}. ` +
@@ -106,4 +95,4 @@ swap(
 );
 await writeFile("site/index.html", html);
 
-console.log(`Baked ${release.version} (${mb} MB, ${count} downloads) into the page.`);
+console.log(`Baked ${release.version} (${mb} MB) into the page.`);

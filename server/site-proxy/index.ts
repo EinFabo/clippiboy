@@ -30,6 +30,9 @@ export default {
     if (/^\/c\/[a-z0-9]+(\/add)?$/.test(url.pathname) || /^\/i\/[A-Za-z0-9-]{8,9}(\/add)?$/.test(url.pathname)) {
       return env.API.fetch(request);
     }
+    if (url.pathname === "/stats.json") {
+      return stats(request, env, ctx);
+    }
     if (/^\/get(\/|$)/.test(url.pathname)) {
       const known = (env.DOWNLOAD_REFS ?? "site").split(",").map((ref) => ref.trim().toLowerCase());
       return download(request, env, ctx, refFromPath(url.pathname, known));
@@ -79,11 +82,14 @@ async function download(request: Request, env: Env, ctx: ExecutionContext, ref: 
     (await env.DOWNLOAD_LIMIT.limit({ key: addressKey(address) })).success
   ) {
     ctx.waitUntil(
-      env.DB.prepare(
-        "INSERT INTO downloads (day, ref, count) VALUES (?, ?, 1) ON CONFLICT(day, ref) DO UPDATE SET count = count + 1",
-      )
-        .bind(utcDay(Date.now()), ref)
-        .run(),
+      env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO downloads (day, ref, count) VALUES (?, ?, 1) ON CONFLICT(day, ref) DO UPDATE SET count = count + 1",
+        ).bind(utcDay(Date.now()), ref),
+        env.DB.prepare(
+          "INSERT INTO download_totals (ref, count) VALUES (?, 1) ON CONFLICT(ref) DO UPDATE SET count = count + 1",
+        ).bind(ref),
+      ]),
     );
   }
   const headers = new Headers({
@@ -94,4 +100,32 @@ async function download(request: Request, env: Env, ctx: ExecutionContext, ref: 
   const length = file.headers.get("Content-Length");
   if (length) headers.set("Content-Length", length);
   return new Response(request.method === "HEAD" ? null : file.body, { headers });
+}
+
+/**
+ * The number on the page: real downloads through clippiboy.com/get/…, all links
+ * together. GitHub's own counter would add every auto-update, since the updater
+ * fetches the same installer. Kept at the edge for ten minutes, so visitors
+ * don't each ask the database.
+ */
+async function stats(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const cache = caches.default;
+  const key = new Request(new URL("/stats.json", HOME).toString());
+  const kept = await cache.match(key);
+  if (kept) return kept;
+  let downloads = 0;
+  try {
+    const row = await env.DB.prepare("SELECT COALESCE(SUM(count), 0) AS total FROM download_totals").first<{ total: number }>();
+    downloads = row?.total ?? 0;
+  } catch (err) {
+    console.error(err);
+    return new Response(JSON.stringify({ downloads: 0 }), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  }
+  const response = new Response(JSON.stringify({ downloads }), {
+    headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=600" },
+  });
+  if (request.method === "GET") ctx.waitUntil(cache.put(key, response.clone()));
+  return response;
 }

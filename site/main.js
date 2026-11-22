@@ -311,7 +311,7 @@ async function fromSite() {
   }
 }
 
-/** The same shape, asked of GitHub. All releases, so the download count adds up. */
+/** The same shape, asked of GitHub. */
 async function fromApi() {
   const KEY = "clippiboy-release-v2";
   try {
@@ -341,7 +341,6 @@ async function fromApi() {
     url: latest.html_url,
     setup: { url: setup.browser_download_url, size: setup.size },
     plugin: plugin ? { url: plugin.browser_download_url } : null,
-    downloads: apps.flatMap((r) => r.assets).filter(isSetup).reduce((n, a) => n + a.download_count, 0),
   };
   try { sessionStorage.setItem(KEY, JSON.stringify(data)); } catch {}
   return data;
@@ -356,12 +355,6 @@ function show(data) {
   document.querySelectorAll("[data-version]").forEach((el) => {
     el.textContent = `Version ${data.version}, ${mb} MB`;
   });
-  if (data.downloads > 0) {
-    document.querySelectorAll("[data-downloads]").forEach((el) => {
-      el.textContent = ` · ${data.downloads.toLocaleString("en-US")} downloads`;
-      el.hidden = false;
-    });
-  }
   const target = document.querySelector("[data-release]");
   if (target) {
     const date = data.publishedAt
@@ -387,6 +380,21 @@ function show(data) {
   document.querySelectorAll("[data-download]").forEach((a) => {
     a.href = `https://clippiboy.com/get/${ref}`;
   });
+})();
+
+// Real downloads, counted by clippiboy.com/get/… itself. GitHub's counter is no
+// use here: the updater fetches the same installer, so every update would count.
+(async function downloads() {
+  try {
+    const res = await fetch("/stats.json", { cache: "no-cache" });
+    if (!res.ok) return;
+    const { downloads } = await res.json();
+    if (!(downloads > 0)) return;
+    document.querySelectorAll("[data-downloads]").forEach((el) => {
+      el.textContent = ` · ${downloads.toLocaleString("en-US")} downloads`;
+      el.hidden = false;
+    });
+  } catch {}
 })();
 
 (async function release() {
