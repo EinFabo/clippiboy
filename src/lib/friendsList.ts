@@ -85,3 +85,9 @@ export function ago(at: number, now: number): string {
   const days = Math.floor(hours / 24);
   return days === 1 ? "yesterday" : `${days} days ago`;
 }
+
+/** The rows a group shows: all while open; folded, only those with a transfer
+ *  line, which would otherwise be on no card and in no row. */
+export function foldedRows<T extends { transfer: unknown }>(rows: T[], open: boolean): T[] {
+  return open ? rows : rows.filter((row) => row.transfer !== null);
+}

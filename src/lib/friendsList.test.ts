@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ago, friendStatus, groupFriends, pendingCount, pendingRows } from "./friendsList.ts";
+import { ago, foldedRows, friendStatus, groupFriends, pendingCount, pendingRows } from "./friendsList.ts";
 import type { FriendPending, FriendPresence, FriendUser, Transfer } from "./types.ts";
 
 const user = (id: string, displayName: string): FriendUser => ({
@@ -82,4 +82,15 @@ test("ago", () => {
   assert.equal(ago(now - 30 * 3_600_000, now), "yesterday");
   assert.equal(ago(now - 5 * 86_400_000, now), "5 days ago");
   assert.equal(ago(now + 5_000, now), "just now");
+});
+
+test("a folded group still shows the rows with a transfer line", () => {
+  const rows = [
+    { id: "a", transfer: null },
+    { id: "b", transfer: { kind: "error" } },
+    { id: "c", transfer: null },
+  ];
+  assert.deepEqual(foldedRows(rows, true).map((r) => r.id), ["a", "b", "c"]);
+  assert.deepEqual(foldedRows(rows, false).map((r) => r.id), ["b"]);
+  assert.deepEqual(foldedRows([{ id: "a", transfer: null }], false), []);
 });

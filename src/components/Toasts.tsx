@@ -5,6 +5,7 @@ import { cn } from "@/lib/cn";
 import { useFlip } from "@/lib/useFlip";
 import { onToast } from "@/lib/toastBus";
 import { isDuplicateToast } from "@/lib/toastDedupe";
+import { signInCardSays } from "@/lib/friends";
 
 interface Notice {
   kind: "ok" | "error";
@@ -94,7 +95,11 @@ export function Toasts() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     if (inTauri) {
-      listen<Notice>("notice", (event) => push(event.payload)).then((fn) => {
+      listen<Notice>("notice", (event) => {
+        // The Friends page's sign-in card says why a sign-in failed itself.
+        if (signInCardSays(event.payload)) return;
+        push(event.payload);
+      }).then((fn) => {
         if (cancelled) fn();
         else unlisten = fn;
       });

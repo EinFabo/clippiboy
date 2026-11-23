@@ -1,4 +1,4 @@
-import type { AudioProcess, AudioSource } from "./types.ts";
+import type { AudioDevice, AudioProcess, AudioSource } from "./types.ts";
 
 export interface AppRow {
   process: AudioProcess;
@@ -37,4 +37,22 @@ export function appRows(
       sub: parts.join(" · "),
     };
   });
+}
+
+/**
+ * Is this device a source already? A source that follows the Windows default
+ * (`deviceId` "") takes the default device's row too: added again by its id,
+ * the same sound would be in the clip twice.
+ */
+export function deviceAdded(
+  sources: AudioSource[],
+  type: "outputDevice" | "inputDevice",
+  device: Pick<AudioDevice, "id" | "isDefault">,
+): boolean {
+  return sources.some(
+    (s) =>
+      s.kind.type === type &&
+      "deviceId" in s.kind &&
+      (s.kind.deviceId === device.id || (s.kind.deviceId === "" && device.isDefault)),
+  );
 }

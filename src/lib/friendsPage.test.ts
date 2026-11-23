@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import {
   addAnswer,
   awayOrder,
+  isSignInReason,
   maskedCode,
   myStatus,
   newcomer,
   nextDrop,
   seenWhileAway,
   shortLink,
+  SIGN_IN_REASON_MS,
   signInFailed,
   statusChoice,
   statusPatch,
@@ -103,4 +105,14 @@ test("sign-in failed only when waiting ends signed out and not by Cancel", () =>
   assert.equal(signInFailed(waiting, { signingIn: false, signedIn: false }, true), false);
   assert.equal(signInFailed(waiting, { signingIn: false, signedIn: true }, false), false);
   assert.equal(signInFailed({ signingIn: false }, { signingIn: false, signedIn: false }, false), false);
+});
+
+test("the error notice right after a failed sign-in is its reason, nothing else is", () => {
+  const error = { kind: "error" };
+  assert.equal(isSignInReason(error, 1000, 1200, false), true);
+  assert.equal(isSignInReason(error, 1000, 1000 + SIGN_IN_REASON_MS, false), false);
+  // No failure yet, signed in by now, or good news: a toast as always.
+  assert.equal(isSignInReason(error, 0, 1200, false), false);
+  assert.equal(isSignInReason(error, 1000, 1200, true), false);
+  assert.equal(isSignInReason({ kind: "ok" }, 1000, 1200, false), false);
 });

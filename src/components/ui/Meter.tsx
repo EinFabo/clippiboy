@@ -2,10 +2,13 @@ import { type CSSProperties, type RefObject, useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 import {
   decayLevel,
+  type GainHold,
   type HeldPeak,
+  holdGain,
   holdPeak,
   hotUntil,
   levelPct,
+  meterGain,
   peakDbText,
   preGain,
   riseLevel,
@@ -30,6 +33,8 @@ type Entry = {
   /** Draw the signal before this gain (a volume track); the warning keeps the
    *  level after it, which is what reaches the clip. */
   gainDb: number | null;
+  /** The gain before the last change, while packets may still carry it. */
+  gainHold: GainHold | null;
   /** The level as drawn: rises at once, falls softly. */
   shown: number;
   /** The bar, moved by a transform. */
@@ -100,7 +105,10 @@ function wake() {
 
 function feed(e: Entry, s: EngineState, now: number) {
   const level = e.muted ? 0 : e.read(s);
-  e.shown = riseLevel(e.shown, e.gainDb === null ? level : preGain(level, e.gainDb));
+  e.shown = riseLevel(
+    e.shown,
+    e.gainDb === null ? level : preGain(level, meterGain(e.gainDb, e.gainHold, now)),
+  );
   e.hotUntil = hotUntil(e.hotUntil, level, now);
   e.held = holdPeak(e.held, level, now);
 }
@@ -133,6 +141,7 @@ function newEntry(read: Entry["read"], muted: boolean): Entry {
     read,
     muted,
     gainDb: null,
+    gainHold: null,
     shown: 0,
     pct: -1,
     hotUntil: 0,
@@ -195,8 +204,15 @@ export function Meter({
   }, [muted]);
 
   // The gain the core applied — the stored one, not a knob still being dragged.
+  // The levels catch up with a change a moment later; until then the old gain
+  // is held as well (`meterGain`).
   useEffect(() => {
-    if (entry.current) entry.current.gainDb = gainDb ?? null;
+    const e = entry.current;
+    if (!e) return;
+    const next = gainDb ?? null;
+    if (e.gainDb !== null && next !== null && next !== e.gainDb)
+      e.gainHold = holdGain(e.gainHold, e.gainDb, performance.now());
+    e.gainDb = next;
   }, [gainDb]);
 
   return (

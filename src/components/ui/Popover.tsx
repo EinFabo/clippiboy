@@ -13,7 +13,8 @@ const GAP = 6;
  * A floating surface under its button, like the list behind "Add source": the
  * menus' fill, placed like every menu, its right edge on the button's. Escape,
  * a click outside, scrolling the page or a resize closes it. Not the shared
- * `Menu`, which takes no focus — these hold a field to type in.
+ * `Menu`, which takes no focus — these hold a field to type in, and the focus
+ * moves inside on open.
  */
 export function Popover({
   anchor,
@@ -62,6 +63,18 @@ export function Popover({
     observer.observe(el.firstElementChild ?? el);
     return () => observer.disconnect();
   }, [anchor]);
+
+  // Focus moves in on open, so the keyboard goes on where the eyes do: to what
+  // the content marks with `data-autofocus`, else its first field or button.
+  // Content that took the focus itself (a field it selects) keeps it.
+  useEffect(() => {
+    const el = box.current;
+    if (!el || el.contains(document.activeElement)) return;
+    const target =
+      el.querySelector<HTMLElement>("[data-autofocus]") ??
+      el.querySelector<HTMLElement>("input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex='-1'])");
+    target?.focus({ preventScroll: true });
+  }, []);
 
   const close = useRef(onClose);
   close.current = onClose;

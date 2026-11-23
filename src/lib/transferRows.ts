@@ -96,6 +96,31 @@ export function cardLeft(t: Transfer, ended: Record<string, Ended>, now: number)
   return Math.max(0, CARD_ENDED_MS - (now - at));
 }
 
+/** Failed cards on screen at once; the rest wait behind "Dismiss all". */
+export const FAILED_CARDS_SHOWN = 3;
+
+/**
+ * The cards to draw from the ones that stay: everything still running or just
+ * ended, and the newest failures up to `cap` — failures never go by
+ * themselves, so a bad connection piled them up the window. `failed` is every
+ * failure for "Dismiss all", `more` how many of them are not drawn.
+ */
+export function cardStack(
+  shown: Transfer[],
+  ended: Record<string, Ended>,
+  cap = FAILED_CARDS_SHOWN,
+): { cards: Transfer[]; failed: Transfer[]; more: number } {
+  const failed = shown.filter((t) => transferKind(t) === "error");
+  if (failed.length <= cap) return { cards: shown, failed, more: 0 };
+  const at = (t: Transfer) => ended[t.id]?.at ?? Infinity;
+  const newest = new Set([...failed].sort((a, b) => at(b) - at(a)).slice(0, cap));
+  return {
+    cards: shown.filter((t) => transferKind(t) !== "error" || newest.has(t)),
+    failed,
+    more: failed.length - cap,
+  };
+}
+
 /** Whether the Friends page shows it itself — an offer in "Pending", the rest
  *  in the row of a friend on the list. */
 export function onFriendsPage(t: Transfer, friendIds: ReadonlySet<string>): boolean {

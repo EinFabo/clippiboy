@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   CARD_ENDED_MS,
   cardLeft,
+  cardStack,
   noteEnded,
   onFriendsPage,
   presenceSig,
@@ -188,4 +189,27 @@ test("row: clips still queued for the friend count in", () => {
   assert.equal(rowTransfer("1", [t({ moved: 50 })], {}, shot)?.kind === "sending" && rowTransfer("1", [t({ moved: 50 })], {}, shot)?.share, 0.5);
   // Receiving from them while one's own clips wait: the sending shows.
   assert.equal(rowTransfer("1", [t({ direction: "in", moved: 10 })], {}, queued)?.kind, "sending");
+});
+
+test("cards: at most three failures, the newest; the rest counted for Dismiss all", () => {
+  const failed = (id: string) => t({ id, stage: "failed" });
+  const list = [t({ id: "run" }), failed("a"), failed("b"), failed("c"), failed("d"), failed("e")];
+  const ended: Record<string, Ended> = {
+    a: { at: 5, sig: "" },
+    b: { at: 1, sig: "" },
+    c: { at: 4, sig: "" },
+    d: { at: 2, sig: "" },
+    e: { at: 3, sig: "" },
+  };
+  const stack = cardStack(list, ended);
+  // The running one stays, the failures keep their order on screen.
+  assert.deepEqual(stack.cards.map((x) => x.id), ["run", "a", "c", "e"]);
+  assert.equal(stack.more, 2);
+  assert.deepEqual(stack.failed.map((x) => x.id), ["a", "b", "c", "d", "e"]);
+  // Up to the cap nothing is held back.
+  const few = cardStack(list.slice(0, 4), ended);
+  assert.equal(few.cards.length, 4);
+  assert.equal(few.more, 0);
+  // Not noted yet means just now: newest.
+  assert.ok(cardStack([...list, failed("f")], ended).cards.some((x) => x.id === "f"));
 });

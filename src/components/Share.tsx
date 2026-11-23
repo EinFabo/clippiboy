@@ -27,7 +27,7 @@ import {
   useTransferMemory,
   watchTransfers,
 } from "@/lib/share";
-import { cardLeft, noun, onFriendsPage, transferKind, type Ended } from "@/lib/transferRows";
+import { cardLeft, cardStack, noun, onFriendsPage, transferKind, type Ended } from "@/lib/transferRows";
 import type { Clip, FriendPresence, FriendUser, Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Avatar } from "@/routes/Friends";
@@ -412,6 +412,7 @@ export function Transfers({ onFriendsPage: friendsPage = false }: { onFriendsPag
   );
   const uploads = useLinkUploads();
   if (shown.length === 0 && uploads.length === 0) return null;
+  const { cards, failed, more } = cardStack(shown, ended);
 
   // Above the player and the dialogs (z-50, portals later in the DOM): a link
   // shared from the player's menu shows its progress there too. Below menus.
@@ -422,9 +423,23 @@ export function Transfers({ onFriendsPage: friendsPage = false }: { onFriendsPag
       {uploads.map((upload) => (
         <UploadCard key={`link-${upload.clipId}`} upload={upload} />
       ))}
-      {shown.map((transfer) => (
+      {cards.map((transfer) => (
         <TransferCard key={transfer.id} transfer={transfer} />
       ))}
+      {more > 0 && (
+        <div className="flex items-center gap-3 rounded-card border border-line bg-surface/95 py-2 pr-2 pl-4 shadow-2xl backdrop-blur">
+          <p className="min-w-0 flex-1 truncate text-xs text-ink-muted">{more} more failed</p>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              for (const t of failed) void shareApi.dismiss(t.id);
+            }}
+          >
+            Dismiss all
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -455,6 +470,8 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
   const canRetry = failed && !incoming && t.clipId !== null;
   // Already queued to go again — a second click would send it twice.
   const queued = useSendQueue((s) => retrying(s.queue, t.id));
+  // Like the row's Retry: nothing goes to someone offline or busy.
+  const reachable = useFriends((s) => canReceive(s.presence[t.friendId]));
 
   return (
     <div className="rounded-card border border-line bg-surface/95 p-4 shadow-2xl backdrop-blur">
@@ -503,7 +520,8 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
               size="sm"
               className="ml-auto"
               icon={<IconRetry className="h-3.5 w-3.5" />}
-              disabled={queued}
+              disabled={queued || !reachable}
+              title={reachable ? undefined : "They aren't online right now"}
               onClick={() => retryTransfers([t])}
             >
               Retry

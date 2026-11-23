@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { inTauri } from "./ipc";
-import { nextDrop, signInFailed, type Drop } from "./friendsPage";
+import { isSignInReason, nextDrop, signInFailed, type Drop } from "./friendsPage";
 import type { FriendPresence, FriendsView } from "./types";
 
 /**
@@ -78,10 +78,29 @@ if (inTauri) {
   void listen<{ kind: string; message: string }>("notice", (event) => {
     if (event.payload.kind !== "error") return;
     lastError = { message: event.payload.message, at: Date.now() };
-    if (lastError.at - failedAt < 3_000 && !useFriends.getState().signedIn) {
+    if (isSignInReason(event.payload, failedAt, lastError.at, useFriends.getState().signedIn)) {
       useFriendsExtra.setState({ signInError: event.payload.message });
     }
   });
+}
+
+/** Sign-in cards on screen; while one is, it says why a sign-in failed. */
+let signInCards = 0;
+
+/** A sign-in card shows; the returned function says it went. */
+export function showSignInCard(): () => void {
+  signInCards += 1;
+  return () => {
+    signInCards -= 1;
+  };
+}
+
+/**
+ * Is this core notice the reason a sign-in just failed, with the card there to
+ * show it? Then the toast keeps quiet — the reason was said twice.
+ */
+export function signInCardSays(notice: { kind: string }): boolean {
+  return signInCards > 0 && isSignInReason(notice, failedAt, Date.now(), useFriends.getState().signedIn);
 }
 
 /** "Sign in with Discord" and "Open browser again": the browser opens, the core waits. */

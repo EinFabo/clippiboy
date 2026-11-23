@@ -40,7 +40,7 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
             .catch(() => useEngine.getState().processes);
           const { config: now } = useEngine.getState();
           if (cancelled || now.discordHintShown) return;
-          const kind = discordHint(now.sources, processes, useEngine.getState().appCapture);
+          const kind = discordHint(now.sources, processes, useEngine.getState().appCapture !== false);
           const discord = runningDiscord(processes);
           // Not marked as said here: clips are saved in the game, with this
           // window hidden. The note stays until it is answered; a restart

@@ -8,6 +8,7 @@ import {
   inviteLink,
   lastSeenText,
   playingFor,
+  showSignInCard,
   startSignIn,
   useFriends,
   useFriendsExtra,
@@ -41,7 +42,7 @@ import {
   useTransferMemory,
 } from "@/lib/share";
 import { retrying, waitingFor } from "@/lib/sendQueue";
-import { ago, friendStatus, groupFriends, pendingRows, type FriendStatus } from "@/lib/friendsList";
+import { ago, foldedRows, friendStatus, groupFriends, pendingRows, type FriendStatus } from "@/lib/friendsList";
 import { noun, rowTransfer, type Ended, type RowTransfer } from "@/lib/transferRows";
 import { readOpen, writeOpen } from "@/lib/groupState";
 import { formatDuration } from "@/lib/format";
@@ -101,6 +102,8 @@ function Header({ children }: { children?: ReactNode }) {
 function SignedOut() {
   const signingIn = useFriends((s) => s.signingIn);
   const error = useFriendsExtra((s) => s.signInError);
+  // The red line below says why a sign-in failed — no toast as well.
+  useEffect(showSignInCard, []);
 
   return (
     <>
@@ -476,6 +479,7 @@ function StatusMenu({
         <button
           key={choice}
           aria-pressed={current === choice}
+          data-autofocus={current === choice || undefined}
           onClick={() => {
             picked.current = true;
             onPick(choice, text);
@@ -827,21 +831,28 @@ function Group({
     setOpen(!open);
     writeOpen(storageKey, !open);
   };
+  const rows = friends.map((friend) => ({
+    friend,
+    transfer: rowTransfer(friend.id, transfers, ended, waitingFor(queue, friend.id)),
+  }));
+  // Folded, a row with a clip on its way or a failure stays: the cards leave
+  // those to this page, and a folded group hid them altogether.
+  const shown = foldedRows(rows, open);
   return (
     <section>
       <GroupTitle title={title} count={friends.length}>
         {collapsible && <Chevron open={open} label={title} onClick={toggle} />}
       </GroupTitle>
-      {open && (
+      {shown.length > 0 && (
         <Card className="divide-y divide-line">
-          {friends.map((friend) => (
+          {shown.map(({ friend, transfer }) => (
             <FriendRow
               key={friend.id}
               friend={friend}
               presence={presence[friend.id] ?? null}
               lastSeen={lastSeen[friend.id]}
               now={now}
-              transfer={rowTransfer(friend.id, transfers, ended, waitingFor(queue, friend.id))}
+              transfer={transfer}
             />
           ))}
         </Card>

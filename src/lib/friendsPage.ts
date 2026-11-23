@@ -158,3 +158,20 @@ export function signInFailed(
 ): boolean {
   return prev.signingIn && !next.signingIn && !next.signedIn && !cancelled;
 }
+
+/** How long after a failed sign-in the core's error notice is its reason. */
+export const SIGN_IN_REASON_MS = 3_000;
+
+/**
+ * Is this notice the reason a sign-in just failed? The core drops the waiting
+ * flag first and says why right after; the sign-in card shows that reason
+ * itself, so it is not raised a second time as a toast.
+ */
+export function isSignInReason(
+  notice: { kind: string },
+  failedAt: number,
+  now: number,
+  signedIn: boolean,
+): boolean {
+  return notice.kind === "error" && !signedIn && failedAt > 0 && now - failedAt < SIGN_IN_REASON_MS;
+}

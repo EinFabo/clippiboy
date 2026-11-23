@@ -4,6 +4,7 @@ import { changedPart } from "./lib/same";
 import { coalesce } from "./lib/coalesce";
 import { Outbox } from "./lib/outbox";
 import { removeSourceWrite, sourceWrite } from "./lib/sourceWrite";
+import { simulatedLevel } from "./lib/meter";
 import { api, events, inTauri } from "./lib/ipc";
 import { toast } from "./lib/toastBus";
 import * as mock from "./lib/mock";
@@ -66,8 +67,9 @@ export interface EngineState {
   removeVirtualCamera: () => Promise<void>;
   devices: AudioDevice[];
   processes: AudioProcess[];
-  /** Can a single application be recorded here (Windows 11)? Browser mode: yes. */
-  appCapture: boolean;
+  /** Can a single application be recorded here (Windows 11)? Browser mode: yes.
+   *  `null` until the core has answered. */
+  appCapture: boolean | null;
   targets: CaptureTarget[];
   encoders: EncoderInfo[];
   clips: Clip[];
@@ -275,7 +277,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   config: mock.mockConfig,
   devices: [],
   processes: [],
-  appCapture: true,
+  appCapture: null,
   targets: [],
   encoders: [],
   clips: [],
@@ -358,6 +360,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         config: mock.mockConfig,
         devices: mock.mockDevices,
         processes: mock.mockProcesses,
+        appCapture: true,
         targets: mock.mockTargets,
         encoders: mock.mockEncoders,
         clips: mock.mockClips,
@@ -368,8 +371,11 @@ export const useEngine = create<EngineState>((set, get) => ({
         const levels: LevelMap = {};
         let left = 0;
         let right = 0;
-        for (const s of get().config.sources) {
-          const level = s.enabled && !s.muted ? Math.random() * 0.55 + 0.15 : 0;
+        const sources = get().config.sources;
+        const anySolo = sources.some((s) => s.solo);
+        for (const s of sources) {
+          // After the volume, like the core's: the mixer takes it back out.
+          const level = simulatedLevel(s, anySolo, Math.random() * 0.55 + 0.15);
           levels[s.id] = level;
           // The core's power sum over every track, roughly — the gain is in
           // `level` already.
@@ -380,6 +386,14 @@ export const useEngine = create<EngineState>((set, get) => ({
       }, 80);
       return;
     }
+
+    // Asked first and on its own: the Apps list of the add menu waits for it,
+    // and a default of yes showed Windows 10 the lists it cannot record for a
+    // moment. Where the core cannot say, it assumes yes itself.
+    void api
+      .appCaptureSupported()
+      .then((appCapture) => set({ appCapture }))
+      .catch(() => set({ appCapture: true }));
 
     // Every query on its own: if one fails — the process list, say, for which
     // Windows does not always grant rights — that must not take the rest down
@@ -437,10 +451,6 @@ export const useEngine = create<EngineState>((set, get) => ({
         clips,
       });
       if (configRead) configLoaded = true;
-      void api
-        .appCaptureSupported()
-        .then((appCapture) => set({ appCapture }))
-        .catch(() => {});
 
       await events.onLevels((levels) => set({ levels }));
       await events.onMix((mix) => set({ mix }));

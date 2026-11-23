@@ -34,7 +34,8 @@ import { gainText, leftoversMode, sourceStatus } from "@/lib/audioRows";
 import { placeMenu } from "@/lib/menuPlace";
 import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
 import type { AudioProcess, AudioSource, SourceKind } from "@/lib/types";
-import { appRows } from "@/lib/appPicker";
+import { announce } from "@/lib/announce";
+import { appRows, deviceAdded } from "@/lib/appPicker";
 import { api, inTauri } from "@/lib/ipc";
 
 /**
@@ -273,7 +274,8 @@ export function AudioMixer() {
   /** What a screen reader hears after a move. */
   const [moved, setMoved] = useState("");
 
-  const leftovers = leftoversMode(config.sources, appCapture);
+  // Not answered yet: as the core assumes where it cannot tell.
+  const leftovers = leftoversMode(config.sources, appCapture !== false);
 
   /**
    * Write a new order of the sources.
@@ -286,7 +288,7 @@ export function AudioMixer() {
     const byId = new Map(config.sources.map((s) => [s.id, s]));
     const sources = ids.flatMap((id) => byId.get(id) ?? []);
     if (sources.length !== config.sources.length) return;
-    setMoved(`Moved to position ${ids.indexOf(movedId) + 1} of ${ids.length}`);
+    setMoved((now) => announce(now, `Moved to position ${ids.indexOf(movedId) + 1} of ${ids.length}`));
     void patchConfig({ sources });
   };
 
@@ -798,7 +800,7 @@ function AddSourceList({
     });
     el.style.maxHeight = kept;
     setPlace({ left: p.x, top: p.y, maxHeight: Math.min(el.offsetHeight, p.maxHeight) });
-  }, [anchor, tab, processes.length, devices.length]);
+  }, [anchor, tab, processes.length, devices.length, appCapture]);
 
   const close = useRef(onClose);
   close.current = onClose;
@@ -922,7 +924,9 @@ function AddSourceList({
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {tab === "apps" ? (
           <>
-            {!appCapture && (
+            {/* Nothing until the core has said whether per-app capture
+                works here — a list shown and then taken back on Windows 10. */}
+            {appCapture === false && (
               <p className="mx-1 my-1 px-2.5 py-2 text-xs text-ink-muted">
                 Per-app audio needs Windows 11
               </p>
@@ -973,6 +977,7 @@ function AddSourceList({
                     d.isDefault ? "Default device" : "",
                     { type: "outputDevice", deviceId: d.id },
                     <IconSpeaker className="h-4 w-4" />,
+                    deviceAdded(sources, "outputDevice", d),
                   ),
                 )}
             {heading("Inputs")}
@@ -985,6 +990,7 @@ function AddSourceList({
                     d.isDefault ? "Default device" : "",
                     { type: "inputDevice", deviceId: d.id },
                     <IconMic className="h-4 w-4" />,
+                    deviceAdded(sources, "inputDevice", d),
                   ),
                 )}
           </>

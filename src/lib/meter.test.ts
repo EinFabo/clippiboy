@@ -2,15 +2,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   decayLevel,
+  GAIN_SETTLE_MS,
+  holdGain,
   HOT_HOLD_MS,
   HOT_LEVEL,
   holdPeak,
   hotUntil,
   levelPct,
+  meterGain,
   PEAK_HOLD_MS,
   peakDbText,
   preGain,
   riseLevel,
+  simulatedLevel,
 } from "./meter.ts";
 
 test("one 60 ms step keeps 78 percent", () => assert.ok(Math.abs(decayLevel(1, 60) - 0.78) < 1e-9));
@@ -64,4 +68,37 @@ test("pre-gain: the volume taken back out, capped at full scale", () => {
   assert.equal(preGain(2, 0), 1);
   assert.equal(preGain(0, 12), 0);
   assert.equal(preGain(Number.NaN, 0), 0);
+});
+
+test("after a big drop the old gain stays in the meter until the core has it", () => {
+  // +12 dB down to -30 dB at t=1000: a packet still measured at +12 dB…
+  const hold = holdGain(null, 12, 1000);
+  const late = 0.5 * 10 ** (12 / 20);
+  assert.equal(meterGain(-30, hold, 1100), 12);
+  assert.ok(Math.abs(preGain(late, meterGain(-30, hold, 1100)) - 0.5) < 1e-9);
+  // …where the new gain alone fills the bar.
+  assert.equal(preGain(late, -30), 1);
+  // Once settled, the new gain counts.
+  assert.equal(meterGain(-30, hold, 1000 + GAIN_SETTLE_MS), -30);
+  assert.equal(meterGain(-30, null, 1100), -30);
+});
+
+test("a raise counts at once, and a change during a hold keeps the higher gain", () => {
+  assert.equal(meterGain(6, holdGain(null, 0, 1000), 1100), 6);
+  const first = holdGain(null, 12, 1000);
+  const second = holdGain(first, 0, 1200);
+  assert.equal(second.db, 12);
+  assert.equal(second.until, 1200 + GAIN_SETTLE_MS);
+  // A hold that ran out is not carried on.
+  assert.equal(holdGain(first, 0, 1000 + GAIN_SETTLE_MS).db, 0);
+});
+
+test("browser levels: the volume applied, nothing off, muted or left out by Solo", () => {
+  const s = { enabled: true, muted: false, solo: false, gainDb: 0 };
+  assert.equal(simulatedLevel(s, false, 0.4), 0.4);
+  assert.ok(Math.abs(simulatedLevel({ ...s, gainDb: -20 }, false, 0.4) - 0.04) < 1e-9);
+  assert.equal(simulatedLevel({ ...s, muted: true }, false, 0.4), 0);
+  assert.equal(simulatedLevel({ ...s, enabled: false }, false, 0.4), 0);
+  assert.equal(simulatedLevel(s, true, 0.4), 0);
+  assert.equal(simulatedLevel({ ...s, solo: true }, true, 0.4), 0.4);
 });
