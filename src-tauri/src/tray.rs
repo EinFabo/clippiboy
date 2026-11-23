@@ -299,6 +299,15 @@ pub fn bring_main_window_over_game(app: &tauri::AppHandle) {
     }
 }
 
+/// Notes `next` as the tooltip shown; true when it differs from the last one.
+fn take_if_changed(last: &mut String, next: &str) -> bool {
+    if last == next {
+        return false;
+    }
+    next.clone_into(last);
+    true
+}
+
 /// Bring tooltip, icon and menu state in line with the status. Runs once a second.
 pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
     let Some(handles) = app.try_state::<TrayHandles>() else {
@@ -336,12 +345,11 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
         tooltip.push_str(" · streamer mode");
     }
 
-    {
-        let mut last = handles.last_tooltip.lock();
-        if *last != tooltip {
-            let _ = tray.set_tooltip(Some(&tooltip));
-            *last = tooltip;
-        }
+    // Decided under the lock, set after it: `set_tooltip` waits for the main
+    // thread, and a `refresh` from there would have waited on this lock for good.
+    let changed = take_if_changed(&mut handles.last_tooltip.lock(), &tooltip);
+    if changed {
+        let _ = tray.set_tooltip(Some(&tooltip));
     }
 
     let was_recording = handles
@@ -367,5 +375,20 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
         let _ = tray.set_icon(Some(icon));
         let _ = handles.toggle.set_checked(status.buffer_active);
         let _ = handles.save.set_enabled(status.buffer_active);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tooltip_is_set_only_when_it_changes() {
+        let mut last = String::new();
+        assert!(take_if_changed(&mut last, "ClippiBoy · buffer off"));
+        assert_eq!(last, "ClippiBoy · buffer off");
+        assert!(!take_if_changed(&mut last, "ClippiBoy · buffer off"));
+        assert!(take_if_changed(&mut last, "ClippiBoy · buffer running — 30 s"));
+        assert_eq!(last, "ClippiBoy · buffer running — 30 s");
     }
 }

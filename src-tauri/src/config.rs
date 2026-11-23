@@ -389,6 +389,14 @@ fn read_config(dir: &Path, stamp_ms: i64) -> (Option<AppConfig>, Loaded) {
     )
 }
 
+/// The accent colours in the one form a save keeps them in
+/// (`commands::save_config`). A hand-edited file can say anything, and the
+/// tray tints its icon from them before any window has asked.
+fn clean_accents(config: &mut AppConfig) {
+    config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
+    config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
+}
+
 pub fn load() -> (AppConfig, Loaded) {
     let dir = data_dir();
     let stamp_ms = std::time::SystemTime::now()
@@ -407,6 +415,7 @@ pub fn load() -> (AppConfig, Loaded) {
             normalize_recording(&mut config.recording);
             migrate_sources(&mut config);
             migrate_pad_bindings(&mut config);
+            clean_accents(&mut config);
             config
         }
         None => default_config(),
@@ -1135,6 +1144,26 @@ mod tests {
         assert!(config.is_some());
         assert_eq!(loaded, Loaded::Fine);
         assert_eq!(std::fs::read_to_string(dir.join("config.json.bak")).unwrap(), text);
+    }
+
+    /// A hand-edited accent that is no `#rrggbb` loads as the violet instead
+    /// of reaching the tray's tint, where "#€ab1" aborted every start.
+    #[test]
+    fn a_config_with_a_broken_accent_still_loads() {
+        let dir = config_dir();
+        let mut edited = default_config();
+        edited.accent_color = Some("#€ab1".into());
+        edited.accent_color_2 = Some(" #3B82F6 ".into());
+        std::fs::write(dir.join("config.json"), serde_json::to_string(&edited).unwrap()).unwrap();
+        let (config, loaded) = read_config(&dir, 1);
+        let mut config = config.expect("the file is a config");
+        assert_eq!(loaded, Loaded::Fine);
+        clean_accents(&mut config);
+        assert_eq!(config.accent_color, None);
+        assert_eq!(config.accent_color_2.as_deref(), Some("#3b82f6"));
+        let mut icon = [0x8b, 0x5c, 0xf6, 255];
+        crate::tint::tint_rgba(&mut icon, 1, 1, &config.accent());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

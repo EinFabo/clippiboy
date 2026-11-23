@@ -28,9 +28,13 @@ const VIOLET: [u8; 3] = [0x8b, 0x5c, 0xf6];
 const GREY: f32 = 0.12;
 
 /// `#rrggbb` to red, green and blue — `None` for anything else.
+///
+/// Six bytes are not six digits: a hand-edited `config.json` with "#€ab1" in
+/// it had the slicing below cut into the euro sign, and the panic took the app
+/// down at every start (release aborts on a panic).
 fn parse(hex: &str) -> Option<[u8; 3]> {
     let hex = hex.strip_prefix('#')?;
-    if hex.len() != 6 {
+    if hex.len() != 6 || !hex.is_ascii() {
         return None;
     }
     let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
@@ -201,6 +205,24 @@ mod tests {
         tint_rgba(&mut rgba, 1, 1, &solid(None));
         tint_rgba(&mut rgba, 1, 1, &solid(Some("violet")));
         assert_eq!(rgba, [0x8b, 0x5c, 0xf6, 255]);
+    }
+
+    /// Six bytes that are not six ASCII digits are no colour — and no panic.
+    #[test]
+    fn a_colour_with_a_wide_character_is_no_colour() {
+        assert_eq!(parse("#€ab1"), None);
+        assert_eq!(parse("#ab€1"), None);
+        assert_eq!(parse("#ä1234"), None);
+        assert_eq!(parse("#22c55e"), Some([0x22, 0xc5, 0x5e]));
+        let mut rgba = [0x8b, 0x5c, 0xf6, 255];
+        tint_rgba(&mut rgba, 1, 1, &solid(Some("#€ab1")));
+        assert_eq!(rgba, [0x8b, 0x5c, 0xf6, 255]);
+        // Both ends fall back to the violet.
+        let gradient = Accent { mode: AccentMode::Gradient, color_2: Some("#1€23".into()), ..solid(Some("#€ab1")) };
+        tint_rgba(&mut rgba, 1, 1, &gradient);
+        for (a, b) in rgba.iter().zip([0x8b, 0x5c, 0xf6, 255]) {
+            assert!(a.abs_diff(b) <= 1, "{rgba:?}");
+        }
     }
 
     /// Top left takes the first colour, bottom right the second.

@@ -8,12 +8,15 @@
 //! - in the clip folder and up to two levels below (`<clip folder>/<game>/Videos`,
 //!   as deep as `filing` ever puts a clip): a save's `<clip id>.part.*` (and
 //!   the `<stem>_<clip id>.part.*` of versions before), an edit's
-//!   `<clip>.<pid>.neu.mp4` and an export's `<name>.<pid>.clippiboy-export.mp4`;
+//!   `<clip>.<pid>.neu.mp4`, an export's `<name>.<pid>.clippiboy-export.mp4`
+//!   and a copy across drives' `<name>.<pid>.clippiboy-move.part`;
 //!   and the empty file a screenshot claims its name with
 //!   (`<game or shot>_<stamp>.png`, see `state::claim_file`) when the picture
 //!   never got into it — 0 bytes is never a picture;
-//! - in the originals store: a cam the save did not finish (`cam.part.*`) and
-//!   a picture an edit did not finish (`<clip id>.part.png`);
+//! - in the originals store: a cam the save did not finish (`cam.part.*`),
+//!   a picture an edit did not finish (`<clip id>.part.png`) and a recording
+//!   copied in across drives (`video.mp4.<pid>.clippiboy-move.part`, up to
+//!   1.0.0 `video.part`);
 //! - in the folder of Discord copies: an export's part file, as above, and
 //!   copies more than a week old ([`COPY_AGE`]);
 //! - in the same folders: a received clip's `.clippiboy-<offer>.part`
@@ -21,7 +24,10 @@
 //! - in the stem store: a clip's folder with neither an index nor a clip.
 //!
 //! Only names given out here, and only files from well before the start
-//! ([`CLOCK_MARGIN`]) — a save begun meanwhile keeps its own.
+//! ([`CLOCK_MARGIN`]) — a save begun meanwhile keeps its own. A name carrying
+//! this process's id is never touched: a copy across drives takes over the
+//! source's timestamp, so its age says nothing about whether it is still being
+//! written.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -145,12 +151,16 @@ fn recording_ids(clip_dir: &Path) -> Vec<String> {
 
 fn still_left_over(path: &Path, before: SystemTime) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    modified_before(path, before) && (is_scratch_name(&name) || is_cam_part(&name) || is_empty_file(path))
+    modified_before(path, before)
+        && !in_use(&name)
+        && (is_scratch_name(&name) || is_cam_part(&name) || is_empty_file(path))
 }
 
 /// The names a facecam is written under in the originals store until it is
-/// complete (`cam_partials`).
-const CAM_PARTS: [&str; 2] = ["cam.part.h264", "cam.part.mp4"];
+/// complete (`cam_partials`), and `video.part`: where 1.0.0 and before copied
+/// a recording in from another drive. Nothing writes that name any more, and
+/// in the store it can be nothing else.
+const CAM_PARTS: [&str; 3] = ["cam.part.h264", "cam.part.mp4", "video.part"];
 
 fn is_cam_part(name: &str) -> bool {
     CAM_PARTS.contains(&name)
@@ -201,14 +211,34 @@ pub fn is_scratch_name(name: &str) -> bool {
         };
         return kind && ends_in_clip_id(head);
     }
-    // `<target stem>.<pid>.<what>.mp4`, see `edit.rs`, `commands::export_part`.
-    // The pid as Windows gives it out — up to ten digits, no leading zero — so
-    // a "Holiday.2019.neu.mp4" of the user's has to be very unlucky.
-    [".neu.mp4", ".clippiboy-export.mp4"].iter().any(|suffix| {
+    tagged_pid(name).is_some()
+}
+
+/// The names that carry the id of the process writing them:
+/// `<target stem>.<pid>.<what>.mp4` (`edit.rs`, `commands::export_part`) and
+/// `<target name>.<pid>.clippiboy-move.part` (`edit::move_part`).
+const PID_TAGGED: [&str; 3] = [".neu.mp4", ".clippiboy-export.mp4", ".clippiboy-move.part"];
+
+/// The process id in a [`PID_TAGGED`] name. The pid as Windows gives it out —
+/// up to ten digits, no leading zero — so a "Holiday.2019.neu.mp4" of the
+/// user's has to be very unlucky.
+fn tagged_pid(name: &str) -> Option<&str> {
+    PID_TAGGED.iter().find_map(|suffix| {
         name.strip_suffix(suffix)
             .and_then(|rest| rest.rsplit_once('.'))
-            .is_some_and(|(_, pid)| is_pid(pid))
+            .map(|(_, pid)| pid)
+            .filter(|pid| is_pid(pid))
     })
+}
+
+/// A scratch file this very process is writing — a copy across drives begun
+/// since the start, say. Never a leftover, however old it looks.
+fn in_use(name: &str) -> bool {
+    written_by(name, std::process::id())
+}
+
+fn written_by(name: &str, pid: u32) -> bool {
+    tagged_pid(name).is_some_and(|tagged| tagged == pid.to_string())
 }
 
 fn is_pid(text: &str) -> bool {
@@ -255,6 +285,7 @@ pub fn leftovers_in(clip_dir: &Path, before: SystemTime) -> Vec<PathBuf> {
                 }
             } else if kind.is_file()
                 && (is_scratch_name(&name) || (is_screenshot_name(&name) && is_empty_file(&path)))
+                && !in_use(&name)
                 && modified_before(&path, before)
             {
                 found.push(path);
@@ -268,7 +299,8 @@ pub fn leftovers_in(clip_dir: &Path, before: SystemTime) -> Vec<PathBuf> {
 /// store, written before `before`. `facecam.json` is written only after
 /// `cam.mp4`, so a part file there is never a finished cam. Also a picture
 /// staged beside `base.png` or `under.png` (`<clip id>.part.png`,
-/// `shot::write_png`) and never renamed into place.
+/// `shot::write_png`) and never renamed into place, and a recording whose
+/// copy in from another drive was cut short (`edit::move_part`).
 pub fn cam_partials(originals: &Path, before: SystemTime) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(originals) else {
         return Vec::new();
@@ -290,8 +322,10 @@ pub fn cam_partials(originals: &Path, before: SystemTime) -> Vec<PathBuf> {
         for file in files.flatten() {
             let name = file.file_name().to_string_lossy().to_string();
             let path = file.path();
-            if name.ends_with(".part.png")
+            let staged = name.ends_with(".part.png") || name.ends_with(".clippiboy-move.part");
+            if staged
                 && is_scratch_name(&name)
+                && !in_use(&name)
                 && file.file_type().is_ok_and(|kind| kind.is_file())
                 && modified_before(&path, before)
             {
@@ -599,6 +633,88 @@ mod tests {
     fn age(path: &Path, by: Duration) {
         let file = std::fs::File::options().write(true).open(path).unwrap();
         file.set_modified(SystemTime::now() - by).unwrap();
+    }
+
+    /// A copy across drives cut short (`edit::move_part`) is a name of ours;
+    /// the plain `.part` it used to be is not.
+    #[test]
+    fn a_move_cut_short_is_a_scratch_name() {
+        for name in [
+            "Valorant_2026-10-22_12-00-00-123.mp4.4711.clippiboy-move.part".to_owned(),
+            "video.mp4.4294967295.clippiboy-move.part".to_owned(),
+            crate::edit::move_part(Path::new("video.mp4")).file_name().unwrap().to_string_lossy().into_owned(),
+        ] {
+            assert!(is_scratch_name(&name), "{name}");
+        }
+        for name in [
+            "video.part",
+            "Valorant.part",
+            "video.mp4.part",
+            "video.mp4.0471.clippiboy-move.part",
+            "video.mp4..clippiboy-move.part",
+            "video.mp4.4711.clippiboy-move.part.mp4",
+        ] {
+            assert!(!is_scratch_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn only_a_name_with_this_process_id_is_in_use() {
+        let name = "video.mp4.4711.clippiboy-move.part";
+        assert!(written_by(name, 4711));
+        assert!(!written_by(name, 471));
+        assert!(!written_by(name, 47110));
+        assert!(written_by("Valorant.4711.neu.mp4", 4711));
+        assert!(!written_by("video.mp4.part", 4711));
+        let ours = crate::edit::move_part(Path::new("clip.mp4"));
+        assert!(in_use(&ours.file_name().unwrap().to_string_lossy()));
+    }
+
+    /// A move part from a run before is swept from the clip folder and the
+    /// originals store; one this process is still copying is not, however
+    /// old the timestamp it took over from its source.
+    #[test]
+    fn a_move_cut_short_is_swept_unless_it_is_still_being_copied() {
+        let foreign_pid = if std::process::id() == 4711 { 4712 } else { 4711 };
+        let dir = scratch_dir();
+        let videos = dir.join("Valorant");
+        std::fs::create_dir_all(&videos).unwrap();
+        let left = videos.join(format!("Valorant_2026-10-22_12-00-00-123.mp4.{foreign_pid}.clippiboy-move.part"));
+        let copying = crate::edit::move_part(&videos.join("Valorant_2026-10-22_12-00-00-124.mp4"));
+        for path in [&left, &copying] {
+            std::fs::write(path, b"half a clip").unwrap();
+            age(path, Duration::from_secs(60 * 60));
+        }
+        let before = cutoff(SystemTime::now());
+        assert_eq!(leftovers_in(&dir, before), vec![left.clone()]);
+        remove_file(&copying, before);
+        assert!(copying.is_file(), "a copy still running was removed");
+        remove_file(&left, before);
+        assert!(!left.exists(), "the leftover stayed");
+
+        let root = scratch_dir();
+        let store = root.join(ID);
+        std::fs::create_dir_all(&store).unwrap();
+        let left = store.join(format!("video.mp4.{foreign_pid}.clippiboy-move.part"));
+        let copying = crate::edit::move_part(&store.join("video.mp4"));
+        for path in [&left, &copying] {
+            std::fs::write(path, b"half a recording").unwrap();
+            age(path, Duration::from_secs(60 * 60));
+        }
+        // The name 1.0.0 gave it.
+        let old = store.join("video.part");
+        std::fs::write(&old, b"half a recording").unwrap();
+        age(&old, Duration::from_secs(60 * 60));
+        let mut found = cam_partials(&root, cutoff(SystemTime::now()));
+        found.sort();
+        let mut expected = vec![left, old.clone()];
+        expected.sort();
+        remove_file(&old, cutoff(SystemTime::now()));
+        let removed = !old.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(found, expected);
+        assert!(removed, "the old name stayed");
     }
 
     #[test]

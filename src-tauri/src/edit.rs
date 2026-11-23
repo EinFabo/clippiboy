@@ -946,14 +946,14 @@ fn note_cam_applied(clip_id: &str, cam: &CamInputs, plan: &RenderPlan, target: &
 /// the time a copy of a few hundred megabytes takes, but it is the only way
 /// across.
 ///
-/// The copy goes to a `.part` beside the target and is renamed onto it only
-/// once complete. Copied straight onto the target, a crash halfway left a
-/// truncated file under the real name — for the originals store a "recording"
-/// with no index that `repair` took at its word.
+/// The copy goes to a part file beside the target ([`move_part`]) and is
+/// renamed onto it only once complete. Copied straight onto the target, a
+/// crash halfway left a truncated file under the real name — for the originals
+/// store a "recording" with no index that `repair` took at its word.
 pub(crate) fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {
-            let part = to.with_extension("part");
+            let part = move_part(to);
             if let Err(err) = std::fs::copy(from, &part).and_then(|_| std::fs::rename(&part, to)) {
                 let _ = std::fs::remove_file(&part);
                 return Err(err);
@@ -968,6 +968,17 @@ pub(crate) fn move_across(from: &Path, to: &Path) -> std::io::Result<()> {
         }
         other => other,
     }
+}
+
+/// `<target name>.<pid>.clippiboy-move.part`: where [`move_across`] copies to.
+/// A plain `.part` was a name the sweep could not tell from a user's own file,
+/// so a copy cut short by a crash lay there at the clip's size for good; this
+/// one it knows (`sweep::is_scratch_name`), and the process id keeps a copy
+/// still running in this session out of its reach.
+pub(crate) fn move_part(to: &Path) -> PathBuf {
+    let mut name = to.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.clippiboy-move.part", std::process::id()));
+    to.with_file_name(name)
 }
 
 /// May the file being replaced be filed away as the untouched recording?
@@ -1010,6 +1021,17 @@ fn archives_the_clip(clip: &Clip, plan: &RenderPlan, archive_exists: bool) -> bo
     clip.kind() == ClipKind::Clip && keeps_original && !archive_exists && !already_trimmed
 }
 
+/// The note a first cut leaves beside the recording it files away: the plan's
+/// record, or the whole recording when the plan keeps none (a clean picture
+/// filed away for a cam that failed, with no trim).
+fn first_cut_note(plan: &RenderPlan) -> ClipOriginal {
+    plan.original.unwrap_or(ClipOriginal {
+        duration_ms: plan.length_ms,
+        start_ms: 0,
+        end_ms: plan.length_ms,
+    })
+}
+
 /// Move the finished file into its place — and, if this is the first real cut,
 /// rescue the untouched recording along the way.
 ///
@@ -1029,8 +1051,11 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
     if first_cut {
         // Note first: if the process dies right away, `repair` finds the file
         // again by it. The other way round a video would lie there with nothing
-        // to tie it to.
-        write_note(&clip.id, plan.original.as_ref().expect("checked"))?;
+        // to tie it to. A cam that failed to go in is filed away untrimmed
+        // too, on a save that only changes the mix: its note is the whole
+        // recording, which the swap clears away again. Taking the plan's
+        // record for granted there aborted the app.
+        write_note(&clip.id, &first_cut_note(plan))?;
         if let Err(err) = move_across(target, &archive) {
             let _ = std::fs::remove_file(temp);
             let _ = std::fs::remove_file(note_path(&clip.id));
@@ -1083,8 +1108,10 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
                 );
                 return Err(err);
             }
-            let _ = std::fs::remove_file(note_path(&clip.id));
-            let _ = std::fs::remove_dir_all(dir(&clip.id));
+            // The note and the store's folder go — but not a facecam store:
+            // a cam that failed to go in keeps its cam and facts there, and
+            // clearing the folder deleted the cam recording for good.
+            remove(&clip.id);
         }
         let _ = std::fs::remove_file(temp);
         return Err(err);
@@ -2874,6 +2901,72 @@ pub(crate) mod tests {
         let (kept, archived) = first_cut_of(clip);
         assert_eq!(kept, b"the excerpt");
         assert!(archived, "the clip's original was not kept");
+    }
+
+    /// A facecam store whose cam failed to go in: cam and facts in the store,
+    /// the clip file the clean picture. Returns the clip, its file and the
+    /// scratch folder it lies in.
+    fn clip_whose_cam_failed(id: &str) -> (Clip, PathBuf, PathBuf) {
+        let scratch = std::env::temp_dir().join(format!("clippiboy-{id}-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let target = scratch.join("clip.mp4");
+        std::fs::write(&target, b"the clean picture").unwrap();
+        let clip = Clip { id: id.into(), path: target.to_string_lossy().into_owned(), ..plain_clip(None, None) };
+        remove_everything(&clip.id);
+        std::fs::create_dir_all(dir(&clip.id)).unwrap();
+        std::fs::write(crate::facecam::cam_path(&clip.id), b"the cam").unwrap();
+        std::fs::write(crate::facecam::facts_path(&clip.id), b"{}").unwrap();
+        (clip, target, scratch)
+    }
+
+    /// The swap fails and the clean picture goes back: the rollback cleared
+    /// the whole store folder, and the cam recording with it.
+    #[test]
+    fn a_rolled_back_first_cut_keeps_the_cam() {
+        for (id, trim) in [
+            ("facecam-rollback-front-test", Trim { start_ms: 5_000, end_ms: 30_000 }),
+            ("facecam-rollback-whole-test", Trim::whole(30_000)),
+        ] {
+            let (clip, target, scratch) = clip_whose_cam_failed(id);
+            let cut = plan(None, true, 30_000, trim, CamPart::Shown { differs: true });
+            assert!(archives_the_clip(&clip, &cut, false));
+            // No finished render: the swap fails after the clean picture was filed away.
+            let swapped = swap_in(&clip, &cut, &scratch.join("clip.neu.mp4"), &target);
+            let kept = std::fs::read(&target);
+            let cam = crate::facecam::cam_path(&clip.id).is_file();
+            let facts = crate::facecam::has_store(&clip.id);
+            let leftovers = (note_path(&clip.id).exists(), video_path(&clip.id).exists());
+            remove_everything(&clip.id);
+            let _ = std::fs::remove_dir_all(&scratch);
+            assert!(swapped.is_err(), "{id}");
+            assert_eq!(kept.unwrap(), b"the clean picture", "{id}");
+            assert!(cam && facts, "{id}: the cam store went with the rollback");
+            assert_eq!(leftovers, (false, false), "{id}");
+        }
+    }
+
+    /// A save that only changes the mix on a clip whose cam failed files the
+    /// clean picture away with no trim to note — it used to abort the app on
+    /// the plan's missing record.
+    #[test]
+    fn a_mix_save_on_a_clip_whose_cam_failed_files_the_clean_picture() {
+        let (clip, target, scratch) = clip_whose_cam_failed("facecam-failed-mix-save-test");
+        let save = plan(None, true, 30_000, Trim::whole(30_000), CamPart::Shown { differs: true });
+        assert_eq!((save.video, save.original), (VideoSource::CleanWithCam, None));
+        let temp = scratch.join("clip.neu.mp4");
+        std::fs::write(&temp, b"clean picture and cam").unwrap();
+        let swapped = swap_in(&clip, &save, &temp, &target);
+        let kept = std::fs::read(&target);
+        let clean = std::fs::read(video_path(&clip.id));
+        let cam = crate::facecam::cam_path(&clip.id).is_file();
+        let note = note_path(&clip.id).exists();
+        remove_everything(&clip.id);
+        let _ = std::fs::remove_dir_all(&scratch);
+        swapped.unwrap();
+        assert_eq!(kept.unwrap(), b"clean picture and cam");
+        assert_eq!(clean.unwrap(), b"the clean picture");
+        assert!(cam);
+        assert!(!note, "the whole-recording note outlived the swap");
     }
 
     /// An in-place cut (no untouched copy) swapped in for `clip` under `plan`,

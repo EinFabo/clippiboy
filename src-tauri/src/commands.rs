@@ -1757,6 +1757,21 @@ pub fn export_for_discord(
     Ok(output.to_string_lossy().to_string())
 }
 
+/// The largest Discord copy asked for, in MB: well above any upload limit
+/// Discord has had.
+const MAX_DISCORD_MB: u64 = 4096;
+
+/// A Discord copy's size as the window asks for it, kept between 1 MB and
+/// [`MAX_DISCORD_MB`]. Unchecked, a huge number wrapped round to a tiny
+/// limit in the multiplication, and 0 asked for a file of no bytes.
+fn discord_megabytes(megabytes: u64) -> u64 {
+    megabytes.clamp(1, MAX_DISCORD_MB)
+}
+
+fn megabytes_in_bytes(megabytes: u64) -> u64 {
+    megabytes.saturating_mul(1024 * 1024)
+}
+
 /// A clip's Discord copy under `megabytes`, made unless a fitting one is there
 /// already — for "Copy for Discord" and for posting to a channel
 /// (`webhook.rs`). `announce`: say how the export went, as "Copy for Discord"
@@ -1768,6 +1783,7 @@ pub(crate) fn discord_copy_of(
     megabytes: u64,
     announce: bool,
 ) -> Result<std::path::PathBuf> {
+    let megabytes = discord_megabytes(megabytes);
     // Before the clip's lock: a cam still being added to this clip finishes
     // first, and its job needs that lock.
     if !crate::composite::wait_settled(id, std::time::Duration::from_secs(300)) {
@@ -1787,7 +1803,7 @@ pub(crate) fn discord_copy_of(
         std::fs::create_dir_all(folder)
             .map_err(|err| format!("Could not make a folder for the Discord copy: {err}"))?;
     }
-    let target_bytes = megabytes * 1024 * 1024;
+    let target_bytes = megabytes_in_bytes(megabytes);
 
     // Already there from an earlier run, small enough and newer than the clip:
     // copying it again beats encoding the same file twice. An older one still
@@ -1842,7 +1858,8 @@ pub(crate) fn shot_discord_copy_of(
     if !clip.screenshot {
         return Err("Only a screenshot is copied for Discord this way.".into());
     }
-    let limit = megabytes * 1024 * 1024;
+    let megabytes = discord_megabytes(megabytes);
+    let limit = megabytes_in_bytes(megabytes);
     let source = std::path::PathBuf::from(&clip.path);
     let stem = source
         .file_stem()
@@ -3169,6 +3186,16 @@ mod tests {
             format!("Valorant (10 MB).{}.clippiboy-export.mp4", std::process::id())
         );
         assert!(crate::sweep::is_scratch_name(&part.file_name().unwrap().to_string_lossy()));
+    }
+
+    #[test]
+    fn a_discord_size_from_the_window_is_kept_in_range() {
+        assert_eq!(discord_megabytes(19), 19);
+        assert_eq!(discord_megabytes(0), 1);
+        assert_eq!(discord_megabytes(u64::MAX), MAX_DISCORD_MB);
+        assert_eq!(megabytes_in_bytes(discord_megabytes(u64::MAX)), MAX_DISCORD_MB * 1024 * 1024);
+        assert_eq!(megabytes_in_bytes(10), 10 * 1024 * 1024);
+        assert_eq!(megabytes_in_bytes(u64::MAX), u64::MAX, "no wrap round to a small limit");
     }
 
     #[test]

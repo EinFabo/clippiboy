@@ -392,6 +392,30 @@ pub fn resolve_name(exe: &str, title: &str, fullscreen: bool) -> Option<String> 
     })
 }
 
+/// `WS_CAPTION` (`WS_BORDER | WS_DLGFRAME`): a title bar.
+const WS_CAPTION: u32 = 0x00C0_0000;
+/// `WS_THICKFRAME`: a border to resize by.
+const WS_THICKFRAME: u32 = 0x0004_0000;
+
+/// Does a window at `rect` (left, top, right, bottom) cover the monitor at
+/// `monitor` completely? True for real fullscreen as well as for a borderless
+/// window — both are signs of a game.
+///
+/// Not for a maximized window, nor one with a title bar or a resize border:
+/// maximized, a framed window overhangs the screen by its border on every
+/// side, and on a screen without a taskbar that covered it too — any browser
+/// or editor maximized there counted as a game.
+fn covers_monitor_rule(rect: [i32; 4], monitor: [i32; 4], zoomed: bool, style: u32) -> bool {
+    let framed = style & WS_CAPTION == WS_CAPTION || style & WS_THICKFRAME != 0;
+    let [left, top, right, bottom] = rect;
+    !zoomed
+        && !framed
+        && left <= monitor[0]
+        && top <= monitor[1]
+        && right >= monitor[2]
+        && bottom >= monitor[3]
+}
+
 #[cfg(windows)]
 mod win {
     use windows::Win32::Foundation::{CloseHandle, HWND, MAX_PATH, RECT};
@@ -403,8 +427,8 @@ mod win {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId,
+        GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsZoomed, GWL_STYLE,
     };
 
     /// A process's full exe path, reduced to the file name.
@@ -444,8 +468,7 @@ mod win {
         }
     }
 
-    /// Does the window cover the monitor completely? True for real fullscreen as
-    /// well as for a borderless window — both are signs of a game.
+    /// Does the window cover the monitor completely? See [`super::covers_monitor_rule`].
     fn covers_monitor(hwnd: HWND) -> bool {
         unsafe {
             let mut rect = RECT::default();
@@ -461,10 +484,12 @@ mod win {
                 return false;
             }
             let screen = info.rcMonitor;
-            rect.left <= screen.left
-                && rect.top <= screen.top
-                && rect.right >= screen.right
-                && rect.bottom >= screen.bottom
+            super::covers_monitor_rule(
+                [rect.left, rect.top, rect.right, rect.bottom],
+                [screen.left, screen.top, screen.right, screen.bottom],
+                IsZoomed(hwnd).as_bool(),
+                GetWindowLongW(hwnd, GWL_STYLE) as u32,
+            )
         }
     }
 
@@ -675,6 +700,39 @@ mod tests {
         assert_eq!(resolve_name("discord.exe", "Discord", true), None);
         assert_eq!(resolve_name("clippiboy.exe", "ClippiBoy", true), None);
         assert_eq!(resolve_name("CHROME.EXE", "YouTube", true), None);
+    }
+
+    const SCREEN: [i32; 4] = [0, 0, 1920, 1080];
+    /// `WS_POPUP | WS_VISIBLE`, as a borderless game sets it.
+    const POPUP: u32 = 0x8000_0000 | 0x1000_0000;
+    /// `WS_OVERLAPPEDWINDOW | WS_VISIBLE`: a normal application window.
+    const FRAMED: u32 = 0x00CF_0000 | 0x1000_0000;
+
+    #[test]
+    fn a_borderless_window_at_the_screens_size_covers_it() {
+        assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP));
+        // Exclusive fullscreen on a second screen, a little larger even.
+        assert!(covers_monitor_rule([1920, -1, 3841, 1081], [1920, 0, 3840, 1080], false, POPUP));
+        // A popup with a thin line around it is still borderless.
+        assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP | 0x0080_0000));
+    }
+
+    /// Maximized on a screen without a taskbar, a framed window overhangs it
+    /// by its border on every side.
+    #[test]
+    fn a_maximized_framed_window_is_no_fullscreen() {
+        let maximized = [-8, -8, 1928, 1088];
+        assert!(!covers_monitor_rule(maximized, SCREEN, true, FRAMED));
+        assert!(!covers_monitor_rule(maximized, SCREEN, false, FRAMED));
+        assert!(!covers_monitor_rule(maximized, SCREEN, true, POPUP));
+        assert!(!covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_THICKFRAME));
+        assert!(!covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_CAPTION));
+    }
+
+    #[test]
+    fn a_window_short_of_the_screen_does_not_cover_it() {
+        assert!(!covers_monitor_rule([0, 0, 1920, 1040], SCREEN, false, POPUP));
+        assert!(!covers_monitor_rule([1, 0, 1920, 1080], SCREEN, false, POPUP));
     }
 
     #[test]
