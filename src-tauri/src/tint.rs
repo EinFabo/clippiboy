@@ -250,10 +250,10 @@ mod tests {
         // Two pixels in a column: the first at t = 0, the second at t = 0.25.
         tint_rgba(&mut rgba, 1, 2, &accent);
         let (top, _, _) = to_hsv([rgba[0], rgba[1], rgba[2]]);
-        assert!(top < 5.0 || top > 355.0, "top {top} should be red");
+        assert!(!(5.0..=355.0).contains(&top), "top {top} should be red");
         let (lower, _, _) = to_hsv([rgba[4], rgba[5], rgba[6]]);
         assert!(
-            lower > 300.0 || lower < 5.0,
+            !(5.0..=300.0).contains(&lower),
             "lower {lower} should be on the way to blue"
         );
     }

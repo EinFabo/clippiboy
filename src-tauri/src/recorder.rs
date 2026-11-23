@@ -1741,7 +1741,7 @@ mod tests {
         let recorder =
             Recorder::start(&dir, meta, &[0, 0, 0, 1, 0x67], Vec::new(), 0, true).unwrap();
         let ring = ring_with("game");
-        assert!(recorder.begin_window(&[ring.clone()], 1250));
+        assert!(recorder.begin_window(std::slice::from_ref(&ring), 1250));
         for _ in 0..50 {
             recorder.audio(&ring, &[3i16; 960]);
         }
@@ -1834,7 +1834,7 @@ mod tests {
         .unwrap();
         let ring = ring_with("mic");
         ring.set_label("Old".into());
-        assert!(recorder.begin_window(&[ring.clone()], 0));
+        assert!(recorder.begin_window(std::slice::from_ref(&ring), 0));
         recorder.audio(&ring, &[0; 960]);
         ring.set_label("New".into());
         let meta = recorder.finish(vec!["mic".into()], None);
@@ -1863,7 +1863,7 @@ mod tests {
         let game = ring_with("game");
         game.push(&[5i16; 12], 0);
 
-        assert!(recorder.begin_window(&[game.clone()], 1250));
+        assert!(recorder.begin_window(std::slice::from_ref(&game), 1250));
         recorder.audio(&game, &[7i16; 12]);
         recorder.end_window(6);
 
@@ -2007,11 +2007,11 @@ mod tests {
         let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
         let game = ring_with("game");
         game.push(&[5i16; 12], 0);
-        assert!(recorder.begin_window(&[game.clone()], 1250));
+        assert!(recorder.begin_window(std::slice::from_ref(&game), 1250));
         recorder.audio(&game, &[7i16; 12]);
         recorder.end_window(6);
         recorder.skip_window(28_800_000);
-        assert!(recorder.begin_window(&[game.clone()], 6_000_001_250));
+        assert!(recorder.begin_window(std::slice::from_ref(&game), 6_000_001_250));
         recorder.audio(&game, &[8i16; 12]);
         recorder.end_window(6);
         let meta = recorder.finish(Vec::new(), None);
@@ -2041,7 +2041,7 @@ mod tests {
         let recorder = Recorder::start(&dir, meta, &[], Vec::new(), 0, true).unwrap();
         let game = ring_with("game");
         game.push(&[5i16; 12], 0);
-        assert!(recorder.begin_window(&[game.clone()], 1250));
+        assert!(recorder.begin_window(std::slice::from_ref(&game), 1250));
         recorder.audio(&game, &[7i16; 12]);
         recorder.end_window(6);
         recorder.skip_window(28_800_000);
@@ -2062,6 +2062,8 @@ mod tests {
     /// REC-1, Review Focus: the mixer's gap and the picture's gap never line up to
     /// the frame (mixer lag, pacer skip). The seam costs a few zeros and never a shift.
     #[test]
+    // `&[40..90]` is a list of one gap, not the numbers in it.
+    #[allow(clippy::single_range_in_vec_init)]
     fn gaps_that_do_not_line_up_leave_only_zeros_at_the_seam() {
         assert_eq!(
             audio_edits(100, &[40..90], &[44..92]),
@@ -2071,6 +2073,8 @@ mod tests {
 
     /// REC-1: the other cases, in frames on the recording's timeline.
     #[test]
+    // `&[40..90]` is a list of one gap, not the numbers in it.
+    #[allow(clippy::single_range_in_vec_init)]
     fn audio_edits_follow_both_gaps() {
         assert_eq!(audio_edits(100, &[], &[]), vec![Edit::Copy(100)]);
         // Sleep: picture and sound stopped together.
@@ -2090,6 +2094,7 @@ mod tests {
     /// REC-1: the seam edits above, done to a file. What comes out is as long
     /// as the picture, and the sound after the seam is the sound after the wake.
     #[test]
+    #[allow(clippy::single_range_in_vec_init)] // one gap each, as above
     fn a_cut_track_is_exactly_as_long_as_the_picture() {
         let dir = scratch("cut");
         let path = dir.join("track_0.pcm");

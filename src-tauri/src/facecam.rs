@@ -58,7 +58,7 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
         .enumerate()
         .filter(|(_, pair)| pair[1].pts_us - pair[0].pts_us > HOLE_US)
         .map(|(i, _)| i + 1)
-        .last()
+        .next_back()
     {
         let restart = packets[after_hole..].iter().position(|p| p.keyframe)?;
         packets.drain(..after_hole + restart);
@@ -70,7 +70,7 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
     if ring
         .gaps
         .iter()
-        .any(|g| g.from_100ns <= g0 && g.to_100ns.map_or(true, |t| t >= end))
+        .any(|g| g.from_100ns <= g0 && g.to_100ns.is_none_or(|t| t >= end))
     {
         return None;
     }
@@ -78,7 +78,7 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
     let gaps_ms = ring
         .gaps
         .iter()
-        .filter(|g| g.from_100ns < end && g.to_100ns.map_or(true, |t| t > g0))
+        .filter(|g| g.from_100ns < end && g.to_100ns.is_none_or(|t| t > g0))
         .map(|g| {
             let from = ((g.from_100ns - g0).max(0) / 10_000) as u64;
             let to = g.to_100ns.map_or(length_ms, |t| {

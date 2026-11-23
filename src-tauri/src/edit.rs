@@ -672,6 +672,8 @@ pub struct Applied {
 /// `facecam` is the camera the editor asks for: the run plans on the row with
 /// it in place, so the cam goes where it stands now; the row itself is written
 /// by the caller, from `Applied::facecam`, once the file is.
+// Each input is the editor's own choice; a struct of them would be built once, here.
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     clip_id: &str,
     load: impl FnOnce() -> Result<Clip, String>,
@@ -838,7 +840,7 @@ fn run(
         return Err("The untouched recording can no longer be found.".into());
     }
     let cam = match plan.video {
-        VideoSource::CleanWithCam => Some(cam_inputs(&clip, plan, &video)?),
+        VideoSource::CleanWithCam => Some(cam_inputs(clip, plan, &video)?),
         _ => None,
     };
 
@@ -1220,6 +1222,8 @@ fn swap_in(clip: &Clip, plan: &RenderPlan, temp: &Path, target: &Path) -> Result
 }
 
 /// The ffmpeg line. Pulled out so it can be checked without a run.
+// Each input is one part of the line; the tests call it with all of them.
+#[allow(clippy::too_many_arguments)]
 fn arguments(
     plan: &RenderPlan,
     video: &Path,

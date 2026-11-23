@@ -372,7 +372,7 @@ fn soft_clip(sample: f32) -> f32 {
 fn stereo_share(channels: usize, channel: usize) -> (f32, f32) {
     const MINUS_3_DB: f32 = std::f32::consts::FRAC_1_SQRT_2;
     let surround = |index: usize| {
-        if index % 2 == 0 {
+        if index.is_multiple_of(2) {
             (MINUS_3_DB, 0.0)
         } else {
             (0.0, MINUS_3_DB)

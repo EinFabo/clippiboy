@@ -280,7 +280,7 @@ impl TrackRing {
             inner.dropped_frames = 0;
             inner.primed = true;
         } else {
-            inner.samples.extend(std::iter::repeat(0).take(gap));
+            inner.samples.extend(std::iter::repeat_n(0, gap));
         }
 
         inner.samples.extend(block.iter().copied());
@@ -427,7 +427,7 @@ impl ErrorSlot {
     /// on the first report and every 500th, at debug in between.
     pub fn report(&self, scope: &str, message: String) {
         let n = self.reports.fetch_add(1, Ordering::Relaxed);
-        if n % 500 == 0 {
+        if n.is_multiple_of(500) {
             log::warn!("{scope}: {message}");
         } else {
             log::debug!("{scope}: {message}");

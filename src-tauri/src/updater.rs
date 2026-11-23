@@ -179,7 +179,7 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
             |chunk, total| {
                 downloaded += chunk as u64;
                 let done = total.is_some_and(|total| downloaded >= total);
-                if done || last_emit.map_or(true, |at| at.elapsed() >= PROGRESS_EVERY) {
+                if done || last_emit.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
                     last_emit = Some(std::time::Instant::now());
                     let _ = tauri::Emitter::emit(
                         app,
@@ -207,7 +207,7 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
                 // goes on too instead of ending at its next clip.
                 crate::clips::STOP_PASSES.store(false, std::sync::atomic::Ordering::SeqCst);
                 // The hook took the control port down with the handshake file.
-                crate::control::start(&app);
+                crate::control::start(app);
             }
             format!("could not install the update: {err}")
         })?;

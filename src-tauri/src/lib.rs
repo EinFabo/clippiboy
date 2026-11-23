@@ -1469,7 +1469,9 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
 fn lock_signals() -> state::LockSignals {
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
-    static LAST: Mutex<Option<(Option<bool>, Result<(), String>)>> = Mutex::new(None);
+    /// The session's lock state and the desktop check, as last logged.
+    type Signals = (Option<bool>, Result<(), String>);
+    static LAST: Mutex<Option<Signals>> = Mutex::new(None);
     static LAST_CHECK: Mutex<Option<SystemTime>> = Mutex::new(None);
 
     let session = capture::session_locked();
@@ -1908,7 +1910,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // hört ihr niemand zu, und zwanzig Pakete die Sekunde in ein
             // unsichtbares Fenster sind genau der Aufwand, den `emit_to` hier
             // vermeiden soll.
-            if tick % 10 == 0 {
+            if tick.is_multiple_of(10) {
                 watched = window_awake(&handle, "main");
                 console_watched = window_awake(&handle, console::LABEL);
             }
@@ -1930,7 +1932,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     );
                 }
                 // Diagnostics: with CLIPPIBOY_LOG_LEVELS=1 the levels get logged.
-                if tick % 20 == 0 && logging {
+                if tick.is_multiple_of(20) && logging {
                     let summary: Vec<String> = levels
                         .sources
                         .iter()
@@ -1944,7 +1946,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // Every 10 s: retry sources that failed to start. A headset that was
             // not plugged in at program start would otherwise not run along until
             // the next restart.
-            if tick % 200 == 0 {
+            if tick.is_multiple_of(200) {
                 state
                     .audio
                     .retry_failed(state.config_snapshot().sources, state.game_pid());
@@ -1955,7 +1957,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 guard_recording_room(&handle);
             }
             // Every 2 s, look which game is running in the foreground.
-            if tick % 40 == 0 {
+            if tick.is_multiple_of(40) {
                 let tick_game = state.track_game();
                 friends::set_game(&handle, tick_game.held.as_deref());
                 // Whatever moved — the game to a new process, an application
@@ -2043,7 +2045,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // If the recording reports a problem, somebody has to hear about it.
             // Without this the app appears to keep buffering, and only pressing
             // "Save clip" brings to light that nothing has arrived for minutes.
-            if tick % 20 == 0 {
+            if tick.is_multiple_of(20) {
                 let trouble = state
                     .shared
                     .lock()
@@ -2088,7 +2090,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // really doing. One line, at info, so a log sent back from a machine
             // we cannot reach tells us whether the encoder kept up — instead of
             // us having to take "it lags" as the whole report.
-            if tick % 100 == 0 {
+            if tick.is_multiple_of(100) {
                 let line = state
                     .shared
                     .lock()
@@ -2102,7 +2104,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 }
                 state.vcam.heartbeat(state.camera.shared());
             }
-            if tick % 20 == 0 {
+            if tick.is_multiple_of(20) {
                 // Erst messen, dann lesen: die Bildrate ist eine Rate, und das
                 // Intervall dafür darf nur dieser eine Aufrufer verbrauchen.
                 state.sample_fps();

@@ -157,7 +157,7 @@ impl SampleRing {
                 // A real gap (the device dropped out): fill with silence so
                 // everything after it stays in its right place.
                 let missing = self.duration_to_frames(drift) as usize * self.channels;
-                inner.samples.extend(std::iter::repeat(0.0).take(missing));
+                inner.samples.extend(std::iter::repeat_n(0.0, missing));
             } else {
                 // What is left over is the difference between two crystals, in
                 // whichever direction. Follow it — but only by a sliver of the

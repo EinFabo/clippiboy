@@ -51,10 +51,13 @@ enum Ask {
     StopEncoder(VideoEncoder),
 }
 
+/// An open that worked, or why not and on which device if one was found.
+type OpenResult = Result<(Box<dyn Source>, CameraDevice), (Error, Option<CameraDevice>)>;
+
 enum Answer {
     Opened {
         generation: u64,
-        result: Result<(Box<dyn Source>, CameraDevice), (Error, Option<CameraDevice>)>,
+        result: OpenResult,
     },
     Holder(Option<String>),
     Encoder {
@@ -412,7 +415,7 @@ impl Worker {
         if self.stopped {
             return;
         }
-        if self.source.is_none() && !self.opening && self.retry_at.map_or(true, |t| now >= t) {
+        if self.source.is_none() && !self.opening && self.retry_at.is_none_or(|t| now >= t) {
             self.open_camera();
         }
         // Open, but no picture for a while: another app has the camera.
@@ -482,7 +485,7 @@ impl Worker {
     fn fail_later(&mut self, error: &Error) {
         let wait = match error {
             Error::Denied => BLOCKED_RETRY,
-            _ => self.backoff.next(),
+            _ => self.backoff.next_wait(),
         };
         self.retry_at = Some(Instant::now() + wait);
         self.state = match error {
@@ -1054,7 +1057,7 @@ impl Scaler {
         }
         let (w, h) = (dst.0 as usize, dst.1 as usize);
         let mut black = vec![16u8; w * h];
-        black.extend(std::iter::repeat(128u8).take(w * h / 2));
+        black.extend(std::iter::repeat_n(128u8, w * h / 2));
         let black = texture(
             &device,
             &nv12_desc(
@@ -1140,7 +1143,7 @@ mod tests {
     fn flat(width: u32, height: u32, y: u8) -> Frame {
         let (w, h) = (width as usize, height as usize);
         let mut nv12 = vec![y; w * h];
-        nv12.extend(std::iter::repeat(128u8).take(w * h / 2));
+        nv12.extend(std::iter::repeat_n(128u8, w * h / 2));
         Frame {
             probe: ProbeFrame {
                 qpc_100ns: 0,
@@ -1198,7 +1201,7 @@ mod tests {
         let mut nv12: Vec<u8> = (0..h)
             .flat_map(|_| (0..w).map(move |x| (16 + x * 219 / (w - 1)) as u8))
             .collect();
-        nv12.extend(std::iter::repeat(128u8).take(w * h / 2));
+        nv12.extend(std::iter::repeat_n(128u8, w * h / 2));
         let mut frame = flat(src.0, src.1, 0);
         frame.nv12 = nv12.into();
         let mut scaler = Scaler::new(&gpu, src, dst).unwrap();

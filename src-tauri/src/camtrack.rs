@@ -514,9 +514,9 @@ impl PreviewSlot {
             let wanted = inner
                 .asked
                 .is_some_and(|t| now.saturating_duration_since(t) < PREVIEW_INTEREST);
-            let due = inner.made.map_or(true, |t| {
-                now.saturating_duration_since(t) + PREVIEW_SLACK >= PREVIEW_EVERY
-            });
+            let due = inner
+                .made
+                .is_none_or(|t| now.saturating_duration_since(t) + PREVIEW_SLACK >= PREVIEW_EVERY);
             if !wanted || !due {
                 return;
             }
@@ -721,8 +721,10 @@ mod tests {
     /// last wants must not cut the 3 s a pipeline restart gets down to nothing.
     #[test]
     fn an_unchanged_plan_does_not_cut_the_grace_short() {
-        let mut cam = crate::model::FacecamConfig::default();
-        cam.enabled = true;
+        let cam = crate::model::FacecamConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let (_, on) = plan_for(&cam, &inputs(true, false), None);
         let (plan, off) = plan_for(&cam, &inputs(false, false), Some(&on));
         assert_eq!(plan.stop_after, Duration::from_secs(3));
@@ -902,7 +904,7 @@ mod tests {
     fn grey(width: u32, height: u32) -> Frame {
         let (w, h) = (width as usize, height as usize);
         let mut nv12 = vec![126u8; w * h];
-        nv12.extend(std::iter::repeat(128u8).take(w * h / 2));
+        nv12.extend(std::iter::repeat_n(128u8, w * h / 2));
         Frame {
             probe: ProbeFrame {
                 qpc_100ns: 0,

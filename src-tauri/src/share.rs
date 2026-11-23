@@ -187,8 +187,11 @@ const MAX_TRACK_BYTES: u64 = 2 << 30;
 const SPACE_MARGIN: u64 = 512 << 20;
 
 /// The handshake, passed through the friends server as the body of a relay.
+// The variant names are the `kind` tags on the wire, and a signal lives only
+// as long as one relay message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(clippy::enum_variant_names, clippy::large_enum_variant)]
 enum Signal {
     #[serde(rename_all = "camelCase")]
     ShareOffer {
@@ -1520,7 +1523,7 @@ fn file_clip(
         facecam: None,
         screenshot: meta.screenshot,
         recording: meta.recording,
-        tags: vec![crate::clips::from_tag(&from)],
+        tags: vec![crate::clips::from_tag(from)],
     };
     let state = app.state::<AppState>();
     let guard = state.library.lock();
@@ -2806,7 +2809,7 @@ mod tests {
     /// The handshake as 1.0.0 has it, to check both directions against.
     #[derive(Debug, Deserialize, Serialize)]
     #[serde(tag = "kind", rename_all = "camelCase")]
-    #[allow(clippy::large_enum_variant)]
+    #[allow(clippy::large_enum_variant, clippy::enum_variant_names)]
     enum OldSignal {
         #[serde(rename_all = "camelCase")]
         ShareOffer {

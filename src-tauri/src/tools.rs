@@ -307,7 +307,7 @@ async fn download(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<
         }
         file.write_all(&chunk)
             .map_err(|err| format!("could not write the download: {err}"))?;
-        if last_emit.map_or(true, |at| at.elapsed() >= PROGRESS_EVERY) {
+        if last_emit.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
             last_emit = Some(Instant::now());
             set(app, Status::Downloading { downloaded, total });
         }

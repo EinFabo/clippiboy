@@ -611,7 +611,7 @@ pub fn app_capture_supported(build: u32) -> bool {
 /// build cannot be read, assume it works: that is what the app did before.
 pub fn app_capture_ok() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| os_build().map_or(true, app_capture_supported))
+    *OK.get_or_init(|| os_build().is_none_or(app_capture_supported))
 }
 
 #[cfg(windows)]

@@ -226,7 +226,7 @@ pub struct Backoff {
 impl Backoff {
     const WAITS: [u64; 4] = [1, 2, 5, 10];
 
-    pub fn next(&mut self) -> Duration {
+    pub fn next_wait(&mut self) -> Duration {
         let wait = Self::WAITS[self.step.min(Self::WAITS.len() - 1)];
         self.step += 1;
         Duration::from_secs(wait)
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!((r.y, r.h), (0, 1080));
         assert_eq!(r.w, 1920);
         assert_eq!(r.x, 320);
-        assert!(r.x % 2 == 0 && r.w % 2 == 0);
+        assert!(r.x.is_multiple_of(2) && r.w.is_multiple_of(2));
     }
 
     #[test]
@@ -586,10 +586,10 @@ mod tests {
     #[test]
     fn the_retry_waits_grow_to_ten_seconds() {
         let mut backoff = Backoff::default();
-        let waits: Vec<u64> = (0..5).map(|_| backoff.next().as_secs()).collect();
+        let waits: Vec<u64> = (0..5).map(|_| backoff.next_wait().as_secs()).collect();
         assert_eq!(waits, [1, 2, 5, 10, 10]);
         backoff.reset();
-        assert_eq!(backoff.next().as_secs(), 1);
+        assert_eq!(backoff.next_wait().as_secs(), 1);
     }
 
     fn native(fourcc: &[u8; 4], w: u32, h: u32, fps: f32) -> NativeType {

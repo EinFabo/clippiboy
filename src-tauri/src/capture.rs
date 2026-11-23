@@ -447,7 +447,12 @@ pub fn session_locked() -> Option<bool> {
             None
         } else {
             let info = &*(buffer.0 as *const WTSINFOEXW);
-            (info.Level == 1).then(|| info.Data.WTSInfoExLevel1.SessionFlags as u32)
+            // The union is read only when Level says which member it holds.
+            if info.Level == 1 {
+                Some(info.Data.WTSInfoExLevel1.SessionFlags as u32)
+            } else {
+                None
+            }
         };
         WTSFreeMemory(buffer.0 as *mut core::ffi::c_void);
         match flags? {

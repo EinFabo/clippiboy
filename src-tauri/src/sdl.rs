@@ -397,38 +397,38 @@ mod imp {
         .map_err(|err| format!("could not load: {err}"))?;
 
         macro_rules! symbol {
-            ($name:literal) => {{
+            ($name:literal, $ty:ty) => {{
                 let proc = unsafe { GetProcAddress(module, PCSTR(concat!($name, "\0").as_ptr())) }
                     .ok_or_else(|| format!("{} missing", $name))?;
                 // SAFETY: the type is the function's C signature in SDL 3.2+.
-                unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, _>(proc) }
+                unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, $ty>(proc) }
             }};
         }
 
-        let version: GetVersion = symbol!("SDL_GetVersion");
+        let version = symbol!("SDL_GetVersion", GetVersion);
         let found = unsafe { version() };
         if found < MIN_VERSION {
             return Err(format!("SDL {found} is older than 3.2"));
         }
         Ok(Sdl {
-            set_hint: symbol!("SDL_SetHintWithPriority"),
-            init: symbol!("SDL_Init"),
-            quit_sub_system: symbol!("SDL_QuitSubSystem"),
-            get_error: symbol!("SDL_GetError"),
-            set_joystick_events: symbol!("SDL_SetJoystickEventsEnabled"),
-            set_gamepad_events: symbol!("SDL_SetGamepadEventsEnabled"),
-            flush_events: symbol!("SDL_FlushEvents"),
-            update: symbol!("SDL_UpdateGamepads"),
-            get_gamepads: symbol!("SDL_GetGamepads"),
-            free: symbol!("SDL_free"),
-            open: symbol!("SDL_OpenGamepad"),
-            close: symbol!("SDL_CloseGamepad"),
-            connected: symbol!("SDL_GamepadConnected"),
-            button: symbol!("SDL_GetGamepadButton"),
-            axis: symbol!("SDL_GetGamepadAxis"),
-            name: symbol!("SDL_GetGamepadName"),
-            kind: symbol!("SDL_GetGamepadType"),
-            label: symbol!("SDL_GetGamepadButtonLabel"),
+            set_hint: symbol!("SDL_SetHintWithPriority", SetHintWithPriority),
+            init: symbol!("SDL_Init", Init),
+            quit_sub_system: symbol!("SDL_QuitSubSystem", QuitSubSystem),
+            get_error: symbol!("SDL_GetError", GetError),
+            set_joystick_events: symbol!("SDL_SetJoystickEventsEnabled", SetEventsEnabled),
+            set_gamepad_events: symbol!("SDL_SetGamepadEventsEnabled", SetEventsEnabled),
+            flush_events: symbol!("SDL_FlushEvents", FlushEvents),
+            update: symbol!("SDL_UpdateGamepads", Update),
+            get_gamepads: symbol!("SDL_GetGamepads", GetGamepads),
+            free: symbol!("SDL_free", Free),
+            open: symbol!("SDL_OpenGamepad", OpenGamepad),
+            close: symbol!("SDL_CloseGamepad", OnGamepad),
+            connected: symbol!("SDL_GamepadConnected", Connected),
+            button: symbol!("SDL_GetGamepadButton", GetButton),
+            axis: symbol!("SDL_GetGamepadAxis", GetAxis),
+            name: symbol!("SDL_GetGamepadName", GetName),
+            kind: symbol!("SDL_GetGamepadType", GetType),
+            label: symbol!("SDL_GetGamepadButtonLabel", GetLabel),
         })
     }
 }

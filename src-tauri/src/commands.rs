@@ -1264,7 +1264,7 @@ fn edit_screenshot(
     // the swap in `write_picture` would otherwise bring a deleted file back.
     let own = edit::clip_lock(&id);
     let _clip = own.lock();
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+    let clip = with_library(state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
         .ok_or_else(|| "clip not found".to_string())?;
     if !clip.screenshot {
         return Err("Only a screenshot can be edited this way.".into());
@@ -1280,7 +1280,7 @@ fn edit_screenshot(
     // mark noted beside it.
     if crop.is_none() && steps.is_empty() && marks.is_empty() {
         let whole = crate::shot::read_png(&crate::shot::original_path(&clip.id))?;
-        let clip = write_picture(&state, &clip, &whole)?;
+        let clip = write_picture(state, &clip, &whole)?;
         crate::shot::forget(&id);
         return Ok(clip);
     }
@@ -1344,7 +1344,7 @@ fn edit_screenshot(
     if let Some(shot) = &ground {
         shot.write_png(&base_part, &clip.id)?;
     }
-    let written = match write_picture(&state, &clip, &picture) {
+    let written = match write_picture(state, &clip, &picture) {
         Ok(written) => written,
         Err(err) => {
             let _ = std::fs::remove_file(&base_part);
@@ -2026,7 +2026,7 @@ pub async fn export_for_discord(
     blocking(move || -> Result<String> {
         let state = app.state::<AppState>();
         let output = discord_copy_of(&state, &app, &id, megabytes, true)?;
-        crate::clipboard::copy_files(&[output.clone()])?;
+        crate::clipboard::copy_files(std::slice::from_ref(&output))?;
         Ok(output.to_string_lossy().to_string())
     })
     .await
@@ -2139,7 +2139,7 @@ pub async fn export_shot_for_discord(
     blocking(move || -> Result<String> {
         let state = app.state::<AppState>();
         let output = shot_discord_copy_of(&state, &id, megabytes)?;
-        crate::clipboard::copy_files(&[output.clone()])?;
+        crate::clipboard::copy_files(std::slice::from_ref(&output))?;
         Ok(output.to_string_lossy().to_string())
     })
     .await
