@@ -345,11 +345,19 @@ pub fn refresh(app: &tauri::AppHandle, status: &EngineStatus) {
         tooltip.push_str(" · streamer mode");
     }
 
-    // Decided under the lock, set after it: `set_tooltip` waits for the main
-    // thread, and a `refresh` from there would have waited on this lock for good.
-    let changed = take_if_changed(&mut handles.last_tooltip.lock(), &tooltip);
-    if changed {
-        let _ = tray.set_tooltip(Some(&tooltip));
+    // Decided and queued under the lock, so two refreshes (the status thread,
+    // a settings restart) reach the tray in the order they decided. Never
+    // `set_tooltip` itself under it: that waits for the main thread, and a
+    // `refresh` from there would have waited on this lock for good. Queueing
+    // does not wait, and on the main thread it runs at once.
+    {
+        let mut last = handles.last_tooltip.lock();
+        if take_if_changed(&mut last, &tooltip) {
+            let tray = tray.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = tray.set_tooltip(Some(&tooltip));
+            });
+        }
     }
 
     let was_recording = handles

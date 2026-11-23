@@ -401,19 +401,19 @@ const WS_THICKFRAME: u32 = 0x0004_0000;
 /// `monitor` completely? True for real fullscreen as well as for a borderless
 /// window — both are signs of a game.
 ///
-/// Not for a maximized window, nor one with a title bar or a resize border:
-/// maximized, a framed window overhangs the screen by its border on every
-/// side, and on a screen without a taskbar that covered it too — any browser
-/// or editor maximized there counted as a game.
+/// Not for a framed window (a title bar or a resize border) that is maximized
+/// or overhangs the screen on every side: maximized, a framed window overhangs
+/// it by its border, and on a screen without a taskbar that covered it too —
+/// any browser or editor maximized there counted as a game. Only that case
+/// goes: a game missed here loses its Game track, "playing", the controller
+/// and its name on the clip, so a frameless popup counts even maximized, and
+/// a framed window sized exactly to the screen still counts.
 fn covers_monitor_rule(rect: [i32; 4], monitor: [i32; 4], zoomed: bool, style: u32) -> bool {
     let framed = style & WS_CAPTION == WS_CAPTION || style & WS_THICKFRAME != 0;
     let [left, top, right, bottom] = rect;
-    !zoomed
-        && !framed
-        && left <= monitor[0]
-        && top <= monitor[1]
-        && right >= monitor[2]
-        && bottom >= monitor[3]
+    let covers = left <= monitor[0] && top <= monitor[1] && right >= monitor[2] && bottom >= monitor[3];
+    let overhangs = left < monitor[0] && top < monitor[1] && right > monitor[2] && bottom > monitor[3];
+    covers && !(framed && (zoomed || overhangs))
 }
 
 #[cfg(windows)]
@@ -715,6 +715,18 @@ mod tests {
         assert!(covers_monitor_rule([1920, -1, 3841, 1081], [1920, 0, 3840, 1080], false, POPUP));
         // A popup with a thin line around it is still borderless.
         assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP | 0x0080_0000));
+        // A frameless popup counts maximized too, overhanging or not.
+        assert!(covers_monitor_rule(SCREEN, SCREEN, true, POPUP));
+        assert!(covers_monitor_rule([-8, -8, 1928, 1088], SCREEN, true, POPUP));
+    }
+
+    /// A game that keeps a frame style but sizes its window to the screen
+    /// exactly is still a game.
+    #[test]
+    fn a_framed_window_sized_exactly_to_the_screen_covers_it() {
+        assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_THICKFRAME));
+        assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_CAPTION));
+        assert!(covers_monitor_rule(SCREEN, SCREEN, false, FRAMED));
     }
 
     /// Maximized on a screen without a taskbar, a framed window overhangs it
@@ -722,11 +734,13 @@ mod tests {
     #[test]
     fn a_maximized_framed_window_is_no_fullscreen() {
         let maximized = [-8, -8, 1928, 1088];
+        // A browser or an editor, maximized.
         assert!(!covers_monitor_rule(maximized, SCREEN, true, FRAMED));
+        // Overhanging without the zoom flag (restored to the same rect).
         assert!(!covers_monitor_rule(maximized, SCREEN, false, FRAMED));
-        assert!(!covers_monitor_rule(maximized, SCREEN, true, POPUP));
-        assert!(!covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_THICKFRAME));
-        assert!(!covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_CAPTION));
+        // A frameless Chromium app keeps caption and resize border.
+        assert!(!covers_monitor_rule(maximized, SCREEN, true, POPUP | WS_CAPTION | WS_THICKFRAME));
+        assert!(!covers_monitor_rule(SCREEN, SCREEN, true, FRAMED));
     }
 
     #[test]
