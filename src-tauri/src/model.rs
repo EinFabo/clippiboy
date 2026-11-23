@@ -445,7 +445,6 @@ pub fn default_console_scale() -> f64 {
     1.0
 }
 
-
 /// Serde needs a function even for a plain `true`.
 fn yes() -> bool {
     true
@@ -637,7 +636,10 @@ pub struct PortraitLayout {
 
 impl Default for PortraitLayout {
     fn default() -> Self {
-        Self { split: 0.35, game_x: 0.5 }
+        Self {
+            split: 0.35,
+            game_x: 0.5,
+        }
     }
 }
 
@@ -872,7 +874,10 @@ pub struct SoundSetting {
 
 impl Default for SoundSetting {
     fn default() -> Self {
-        Self { on: true, volume: 1.0 }
+        Self {
+            on: true,
+            volume: 1.0,
+        }
     }
 }
 
@@ -1028,10 +1033,15 @@ impl PadProfiles {
     /// Every profile there is, `all` first.
     pub fn present(&self) -> Vec<(crate::bindings::Profile, &PadBindings)> {
         use crate::bindings::Profile;
-        [Profile::All, Profile::Xbox, Profile::PlayStation, Profile::Nintendo]
-            .into_iter()
-            .filter_map(|profile| self.get(profile).map(|set| (profile, set)))
-            .collect()
+        [
+            Profile::All,
+            Profile::Xbox,
+            Profile::PlayStation,
+            Profile::Nintendo,
+        ]
+        .into_iter()
+        .filter_map(|profile| self.get(profile).map(|set| (profile, set)))
+        .collect()
     }
 
     /// The bindings a pad of type `ty` goes by: its type's own, else `all`.
@@ -1463,11 +1473,15 @@ pub enum CamState {
     /// Running. ClippiBoy controls the camera, so other apps cannot use it meanwhile.
     Live,
     /// Another app holds the camera.
-    Taken { by: Option<String> },
+    Taken {
+        by: Option<String>,
+    },
     /// Windows' camera privacy blocks desktop apps.
     Blocked,
     NoCamera,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -1494,7 +1508,10 @@ mod tests {
         assert_eq!(clean(&|c| c.fps = 60).fps, 30);
         assert_eq!(clean(&|c| c.portrait.split = 0.9).portrait.split, 0.5);
         assert!((clean(&|c| c.portrait.game_x = f32::NAN).portrait.game_x - 0.5).abs() < 1e-6);
-        assert_eq!(clean(&|c| c.device_id = Some(String::new())).device_id, None);
+        assert_eq!(
+            clean(&|c| c.device_id = Some(String::new())).device_id,
+            None
+        );
     }
 
     /// Only `#rrggbb` gets into the CSS of three windows — the rest is violet.

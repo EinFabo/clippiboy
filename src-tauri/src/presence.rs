@@ -168,10 +168,17 @@ fn run(app: &AppHandle, inbox: &Receiver<Msg>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        let Some(state) = app.try_state::<AppState>() else { continue };
+        let Some(state) = app.try_state::<AppState>() else {
+            continue;
+        };
         let enabled = state.config.lock().friends.discord_status;
         let playing = state.current_game.lock().is_some();
-        let want = wanted(enabled, SUPPRESSED.load(Ordering::SeqCst), playing, HIDE_WHILE_PLAYING);
+        let want = wanted(
+            enabled,
+            SUPPRESSED.load(Ordering::SeqCst),
+            playing,
+            HIDE_WHILE_PLAYING,
+        );
 
         if !want {
             if let Some(mut gone) = link.take() {
@@ -244,7 +251,11 @@ impl Link {
         // passed over for the next.
         let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no Discord pipe");
         for n in 0..10 {
-            let Ok(pipe) = OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{n}")) else {
+            let Ok(pipe) = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(format!(r"\\.\pipe\discord-ipc-{n}"))
+            else {
                 continue;
             };
             let mut link = Self { pipe, nonce: 0 };
@@ -257,12 +268,18 @@ impl Link {
     }
 
     fn greet(&mut self) -> std::io::Result<()> {
-        self.pipe.write_all(&frame(OP_HANDSHAKE, &json!({ "v": 1, "client_id": CLIENT_ID }))?)?;
+        self.pipe.write_all(&frame(
+            OP_HANDSHAKE,
+            &json!({ "v": 1, "client_id": CLIENT_ID }),
+        )?)?;
         let (op, ready) = self.receive()?;
         if op == OP_FRAME && ready["evt"] == "READY" {
             Ok(())
         } else {
-            Err(std::io::Error::other(format!("handshake refused (op {op}): {}", ready["message"])))
+            Err(std::io::Error::other(format!(
+                "handshake refused (op {op}): {}",
+                ready["message"]
+            )))
         }
     }
 
@@ -270,7 +287,9 @@ impl Link {
     fn receive(&mut self) -> std::io::Result<(u32, Value)> {
         let deadline = Instant::now() + ANSWER_WAIT;
         let pipe = &self.pipe;
-        read_frame(&mut &self.pipe, &mut |bytes| wait_for(pipe, bytes, deadline))
+        read_frame(&mut &self.pipe, &mut |bytes| {
+            wait_for(pipe, bytes, deadline)
+        })
     }
 
     /// Sends the activity (or clears it with `None`) and waits for Discord's answer.
@@ -284,10 +303,18 @@ impl Link {
             let (op, body) = self.receive()?;
             match op {
                 OP_PING => self.pipe.write_all(&frame(OP_PONG, &body)?)?,
-                OP_CLOSE => return Err(std::io::Error::other(format!("closed by Discord: {}", body["message"]))),
+                OP_CLOSE => {
+                    return Err(std::io::Error::other(format!(
+                        "closed by Discord: {}",
+                        body["message"]
+                    )))
+                }
                 OP_FRAME if body["nonce"] == nonce.as_str() => {
                     return if body["evt"] == "ERROR" {
-                        Err(std::io::Error::other(format!("refused: {}", body["data"]["message"])))
+                        Err(std::io::Error::other(format!(
+                            "refused: {}",
+                            body["data"]["message"]
+                        )))
                     } else {
                         Ok(())
                     };
@@ -341,13 +368,25 @@ fn wait_for(pipe: &File, bytes: usize, deadline: Instant) -> std::io::Result<()>
     let handle = HANDLE(pipe.as_raw_handle());
     loop {
         let mut available = 0u32;
-        unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available as *mut u32), None) }
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err.to_string()))?;
+        unsafe {
+            PeekNamedPipe(
+                handle,
+                None,
+                0,
+                None,
+                Some(&mut available as *mut u32),
+                None,
+            )
+        }
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err.to_string()))?;
         if available as usize >= bytes {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Discord did not answer"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Discord did not answer",
+            ));
         }
         std::thread::sleep(Duration::from_millis(15));
     }
@@ -366,9 +405,18 @@ mod tests {
     fn the_status_follows_the_setting_and_the_suppression() {
         assert!(wanted(true, false, false, false));
         assert!(!wanted(false, false, false, false), "switched off");
-        assert!(!wanted(true, true, false, false), "suppressed, e.g. streamer mode");
-        assert!(wanted(true, false, true, false), "a game running changes nothing by default");
-        assert!(!wanted(true, false, true, true), "unless it is to hide while playing");
+        assert!(
+            !wanted(true, true, false, false),
+            "suppressed, e.g. streamer mode"
+        );
+        assert!(
+            wanted(true, false, true, false),
+            "a game running changes nothing by default"
+        );
+        assert!(
+            !wanted(true, false, true, true),
+            "unless it is to hide while playing"
+        );
         assert!(wanted(true, false, false, true));
     }
 
@@ -396,7 +444,9 @@ mod tests {
         assert_eq!(activity["buttons"][0]["url"], "https://clippiboy.com");
         assert!(activity.get("timestamps").is_none(), "no counter");
         // Clearing leaves the activity out altogether.
-        assert!(set_activity(42, None, "8")["args"].get("activity").is_none());
+        assert!(set_activity(42, None, "8")["args"]
+            .get("activity")
+            .is_none());
     }
 
     #[test]
@@ -404,14 +454,21 @@ mod tests {
         let body = json!({ "cmd": "SET_ACTIVITY", "nonce": "1" });
         let bytes = frame(OP_FRAME, &body).unwrap();
         assert_eq!(&bytes[..4], &1u32.to_le_bytes());
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+            bytes.len() - 8
+        );
         let mut asked = Vec::new();
         let (op, back) = read_frame(&mut bytes.as_slice(), &mut |n| {
             asked.push(n);
             Ok(())
         })
         .unwrap();
-        assert_eq!(asked, vec![8, bytes.len() - 8], "each read waits for its bytes first");
+        assert_eq!(
+            asked,
+            vec![8, bytes.len() - 8],
+            "each read waits for its bytes first"
+        );
         assert_eq!(op, OP_FRAME);
         assert_eq!(back, body);
     }
@@ -427,7 +484,8 @@ mod tests {
     #[test]
     fn a_silent_pipe_breaks_the_read_instead_of_blocking() {
         let bytes = frame(OP_FRAME, &json!({})).unwrap();
-        let timed_out = || std::io::Error::new(std::io::ErrorKind::TimedOut, "Discord did not answer");
+        let timed_out =
+            || std::io::Error::new(std::io::ErrorKind::TimedOut, "Discord did not answer");
         let err = read_frame(&mut bytes.as_slice(), &mut |_| Err(timed_out())).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }

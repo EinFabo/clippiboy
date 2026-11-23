@@ -178,20 +178,28 @@ pub fn source_from_file_name(name: &str) -> Option<String> {
     let mut stem = lower.strip_suffix(".exe")?;
     if let Some(open) = stem.rfind(" (") {
         let inner = &stem[open + 2..];
-        if inner.len() > 1 && inner.ends_with(')') && inner[..inner.len() - 1].bytes().all(|b| b.is_ascii_digit()) {
+        if inner.len() > 1
+            && inner.ends_with(')')
+            && inner[..inner.len() - 1].bytes().all(|b| b.is_ascii_digit())
+        {
             stem = &stem[..open];
         }
     }
     let (_, source) = stem.rsplit_once("-setup.")?;
     let valid = (1..=32).contains(&source.len())
-        && source.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        && source
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     valid.then(|| source.to_string())
 }
 
 static USAGE: LazyLock<Mutex<Usage>> = LazyLock::new(|| Mutex::new(Usage::default()));
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn clip() {
@@ -271,7 +279,12 @@ fn send_if_due(app: &tauri::AppHandle) {
     });
     let url = format!("{}/t/ping", crate::friends::SERVER);
     let outcome = tauri::async_runtime::block_on(async {
-        let response = client().post(url).json(&body).send().await.map_err(|err| err.to_string())?;
+        let response = client()
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| err.to_string())?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -384,14 +397,30 @@ mod tests {
         usage.count(Event::Shot);
         usage.count(Event::Used(Feature::Console));
         usage.count(Event::Used(Feature::ShareLink));
-        assert_eq!(usage.file.pending, Counts { clips: 3, shots: 1, recordings: 0, features: 0b1001 });
+        assert_eq!(
+            usage.file.pending,
+            Counts {
+                clips: 3,
+                shots: 1,
+                recordings: 0,
+                features: 0b1001
+            }
+        );
 
         // Taken for a send that then fails: nothing is lost, the two clips
         // counted meanwhile add on.
         let (_, first) = usage.snapshot();
         usage.count(Event::Clip);
         usage.count(Event::Clip);
-        assert_eq!(usage.file.pending, Counts { clips: 5, shots: 1, recordings: 0, features: 0b1001 });
+        assert_eq!(
+            usage.file.pending,
+            Counts {
+                clips: 5,
+                shots: 1,
+                recordings: 0,
+                features: 0b1001
+            }
+        );
 
         // The next one gets through; what came in during it stays for later.
         let (_, second) = usage.snapshot();
@@ -399,7 +428,15 @@ mod tests {
         usage.count(Event::Clip);
         usage.count(Event::Used(Feature::Friends));
         usage.sent(&second, 1_000);
-        assert_eq!(usage.file.pending, Counts { clips: 1, shots: 0, recordings: 0, features: 0b0010 });
+        assert_eq!(
+            usage.file.pending,
+            Counts {
+                clips: 1,
+                shots: 0,
+                recordings: 0,
+                features: 0b0010
+            }
+        );
         assert_eq!(usage.file.last_sent, 1_000);
 
         // And all of it survives a restart.
@@ -425,7 +462,10 @@ mod tests {
     #[test]
     fn nothing_goes_out_before_someone_said_yes() {
         let hour = 3600;
-        let file = UsageFile { last_sent: 100 * hour, ..Default::default() };
+        let file = UsageFile {
+            last_sent: 100 * hour,
+            ..Default::default()
+        };
         assert!(!due(&file, true, false, 200 * hour));
         assert!(due(&file, true, true, 120 * hour));
         assert!(!due(&file, true, true, 119 * hour));

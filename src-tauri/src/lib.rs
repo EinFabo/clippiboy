@@ -4,8 +4,8 @@ pub mod bindings;
 pub mod buffer;
 pub mod camera;
 pub mod camtrack;
-pub mod child;
 pub mod capture;
+pub mod child;
 pub mod cleanup;
 pub mod clipboard;
 pub mod clips;
@@ -14,7 +14,6 @@ pub mod composite;
 pub mod config;
 pub mod console;
 pub mod consolenav;
-pub mod focus;
 pub mod control;
 pub mod convert;
 pub mod disk;
@@ -23,42 +22,43 @@ pub mod encode;
 pub mod export;
 pub mod facecam;
 pub mod filing;
+pub mod focus;
 pub mod friends;
 pub mod game;
-pub mod links;
-pub mod share;
-pub mod peers;
-pub mod secret;
 pub mod gpu;
-pub mod inputpoll;
 #[cfg(test)]
 mod grants;
+pub mod inputpoll;
+pub mod links;
 pub mod logging;
 pub mod mft;
 pub mod model;
 pub mod muxer;
 pub mod overlay;
+pub mod peers;
 pub mod pipeline;
-pub mod recorder;
-pub mod preview;
 pub mod presence;
+pub mod preview;
+pub mod reccam;
+pub mod recorder;
+pub mod sdl;
+pub mod secret;
+pub mod share;
 pub mod shot;
 pub mod shotfit;
 pub mod sounds;
 pub mod state;
 pub mod stems;
-pub mod streamer;
 pub mod stills;
+pub mod streamer;
 pub mod sweep;
+pub mod telemetry;
 pub mod thumbs;
 pub mod tint;
-pub mod telemetry;
 pub mod tools;
 pub mod trash;
 pub mod tray;
 pub mod ts;
-pub mod reccam;
-pub mod sdl;
 pub mod updater;
 pub mod vcam;
 pub mod watermark;
@@ -69,8 +69,8 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 
-use overlay::BannerKind;
 use model::SoundKind;
+use overlay::BannerKind;
 use state::AppState;
 
 /// Message to the UI (toast).
@@ -131,8 +131,14 @@ fn store_tags(state: &AppState, clip: &mut model::Clip, names: Vec<String>) {
 /// Phase one of the facecam: the cam cut by the clip's window into the clip's
 /// store. A cam that cannot be written costs the cam, never the clip.
 fn save_cam(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip, cam: state::CamSave) {
-    let Some(out) = state.camera.cut(&cam.window, std::time::Duration::from_millis(500)) else {
-        log::info!("no cam for clip {}: the cam had no picture in its window", clip.id);
+    let Some(out) = state
+        .camera
+        .cut(&cam.window, std::time::Duration::from_millis(500))
+    else {
+        log::info!(
+            "no cam for clip {}: the cam had no picture in its window",
+            clip.id
+        );
         return;
     };
     match facecam::write_phase_one(&clip.id, &out, cam.window.length_us, cam.game_gop) {
@@ -143,7 +149,11 @@ fn save_cam(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip, ca
                 layout,
                 portrait: config.facecam.portrait,
                 delay_ms: facecam::saved_delay_ms(config.facecam.delay_ms, facts.clock),
-                state: if layout.visible { model::FacecamState::Pending } else { model::FacecamState::Ready },
+                state: if layout.visible {
+                    model::FacecamState::Pending
+                } else {
+                    model::FacecamState::Ready
+                },
             };
             log::info!(
                 "cam for clip {}: {} frames, offset {} µs, clock {:?}",
@@ -168,7 +178,10 @@ fn save_cam(app: &tauri::AppHandle, state: &AppState, clip: &mut model::Clip, ca
     }
 }
 
-pub fn save_clip_and_notify(app: &tauri::AppHandle, seconds: Option<u32>) -> Result<model::Clip, String> {
+pub fn save_clip_and_notify(
+    app: &tauri::AppHandle,
+    seconds: Option<u32>,
+) -> Result<model::Clip, String> {
     let state = app.state::<AppState>();
 
     // Debounce before anything happens: if a save is already running, the key
@@ -259,7 +272,10 @@ pub fn wait_for_saves(app: &tauri::AppHandle) {
         );
     }
     if !state::wait_until_idle(busy, QUIT_WAIT, std::time::Duration::from_millis(100)) {
-        log::warn!("still saving after {} s — quitting anyway", QUIT_WAIT.as_secs());
+        log::warn!(
+            "still saving after {} s — quitting anyway",
+            QUIT_WAIT.as_secs()
+        );
     }
 }
 
@@ -269,7 +285,10 @@ pub fn wait_for_saves(app: &tauri::AppHandle) {
 pub fn quit(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     // A second click while the first one waits changes nothing.
-    if state.quitting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if state
+        .quitting
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
         return;
     }
     // Still on the main thread, where the tray handler runs.
@@ -327,7 +346,12 @@ pub fn take_screenshot_and_notify(app: &tauri::AppHandle) -> Result<model::Clip,
         Err(err) => {
             notify(app, "error", err.clone());
             sounds::play(app, SoundKind::Error);
-            overlay::show(app, BannerKind::Error, "Screenshot failed", Some(err.clone()));
+            overlay::show(
+                app,
+                BannerKind::Error,
+                "Screenshot failed",
+                Some(err.clone()),
+            );
             Err(err)
         }
     }
@@ -359,7 +383,12 @@ pub fn start_recording_and_notify(app: &tauri::AppHandle) {
         Err(err) => {
             notify(app, "error", err.clone());
             sounds::play(app, SoundKind::Error);
-            overlay::show(app, BannerKind::Error, "Recording will not start", Some(err));
+            overlay::show(
+                app,
+                BannerKind::Error,
+                "Recording will not start",
+                Some(err),
+            );
         }
     }
 }
@@ -383,7 +412,12 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
             overlay::set_recording(app, state.is_recording());
             notify(app, "error", err.clone());
             sounds::play(app, SoundKind::Error);
-            overlay::show(app, BannerKind::Error, "Recording failed", Some(err.clone()));
+            overlay::show(
+                app,
+                BannerKind::Error,
+                "Recording failed",
+                Some(err.clone()),
+            );
             return Err(err);
         }
     };
@@ -415,7 +449,9 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
             overlay::show_with_thumb(
                 app,
                 BannerKind::Recording,
-                clip.game.clone().unwrap_or_else(|| "Recording saved".into()),
+                clip.game
+                    .clone()
+                    .unwrap_or_else(|| "Recording saved".into()),
                 Some(saved),
                 clip.thumb_path.clone(),
             );
@@ -424,7 +460,12 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
         Err(err) => {
             notify(app, "error", err.clone());
             sounds::play(app, SoundKind::Error);
-            overlay::show(app, BannerKind::Error, "Recording failed", Some(err.clone()));
+            overlay::show(
+                app,
+                BannerKind::Error,
+                "Recording failed",
+                Some(err.clone()),
+            );
             Err(err)
         }
     }
@@ -635,7 +676,12 @@ fn buffer_started(app: &tauri::AppHandle) {
         Some(game) => format!("{game} · last {seconds} s"),
         None => format!("Keeping the last {seconds} s"),
     };
-    overlay::show(app, BannerKind::Buffer, "Replay buffer running", Some(detail));
+    overlay::show(
+        app,
+        BannerKind::Buffer,
+        "Replay buffer running",
+        Some(detail),
+    );
     report_audio_trouble(app);
 }
 
@@ -838,7 +884,9 @@ fn watch_monitors(app: &tauri::AppHandle) {
     let now = capture::current_fingerprint();
     let (screens_changed, any_change, settled) = {
         let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let screens_changed = last.as_ref().is_some_and(|last| last.screens != now.screens);
+        let screens_changed = last
+            .as_ref()
+            .is_some_and(|last| last.screens != now.screens);
         let any_change = last.as_ref().is_some_and(|last| *last != now);
         let settled = capture::settled(last.as_ref(), &now);
         *last = Some(now.clone());
@@ -861,7 +909,9 @@ fn watch_monitors(app: &tauri::AppHandle) {
         return;
     }
     let before = {
-        let mut last = SETTLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut last = SETTLED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if last.as_ref() == Some(&now) {
             None
         } else {
@@ -895,8 +945,7 @@ static CAPTURE_RESTARTING: std::sync::atomic::AtomicBool =
 
 /// Restarts for a changed topology and for a stalled capture, together: a
 /// screen that keeps dropping out must not empty the buffer every few seconds.
-static CAPTURE_BUDGET: std::sync::Mutex<Option<state::RestartBudget>> =
-    std::sync::Mutex::new(None);
+static CAPTURE_BUDGET: std::sync::Mutex<Option<state::RestartBudget>> = std::sync::Mutex::new(None);
 
 /// May the capture be restarted once more now? Says so once when it may not.
 fn capture_budget_allows(why: &str) -> bool {
@@ -1034,7 +1083,12 @@ fn watch_stall(app: &tauri::AppHandle) {
     let Some(shared) = state.shared.lock().clone() else {
         return;
     };
-    let Some(recorded) = shared.source.lock().as_ref().map(|choice| choice.target.clone()) else {
+    let Some(recorded) = shared
+        .source
+        .lock()
+        .as_ref()
+        .map(|choice| choice.target.clone())
+    else {
         return;
     };
     // A window capture: see above.
@@ -1066,7 +1120,8 @@ fn watch_stall(app: &tauri::AppHandle) {
         CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
         return;
     }
-    let quiet = now.saturating_duration_since(state::quiet_since(armed_at, last_new, shared.started));
+    let quiet =
+        now.saturating_duration_since(state::quiet_since(armed_at, last_new, shared.started));
     let screen = recorded.id;
     log::warn!(
         "no new frame for {:.0} s after {why}, with the game on the recorded screen {screen} \u{2014} restarting the capture",
@@ -1198,14 +1253,23 @@ fn watch_encoder(app: &tauri::AppHandle) {
     if !allowed {
         CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
         if !GAVE_UP.swap(true, Ordering::SeqCst) {
-            log::error!("the video encoder keeps failing ({why}) \u{2014} no more restarts for now");
-            notify(app, "error", format!("The video encoder keeps failing ({why})."));
+            log::error!(
+                "the video encoder keeps failing ({why}) \u{2014} no more restarts for now"
+            );
+            notify(
+                app,
+                "error",
+                format!("The video encoder keeps failing ({why})."),
+            );
             sounds::play(app, SoundKind::Error);
             overlay::show(
                 app,
                 BannerKind::Error,
                 "Video encoder keeps failing",
-                Some("Pick another encoder under Settings \u{2192} Recording, or restart ClippiBoy.".into()),
+                Some(
+                    "Pick another encoder under Settings \u{2192} Recording, or restart ClippiBoy."
+                        .into(),
+                ),
             );
         }
         return;
@@ -1234,7 +1298,12 @@ fn watch_encoder(app: &tauri::AppHandle) {
         let recording_stopped = || {
             notify(&app, "error", format!("Recording stopped: {stop_body}"));
             sounds::play(&app, SoundKind::Error);
-            overlay::show(&app, BannerKind::Error, "Recording stopped", Some(stop_body.clone()));
+            overlay::show(
+                &app,
+                BannerKind::Error,
+                "Recording stopped",
+                Some(stop_body.clone()),
+            );
         };
         match state.restart_capture(|| true) {
             Ok(false) => {
@@ -1309,7 +1378,8 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
     // The events a capture has been seen to die in without a word: the stall
     // watch keeps an eye on the capture after each (`watch_stall`).
     {
-        static WAS_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static WAS_LOCKED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         let unlocked = WAS_LOCKED.swap(locked, std::sync::atomic::Ordering::SeqCst) && !locked;
         if signals.woke {
             arm_stall_watch("the wake from sleep");
@@ -1340,7 +1410,9 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
                     log::info!("the screen is locked \u{2014} the buffer stops until the unlock")
                 }
                 state::AutoAction::Start => {
-                    log::info!("the screen is unlocked \u{2014} the buffer starts on a fresh capture")
+                    log::info!(
+                        "the screen is unlocked \u{2014} the buffer starts on a fresh capture"
+                    )
                 }
                 _ => {}
             }
@@ -1354,9 +1426,13 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
     // and stopping waits, if need be, for a save in progress.
     let app = app.clone();
     // Raised here, lowered by the thread's end on any exit.
-    let starting = (action == state::AutoAction::Start)
-        .then(|| state::FlagGuard::raise(&AUTO_STARTING));
-    let reason = if signals.woke { "awake again" } else { "the display is back on" };
+    let starting =
+        (action == state::AutoAction::Start).then(|| state::FlagGuard::raise(&AUTO_STARTING));
+    let reason = if signals.woke {
+        "awake again"
+    } else {
+        "the display is back on"
+    };
     std::thread::spawn(move || match action {
         state::AutoAction::Start => {
             let _starting = starting;
@@ -1595,7 +1671,10 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
 
     // Unbound while the console is switched off.
     let console = if config.console_enabled {
-        [config.console_hotkey.as_str(), config.console_hotkey_alt.as_str()]
+        [
+            config.console_hotkey.as_str(),
+            config.console_hotkey_alt.as_str(),
+        ]
     } else {
         ["", ""]
     };
@@ -1610,7 +1689,10 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
         (Action::Record, config.record_hotkey.as_str()),
         (Action::Record, config.record_hotkey_alt.as_str()),
         (Action::ToggleBuffer, config.toggle_buffer_hotkey.as_str()),
-        (Action::ToggleBuffer, config.toggle_buffer_hotkey_alt.as_str()),
+        (
+            Action::ToggleBuffer,
+            config.toggle_buffer_hotkey_alt.as_str(),
+        ),
     ];
 
     let mut failed: Vec<String> = Vec::new();
@@ -1647,7 +1729,9 @@ pub fn register_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
             Trigger::Mouse(button, mods) => table.bind_mouse(*button, *mods, binding.mode, action),
             // Controller bindings live in the profiles below; one left here
             // by hand would go nowhere a pad is read for.
-            Trigger::Pad(_) => log::warn!("hotkey '{text}' ignored: controller bindings go in a profile"),
+            Trigger::Pad(_) => {
+                log::warn!("hotkey '{text}' ignored: controller bindings go in a profile")
+            }
         }
     }
 
@@ -1777,7 +1861,8 @@ fn guard_recording_room(app: &tauri::AppHandle) {
             }
             STOPPING.store(false, Ordering::Relaxed);
         });
-    } else if free < 2 * needed + RECORDING_MIN_START_BYTES && !WARNED.swap(true, Ordering::Relaxed) {
+    } else if free < 2 * needed + RECORDING_MIN_START_BYTES && !WARNED.swap(true, Ordering::Relaxed)
+    {
         sounds::play(app, SoundKind::Error);
         overlay::show(
             app,
@@ -1898,7 +1983,10 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     // asks for it.
                     if sources.iter().any(|s| {
                         s.enabled
-                            && matches!(s.kind, model::SourceKind::Game | model::SourceKind::Process { .. })
+                            && matches!(
+                                s.kind,
+                                model::SourceKind::Game | model::SourceKind::Process { .. }
+                            )
                     }) {
                         let tree = audio::devices::process_tree();
                         let own = std::process::id();
@@ -1919,12 +2007,9 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                         // name follows its host application from now on — read
                         // again right before the write, so an edit made since
                         // the snapshot is never overwritten with a stale copy.
-                        for (id, pid, exe, label) in audio::helper_migrations(
-                            &sources,
-                            &tree,
-                            own,
-                            audio::app_capture_ok(),
-                        ) {
+                        for (id, pid, exe, label) in
+                            audio::helper_migrations(&sources, &tree, own, audio::app_capture_ok())
+                        {
                             let Some(before) = sources.iter().find(|s| s.id == id) else {
                                 continue;
                             };
@@ -2149,47 +2234,49 @@ fn maintain_library(app: &tauri::AppHandle) {
     }
 
     clips::PASSES_RUNNING.store(true, Ordering::SeqCst);
-    let spawned = std::thread::Builder::new().name("clippiboy-library".into()).spawn({
-        let app = app.clone();
-        move || {
-            let _finished = Finished(app.clone());
-            let state = app.state::<AppState>();
-            let clip_dir = state.config_snapshot().clip_dir;
-            // The folder the clips are filed into first, then the older ones.
-            allow_clip_dir(&app, &clip_dir);
-            let listed = clips::with_library(&state.library, |lib| lib.list());
-            if let Some(Ok(rows)) = &listed {
-                allow_existing_clip_dirs(&app, rows);
-            }
-            drop(listed);
-            // The asset scope holds nothing else (`tauri.conf.json`): a window
-            // that read the list before these grants reads it again now.
-            let _ = app.emit("clips-changed", ());
-            // After a pass that changed something, the gallery learns of it
-            // at once rather than at the very end.
-            let announce = |changed: usize| {
-                if changed > 0 {
-                    let _ = app.emit("clips-changed", ());
+    let spawned = std::thread::Builder::new()
+        .name("clippiboy-library".into())
+        .spawn({
+            let app = app.clone();
+            move || {
+                let _finished = Finished(app.clone());
+                let state = app.state::<AppState>();
+                let clip_dir = state.config_snapshot().clip_dir;
+                // The folder the clips are filed into first, then the older ones.
+                allow_clip_dir(&app, &clip_dir);
+                let listed = clips::with_library(&state.library, |lib| lib.list());
+                if let Some(Ok(rows)) = &listed {
+                    allow_existing_clip_dirs(&app, rows);
                 }
-            };
-            announce(edit::repair(&state.library));
-            // A cam that was on its way when the app last stopped: put the
-            // clean clip back, finish a swap, or composite again.
-            announce(composite::recover(&state.library));
-            // A recording whose camera was being burned in.
-            announce(reccam::recover(&state.library));
-            // Pictures from older versions still sit next to the videos.
-            announce(thumbs::migrate(&state.library));
-            // Game names first, folders second: a name that differs only in
-            // characters nobody can see has to become the one name before
-            // `tidy` works out where its clips belong — otherwise it would
-            // dutifully file them into the four folders they came from.
-            announce(filing::normalize_games(&state.library));
-            // And whatever has not found its way into its game folder since
-            // last time moves there now.
-            announce(filing::tidy(&state.library, &clip_dir));
-        }
-    });
+                drop(listed);
+                // The asset scope holds nothing else (`tauri.conf.json`): a window
+                // that read the list before these grants reads it again now.
+                let _ = app.emit("clips-changed", ());
+                // After a pass that changed something, the gallery learns of it
+                // at once rather than at the very end.
+                let announce = |changed: usize| {
+                    if changed > 0 {
+                        let _ = app.emit("clips-changed", ());
+                    }
+                };
+                announce(edit::repair(&state.library));
+                // A cam that was on its way when the app last stopped: put the
+                // clean clip back, finish a swap, or composite again.
+                announce(composite::recover(&state.library));
+                // A recording whose camera was being burned in.
+                announce(reccam::recover(&state.library));
+                // Pictures from older versions still sit next to the videos.
+                announce(thumbs::migrate(&state.library));
+                // Game names first, folders second: a name that differs only in
+                // characters nobody can see has to become the one name before
+                // `tidy` works out where its clips belong — otherwise it would
+                // dutifully file them into the four folders they came from.
+                announce(filing::normalize_games(&state.library));
+                // And whatever has not found its way into its game folder since
+                // last time moves there now.
+                announce(filing::tidy(&state.library, &clip_dir));
+            }
+        });
     if let Err(err) = spawned {
         log::warn!("the library passes could not start: {err}");
         clips::PASSES_RUNNING.store(false, Ordering::SeqCst);
@@ -2351,17 +2438,19 @@ pub fn run() {
             // Before it, the clean-up by age moves what is too old in there.
             {
                 let app = handle.clone();
-                let _ = std::thread::Builder::new().name("clippiboy-trash".into()).spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(60));
-                    loop {
-                        if clips::passes_stopped() {
-                            break;
+                let _ = std::thread::Builder::new()
+                    .name("clippiboy-trash".into())
+                    .spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        loop {
+                            if clips::passes_stopped() {
+                                break;
+                            }
+                            cleanup::run(&app);
+                            commands::purge_expired(&app);
+                            std::thread::sleep(trash::CHECK_EVERY);
                         }
-                        cleanup::run(&app);
-                        commands::purge_expired(&app);
-                        std::thread::sleep(trash::CHECK_EVERY);
-                    }
-                });
+                    });
             }
             // "Using ClippiBoy" in the Discord status, on a thread of its own;
             // it reaches for Discord only once the status is wanted.
@@ -2619,8 +2708,14 @@ mod tests {
     /// without it for a few seconds and nothing said why.
     #[test]
     fn a_recording_stop_says_the_camera_is_coming() {
-        assert_eq!(format::recording_saved(83_000, false), "Recording saved · 1:23");
-        assert_eq!(format::recording_saved(83_000, true), "Recording saved · 1:23 · adding the camera");
+        assert_eq!(
+            format::recording_saved(83_000, false),
+            "Recording saved · 1:23"
+        );
+        assert_eq!(
+            format::recording_saved(83_000, true),
+            "Recording saved · 1:23 · adding the camera"
+        );
     }
 
     #[test]
@@ -2642,8 +2737,14 @@ mod tests {
         // Up out of a real folder, and up to the drive.
         assert!(grant_target(&inside.join("..").to_string_lossy()).is_none());
         let root = inside.ancestors().last().unwrap().to_path_buf();
-        let to_root = inside.join(std::iter::repeat_n("..", inside.components().count()).collect::<std::path::PathBuf>());
-        assert!(grant_target(&to_root.to_string_lossy()).is_none(), "{}", to_root.display());
+        let to_root = inside.join(
+            std::iter::repeat_n("..", inside.components().count()).collect::<std::path::PathBuf>(),
+        );
+        assert!(
+            grant_target(&to_root.to_string_lossy()).is_none(),
+            "{}",
+            to_root.display()
+        );
         assert!(grant_target(&root.to_string_lossy()).is_none());
         let _ = std::fs::remove_dir_all(&inside);
     }
@@ -2654,7 +2755,8 @@ mod tests {
     #[test]
     fn the_asset_scope_holds_nothing_until_a_folder_is_granted() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
-        let conf: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let protocol = &conf["app"]["security"]["assetProtocol"];
         assert_eq!(protocol["enable"], true);
         assert_eq!(protocol["scope"], serde_json::json!([]));
@@ -2676,7 +2778,11 @@ mod tests {
             shot::under_path("clip"),
         ];
         for file in files {
-            assert!(granted.iter().any(|dir| file.starts_with(dir)), "{} is not granted", file.display());
+            assert!(
+                granted.iter().any(|dir| file.starts_with(dir)),
+                "{} is not granted",
+                file.display()
+            );
         }
     }
 
@@ -2701,7 +2807,11 @@ mod tests {
             .arg(&drive)
             .output()
             .unwrap();
-        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
         assert!(grantable_dir(&link), "as text it looks like a folder");
         assert!(grant_target(&link.to_string_lossy()).is_none());
         std::fs::remove_dir(&link).unwrap();

@@ -14,7 +14,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let name = args.get(1).cloned();
     let seconds: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(12);
-    let out = args.get(3).cloned().unwrap_or_else(|| "cam-track.h264".into());
+    let out = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "cam-track.h264".into());
     let plan = |run: bool| CamPlan {
         run,
         stop_after: Duration::ZERO,
@@ -32,13 +35,20 @@ fn main() {
     for _ in 0..seconds {
         std::thread::sleep(Duration::from_secs(1));
         match track.status() {
-            Some(status) => println!("{:?} | {}", status.state, clippiboy_lib::camtrack::health_text(&status)),
+            Some(status) => println!(
+                "{:?} | {}",
+                status.state,
+                clippiboy_lib::camtrack::health_text(&status)
+            ),
             None => println!("no status yet"),
         }
     }
     // Phase one of a save, as if a 5 s clip had ended a second ago.
     let now = clippiboy_lib::audio::capture::now_100ns();
-    let window = clippiboy_lib::facecam::CamWindow { g0_100ns: now - 60_000_000, length_us: 5_000_000 };
+    let window = clippiboy_lib::facecam::CamWindow {
+        g0_100ns: now - 60_000_000,
+        length_us: 5_000_000,
+    };
     match track.cut(&window, Duration::from_millis(500)) {
         Some(out) => {
             let id = "clippiboy-test-cam-track";
@@ -58,7 +68,12 @@ fn main() {
     }
     let (header, packets, session, gaps) = {
         let ring = track.ring().lock();
-        (ring.header.clone(), ring.ring.snapshot_range(0, i64::MAX), ring.session, ring.gaps.len())
+        (
+            ring.header.clone(),
+            ring.ring.snapshot_range(0, i64::MAX),
+            ring.session,
+            ring.gaps.len(),
+        )
     };
     println!(
         "ring: session {session}, {} packets, header {} bytes, {} keyframes, gaps {gaps}, first pts {:?} last pts {:?}",

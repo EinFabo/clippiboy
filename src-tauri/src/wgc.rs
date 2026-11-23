@@ -128,11 +128,9 @@ fn capture_item(
     id: Option<&str>,
     stable: Option<&str>,
 ) -> Result<(GraphicsCaptureItem, Option<crate::capture::Choice>), String> {
-    let interop: IGraphicsCaptureItemInterop = windows::core::factory::<
-        GraphicsCaptureItem,
-        IGraphicsCaptureItemInterop,
-    >()
-    .map_err(|err| format!("capture interop: {err}"))?;
+    let interop: IGraphicsCaptureItemInterop =
+        windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+            .map_err(|err| format!("capture interop: {err}"))?;
 
     match kind {
         TargetKind::Monitor => {
@@ -170,11 +168,9 @@ fn capture_item(
         }
         TargetKind::Window => {
             let id = id.ok_or_else(|| "no window selected".to_string())?;
-            let raw = id
-                .trim_start_matches("0x")
-                .trim_start_matches("0X");
-            let handle = usize::from_str_radix(raw, 16)
-                .map_err(|_| format!("unusable window id: {id}"))?;
+            let raw = id.trim_start_matches("0x").trim_start_matches("0X");
+            let handle =
+                usize::from_str_radix(raw, 16).map_err(|_| format!("unusable window id: {id}"))?;
             if handle == 0 {
                 return Err("The selected window is no longer open.".into());
             }
@@ -231,7 +227,9 @@ where
         if let Err(err) = session.SetMinUpdateInterval(interval) {
             // CAP-5, left open on purpose: on older builds every extra monitor
             // frame is converted, then thrown away at the tick.
-            log::info!("Windows cannot limit the capture rate here ({err}) — every frame is converted");
+            log::info!(
+                "Windows cannot limit the capture rate here ({err}) — every frame is converted"
+            );
         }
     }
 
@@ -239,49 +237,50 @@ where
     let height = AtomicI32::new(size.Height);
     let state = Arc::new((Mutex::new(on_frame), width, height));
 
-    let handler = TypedEventHandler::<Direct3D11CaptureFramePool, windows::core::IInspectable>::new({
-        let state = state.clone();
-        let winrt = SendPtr(gpu.winrt.clone());
-        move |pool, _| {
-            let Some(pool) = pool.as_ref() else {
-                return Ok(());
-            };
-            let frame = pool.TryGetNextFrame()?;
-            let content = frame.ContentSize()?;
+    let handler =
+        TypedEventHandler::<Direct3D11CaptureFramePool, windows::core::IInspectable>::new({
+            let state = state.clone();
+            let winrt = SendPtr(gpu.winrt.clone());
+            move |pool, _| {
+                let Some(pool) = pool.as_ref() else {
+                    return Ok(());
+                };
+                let frame = pool.TryGetNextFrame()?;
+                let content = frame.ContentSize()?;
 
-            // Size changed (window resized, resolution switched): the pool has to
-            // be recreated, and this frame still hangs off the old one. Release
-            // first, then recreate — otherwise the old texture stays alive.
-            let (last_w, last_h) = (&state.1, &state.2);
-            if content.Width != last_w.load(Ordering::Relaxed)
-                || content.Height != last_h.load(Ordering::Relaxed)
-            {
-                drop(frame);
-                pool.Recreate(
-                    &*winrt,
-                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                    2,
-                    content,
-                )?;
-                last_w.store(content.Width, Ordering::Relaxed);
-                last_h.store(content.Height, Ordering::Relaxed);
-                return Ok(());
+                // Size changed (window resized, resolution switched): the pool has to
+                // be recreated, and this frame still hangs off the old one. Release
+                // first, then recreate — otherwise the old texture stays alive.
+                let (last_w, last_h) = (&state.1, &state.2);
+                if content.Width != last_w.load(Ordering::Relaxed)
+                    || content.Height != last_h.load(Ordering::Relaxed)
+                {
+                    drop(frame);
+                    pool.Recreate(
+                        &*winrt,
+                        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                        2,
+                        content,
+                    )?;
+                    last_w.store(content.Width, Ordering::Relaxed);
+                    last_h.store(content.Height, Ordering::Relaxed);
+                    return Ok(());
+                }
+
+                let surface = frame.Surface()?;
+                let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
+                let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
+                let qpc_100ns = frame.SystemRelativeTime()?.Duration;
+
+                (state.0.lock())(CapturedFrame {
+                    texture: &texture,
+                    width: content.Width.max(0) as u32,
+                    height: content.Height.max(0) as u32,
+                    qpc_100ns,
+                });
+                Ok(())
             }
-
-            let surface = frame.Surface()?;
-            let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
-            let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
-            let qpc_100ns = frame.SystemRelativeTime()?.Duration;
-
-            (state.0.lock())(CapturedFrame {
-                texture: &texture,
-                width: content.Width.max(0) as u32,
-                height: content.Height.max(0) as u32,
-                qpc_100ns,
-            });
-            Ok(())
-        }
-    });
+        });
 
     let token = pool
         .FrameArrived(&handler)
@@ -291,12 +290,13 @@ where
     // frame for all eternity, and what gets recorded is a still image with nothing
     // anywhere saying so.
     let closed_token = item
-        .Closed(&TypedEventHandler::<GraphicsCaptureItem, windows::core::IInspectable>::new(
-            move |_, _| {
-                on_closed();
-                Ok(())
-            },
-        ))
+        .Closed(&TypedEventHandler::<
+            GraphicsCaptureItem,
+            windows::core::IInspectable,
+        >::new(move |_, _| {
+            on_closed();
+            Ok(())
+        }))
         .map_err(|err| format!("Closed: {err}"))?;
 
     session

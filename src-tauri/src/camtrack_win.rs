@@ -11,13 +11,18 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{select, Receiver, Sender};
 use windows::Win32::Foundation::{RECT, TRUE};
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
 
 use super::{CamPlan, CamShared, PlanSender};
 use crate::audio::capture::now_100ns;
 use crate::camera::grid::{Grid, Out};
-use crate::camera::{self, colour_of, cover_crop, Backoff, CameraDevice, ClockKind, Error, Event, Frame, OpenMode, Source};
+use crate::camera::{
+    self, colour_of, cover_crop, Backoff, CameraDevice, ClockKind, Error, Event, Frame, OpenMode,
+    Source,
+};
 use crate::gpu::GpuDevice;
 use crate::mft::{EncoderSettings, RateMode, VideoEncoder};
 use crate::model::{CamState, CamStatus, EncoderId};
@@ -29,23 +34,42 @@ const SILENT: Duration = Duration::from_secs(5);
 const BLOCKED_RETRY: Duration = Duration::from_secs(30);
 
 enum Ask {
-    Open { id: Option<String>, name: Option<String>, capture: (u32, u32), generation: u64, events: Sender<(u64, Event)> },
+    Open {
+        id: Option<String>,
+        name: Option<String>,
+        capture: (u32, u32),
+        generation: u64,
+        events: Sender<(u64, Event)>,
+    },
     Close(Box<dyn Source>),
     Holder(CameraDevice),
-    StartEncoder { session: u64, gpu: Arc<GpuDevice>, settings: EncoderSettings },
+    StartEncoder {
+        session: u64,
+        gpu: Arc<GpuDevice>,
+        settings: EncoderSettings,
+    },
     StopEncoder(VideoEncoder),
 }
 
 enum Answer {
-    Opened { generation: u64, result: Result<(Box<dyn Source>, CameraDevice), (Error, Option<CameraDevice>)> },
+    Opened {
+        generation: u64,
+        result: Result<(Box<dyn Source>, CameraDevice), (Error, Option<CameraDevice>)>,
+    },
     Holder(Option<String>),
-    Encoder { session: u64, result: Result<VideoEncoder, String> },
+    Encoder {
+        session: u64,
+        result: Result<VideoEncoder, String>,
+    },
 }
 
 /// Both threads join the multithreaded apartment and bring Media Foundation up.
 fn join_mta() {
     unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
     }
     let _ = crate::mft::startup();
 }
@@ -62,10 +86,12 @@ pub(super) fn spawn(shared: Arc<CamShared>, plans: Receiver<CamPlan>, sender: Pl
         *sender.lock() = None;
         return;
     }
-    let worker = std::thread::Builder::new().name("clippiboy-cam".into()).spawn(move || {
-        join_mta();
-        Worker::new(shared, plans, sender, ask, answers).run();
-    });
+    let worker = std::thread::Builder::new()
+        .name("clippiboy-cam".into())
+        .spawn(move || {
+            join_mta();
+            Worker::new(shared, plans, sender, ask, answers).run();
+        });
     if let Err(err) = worker {
         log::error!("cam worker thread: {err}");
     }
@@ -76,7 +102,13 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
     // Ends when the worker has gone and every job it left is done.
     while let Ok(ask) = asks.recv() {
         match ask {
-            Ask::Open { id, name, capture, generation, events } => {
+            Ask::Open {
+                id,
+                name,
+                capture,
+                generation,
+                events,
+            } => {
                 let result = match camera::find(id.as_deref(), name.as_deref()) {
                     None => Err((Error::NoCamera, None)),
                     Some(device) => {
@@ -90,8 +122,16 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
                             }
                             let _ = events.send((generation, event));
                         });
-                        let mode = OpenMode::Controlling { width: capture.0, height: capture.1 };
-                        let cancelled = || shared.open_generation.load(std::sync::atomic::Ordering::SeqCst) != generation;
+                        let mode = OpenMode::Controlling {
+                            width: capture.0,
+                            height: capture.1,
+                        };
+                        let cancelled = || {
+                            shared
+                                .open_generation
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                                != generation
+                        };
                         match camera::open(&device, mode, sink, &cancelled) {
                             Ok(source) => Ok((source, device)),
                             Err(err) => Err((err, Some(device))),
@@ -103,10 +143,18 @@ fn helper(shared: Arc<CamShared>, asks: Receiver<Ask>, answer: Sender<Answer>) {
             Ask::Close(source) => source.close(),
             Ask::Holder(device) => {
                 // Frame Server's activity report knows only its own cameras.
-                let by = if device.id.starts_with(camera::dshow::PREFIX) { None } else { camera::windows::holder(&device) };
+                let by = if device.id.starts_with(camera::dshow::PREFIX) {
+                    None
+                } else {
+                    camera::windows::holder(&device)
+                };
                 let _ = answer.send(Answer::Holder(by));
             }
-            Ask::StartEncoder { session, gpu, settings } => {
+            Ask::StartEncoder {
+                session,
+                gpu,
+                settings,
+            } => {
                 let packets = shared.clone();
                 let headers = shared.clone();
                 let result = VideoEncoder::start(
@@ -130,7 +178,13 @@ fn publish_to_vcam(shared: &CamShared, frame: &Frame) {
         return;
     }
     if let Some(writer) = shared.vcam.lock().as_ref() {
-        writer.publish(&frame.nv12, frame.probe.width, frame.probe.height, frame.probe.qpc_100ns, now_100ns());
+        writer.publish(
+            &frame.nv12,
+            frame.probe.width,
+            frame.probe.height,
+            frame.probe.qpc_100ns,
+            now_100ns(),
+        );
     }
 }
 
@@ -301,30 +355,47 @@ impl Worker {
                     plan.ring_seconds,
                     crate::config::cam_bitrate_kbps(plan.resolution),
                 );
-                self.shared.ring.lock().ring.set_capacity(plan.ring_seconds, bytes);
+                self.shared
+                    .ring
+                    .lock()
+                    .ring
+                    .set_capacity(plan.ring_seconds, bytes);
             } else {
                 // Another camera chosen while one runs: let go of it.
                 let other = self.device.as_ref().is_some_and(|d| {
-                    plan.device_id.as_deref().is_some_and(|id| !id.eq_ignore_ascii_case(&d.id))
+                    plan.device_id
+                        .as_deref()
+                        .is_some_and(|id| !id.eq_ignore_ascii_case(&d.id))
                 });
                 // Or the virtual camera went on or off: another size to open at.
-                let resized = self.plan.as_ref().is_some_and(|p| p.capture != plan.capture);
+                let resized = self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|p| p.capture != plan.capture);
                 if other || resized {
                     self.close_camera();
                     self.retry_at = None;
                 }
                 let bytes = crate::config::effective_cam_memory_bytes(
                     plan.ring_seconds,
-                    crate::config::cam_bitrate_kbps(self.plan.as_ref().map_or(plan.resolution, |p| p.resolution)),
+                    crate::config::cam_bitrate_kbps(
+                        self.plan.as_ref().map_or(plan.resolution, |p| p.resolution),
+                    ),
                 );
-                self.shared.ring.lock().ring.set_capacity(plan.ring_seconds, bytes);
+                self.shared
+                    .ring
+                    .lock()
+                    .ring
+                    .set_capacity(plan.ring_seconds, bytes);
             }
         } else if !self.stopped {
             match Instant::now().checked_add(plan.stop_after) {
                 Some(at) => self.stop_at = Some(self.stop_at.map_or(at, |t| t.min(at))),
                 // A repeat of the last plan keeps a stop on its way; with none
                 // scheduled, the restart grace applies.
-                None if self.stop_at.is_none() => self.stop_at = Some(Instant::now() + Duration::from_secs(3)),
+                None if self.stop_at.is_none() => {
+                    self.stop_at = Some(Instant::now() + Duration::from_secs(3))
+                }
                 None => {}
             }
         }
@@ -347,7 +418,9 @@ impl Worker {
         // Open, but no picture for a while: another app has the camera.
         if let (Some(_), Some(device)) = (&self.source, &self.device) {
             let since = self.last_frame_at.or(self.opened_at);
-            if since.is_some_and(|t| now.duration_since(t) > SILENT) && !matches!(self.state, CamState::Taken { .. }) {
+            if since.is_some_and(|t| now.duration_since(t) > SILENT)
+                && !matches!(self.state, CamState::Taken { .. })
+            {
                 self.state = CamState::Taken { by: None };
                 let _ = self.ask.send(Ask::Holder(device.clone()));
             }
@@ -357,7 +430,9 @@ impl Worker {
     fn open_camera(&mut self) {
         let Some(plan) = &self.plan else { return };
         self.generation += 1;
-        self.shared.open_generation.store(self.generation, std::sync::atomic::Ordering::SeqCst);
+        self.shared
+            .open_generation
+            .store(self.generation, std::sync::atomic::Ordering::SeqCst);
         self.opening = true;
         let _ = self.ask.send(Ask::Open {
             id: plan.device_id.clone(),
@@ -373,7 +448,9 @@ impl Worker {
             let _ = self.ask.send(Ask::Close(source));
         }
         self.generation += 1;
-        self.shared.open_generation.store(self.generation, std::sync::atomic::Ordering::SeqCst);
+        self.shared
+            .open_generation
+            .store(self.generation, std::sync::atomic::Ordering::SeqCst);
         self.device = None;
         self.scaler = None;
         self.last_frame_at = None;
@@ -385,7 +462,11 @@ impl Worker {
     fn stop_all(&mut self) {
         self.close_camera();
         if let Some(writer) = self.shared.vcam.lock().as_ref() {
-            writer.set_state(vcam_protocol::State::Idle, vcam_protocol::IdleReason::CamOff, now_100ns());
+            writer.set_state(
+                vcam_protocol::State::Idle,
+                vcam_protocol::IdleReason::CamOff,
+                now_100ns(),
+            );
         }
         if let Some((_, encoder)) = self.encoder.take() {
             let _ = self.ask.send(Ask::StopEncoder(encoder));
@@ -408,7 +489,9 @@ impl Worker {
             Error::Denied => CamState::Blocked,
             Error::Busy { by } => CamState::Taken { by: by.clone() },
             Error::Gone | Error::NoCamera => CamState::NoCamera,
-            other => CamState::Failed { message: other.to_string() },
+            other => CamState::Failed {
+                message: other.to_string(),
+            },
         };
     }
 
@@ -457,13 +540,18 @@ impl Worker {
                             let _ = self.ask.send(Ask::StopEncoder(encoder));
                             return;
                         }
-                        self.shared.ring.lock().set_header(session, encoder.sequence_header.clone());
+                        self.shared
+                            .ring
+                            .lock()
+                            .set_header(session, encoder.sequence_header.clone());
                         self.chosen = Some(encoder.chosen);
                         self.encoder = Some((session, encoder));
                     }
                     Err(err) => {
                         log::warn!("cam encoder: {err}");
-                        self.shared.errors.report("cam", format!("The cam's encoder could not start: {err}"));
+                        self.shared
+                            .errors
+                            .report("cam", format!("The cam's encoder could not start: {err}"));
                         self.state = CamState::Failed { message: err };
                     }
                 }
@@ -484,11 +572,15 @@ impl Worker {
                 }
                 self.clock = Some(frame.probe.clock);
                 self.frames_in += 1;
-                self.lag_max_100ns = self.lag_max_100ns.max(now_100ns() - frame.probe.arrival_100ns);
+                self.lag_max_100ns = self
+                    .lag_max_100ns
+                    .max(now_100ns() - frame.probe.arrival_100ns);
                 let frame = Arc::new(frame);
                 *self.shared.latest.lock() = Some(frame.clone());
                 let size = (frame.probe.width, frame.probe.height);
-                self.shared.preview.offer(&frame, cover_crop(size, self.track), Instant::now());
+                self.shared
+                    .preview
+                    .offer(&frame, cover_crop(size, self.track), Instant::now());
                 let mut outs = Vec::new();
                 let (now, slept) = (now_100ns(), self.suspended_since());
                 self.grid.tick(now, slept, &mut outs);
@@ -547,7 +639,11 @@ impl Worker {
             low_latency: Some(true),
         };
         self.encoder_starting = Some(session);
-        let _ = self.ask.send(Ask::StartEncoder { session, gpu, settings });
+        let _ = self.ask.send(Ask::StartEncoder {
+            session,
+            gpu,
+            settings,
+        });
     }
 
     fn handle(&mut self, outs: Vec<Out<Arc<Frame>>>) {
@@ -571,7 +667,11 @@ impl Worker {
                         let _ = self.ask.send(Ask::StopEncoder(encoder));
                     }
                 }
-                Out::Frame { pts_100ns, frame, duplicate } => self.submit_frame(pts_100ns, &frame, duplicate),
+                Out::Frame {
+                    pts_100ns,
+                    frame,
+                    duplicate,
+                } => self.submit_frame(pts_100ns, &frame, duplicate),
                 Out::Filler { pts_100ns } => self.submit_filler(pts_100ns),
                 Out::GapOpened { from_100ns } => self.shared.ring.lock().open_gap(from_100ns),
                 Out::GapClosed { to_100ns, .. } => self.shared.ring.lock().close_gap(to_100ns),
@@ -590,7 +690,9 @@ impl Worker {
         if self.scaler.as_ref().is_some_and(|s| s.src == size) {
             return true;
         }
-        let Some(gpu) = self.ensure_gpu() else { return false };
+        let Some(gpu) = self.ensure_gpu() else {
+            return false;
+        };
         match Scaler::new(&gpu, size, self.track) {
             Ok(scaler) => {
                 self.scaler = Some(scaler);
@@ -608,7 +710,9 @@ impl Worker {
         if !self.ready_encoder() || !self.ensure_scaler((frame.probe.width, frame.probe.height)) {
             return;
         }
-        let Some(scaler) = self.scaler.as_mut() else { return };
+        let Some(scaler) = self.scaler.as_mut() else {
+            return;
+        };
         let slot = match self.last_slot.filter(|_| duplicate) {
             Some(slot) => slot,
             None => match scaler.scale(frame) {
@@ -635,7 +739,9 @@ impl Worker {
         if self.scaler.is_none() && !self.ensure_scaler(self.track) {
             return;
         }
-        let (Some(scaler), Some((_, encoder))) = (&self.scaler, &self.encoder) else { return };
+        let (Some(scaler), Some((_, encoder))) = (&self.scaler, &self.encoder) else {
+            return;
+        };
         if encoder.submit(&scaler.black, pts_100ns) {
             self.frames_out += 1;
         }
@@ -657,7 +763,11 @@ impl Worker {
         let stats = self.grid.stats();
         let (ring_seconds, ring_bytes, gaps) = {
             let ring = self.shared.ring.lock();
-            (ring.ring.buffered_seconds(), ring.ring.bytes(), ring.gaps.len() as u32)
+            (
+                ring.ring.buffered_seconds(),
+                ring.ring.bytes(),
+                ring.gaps.len() as u32,
+            )
         };
         *self.shared.status.lock() = Some(CamStatus {
             state: self.state.clone(),
@@ -704,14 +814,23 @@ struct Scaler {
     src: (u32, u32),
 }
 
-fn nv12_desc(width: u32, height: u32, usage: D3D11_USAGE, bind: u32, cpu: u32) -> D3D11_TEXTURE2D_DESC {
+fn nv12_desc(
+    width: u32,
+    height: u32,
+    usage: D3D11_USAGE,
+    bind: u32,
+    cpu: u32,
+) -> D3D11_TEXTURE2D_DESC {
     D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_NV12,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: usage,
         BindFlags: bind,
         CPUAccessFlags: cpu,
@@ -719,7 +838,11 @@ fn nv12_desc(width: u32, height: u32, usage: D3D11_USAGE, bind: u32, cpu: u32) -
     }
 }
 
-fn texture(device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC, data: Option<&[u8]>) -> Result<ID3D11Texture2D, String> {
+fn texture(
+    device: &ID3D11Device,
+    desc: &D3D11_TEXTURE2D_DESC,
+    data: Option<&[u8]>,
+) -> Result<ID3D11Texture2D, String> {
     let init = data.map(|bytes| D3D11_SUBRESOURCE_DATA {
         pSysMem: bytes.as_ptr() as *const _,
         SysMemPitch: desc.Width,
@@ -738,7 +861,10 @@ fn video_processor(
     src: (u32, u32),
     dst: (u32, u32),
 ) -> Result<(ID3D11VideoProcessorEnumerator, ID3D11VideoProcessor), String> {
-    let rate = DXGI_RATIONAL { Numerator: 30, Denominator: 1 };
+    let rate = DXGI_RATIONAL {
+        Numerator: 30,
+        Denominator: 1,
+    };
     let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
         InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
         InputFrameRate: rate,
@@ -764,11 +890,18 @@ fn make_input_view(
     let desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
         FourCC: 0,
         ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
+        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+            Texture2D: D3D11_TEX2D_VPIV {
+                MipSlice: 0,
+                ArraySlice: 0,
+            },
+        },
     };
     let mut view = None;
-    unsafe { video_device.CreateVideoProcessorInputView(texture, enumerator, &desc, Some(&mut view)) }
-        .map_err(|err| format!("video processor input view: {err}"))?;
+    unsafe {
+        video_device.CreateVideoProcessorInputView(texture, enumerator, &desc, Some(&mut view))
+    }
+    .map_err(|err| format!("video processor input view: {err}"))?;
     view.ok_or_else(|| "video processor input view: none".to_string())
 }
 
@@ -779,11 +912,15 @@ fn make_output_view(
 ) -> Result<ID3D11VideoProcessorOutputView, String> {
     let desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
         ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-        Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
+        Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+            Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+        },
     };
     let mut view = None;
-    unsafe { video_device.CreateVideoProcessorOutputView(texture, enumerator, &desc, Some(&mut view)) }
-        .map_err(|err| format!("video processor output view: {err}"))?;
+    unsafe {
+        video_device.CreateVideoProcessorOutputView(texture, enumerator, &desc, Some(&mut view))
+    }
+    .map_err(|err| format!("video processor output view: {err}"))?;
     view.ok_or_else(|| "video processor output view: none".to_string())
 }
 
@@ -820,9 +957,13 @@ impl Scaler {
         use crate::convert::{color_space, RANGE_FULL, RANGE_STUDIO};
         use windows::core::Interface;
         let device = gpu.device.clone();
-        let video_device: ID3D11VideoDevice = device.cast().map_err(|err| format!("ID3D11VideoDevice: {err}"))?;
-        let video_context: ID3D11VideoContext =
-            gpu.context.cast().map_err(|err| format!("ID3D11VideoContext: {err}"))?;
+        let video_device: ID3D11VideoDevice = device
+            .cast()
+            .map_err(|err| format!("ID3D11VideoDevice: {err}"))?;
+        let video_context: ID3D11VideoContext = gpu
+            .context
+            .cast()
+            .map_err(|err| format!("ID3D11VideoContext: {err}"))?;
         let (rgb_enum, to_rgb) = video_processor(&video_device, src, src)?;
         let (enumerator, processor) = video_processor(&video_device, src, dst)?;
         let crop = cover_crop(src, dst);
@@ -837,8 +978,13 @@ impl Scaler {
             video_context.VideoProcessorSetOutputColorSpace(&to_rgb, &color_space(false, 0));
             video_context.VideoProcessorSetStreamAutoProcessingMode(&to_rgb, 0, false);
             // Then on as the game picture goes: full-range RGB to studio BT.709.
-            video_context.VideoProcessorSetStreamColorSpace(&processor, 0, &color_space(true, RANGE_FULL));
-            video_context.VideoProcessorSetOutputColorSpace(&processor, &color_space(true, RANGE_STUDIO));
+            video_context.VideoProcessorSetStreamColorSpace(
+                &processor,
+                0,
+                &color_space(true, RANGE_FULL),
+            );
+            video_context
+                .VideoProcessorSetOutputColorSpace(&processor, &color_space(true, RANGE_STUDIO));
             // No edge enhancement or noise reduction the driver picks for itself.
             video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
             let source = RECT {
@@ -847,7 +993,12 @@ impl Scaler {
                 right: (crop.x + crop.w) as i32,
                 bottom: (crop.y + crop.h) as i32,
             };
-            let whole = RECT { left: 0, top: 0, right: dst.0 as i32, bottom: dst.1 as i32 };
+            let whole = RECT {
+                left: 0,
+                top: 0,
+                right: dst.0 as i32,
+                bottom: dst.1 as i32,
+            };
             video_context.VideoProcessorSetStreamSourceRect(&processor, 0, TRUE, Some(&source));
             video_context.VideoProcessorSetStreamDestRect(&processor, 0, TRUE, Some(&whole));
             video_context.VideoProcessorSetOutputTargetRect(&processor, TRUE, Some(&whole));
@@ -855,10 +1006,26 @@ impl Scaler {
 
         let staging = texture(
             &device,
-            &nv12_desc(src.0, src.1, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_WRITE.0 as u32),
+            &nv12_desc(
+                src.0,
+                src.1,
+                D3D11_USAGE_STAGING,
+                0,
+                D3D11_CPU_ACCESS_WRITE.0 as u32,
+            ),
             None,
         )?;
-        let input = texture(&device, &nv12_desc(src.0, src.1, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET.0 as u32, 0), None)?;
+        let input = texture(
+            &device,
+            &nv12_desc(
+                src.0,
+                src.1,
+                D3D11_USAGE_DEFAULT,
+                D3D11_BIND_RENDER_TARGET.0 as u32,
+                0,
+            ),
+            None,
+        )?;
         let input_view = make_input_view(&video_device, &input, &rgb_enum)?;
         let rgb_desc = D3D11_TEXTURE2D_DESC {
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -871,14 +1038,34 @@ impl Scaler {
 
         let mut slots = Vec::new();
         for _ in 0..crate::mft::QUEUE_DEPTH + crate::mft::ENCODER_HOLD_MAX + 2 {
-            let slot = texture(&device, &nv12_desc(dst.0, dst.1, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET.0 as u32, 0), None)?;
+            let slot = texture(
+                &device,
+                &nv12_desc(
+                    dst.0,
+                    dst.1,
+                    D3D11_USAGE_DEFAULT,
+                    D3D11_BIND_RENDER_TARGET.0 as u32,
+                    0,
+                ),
+                None,
+            )?;
             let view = make_output_view(&video_device, &slot, &enumerator)?;
             slots.push((slot, view));
         }
         let (w, h) = (dst.0 as usize, dst.1 as usize);
         let mut black = vec![16u8; w * h];
         black.extend(std::iter::repeat(128u8).take(w * h / 2));
-        let black = texture(&device, &nv12_desc(dst.0, dst.1, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET.0 as u32, 0), Some(&black))?;
+        let black = texture(
+            &device,
+            &nv12_desc(
+                dst.0,
+                dst.1,
+                D3D11_USAGE_DEFAULT,
+                D3D11_BIND_RENDER_TARGET.0 as u32,
+                0,
+            ),
+            Some(&black),
+        )?;
         Ok(Self {
             context: gpu.context.clone(),
             video_context,
@@ -910,19 +1097,37 @@ impl Scaler {
             let pitch = mapped.RowPitch as usize;
             let dst = mapped.pData as *mut u8;
             for row in 0..h {
-                std::ptr::copy_nonoverlapping(frame.nv12.as_ptr().add(row * w), dst.add(row * pitch), w);
+                std::ptr::copy_nonoverlapping(
+                    frame.nv12.as_ptr().add(row * w),
+                    dst.add(row * pitch),
+                    w,
+                );
             }
             let uv = dst.add(pitch * h);
             for row in 0..h / 2 {
-                std::ptr::copy_nonoverlapping(frame.nv12.as_ptr().add(w * h + row * w), uv.add(row * pitch), w);
+                std::ptr::copy_nonoverlapping(
+                    frame.nv12.as_ptr().add(w * h + row * w),
+                    uv.add(row * pitch),
+                    w,
+                );
             }
             self.context.Unmap(&self.staging, 0);
             self.context.CopyResource(&self.input, &self.staging);
         }
         let slot = self.next;
         self.next = (self.next + 1) % self.slots.len();
-        blt(&self.video_context, &self.to_rgb, &self.input_view, &self.rgb_out)?;
-        blt(&self.video_context, &self.processor, &self.rgb_in, &self.slots[slot].1)?;
+        blt(
+            &self.video_context,
+            &self.to_rgb,
+            &self.input_view,
+            &self.rgb_out,
+        )?;
+        blt(
+            &self.video_context,
+            &self.processor,
+            &self.rgb_in,
+            &self.slots[slot].1,
+        )?;
         Ok(slot)
     }
 }
@@ -956,13 +1161,27 @@ mod tests {
     /// The luma in the middle of a scaled slot, read back from the GPU.
     fn scaled_luma(scaler: &mut Scaler, gpu: &GpuDevice, frame: &Frame, dst: (u32, u32)) -> u8 {
         let slot = scaler.scale(frame).unwrap();
-        let staging = texture(&gpu.device, &nv12_desc(dst.0, dst.1, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32), None).unwrap();
+        let staging = texture(
+            &gpu.device,
+            &nv12_desc(
+                dst.0,
+                dst.1,
+                D3D11_USAGE_STAGING,
+                0,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            ),
+            None,
+        )
+        .unwrap();
         unsafe {
             gpu.context.CopyResource(&staging, &scaler.slots[slot].0);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            gpu.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).unwrap();
+            gpu.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .unwrap();
             let pitch = mapped.RowPitch as usize;
-            let y = *(mapped.pData as *const u8).add(pitch * dst.1 as usize / 2 + dst.0 as usize / 2);
+            let y =
+                *(mapped.pData as *const u8).add(pitch * dst.1 as usize / 2 + dst.0 as usize / 2);
             gpu.context.Unmap(&staging, 0);
             y
         }
@@ -976,23 +1195,44 @@ mod tests {
         let (src, dst) = ((1920u32, 1080u32), (1280u32, 720u32));
         let (w, h) = (src.0 as usize, src.1 as usize);
         // Columns from 16 to 235, left to right.
-        let mut nv12: Vec<u8> = (0..h).flat_map(|_| (0..w).map(move |x| (16 + x * 219 / (w - 1)) as u8)).collect();
+        let mut nv12: Vec<u8> = (0..h)
+            .flat_map(|_| (0..w).map(move |x| (16 + x * 219 / (w - 1)) as u8))
+            .collect();
         nv12.extend(std::iter::repeat(128u8).take(w * h / 2));
         let mut frame = flat(src.0, src.1, 0);
         frame.nv12 = nv12.into();
         let mut scaler = Scaler::new(&gpu, src, dst).unwrap();
         let slot = scaler.scale(&frame).unwrap();
-        let staging = texture(&gpu.device, &nv12_desc(dst.0, dst.1, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32), None).unwrap();
+        let staging = texture(
+            &gpu.device,
+            &nv12_desc(
+                dst.0,
+                dst.1,
+                D3D11_USAGE_STAGING,
+                0,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            ),
+            None,
+        )
+        .unwrap();
         unsafe {
             gpu.context.CopyResource(&staging, &scaler.slots[slot].0);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            gpu.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).unwrap();
+            gpu.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .unwrap();
             let row = (mapped.pData as *const u8).add(mapped.RowPitch as usize * 360);
-            let picks: Vec<u8> = [2usize, 160, 320, 640, 960, 1277].iter().map(|x| *row.add(*x)).collect();
+            let picks: Vec<u8> = [2usize, 160, 320, 640, 960, 1277]
+                .iter()
+                .map(|x| *row.add(*x))
+                .collect();
             gpu.context.Unmap(&staging, 0);
             let wanted = [16u8, 43, 71, 126, 180, 235];
             for (got, want) in picks.iter().zip(wanted) {
-                assert!((*got as i32 - want as i32).abs() <= 2, "{picks:?} against {wanted:?}");
+                assert!(
+                    (*got as i32 - want as i32).abs() <= 2,
+                    "{picks:?} against {wanted:?}"
+                );
             }
         }
     }
@@ -1009,10 +1249,18 @@ mod tests {
             let mut scaler = Scaler::new(&gpu, src, dst).unwrap();
             let outs: Vec<(u8, u8)> = [16u8, 22, 128, 235]
                 .into_iter()
-                .map(|y| (y, scaled_luma(&mut scaler, &gpu, &flat(src.0, src.1, y), dst)))
+                .map(|y| {
+                    (
+                        y,
+                        scaled_luma(&mut scaler, &gpu, &flat(src.0, src.1, y), dst),
+                    )
+                })
                 .collect();
             for (y, out) in &outs {
-                assert!((*out as i32 - *y as i32).abs() <= 2, "{src:?}→{dst:?}: in → out {outs:?}");
+                assert!(
+                    (*out as i32 - *y as i32).abs() <= 2,
+                    "{src:?}→{dst:?}: in → out {outs:?}"
+                );
             }
         }
     }

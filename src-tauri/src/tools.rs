@@ -69,13 +69,19 @@ pub enum Status {
     /// Looking whether they are already there.
     Checking,
     #[serde(rename_all = "camelCase")]
-    Downloading { downloaded: u64, total: Option<u64> },
+    Downloading {
+        downloaded: u64,
+        total: Option<u64>,
+    },
     /// Unpacking and checking the hashes.
     Unpacking,
     Ready,
     /// The last attempt failed; the next one follows by itself.
     #[serde(rename_all = "camelCase")]
-    Failed { error: String, retry_in_secs: u64 },
+    Failed {
+        error: String,
+        retry_in_secs: u64,
+    },
 }
 
 static STATUS: Mutex<Status> = Mutex::new(Status::Checking);
@@ -182,7 +188,8 @@ fn provide(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<(), Str
         log::warn!("ffmpeg folder was incomplete ({names} missing) - antivirus quarantine is the usual cause; fetching it again");
         crate::notify(app, "error", missing_notice(&missing));
     }
-    std::fs::create_dir_all(root).map_err(|err| format!("could not create {}: {err}", root.display()))?;
+    std::fs::create_dir_all(root)
+        .map_err(|err| format!("could not create {}: {err}", root.display()))?;
     if adopt_bundled(app, root, target) {
         log::info!("ffmpeg taken over from the old installation");
         return Ok(());
@@ -231,9 +238,9 @@ fn adopt_bundled(app: &tauri::AppHandle, root: &Path, target: &Path) -> bool {
     let Ok(resources) = app.path().resource_dir().map(|dir| dir.join("resources")) else {
         return false;
     };
-    let matches = PROGRAMS.iter().all(|(name, hash)| {
-        sha256_of(&resources.join(name)).is_ok_and(|found| found == *hash)
-    });
+    let matches = PROGRAMS
+        .iter()
+        .all(|(name, hash)| sha256_of(&resources.join(name)).is_ok_and(|found| found == *hash));
     if !matches {
         return false;
     }
@@ -276,11 +283,14 @@ async fn download(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<
 
     let total = response.content_length();
     if total.is_some_and(too_big) {
-        return Err(format!("the download is too big ({} bytes)", total.unwrap_or(0)));
+        return Err(format!(
+            "the download is too big ({} bytes)",
+            total.unwrap_or(0)
+        ));
     }
     let archive = root.join(format!("{VERSION}.zip.part"));
-    let mut file =
-        File::create(&archive).map_err(|err| format!("could not write {}: {err}", archive.display()))?;
+    let mut file = File::create(&archive)
+        .map_err(|err| format!("could not write {}: {err}", archive.display()))?;
     let mut downloaded = 0u64;
     let mut last_emit: Option<Instant> = None;
     set(app, Status::Downloading { downloaded, total });
@@ -323,8 +333,8 @@ fn too_big(bytes: u64) -> bool {
 /// their final place — a folder under [`VERSION`] is always complete.
 fn unpack(archive: &Path, root: &Path, target: &Path) -> Result<(), String> {
     let file = File::open(archive).map_err(|err| format!("could not open the download: {err}"))?;
-    let mut zip =
-        zip::ZipArchive::new(file).map_err(|err| format!("the download is not a ZIP archive: {err}"))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|err| format!("the download is not a ZIP archive: {err}"))?;
     let staging = root.join(format!("{VERSION}.unpack"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|err| format!("could not unpack: {err}"))?;
@@ -340,7 +350,9 @@ fn unpack(archive: &Path, root: &Path, target: &Path) -> Result<(), String> {
             let found = copy_hashing(&mut (&mut entry).take(MAX_PROGRAM_BYTES), &mut out)
                 .map_err(|err| format!("could not unpack {name}: {err}"))?;
             if found != hash {
-                return Err(format!("{name} does not match its checksum — download rejected"));
+                return Err(format!(
+                    "{name} does not match its checksum — download rejected"
+                ));
             }
         }
         Ok(())
@@ -402,7 +414,8 @@ mod tests {
 
     /// A fresh scratch folder under the system temp dir, never the real one.
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("clippiboy-tools-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("clippiboy-tools-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -449,7 +462,8 @@ mod tests {
             missing_notice(&["ffmpeg.exe", "ffprobe.exe"]),
             "ffmpeg.exe and ffprobe.exe were missing - often an antivirus quarantine. Fetching it again."
         );
-        assert!(missing_notice(&["a.exe", "b.exe", "c.exe"]).starts_with("a.exe, b.exe and c.exe were missing"));
+        assert!(missing_notice(&["a.exe", "b.exe", "c.exe"])
+            .starts_with("a.exe, b.exe and c.exe were missing"));
     }
 
     #[test]

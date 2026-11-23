@@ -184,8 +184,8 @@ fn ignored() -> &'static HashSet<&'static str> {
 fn games() -> &'static HashMap<String, String> {
     static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
     MAP.get_or_init(|| {
-        let base: HashMap<String, String> =
-            serde_json::from_str(include_str!("games.json")).unwrap_or_else(|err| {
+        let base: HashMap<String, String> = serde_json::from_str(include_str!("games.json"))
+            .unwrap_or_else(|err| {
                 log::error!("the built-in games.json is broken: {err}");
                 HashMap::new()
             });
@@ -209,12 +209,18 @@ fn games() -> &'static HashMap<String, String> {
 /// Lower-cases both maps, then puts the user's entries on top. Layering before
 /// lower-casing let "CS2.exe" and "cs2.exe" both survive, and which one won
 /// depended on hash order, so it changed from start to start.
-fn layered(base: HashMap<String, String>, user: HashMap<String, String>) -> HashMap<String, String> {
+fn layered(
+    base: HashMap<String, String>,
+    user: HashMap<String, String>,
+) -> HashMap<String, String> {
     let mut map: HashMap<String, String> = base
         .into_iter()
         .map(|(exe, name)| (exe.to_lowercase(), name))
         .collect();
-    map.extend(user.into_iter().map(|(exe, name)| (exe.to_lowercase(), name)));
+    map.extend(
+        user.into_iter()
+            .map(|(exe, name)| (exe.to_lowercase(), name)),
+    );
     map
 }
 
@@ -339,7 +345,10 @@ pub fn clean_title(title: &str) -> String {
         text = words[..words.len() - 1].join(" ");
     }
 
-    text.trim().trim_end_matches(['-', '–', '|', ':']).trim().to_string()
+    text.trim()
+        .trim_end_matches(['-', '–', '|', ':'])
+        .trim()
+        .to_string()
 }
 
 fn looks_like_version(word: &str) -> bool {
@@ -411,8 +420,10 @@ const WS_THICKFRAME: u32 = 0x0004_0000;
 fn covers_monitor_rule(rect: [i32; 4], monitor: [i32; 4], zoomed: bool, style: u32) -> bool {
     let framed = style & WS_CAPTION == WS_CAPTION || style & WS_THICKFRAME != 0;
     let [left, top, right, bottom] = rect;
-    let covers = left <= monitor[0] && top <= monitor[1] && right >= monitor[2] && bottom >= monitor[3];
-    let overhangs = left < monitor[0] && top < monitor[1] && right > monitor[2] && bottom > monitor[3];
+    let covers =
+        left <= monitor[0] && top <= monitor[1] && right >= monitor[2] && bottom >= monitor[3];
+    let overhangs =
+        left < monitor[0] && top < monitor[1] && right > monitor[2] && bottom > monitor[3];
     covers && !(framed && (zoomed || overhangs))
 }
 
@@ -526,7 +537,11 @@ mod win {
             if !GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _).as_bool() {
                 return None;
             }
-            let end = info.szDevice.iter().position(|c| *c == 0).unwrap_or(info.szDevice.len());
+            let end = info
+                .szDevice
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(info.szDevice.len());
             Some(String::from_utf16_lossy(&info.szDevice[..end]))
         }
     }
@@ -712,20 +727,45 @@ mod tests {
     fn a_borderless_window_at_the_screens_size_covers_it() {
         assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP));
         // Exclusive fullscreen on a second screen, a little larger even.
-        assert!(covers_monitor_rule([1920, -1, 3841, 1081], [1920, 0, 3840, 1080], false, POPUP));
+        assert!(covers_monitor_rule(
+            [1920, -1, 3841, 1081],
+            [1920, 0, 3840, 1080],
+            false,
+            POPUP
+        ));
         // A popup with a thin line around it is still borderless.
-        assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP | 0x0080_0000));
+        assert!(covers_monitor_rule(
+            SCREEN,
+            SCREEN,
+            false,
+            POPUP | 0x0080_0000
+        ));
         // A frameless popup counts maximized too, overhanging or not.
         assert!(covers_monitor_rule(SCREEN, SCREEN, true, POPUP));
-        assert!(covers_monitor_rule([-8, -8, 1928, 1088], SCREEN, true, POPUP));
+        assert!(covers_monitor_rule(
+            [-8, -8, 1928, 1088],
+            SCREEN,
+            true,
+            POPUP
+        ));
     }
 
     /// A game that keeps a frame style but sizes its window to the screen
     /// exactly is still a game.
     #[test]
     fn a_framed_window_sized_exactly_to_the_screen_covers_it() {
-        assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_THICKFRAME));
-        assert!(covers_monitor_rule(SCREEN, SCREEN, false, POPUP | WS_CAPTION));
+        assert!(covers_monitor_rule(
+            SCREEN,
+            SCREEN,
+            false,
+            POPUP | WS_THICKFRAME
+        ));
+        assert!(covers_monitor_rule(
+            SCREEN,
+            SCREEN,
+            false,
+            POPUP | WS_CAPTION
+        ));
         assert!(covers_monitor_rule(SCREEN, SCREEN, false, FRAMED));
     }
 
@@ -739,14 +779,29 @@ mod tests {
         // Overhanging without the zoom flag (restored to the same rect).
         assert!(!covers_monitor_rule(maximized, SCREEN, false, FRAMED));
         // A frameless Chromium app keeps caption and resize border.
-        assert!(!covers_monitor_rule(maximized, SCREEN, true, POPUP | WS_CAPTION | WS_THICKFRAME));
+        assert!(!covers_monitor_rule(
+            maximized,
+            SCREEN,
+            true,
+            POPUP | WS_CAPTION | WS_THICKFRAME
+        ));
         assert!(!covers_monitor_rule(SCREEN, SCREEN, true, FRAMED));
     }
 
     #[test]
     fn a_window_short_of_the_screen_does_not_cover_it() {
-        assert!(!covers_monitor_rule([0, 0, 1920, 1040], SCREEN, false, POPUP));
-        assert!(!covers_monitor_rule([1, 0, 1920, 1080], SCREEN, false, POPUP));
+        assert!(!covers_monitor_rule(
+            [0, 0, 1920, 1040],
+            SCREEN,
+            false,
+            POPUP
+        ));
+        assert!(!covers_monitor_rule(
+            [1, 0, 1920, 1080],
+            SCREEN,
+            false,
+            POPUP
+        ));
     }
 
     #[test]
@@ -891,6 +946,9 @@ mod tests {
     #[test]
     fn the_builtin_list_parses() {
         assert!(games().len() > 50);
-        assert_eq!(games().get("eldenring.exe").map(String::as_str), Some("Elden Ring"));
+        assert_eq!(
+            games().get("eldenring.exe").map(String::as_str),
+            Some("Elden Ring")
+        );
     }
 }

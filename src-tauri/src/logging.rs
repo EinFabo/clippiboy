@@ -105,7 +105,11 @@ fn open_for(path: &Path, how: Open) -> Option<File> {
         std::fs::create_dir_all(dir).ok()?;
     }
     if how == Open::Append {
-        return std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+        return std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok();
     }
     rotate(path);
     File::create(path).ok()
@@ -120,7 +124,11 @@ fn attach(how: Open) {
     match open_for(&path, how) {
         Some(file) => {
             *FILE.lock() = Some(file);
-            log::info!("ClippiBoy {} · log file: {}", env!("CARGO_PKG_VERSION"), path.display());
+            log::info!(
+                "ClippiBoy {} · log file: {}",
+                env!("CARGO_PKG_VERSION"),
+                path.display()
+            );
         }
         None => log::warn!("no log file at {} — stderr only", path.display()),
     }
@@ -162,7 +170,10 @@ pub fn init(first: bool) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
-        log::error!("panic on thread '{}': {info}", thread.name().unwrap_or("unnamed"));
+        log::error!(
+            "panic on thread '{}': {info}",
+            thread.name().unwrap_or("unnamed")
+        );
         log::logger().flush();
         default(info);
     }));
@@ -186,7 +197,10 @@ mod tests {
         std::fs::write(path.with_extension("log.1"), "previous").unwrap();
         assert!(open_for(&path, Open::Not).is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "live");
-        assert_eq!(std::fs::read_to_string(path.with_extension("log.1")).unwrap(), "previous");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("log.1")).unwrap(),
+            "previous"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -195,7 +209,10 @@ mod tests {
         let (dir, path) = temp_log();
         std::fs::write(&path, "old").unwrap();
         drop(open_for(&path, Open::Rotate).unwrap());
-        assert_eq!(std::fs::read_to_string(path.with_extension("log.1")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("log.1")).unwrap(),
+            "old"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -211,8 +228,14 @@ mod tests {
         let mut file = open_for(&path, Open::Append).unwrap();
         file.write_all(b"late start\n").unwrap();
         drop(file);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first start\nlate start\n");
-        assert_eq!(std::fs::read_to_string(path.with_extension("log.1")).unwrap(), "previous session");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "first start\nlate start\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("log.1")).unwrap(),
+            "previous session"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

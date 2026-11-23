@@ -2,7 +2,6 @@
 //! game picture. This half holds its rules — when it runs, its ring, the tap
 //! for recordings, the preview frames — and is the same on every system.
 
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,7 +35,10 @@ pub struct CamWants {
 pub fn cam_wanted(w: &CamWants) -> bool {
     w.enabled
         && !w.locked
-        && ((w.buffer_wanted && w.in_clips) || (w.recording && w.in_recordings) || w.preview_open || w.vcam_consumer)
+        && ((w.buffer_wanted && w.in_clips)
+            || (w.recording && w.in_recordings)
+            || w.preview_open
+            || w.vcam_consumer)
 }
 
 /// How long to wait before closing the camera after a change. `None` while it
@@ -47,8 +49,17 @@ pub fn stop_delay(before: &CamWants, after: &CamWants) -> Option<Duration> {
     if cam_wanted(after) {
         return None;
     }
-    let only_the_buffer = before.buffer_wanted && !after.buffer_wanted && CamWants { buffer_wanted: false, ..*before } == *after;
-    Some(if only_the_buffer { Duration::from_secs(3) } else { Duration::ZERO })
+    let only_the_buffer = before.buffer_wanted
+        && !after.buffer_wanted
+        && CamWants {
+            buffer_wanted: false,
+            ..*before
+        } == *after;
+    Some(if only_the_buffer {
+        Duration::from_secs(3)
+    } else {
+        Duration::ZERO
+    })
 }
 
 /// `CamPlan::stop_after` of a plan that only repeats the last one.
@@ -100,7 +111,11 @@ pub fn capture_size(resolution: crate::model::CamResolution, vcam_feeding: bool)
 
 /// The plan for the cam, and the wants it was made from, to compare the next
 /// one against (`stop_delay`).
-pub fn plan_for(cam: &crate::model::FacecamConfig, inputs: &PlanInputs, before: Option<&CamWants>) -> (CamPlan, CamWants) {
+pub fn plan_for(
+    cam: &crate::model::FacecamConfig,
+    inputs: &PlanInputs,
+    before: Option<&CamWants>,
+) -> (CamPlan, CamWants) {
     let wants = CamWants {
         enabled: cam.enabled,
         in_clips: cam.in_clips,
@@ -126,7 +141,10 @@ pub fn plan_for(cam: &crate::model::FacecamConfig, inputs: &PlanInputs, before: 
         resolution: cam.resolution,
         capture: capture_size(cam.resolution, inputs.vcam_feeding),
         fps: cam.fps,
-        ring_seconds: crate::config::cam_ring_seconds(inputs.buffer_seconds, inputs.keyframe_seconds),
+        ring_seconds: crate::config::cam_ring_seconds(
+            inputs.buffer_seconds,
+            inputs.keyframe_seconds,
+        ),
         encoder: inputs.encoder,
         preview: inputs.preview_open && cam.enabled,
     };
@@ -142,7 +160,10 @@ pub fn health_text(status: &crate::model::CamStatus) -> String {
         Some(crate::camera::ClockKind::Arrival) => "arrival",
         None => "none",
     };
-    let encoder = status.encoder.map(|e| format!("{e:?}")).unwrap_or_else(|| "none".into());
+    let encoder = status
+        .encoder
+        .map(|e| format!("{e:?}"))
+        .unwrap_or_else(|| "none".into());
     format!(
         "cam: {:.1} fps in, {:.1} out, dup={} filler={} gaps={} clock={clock} encoder={encoder} ring {:.1} s {:.1} MB lag {} ms",
         status.fps_in,
@@ -266,7 +287,11 @@ impl CamTrack {
 
     /// The cam for a clip just saved. Waits up to `wait` — no lock held in
     /// between — for the ring to reach past the window's end, then cuts.
-    pub fn cut(&self, window: &crate::facecam::CamWindow, wait: Duration) -> Option<crate::facecam::CamCutOut> {
+    pub fn cut(
+        &self,
+        window: &crate::facecam::CamWindow,
+        wait: Duration,
+    ) -> Option<crate::facecam::CamCutOut> {
         let (_, end) = crate::facecam::cut_window(window);
         let deadline = Instant::now() + wait;
         loop {
@@ -342,7 +367,14 @@ impl CamRing {
     pub fn new(seconds: u32, bytes: u64) -> Self {
         let mut ring = ReplayBuffer::new(seconds, bytes);
         ring.set_jump_limit_us(CAM_JUMP_US);
-        Self { ring, origin_100ns: 0, session: 0, header: Vec::new(), gaps: VecDeque::new(), tap: None }
+        Self {
+            ring,
+            origin_100ns: 0,
+            session: 0,
+            header: Vec::new(),
+            gaps: VecDeque::new(),
+            tap: None,
+        }
     }
 
     /// A packet of `session`; one of an older session is dropped (`false`).
@@ -380,7 +412,10 @@ impl CamRing {
         if self.gaps.back().is_some_and(|g| g.to_100ns.is_none()) {
             return;
         }
-        self.gaps.push_back(Gap { from_100ns, to_100ns: None });
+        self.gaps.push_back(Gap {
+            from_100ns,
+            to_100ns: None,
+        });
     }
 
     pub fn close_gap(&mut self, to_100ns: i64) {
@@ -396,7 +431,9 @@ impl CamRing {
         if !self.header.is_empty() {
             tap.header(self.session, self.origin_100ns, &self.header);
         }
-        let backlog = self.ring.snapshot_range((from_100ns - self.origin_100ns) / 10, i64::MAX);
+        let backlog = self
+            .ring
+            .snapshot_range((from_100ns - self.origin_100ns) / 10, i64::MAX);
         for packet in &backlog {
             tap.cam(packet);
         }
@@ -410,9 +447,15 @@ impl CamRing {
 
     /// Gaps that ended before the ring's front left with it.
     fn prune_gaps(&mut self) {
-        let Some(front_us) = self.ring.oldest_pts() else { return };
+        let Some(front_us) = self.ring.oldest_pts() else {
+            return;
+        };
         let front = self.origin_100ns + front_us * 10;
-        while self.gaps.front().is_some_and(|g| g.to_100ns.is_some_and(|to| to < front)) {
+        while self
+            .gaps
+            .front()
+            .is_some_and(|g| g.to_100ns.is_some_and(|to| to < front))
+        {
             self.gaps.pop_front();
         }
     }
@@ -459,14 +502,21 @@ impl Default for PreviewSlot {
 
 impl PreviewSlot {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(PreviewInner::default()), fresh: Condvar::new() }
+        Self {
+            inner: Mutex::new(PreviewInner::default()),
+            fresh: Condvar::new(),
+        }
     }
 
     pub fn offer(&self, frame: &Frame, crop: Rect, now: Instant) {
         {
             let inner = self.inner.lock();
-            let wanted = inner.asked.is_some_and(|t| now.saturating_duration_since(t) < PREVIEW_INTEREST);
-            let due = inner.made.map_or(true, |t| now.saturating_duration_since(t) + PREVIEW_SLACK >= PREVIEW_EVERY);
+            let wanted = inner
+                .asked
+                .is_some_and(|t| now.saturating_duration_since(t) < PREVIEW_INTEREST);
+            let due = inner.made.map_or(true, |t| {
+                now.saturating_duration_since(t) + PREVIEW_SLACK >= PREVIEW_EVERY
+            });
             if !wanted || !due {
                 return;
             }
@@ -476,7 +526,12 @@ impl PreviewSlot {
         let mut inner = self.inner.lock();
         inner.seq += 1;
         let seq = inner.seq;
-        inner.frame = Some(PreviewFrame { seq, width, height, bgra: bgra.into() });
+        inner.frame = Some(PreviewFrame {
+            seq,
+            width,
+            height,
+            bgra: bgra.into(),
+        });
         inner.made = Some(now);
         drop(inner);
         self.fresh.notify_all();
@@ -508,7 +563,16 @@ impl PreviewSlot {
 /// BT.601 studio range. Only for looking at: the clip gets the real scaler.
 pub fn preview_bgra(frame: &Frame, crop: Rect, width: u32) -> (u32, u32, Vec<u8>) {
     let (fw, fh) = (frame.probe.width as usize, frame.probe.height as usize);
-    let crop = if crop.w == 0 || crop.h == 0 { Rect { x: 0, y: 0, w: fw as u32, h: fh as u32 } } else { crop };
+    let crop = if crop.w == 0 || crop.h == 0 {
+        Rect {
+            x: 0,
+            y: 0,
+            w: fw as u32,
+            h: fh as u32,
+        }
+    } else {
+        crop
+    };
     let ow = width.max(2) as usize;
     let oh = ((ow as u64 * crop.h as u64 / crop.w.max(1) as u64) as usize).max(2) & !1;
     let mut out = vec![0u8; ow * oh * 4];
@@ -583,29 +647,56 @@ mod tests {
     /// CPU for it. The clips keep their own size, scaled on the GPU.
     #[test]
     fn the_camera_opens_at_1080p_for_the_virtual_camera() {
-        let cam = crate::model::FacecamConfig { enabled: true, ..Default::default() };
+        let cam = crate::model::FacecamConfig {
+            enabled: true,
+            ..Default::default()
+        };
         assert_eq!(cam.resolution, crate::model::CamResolution::P720);
         let (plan, _) = plan_for(&cam, &inputs(true, false), None);
         assert_eq!(plan.capture, (1280, 720));
-        let vcam = PlanInputs { vcam_feeding: true, ..inputs(true, false) };
+        let vcam = PlanInputs {
+            vcam_feeding: true,
+            ..inputs(true, false)
+        };
         let (plan, _) = plan_for(&cam, &vcam, None);
         assert_eq!(plan.capture, (1920, 1080));
-        assert_eq!(plan.resolution, crate::model::CamResolution::P720, "the clips' size stays");
+        assert_eq!(
+            plan.resolution,
+            crate::model::CamResolution::P720,
+            "the clips' size stays"
+        );
     }
 
     /// The buffer off, "In clips" off: a recording with "In recordings" on
     /// still needs the camera — and only while it runs.
     #[test]
     fn the_cam_runs_for_a_recording_when_asked() {
-        let mut cam = crate::model::FacecamConfig { enabled: true, in_clips: false, in_recordings: true, ..Default::default() };
-        let recording = PlanInputs { recording: true, ..inputs(false, false) };
+        let mut cam = crate::model::FacecamConfig {
+            enabled: true,
+            in_clips: false,
+            in_recordings: true,
+            ..Default::default()
+        };
+        let recording = PlanInputs {
+            recording: true,
+            ..inputs(false, false)
+        };
         assert!(plan_for(&cam, &recording, None).0.run);
-        assert!(!plan_for(&cam, &inputs(false, false), None).0.run, "no recording, nothing needs it");
+        assert!(
+            !plan_for(&cam, &inputs(false, false), None).0.run,
+            "no recording, nothing needs it"
+        );
         cam.in_recordings = false;
         assert!(!plan_for(&cam, &recording, None).0.run);
         cam.in_recordings = true;
-        let locked = PlanInputs { locked: true, ..recording };
-        assert!(!plan_for(&cam, &locked, None).0.run, "never behind the lock screen");
+        let locked = PlanInputs {
+            locked: true,
+            ..recording
+        };
+        assert!(
+            !plan_for(&cam, &locked, None).0.run,
+            "never behind the lock screen"
+        );
     }
 
     #[test]
@@ -669,7 +760,10 @@ mod tests {
         for buffer in [false, true] {
             for clips in [false, true] {
                 for preview in [false, true] {
-                    assert!(!cam_wanted(&wants(false, clips, buffer, preview, false)), "master off");
+                    assert!(
+                        !cam_wanted(&wants(false, clips, buffer, preview, false)),
+                        "master off"
+                    );
                 }
             }
         }
@@ -788,7 +882,11 @@ mod tests {
         // The backlog goes to the tap itself, under the ring's lock, so no
         // live packet can slip in before it.
         let backlog = ring.attach_tap(seen.clone(), 15_000_000);
-        assert_eq!(seen.0.lock().unwrap()[0], 1_000_000, "from the keyframe before 1.5 s");
+        assert_eq!(
+            seen.0.lock().unwrap()[0],
+            1_000_000,
+            "from the keyframe before 1.5 s"
+        );
         assert_eq!(seen.0.lock().unwrap().len(), backlog);
         let session = ring.session;
         ring.push(session, packet(3_000));
@@ -824,7 +922,16 @@ mod tests {
 
     #[test]
     fn a_grey_frame_previews_grey() {
-        let (w, h, bgra) = preview_bgra(&grey(4, 2), Rect { x: 0, y: 0, w: 4, h: 2 }, 4);
+        let (w, h, bgra) = preview_bgra(
+            &grey(4, 2),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 2,
+            },
+            4,
+        );
         assert_eq!((w, h), (4, 2));
         assert_eq!(bgra.len(), 4 * 2 * 4);
         for px in bgra.chunks_exact(4) {
@@ -837,7 +944,12 @@ mod tests {
 
     #[test]
     fn the_preview_frame_starts_with_its_sequence_number() {
-        let frame = PreviewFrame { seq: 7, width: 2, height: 1, bgra: vec![1, 2, 3, 4, 5, 6, 7, 8].into() };
+        let frame = PreviewFrame {
+            seq: 7,
+            width: 2,
+            height: 1,
+            bgra: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
+        };
         let bytes = encode_preview(&frame);
         assert_eq!(&bytes[..8], &7u64.to_le_bytes());
         assert_eq!(&bytes[8..12], &2u32.to_le_bytes());
@@ -855,8 +967,18 @@ mod tests {
         // 30 frames in a second, each up to 3 ms early or late.
         for i in 0..30u64 {
             let jitter = if i % 2 == 0 { 3 } else { 0 };
-            let at = start + Duration::from_micros(i * 33_333) - Duration::from_millis(jitter).min(Duration::from_micros(i * 33_333));
-            slot.offer(&grey(64, 36), Rect { x: 0, y: 0, w: 64, h: 36 }, at);
+            let at = start + Duration::from_micros(i * 33_333)
+                - Duration::from_millis(jitter).min(Duration::from_micros(i * 33_333));
+            slot.offer(
+                &grey(64, 36),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 64,
+                    h: 36,
+                },
+                at,
+            );
             if let Some(frame) = slot.wait_after(seen, Duration::ZERO) {
                 seen = frame.seq;
                 made += 1;
@@ -873,7 +995,16 @@ mod tests {
         let mut seen = 0;
         let mut made = 0;
         for i in 0..60u64 {
-            slot.offer(&grey(64, 36), Rect { x: 0, y: 0, w: 64, h: 36 }, start + Duration::from_micros(i * 16_667));
+            slot.offer(
+                &grey(64, 36),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 64,
+                    h: 36,
+                },
+                start + Duration::from_micros(i * 16_667),
+            );
             if let Some(frame) = slot.wait_after(seen, Duration::ZERO) {
                 seen = frame.seq;
                 made += 1;
@@ -886,11 +1017,31 @@ mod tests {
     fn nobody_asking_means_no_preview_work() {
         let slot = PreviewSlot::new();
         let now = Instant::now();
-        slot.offer(&grey(64, 36), Rect { x: 0, y: 0, w: 64, h: 36 }, now);
+        slot.offer(
+            &grey(64, 36),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 36,
+            },
+            now,
+        );
         assert!(slot.wait_after(0, Duration::ZERO).is_none());
         // Asked for now: the next offer is made.
-        slot.offer(&grey(64, 36), Rect { x: 0, y: 0, w: 64, h: 36 }, Instant::now());
-        let got = slot.wait_after(0, Duration::ZERO).expect("a frame once asked for");
+        slot.offer(
+            &grey(64, 36),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 36,
+            },
+            Instant::now(),
+        );
+        let got = slot
+            .wait_after(0, Duration::ZERO)
+            .expect("a frame once asked for");
         assert_eq!(got.seq, 1);
         assert_eq!(got.width, 320);
     }

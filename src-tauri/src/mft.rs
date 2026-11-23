@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 use windows::core::{Interface, GUID, VARIANT};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::*;
-use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
+};
 
 use crate::buffer::{EncodedPacket, VIDEO_TRACK};
 use crate::gpu::{GpuDevice, SendPtr};
@@ -51,7 +53,9 @@ pub fn queue_depth() -> usize {
     let depth = queue_depth_from(raw);
     if let Some(raw) = raw {
         if raw as usize != depth && !WARNED.swap(true, Ordering::Relaxed) {
-            log::warn!("CLIPPIBOY_QUEUE_DEPTH={raw} is outside 1..={MAX_QUEUE_DEPTH} — using {depth}");
+            log::warn!(
+                "CLIPPIBOY_QUEUE_DEPTH={raw} is outside 1..={MAX_QUEUE_DEPTH} — using {depth}"
+            );
         }
     }
     depth
@@ -73,7 +77,6 @@ fn queue_depth_from(raw: Option<u32>) -> usize {
 /// lie. The rotation must not come round again before the encoder has let go.
 pub const ENCODER_HOLD_MAX: usize = 16;
 
-
 /// A knob with no default of our own — absent means the property is not touched
 /// at all, and the driver keeps whatever it would have done.
 fn env_opt_u32(name: &str) -> Option<u32> {
@@ -86,7 +89,6 @@ fn env_opt_u32(name: &str) -> Option<u32> {
         }
     }
 }
-
 
 /// What the encoder costs, measured rather than assumed.
 ///
@@ -275,7 +277,11 @@ fn vendor_of(activate: &IMFActivate) -> Option<String> {
         let mut len = 0u32;
         let mut buf = [0u16; 64];
         activate
-            .GetString(&MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, &mut buf, Some(&mut len))
+            .GetString(
+                &MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
+                &mut buf,
+                Some(&mut len),
+            )
             .ok()?;
         Some(String::from_utf16_lossy(&buf[..len as usize]).to_uppercase())
     }
@@ -345,20 +351,21 @@ fn enumerate(adapter: Option<i64>) -> Result<Vec<Candidate>, String> {
     if let Some(luid) = adapter {
         let listed = unsafe {
             let mut attributes: Option<IMFAttributes> = None;
-            MFCreateAttributes(&mut attributes, 1)
-                .and_then(|()| {
-                    let attributes = attributes.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    attributes.SetUINT64(&MFT_ENUM_ADAPTER_LUID, luid_attribute(luid))?;
-                    MFTEnum2(
-                        MFT_CATEGORY_VIDEO_ENCODER,
-                        flags,
-                        Some(&input),
-                        Some(&output),
-                        attributes,
-                        &mut array,
-                        &mut count,
-                    )
-                })
+            MFCreateAttributes(&mut attributes, 1).and_then(|()| {
+                let attributes = attributes
+                    .as_ref()
+                    .ok_or_else(windows::core::Error::empty)?;
+                attributes.SetUINT64(&MFT_ENUM_ADAPTER_LUID, luid_attribute(luid))?;
+                MFTEnum2(
+                    MFT_CATEGORY_VIDEO_ENCODER,
+                    flags,
+                    Some(&input),
+                    Some(&output),
+                    attributes,
+                    &mut array,
+                    &mut count,
+                )
+            })
         };
         match listed {
             Ok(()) if count > 0 => {}
@@ -498,7 +505,9 @@ fn configure_rate_control(codec: &ICodecAPI, settings: &EncoderSettings) -> Rate
     // its budget whether the picture needs it or not, so a menu screen cost as
     // much as a firefight. Certified hardware encoders are required to support
     // it, but a driver is still a driver.
-    if tries_constant_quality(settings.rate) && set_rate_control(codec, eAVEncCommonRateControlMode_Quality) {
+    if tries_constant_quality(settings.rate)
+        && set_rate_control(codec, eAVEncCommonRateControlMode_Quality)
+    {
         if set_codec_property(
             codec,
             "quality",
@@ -631,14 +640,32 @@ fn configure_codec(
     // 0 = as fast as possible, 100 = best quality. A replay buffer runs in the
     // background but is not in real-time distress — 70 is the point where NVENC
     // and AMF get noticeably better without losing frames.
-    let env_flag = |name: &str| std::env::var(name).ok().map(|raw| matches!(raw.trim(), "1" | "true" | "yes" | "on"));
-    let quality_vs_speed = speed_choice(settings.quality_vs_speed, env_opt_u32("CLIPPIBOY_QUALITY_VS_SPEED"), 70);
-    log::info!("encoder ({}): quality/speed {quality_vs_speed}", settings.label);
-    let low_latency =
-        latency_choice(settings.low_latency, env_flag("CLIPPIBOY_LOW_LATENCY"), low_latency_default(chosen));
+    let env_flag = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|raw| matches!(raw.trim(), "1" | "true" | "yes" | "on"))
+    };
+    let quality_vs_speed = speed_choice(
+        settings.quality_vs_speed,
+        env_opt_u32("CLIPPIBOY_QUALITY_VS_SPEED"),
+        70,
+    );
+    log::info!(
+        "encoder ({}): quality/speed {quality_vs_speed}",
+        settings.label
+    );
+    let low_latency = latency_choice(
+        settings.low_latency,
+        env_flag("CLIPPIBOY_LOW_LATENCY"),
+        low_latency_default(chosen),
+    );
 
     let wanted: Vec<(&'static str, &GUID, VARIANT)> = vec![
-        ("Keyframe-Abstand", &CODECAPI_AVEncMPVGOPSize, VARIANT::from(gop)),
+        (
+            "Keyframe-Abstand",
+            &CODECAPI_AVEncMPVGOPSize,
+            VARIANT::from(gop),
+        ),
         (
             "quality/speed",
             &CODECAPI_AVEncCommonQualityVsSpeed,
@@ -676,10 +703,7 @@ fn read_u32(codec: &ICodecAPI, api: &GUID) -> Option<u32> {
     unsafe { u32::try_from(&codec.GetValue(api).ok()?).ok() }
 }
 
-fn media_type_video(
-    subtype: GUID,
-    settings: &EncoderSettings,
-) -> Result<IMFMediaType, String> {
+fn media_type_video(subtype: GUID, settings: &EncoderSettings) -> Result<IMFMediaType, String> {
     unsafe {
         let media = MFCreateMediaType().map_err(|err| format!("media type: {err}"))?;
         media
@@ -899,12 +923,20 @@ fn build(gpu: &GpuDevice, settings: &EncoderSettings) -> Result<Transform, Strin
     let chosen = candidates[pick].id.unwrap_or(EncoderId::X264);
 
     let activate = candidates[pick].activate.clone();
-    let transform: IMFTransform = unsafe { activate.ActivateObject() }
-        .map_err(|err| format!("start the encoder: {err}"))?;
+    let transform: IMFTransform =
+        unsafe { activate.ActivateObject() }.map_err(|err| format!("start the encoder: {err}"))?;
 
     // From here on every way out has to give the hardware session back: a
     // half-built transform is shut down like a finished one.
-    match set_up(gpu, settings, &candidates, pick, chosen, &transform, &activate) {
+    match set_up(
+        gpu,
+        settings,
+        &candidates,
+        pick,
+        chosen,
+        &transform,
+        &activate,
+    ) {
         Ok(built) => Ok(built),
         Err(err) => {
             shut_down(&transform, &activate, settings.label);
@@ -950,10 +982,7 @@ fn set_up(
             .ResetDevice(&gpu.device, token)
             .map_err(|err| format!("register device: {err}"))?;
         transform
-            .ProcessMessage(
-                MFT_MESSAGE_SET_D3D_MANAGER,
-                manager.as_raw() as usize,
-            )
+            .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
             // The software transform answers this with E_NOTIMPL, and a raw
             // HRESULT is no way to tell somebody their machine cannot do the
             // thing at all.
@@ -978,13 +1007,18 @@ fn set_up(
             RateControl::UnconstrainedVbr
         }
     };
-    let bframes = codec.as_ref().and_then(|codec| configure_bframes(codec, settings.bframes));
+    let bframes = codec
+        .as_ref()
+        .and_then(|codec| configure_bframes(codec, settings.bframes));
 
     // The order is prescribed: output type before input type.
     let output = media_type_video(MFVideoFormat_H264, settings)?;
     unsafe {
         output
-            .SetUINT32(&MF_MT_AVG_BITRATE, settings.bitrate_kbps.saturating_mul(1000))
+            .SetUINT32(
+                &MF_MT_AVG_BITRATE,
+                settings.bitrate_kbps.saturating_mul(1000),
+            )
             .map_err(|err| format!("bitrate: {err}"))?;
         let _ = output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32);
         // The keyframe distance belongs here, not only on ICodecAPI: the NVIDIA
@@ -1117,7 +1151,9 @@ fn read_sequence_header(transform: &IMFTransform) -> Vec<u8> {
             .and_then(|media| {
                 let size = media.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER).ok()?;
                 let mut blob = vec![0u8; size as usize];
-                media.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob, None).ok()?;
+                media
+                    .GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob, None)
+                    .ok()?;
                 Some(blob)
             })
             .unwrap_or_default()
@@ -1241,13 +1277,8 @@ impl Transform {
     /// an error here leaves the encoder's request for input standing.
     fn prepare(&self, job: &Job, duration_100ns: i64) -> Result<IMFSample, String> {
         unsafe {
-            let buffer = MFCreateDXGISurfaceBuffer(
-                &ID3D11Texture2D::IID,
-                &*job.texture,
-                0,
-                false,
-            )
-            .map_err(|err| format!("texture buffer: {err}"))?;
+            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &*job.texture, 0, false)
+                .map_err(|err| format!("texture buffer: {err}"))?;
 
             // Without a length set the encoder takes the buffer for empty.
             if let Ok(two_d) = buffer.cast::<IMF2DBuffer>() {
@@ -1463,7 +1494,9 @@ impl VideoEncoder {
                     // `run` owns the transform and has shut it down and dropped
                     // it by the time it returns, so every COM object of this
                     // thread is gone before the apartment is.
-                    run(transform, settings, jobs_rx, running, stats, on_packet, on_header);
+                    run(
+                        transform, settings, jobs_rx, running, stats, on_packet, on_header,
+                    );
                     if com {
                         unsafe { CoUninitialize() };
                     }
@@ -1553,7 +1586,8 @@ impl VideoEncoder {
                 // encoder that has stopped asking for input.
                 let timeouts = self.stats.submit_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
                 if timeouts >= SUBMIT_TIMEOUTS_FAIL {
-                    self.stats.fail("the encoder has taken no frame for 5 s".into());
+                    self.stats
+                        .fail("the encoder has taken no frame for 5 s".into());
                 }
                 false
             }
@@ -1735,9 +1769,7 @@ fn run<F, H>(
                                     // the queue was growing — the one time the
                                     // number matters — it stood still at whatever
                                     // the last packet left behind.
-                                    stats
-                                        .in_flight
-                                        .store(sent.len() as u64, Ordering::Relaxed);
+                                    stats.in_flight.store(sent.len() as u64, Ordering::Relaxed);
                                 }
                                 Some(Err(err)) => {
                                     log::warn!("{err}");
@@ -1907,7 +1939,11 @@ mod tests {
     fn an_adapter_luid_goes_into_the_attribute_unchanged() {
         let luid: i64 = (0x0000_0001_i64 << 32) | 0x0000_d3a7;
         assert_eq!(luid_attribute(luid), 0x0000_0001_0000_d3a7);
-        assert_eq!(luid_attribute(-1), u64::MAX, "the high part is signed in the LUID");
+        assert_eq!(
+            luid_attribute(-1),
+            u64::MAX,
+            "the high part is signed in the LUID"
+        );
     }
 
     #[test]
@@ -1935,7 +1971,10 @@ mod tests {
     #[test]
     fn an_idr_opens_a_gop() {
         assert!(opens_a_gop(&nal(5, true)));
-        assert!(opens_a_gop(&nal(5, false)), "three-byte start codes count too");
+        assert!(
+            opens_a_gop(&nal(5, false)),
+            "three-byte start codes count too"
+        );
     }
 
     /// An SPS never stands anywhere but in front of a keyframe, and encoders that
@@ -1988,7 +2027,10 @@ mod tests {
         assert!(!streak.failed(), "and it is reported once");
         streak.succeeded();
         for _ in 1..FAIL_AFTER {
-            assert!(!streak.failed(), "a packet in between starts the count over");
+            assert!(
+                !streak.failed(),
+                "a packet in between starts the count over"
+            );
         }
     }
 
@@ -2003,7 +2045,10 @@ mod tests {
             assert!(!output.failed());
         }
         feed.succeeded();
-        assert!(output.failed(), "the 30th output error in a row fails, feeding or not");
+        assert!(
+            output.failed(),
+            "the 30th output error in a row fails, feeding or not"
+        );
     }
 
     #[test]
@@ -2024,13 +2069,22 @@ mod tests {
         assert_eq!(stats.failure(), None);
         stats.fail("the encoder stopped on its own".into());
         stats.fail("something later".into());
-        assert_eq!(stats.failure().as_deref(), Some("the encoder stopped on its own"));
+        assert_eq!(
+            stats.failure().as_deref(),
+            Some("the encoder stopped on its own")
+        );
     }
 
     #[test]
     fn a_frame_that_never_reached_the_encoder_keeps_its_request() {
-        assert!(!input_answered(false), "prepare failed: the NeedInput still stands");
-        assert!(input_answered(true), "ProcessInput was called, whatever it answered");
+        assert!(
+            !input_answered(false),
+            "prepare failed: the NeedInput still stands"
+        );
+        assert!(
+            input_answered(true),
+            "ProcessInput was called, whatever it answered"
+        );
     }
 
     #[test]
@@ -2039,7 +2093,8 @@ mod tests {
         unsafe {
             let old = MFCreateMediaType().unwrap();
             old.SetUINT32(&MF_MT_AVG_BITRATE, 19_000_000).unwrap();
-            old.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32).unwrap();
+            old.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)
+                .unwrap();
             old.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 120).unwrap();
             let new = MFCreateMediaType().unwrap();
             carry_output_settings(&old, &new);

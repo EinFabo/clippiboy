@@ -155,7 +155,8 @@ pub fn megabytes(bytes: u64) -> String {
 /// side rounded down even — H.264 will not take an odd one.
 fn size_for(target: &Target, short: u32) -> (u32, u32) {
     if target.width < target.height {
-        let height = (target.height as u64 * short as u64 / target.width.max(1) as u64).max(2) as u32 & !1;
+        let height =
+            (target.height as u64 * short as u64 / target.width.max(1) as u64).max(2) as u32 & !1;
         (short, height)
     } else {
         (width_for(target, short), short)
@@ -240,7 +241,12 @@ pub fn arguments(
 fn remix_map(args: &mut Vec<String>, remix: &crate::stems::Remix, first_input: usize) -> bool {
     match remix.filter(first_input) {
         Some(graph) => {
-            args.extend(["-filter_complex".into(), graph, "-map".into(), crate::stems::MIX_LABEL.into()]);
+            args.extend([
+                "-filter_complex".into(),
+                graph,
+                "-map".into(),
+                crate::stems::MIX_LABEL.into(),
+            ]);
             true
         }
         None => {
@@ -288,9 +294,17 @@ pub fn portrait_arguments(
     remix: Option<&crate::stems::Remix>,
 ) -> Vec<String> {
     let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"]
-        .map(String::from)
-        .to_vec();
+    let mut args: Vec<String> = [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+    ]
+    .map(String::from)
+    .to_vec();
     args.extend(crate::muxer::clip_input().map(String::from));
     if inputs.game_seek_ms > 0 {
         args.extend(["-ss".into(), seconds(inputs.game_seek_ms)]);
@@ -307,7 +321,12 @@ pub fn portrait_arguments(
     args.extend(crate::muxer::clip_input().map(String::from));
     args.extend(["-i".into(), inputs.audio.to_string_lossy().to_string()]);
     if let Some(mark) = inputs.mark {
-        args.extend(["-loop".into(), "1".into(), "-i".into(), mark.to_string_lossy().to_string()]);
+        args.extend([
+            "-loop".into(),
+            "1".into(),
+            "-i".into(),
+            mark.to_string_lossy().to_string(),
+        ]);
     }
     // A remix's tracks after everything the picture's graph counts on; the
     // clip file stays an input, unread, so the graph's numbers hold.
@@ -405,7 +424,13 @@ mod tests {
     /// 720×1280, then 480×852 — never 608×1080 from stepping on the height.
     #[test]
     fn portrait_audio_comes_from_the_clip_file() {
-        let plan = recipe(&Target { bytes: 50 * MB, duration_ms: 20_000, width: PORTRAIT.0, height: PORTRAIT.1, source_kbps: None });
+        let plan = recipe(&Target {
+            bytes: 50 * MB,
+            duration_ms: 20_000,
+            width: PORTRAIT.0,
+            height: PORTRAIT.1,
+            source_kbps: None,
+        });
         let inputs = PortraitInputs {
             game: Path::new("clean.mp4"),
             game_seek_ms: 5_000,
@@ -413,7 +438,15 @@ mod tests {
             audio: Path::new("clip.mp4"),
             mark: Some(Path::new("mark.png")),
         };
-        let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, None);
+        let args = portrait_arguments(
+            &inputs,
+            "[0:v]null[v]",
+            Path::new("out.mp4"),
+            &plan,
+            20_000,
+            EncoderId::X264,
+            None,
+        );
         let joined = args.join(" ");
         let guard = crate::muxer::clip_input().join(" ");
         assert!(
@@ -421,18 +454,44 @@ mod tests {
             "{joined}"
         );
         assert!(args.windows(2).any(|w| w == ["-map", "[v]"]), "{joined}");
-        assert!(args.windows(2).any(|w| w == ["-map", "2:a:0?"]), "the clip file is input 2: {joined}");
+        assert!(
+            args.windows(2).any(|w| w == ["-map", "2:a:0?"]),
+            "the clip file is input 2: {joined}"
+        );
         assert!(args.windows(2).any(|w| w == ["-t", "20.000"]), "{joined}");
-        assert!(!args.iter().any(|a| a == "-vf"), "-vf and -filter_complex never meet: {joined}");
+        assert!(
+            !args.iter().any(|a| a == "-vf"),
+            "-vf and -filter_complex never meet: {joined}"
+        );
         // Without a cam the clip file is input 1.
-        let bare = PortraitInputs { cam: None, mark: None, ..inputs };
-        let args = portrait_arguments(&bare, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, None);
+        let bare = PortraitInputs {
+            cam: None,
+            mark: None,
+            ..inputs
+        };
+        let args = portrait_arguments(
+            &bare,
+            "[0:v]null[v]",
+            Path::new("out.mp4"),
+            &plan,
+            20_000,
+            EncoderId::X264,
+            None,
+        );
         assert!(args.windows(2).any(|w| w == ["-map", "1:a:0?"]), "{args:?}");
     }
 
     #[test]
     fn a_portrait_export_is_never_squashed() {
-        let at = |mb: u64| recipe(&Target { bytes: mb * 1024 * 1024, duration_ms: 30_000, width: 1080, height: 1920, source_kbps: None });
+        let at = |mb: u64| {
+            recipe(&Target {
+                bytes: mb * 1024 * 1024,
+                duration_ms: 30_000,
+                width: 1080,
+                height: 1920,
+                source_kbps: None,
+            })
+        };
         let roomy = at(100);
         assert_eq!((roomy.width, roomy.height), (1080, 1920));
         let tighter = at(8);
@@ -476,7 +535,10 @@ mod tests {
     fn an_absurd_target_lands_on_the_smallest_step() {
         let plan = recipe(&target(MB / 100, 600_000, 1920, 1080));
         assert_eq!(plan.height, 480);
-        assert!(plan.video_kbps >= 200, "ffmpeg needs something to work with");
+        assert!(
+            plan.video_kbps >= 200,
+            "ffmpeg needs something to work with"
+        );
     }
 
     /// Final review I-2: a long clip at a small target used to be floored at
@@ -498,7 +560,10 @@ mod tests {
         assert!(predicted <= 10 * MB, "predicted {predicted} bytes");
 
         let short = recipe(&target(10 * MB, 60_000, 1920, 1080));
-        assert_eq!(short.audio_kbps, 128, "a clip that fits keeps its full sound");
+        assert_eq!(
+            short.audio_kbps, 128,
+            "a clip that fits keeps its full sound"
+        );
         assert!(!short.too_long);
     }
 
@@ -604,11 +669,21 @@ mod tests {
     fn a_remixed_export_maps_the_kept_tracks() {
         let plan = recipe(&target(10 * MB, 120_000, 1920, 1080));
         let remix = crate::stems::Remix {
-            tracks: vec![(Path::new("t/0.m4a").into(), 0.0), (Path::new("t/1.m4a").into(), -3.0)],
+            tracks: vec![
+                (Path::new("t/0.m4a").into(), 0.0),
+                (Path::new("t/1.m4a").into(), -3.0),
+            ],
             start_ms: 2_000,
             length_ms: 120_000,
         };
-        let args = arguments(Path::new("x.mp4"), Path::new("o.mp4"), &plan, 1080, EncoderId::X264, Some(&remix));
+        let args = arguments(
+            Path::new("x.mp4"),
+            Path::new("o.mp4"),
+            &plan,
+            1080,
+            EncoderId::X264,
+            Some(&remix),
+        );
         let joined = args.join(" ");
         let guard = crate::muxer::clip_input().join(" ");
         assert!(
@@ -619,14 +694,35 @@ mod tests {
         );
         assert!(!args.iter().any(|a| a == "0:a:0?"), "{joined}");
         assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
-        let graph = args.iter().position(|a| a == "-filter_complex").map(|at| &args[at + 1]).unwrap();
+        let graph = args
+            .iter()
+            .position(|a| a == "-filter_complex")
+            .map(|at| &args[at + 1])
+            .unwrap();
         assert!(graph.starts_with("[1:a]volume=1[m0];[2:a]"), "{graph}");
-        assert!(args.windows(2).any(|w| w[0] == "-vf"), "the scale stays a simple filter: {joined}");
+        assert!(
+            args.windows(2).any(|w| w[0] == "-vf"),
+            "the scale stays a simple filter: {joined}"
+        );
 
         // Nothing audible left: no sound at all rather than a failed map.
-        let silent = crate::stems::Remix { tracks: Vec::new(), start_ms: 0, length_ms: 120_000 };
-        let args = arguments(Path::new("x.mp4"), Path::new("o.mp4"), &plan, 1080, EncoderId::X264, Some(&silent));
-        assert!(args.iter().any(|a| a == "-an") && !args.iter().any(|a| a == "-c:a"), "{args:?}");
+        let silent = crate::stems::Remix {
+            tracks: Vec::new(),
+            start_ms: 0,
+            length_ms: 120_000,
+        };
+        let args = arguments(
+            Path::new("x.mp4"),
+            Path::new("o.mp4"),
+            &plan,
+            1080,
+            EncoderId::X264,
+            Some(&silent),
+        );
+        assert!(
+            args.iter().any(|a| a == "-an") && !args.iter().any(|a| a == "-c:a"),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -639,12 +735,30 @@ mod tests {
             audio: Path::new("clip.mp4"),
             mark: Some(Path::new("mark.png")),
         };
-        let remix = crate::stems::Remix { tracks: vec![(Path::new("t/0.m4a").into(), 0.0)], start_ms: 0, length_ms: 20_000 };
-        let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, Some(&remix));
+        let remix = crate::stems::Remix {
+            tracks: vec![(Path::new("t/0.m4a").into(), 0.0)],
+            start_ms: 0,
+            length_ms: 20_000,
+        };
+        let args = portrait_arguments(
+            &inputs,
+            "[0:v]null[v]",
+            Path::new("out.mp4"),
+            &plan,
+            20_000,
+            EncoderId::X264,
+            Some(&remix),
+        );
         let joined = args.join(" ");
         let guard = crate::muxer::clip_input().join(" ");
-        assert!(joined.contains(&format!("-loop 1 -i mark.png {guard} -t 20.000 -i t/0.m4a")), "{joined}");
-        assert!(joined.contains("[0:v]null[v];[4:a]volume=1[m0];[m0]anull[aout]"), "{joined}");
+        assert!(
+            joined.contains(&format!("-loop 1 -i mark.png {guard} -t 20.000 -i t/0.m4a")),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("[0:v]null[v];[4:a]volume=1[m0];[m0]anull[aout]"),
+            "{joined}"
+        );
         assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
         assert!(!joined.contains("2:a:0?"), "{joined}");
     }
@@ -652,11 +766,19 @@ mod tests {
     /// Every encoder has to produce a line ffmpeg can actually run.
     #[test]
     fn every_encoder_aims_at_the_target() {
-        for encoder in [EncoderId::Nvenc, EncoderId::Amf, EncoderId::Qsv, EncoderId::X264] {
+        for encoder in [
+            EncoderId::Nvenc,
+            EncoderId::Amf,
+            EncoderId::Qsv,
+            EncoderId::X264,
+        ] {
             let args = video_args(encoder, 4_000);
             assert!(args.contains(&"-c:v".to_string()), "{encoder:?}: {args:?}");
             assert!(args.contains(&"-b:v".to_string()), "{encoder:?}: {args:?}");
-            assert!(args.contains(&"-pix_fmt".to_string()), "{encoder:?}: {args:?}");
+            assert!(
+                args.contains(&"-pix_fmt".to_string()),
+                "{encoder:?}: {args:?}"
+            );
         }
     }
 
@@ -673,15 +795,27 @@ mod tests {
     /// spends 12. The picture gets what the clip had, not what the size allows.
     #[test]
     fn the_picture_never_gets_more_than_the_clip_spends() {
-        let roomy = Target { source_kbps: Some(12_000), ..target(475 * MB, 30_000, 1920, 1080) };
+        let roomy = Target {
+            source_kbps: Some(12_000),
+            ..target(475 * MB, 30_000, 1920, 1080)
+        };
         let plan = recipe(&roomy);
         assert_eq!(plan.video_kbps, 12_000);
         assert_eq!(plan.height, 1080);
         // Tight targets are unchanged by it.
-        let tight = Target { source_kbps: Some(12_000), ..target(10 * MB, 120_000, 1920, 1080) };
-        assert_eq!(recipe(&tight), recipe(&target(10 * MB, 120_000, 1920, 1080)));
+        let tight = Target {
+            source_kbps: Some(12_000),
+            ..target(10 * MB, 120_000, 1920, 1080)
+        };
+        assert_eq!(
+            recipe(&tight),
+            recipe(&target(10 * MB, 120_000, 1920, 1080))
+        );
         // And a starved clip still gets the floor.
-        let thin = Target { source_kbps: Some(50), ..target(475 * MB, 30_000, 1920, 1080) };
+        let thin = Target {
+            source_kbps: Some(50),
+            ..target(475 * MB, 30_000, 1920, 1080)
+        };
         assert_eq!(recipe(&thin).video_kbps, VIDEO_FLOOR_KBPS);
     }
 
@@ -694,8 +828,18 @@ mod tests {
     #[test]
     fn a_portrait_export_is_scaled_by_its_width() {
         let plan = recipe(&target((6.1 * MB as f64) as u64, 60_000, 1080, 1920));
-        let args = arguments(Path::new("in.mp4"), Path::new("out.mp4"), &plan, 1920, EncoderId::X264, None);
-        assert!(args.windows(2).any(|w| w == ["-vf", "scale=480:-2"]), "{args:?}");
+        let args = arguments(
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            &plan,
+            1920,
+            EncoderId::X264,
+            None,
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["-vf", "scale=480:-2"]),
+            "{args:?}"
+        );
     }
 
     /// The short side steps (spec 3.5): 480 wide, not 480 high — 270×480

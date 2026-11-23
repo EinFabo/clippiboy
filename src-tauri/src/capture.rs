@@ -10,7 +10,12 @@ use crate::model::{CaptureTarget, TargetKind};
 /// Window classes of the shell itself: the desktop ("Program Manager", as large
 /// as the whole desktop), the wallpaper hosts behind it and the taskbars. They
 /// are visible, titled and big, and nobody means to record them.
-const SHELL_CLASSES: &[&str] = &["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"];
+const SHELL_CLASSES: &[&str] = &[
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+];
 
 /// The class of a store app's core window — the shell's own hosts use it too.
 const CORE_WINDOW: &str = "Windows.UI.Core.CoreWindow";
@@ -33,21 +38,26 @@ const SHELL_HOSTS: &[&str] = &[
 /// path) is asked only for a core window; an app's own core window stays.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_shell_window(class: &str, exe: impl FnOnce() -> Option<String>) -> bool {
-    if SHELL_CLASSES.iter().any(|name| name.eq_ignore_ascii_case(class)) {
+    if SHELL_CLASSES
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(class))
+    {
         return true;
     }
     class == CORE_WINDOW
         && exe().is_some_and(|path| {
             let file = path.rsplit(['\\', '/']).next().unwrap_or(path.as_str());
-            SHELL_HOSTS.iter().any(|host| host.eq_ignore_ascii_case(file))
+            SHELL_HOSTS
+                .iter()
+                .any(|host| host.eq_ignore_ascii_case(file))
         })
 }
 
 #[cfg(windows)]
 mod win {
     use super::*;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow, DEVMODEW,
         ENUM_CURRENT_SETTINGS, HDC, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
@@ -55,10 +65,7 @@ mod win {
 
     /// MONITORINFOF_PRIMARY — not exported by the windows crate 0.58.
     const PRIMARY_FLAG: u32 = 0x0000_0001;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible,
-    };
+    use std::collections::HashMap;
     use windows::Win32::Devices::Display::{
         DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
         DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
@@ -66,7 +73,10 @@ mod win {
         DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
     };
     use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
-    use std::collections::HashMap;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindowVisible,
+    };
 
     /// What Windows knows about the panel behind a `\\.\DISPLAYn`.
     pub struct Identity {
@@ -99,11 +109,8 @@ mod win {
         unsafe {
             let mut path_count = 0u32;
             let mut mode_count = 0u32;
-            if GetDisplayConfigBufferSizes(
-                QDC_ONLY_ACTIVE_PATHS,
-                &mut path_count,
-                &mut mode_count,
-            ) != ERROR_SUCCESS
+            if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+                != ERROR_SUCCESS
             {
                 return out;
             }
@@ -348,10 +355,7 @@ mod win {
         let mut targets = list_monitors();
         let mut windows: Vec<CaptureTarget> = Vec::new();
         unsafe {
-            let _ = EnumWindows(
-                Some(window_proc),
-                LPARAM(&mut windows as *mut _ as isize),
-            );
+            let _ = EnumWindows(Some(window_proc), LPARAM(&mut windows as *mut _ as isize));
         }
         targets.extend(windows);
         targets
@@ -533,9 +537,14 @@ pub fn watch_display() {
     use windows::Win32::UI::WindowsAndMessaging::{DEVICE_NOTIFY_CALLBACK, PBT_POWERSETTINGCHANGE};
 
     // Lives in `Win32_System_SystemServices`, a whole feature for one GUID.
-    const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
+    const GUID_CONSOLE_DISPLAY_STATE: GUID =
+        GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
 
-    unsafe extern "system" fn changed(_context: *const c_void, kind: u32, setting: *const c_void) -> u32 {
+    unsafe extern "system" fn changed(
+        _context: *const c_void,
+        kind: u32,
+        setting: *const c_void,
+    ) -> u32 {
         if kind != PBT_POWERSETTINGCHANGE || setting.is_null() {
             return 0;
         }
@@ -645,7 +654,10 @@ pub fn pick(
         return targets
             .iter()
             .find(|t| t.kind == TargetKind::Window && Some(t.id.as_str()) == id)
-            .map(|target| Choice { target: target.clone(), how: Match::Device });
+            .map(|target| Choice {
+                target: target.clone(),
+                how: Match::Device,
+            });
     }
 
     if let Some(stable) = stable.filter(|s| !s.is_empty()) {
@@ -653,7 +665,10 @@ pub fn pick(
             .iter()
             .find(|t| t.kind == TargetKind::Monitor && t.stable_id.as_deref() == Some(stable))
         {
-            return Some(Choice { target: target.clone(), how: Match::Stable });
+            return Some(Choice {
+                target: target.clone(),
+                how: Match::Stable,
+            });
         }
     }
     if let Some(id) = id.filter(|s| !s.is_empty()) {
@@ -661,7 +676,10 @@ pub fn pick(
             .iter()
             .find(|t| t.kind == TargetKind::Monitor && t.id == id)
         {
-            return Some(Choice { target: target.clone(), how: Match::Device });
+            return Some(Choice {
+                target: target.clone(),
+                how: Match::Device,
+            });
         }
     }
 
@@ -671,7 +689,10 @@ pub fn pick(
     } else {
         Match::Default
     };
-    Some(Choice { target: chosen, how })
+    Some(Choice {
+        target: chosen,
+        how,
+    })
 }
 
 /// Resolve the saved selection against the screens that are here right now.
@@ -679,11 +700,7 @@ pub fn pick(
 /// Says out loud when the saved screen could not be found. That line went
 /// missing when capture moved to `wgc.rs`, and without it the app quietly
 /// recorded the primary screen for as long as it took somebody to notice.
-pub fn resolve(
-    kind: TargetKind,
-    id: Option<&str>,
-    stable: Option<&str>,
-) -> Option<Choice> {
+pub fn resolve(kind: TargetKind, id: Option<&str>, stable: Option<&str>) -> Option<Choice> {
     let choice = pick(&list_targets(), kind, id, stable)?;
     match choice.how {
         Match::Fallback => log::warn!(
@@ -839,8 +856,16 @@ impl std::fmt::Display for Fingerprint {
             f,
             "{} screen(s): {} | graphics: {}",
             self.screens.len(),
-            if screens.is_empty() { "none".into() } else { screens.join("; ") },
-            if graphics.is_empty() { "unknown".into() } else { graphics.join("; ") },
+            if screens.is_empty() {
+                "none".into()
+            } else {
+                screens.join("; ")
+            },
+            if graphics.is_empty() {
+                "unknown".into()
+            } else {
+                graphics.join("; ")
+            },
         )
     }
 }
@@ -861,7 +886,10 @@ pub fn fingerprint(targets: &[CaptureTarget]) -> Fingerprint {
         })
         .collect();
     screens.sort();
-    Fingerprint { screens, graphics: Vec::new() }
+    Fingerprint {
+        screens,
+        graphics: Vec::new(),
+    }
 }
 
 /// Has the topology come to rest? Two readings in a row agree, and Windows
@@ -931,10 +959,7 @@ pub fn current_fingerprint() -> Fingerprint {
 /// start where the screen is present.
 ///
 /// Returns whether anything changed, so the caller knows to save.
-pub fn repair_monitor_choice(
-    id: &mut Option<String>,
-    stable: &mut Option<String>,
-) -> bool {
+pub fn repair_monitor_choice(id: &mut Option<String>, stable: &mut Option<String>) -> bool {
     // Nothing chosen at all is a valid state: the primary screen, by default.
     if id.is_none() && stable.is_none() {
         return false;
@@ -985,11 +1010,7 @@ pub fn repair_overlay(overlay: &mut crate::model::OverlayConfig) -> bool {
 
 /// Find the configured target in the current list. With no selection the
 /// primary monitor applies — exactly as in the pipeline.
-fn find_target(
-    kind: TargetKind,
-    id: Option<&str>,
-    stable: Option<&str>,
-) -> Option<CaptureTarget> {
+fn find_target(kind: TargetKind, id: Option<&str>, stable: Option<&str>) -> Option<CaptureTarget> {
     pick(&list_targets(), kind, id, stable).map(|choice| choice.target)
 }
 
@@ -1077,10 +1098,21 @@ mod tests {
             let path = path.to_string();
             move || Some(path)
         };
-        assert!(is_shell_window(CORE_WINDOW, at(r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\TextInputHost.exe")));
-        assert!(is_shell_window(CORE_WINDOW, at(r"C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe")));
+        assert!(is_shell_window(
+            CORE_WINDOW,
+            at(
+                r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\TextInputHost.exe"
+            )
+        ));
+        assert!(is_shell_window(
+            CORE_WINDOW,
+            at(r"C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe")
+        ));
         // A store app's own window, and one whose process will not say.
-        assert!(!is_shell_window(CORE_WINDOW, at(r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe")));
+        assert!(!is_shell_window(
+            CORE_WINDOW,
+            at(r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe")
+        ));
         assert!(!is_shell_window(CORE_WINDOW, || None));
     }
 
@@ -1092,15 +1124,33 @@ mod tests {
         let start = display_state().back;
         note_display(0);
         note_display(0);
-        assert_eq!(display_state(), DisplayState { off: true, back: start });
+        assert_eq!(
+            display_state(),
+            DisplayState {
+                off: true,
+                back: start
+            }
+        );
         note_display(2);
-        assert_eq!(display_state(), DisplayState { off: false, back: start + 1 });
+        assert_eq!(
+            display_state(),
+            DisplayState {
+                off: false,
+                back: start + 1
+            }
+        );
         note_display(1);
         note_display(1);
         assert_eq!(display_state().back, start + 1, "dimmed to on is no return");
         note_display(0);
         note_display(1);
-        assert_eq!(display_state(), DisplayState { off: false, back: start + 2 });
+        assert_eq!(
+            display_state(),
+            DisplayState {
+                off: false,
+                back: start + 2
+            }
+        );
     }
 
     /// Three screens of identical size, as on the machine this was found on:
@@ -1185,7 +1235,11 @@ mod tests {
             Some(&panel("GONE123")),
         )
         .unwrap();
-        assert_eq!(choice.how, Match::Fallback, "the fallback has to be visible");
+        assert_eq!(
+            choice.how,
+            Match::Fallback,
+            "the fallback has to be visible"
+        );
         assert!(choice.target.is_primary);
     }
 
@@ -1320,7 +1374,10 @@ mod tests {
         )
         .unwrap();
         assert_ne!(choice.target.id, "\\\\.\\DISPLAY1");
-        assert_eq!(choice.target.stable_id.as_deref(), Some(panel("CR270H").as_str()));
+        assert_eq!(
+            choice.target.stable_id.as_deref(),
+            Some(panel("CR270H").as_str())
+        );
     }
 
     /// With no known refresh rate the usual steps stand — better to offer 120
@@ -1403,7 +1460,13 @@ mod tests {
     fn a_second_screen_gone_and_back_restarts_the_capture() {
         let both = print(&two_screens());
         let alone = print(&two_screens()[..1]);
-        let readings = [both.clone(), alone.clone(), alone.clone(), both.clone(), both.clone()];
+        let readings = [
+            both.clone(),
+            alone.clone(),
+            alone.clone(),
+            both.clone(),
+            both.clone(),
+        ];
         assert_eq!(restarts(&both, &readings), vec![2, 4]);
     }
 
@@ -1446,7 +1509,10 @@ mod tests {
         let half = print(&half);
         assert!(!settled(Some(&half), &half));
         assert!(!settled(None, &both), "one reading is not two");
-        assert!(!settled(Some(&Fingerprint::default()), &Fingerprint::default()), "no screen at all");
+        assert!(
+            !settled(Some(&Fingerprint::default()), &Fingerprint::default()),
+            "no screen at all"
+        );
         assert!(restarts(&both, &[half.clone(), half, both.clone(), both.clone()]).is_empty());
     }
 
@@ -1473,7 +1539,11 @@ mod tests {
     }
 
     fn adapter(luid: i64, driver: i64) -> AdapterPrint {
-        AdapterPrint { luid, driver, name: "GPU".into() }
+        AdapterPrint {
+            luid,
+            driver,
+            name: "GPU".into(),
+        }
     }
 
     /// A driver update brings a new version and, with the reset, a new LUID:
@@ -1485,7 +1555,10 @@ mod tests {
         assert!(graphics_changed(&before, &after));
         assert!(needs_restart(&before, &after));
         let reset = print(&two_screens()).with_graphics(vec![adapter(0x5678, 10)]);
-        assert!(graphics_changed(&before, &reset), "a reset alone moves the LUID");
+        assert!(
+            graphics_changed(&before, &reset),
+            "a reset alone moves the LUID"
+        );
     }
 
     /// DXGI failing on one side only is no reason to throw the buffer away.
@@ -1506,13 +1579,22 @@ mod tests {
         let mut now = two_screens();
         now[0].id = "\\\\.\\DISPLAY2".into();
         now[1].id = "\\\\.\\DISPLAY1".into();
-        assert!(is_screen(&recorded, "\\\\.\\DISPLAY2", &now), "the same panel, renumbered");
-        assert!(!is_screen(&recorded, "\\\\.\\DISPLAY1", &now), "its old name, another panel");
+        assert!(
+            is_screen(&recorded, "\\\\.\\DISPLAY2", &now),
+            "the same panel, renumbered"
+        );
+        assert!(
+            !is_screen(&recorded, "\\\\.\\DISPLAY1", &now),
+            "its old name, another panel"
+        );
         let mut anonymous = now.clone();
         for screen in &mut anonymous {
             screen.stable_id = None;
         }
-        assert!(is_screen(&recorded, "\\\\.\\DISPLAY1", &anonymous), "no panel: by name");
+        assert!(
+            is_screen(&recorded, "\\\\.\\DISPLAY1", &anonymous),
+            "no panel: by name"
+        );
     }
 
     #[test]
@@ -1527,6 +1609,9 @@ mod tests {
         let mut swapped = gpu;
         swapped.reverse();
         let reordered = print(&two_screens()).with_graphics(swapped);
-        assert!(!graphics_changed(&before, &reordered), "order means nothing");
+        assert!(
+            !graphics_changed(&before, &reordered),
+            "order means nothing"
+        );
     }
 }

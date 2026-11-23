@@ -122,7 +122,11 @@ fn recolor(rgba: &mut [u8], width: u32, height: u32, shift: impl Fn(f32) -> Shif
         let x = (at % width) as f32 / width as f32;
         let y = (at / width) as f32 / height;
         let Shift { turn, scale } = shift((x + y) / 2.0);
-        let [r, g, b] = from_hsv((hue + turn).rem_euclid(360.0), (saturation * scale).min(1.0), value);
+        let [r, g, b] = from_hsv(
+            (hue + turn).rem_euclid(360.0),
+            (saturation * scale).min(1.0),
+            value,
+        );
         pixel[0] = r;
         pixel[1] = g;
         pixel[2] = b;
@@ -194,7 +198,10 @@ mod tests {
         let mut rgba = [0x8b, 0x5c, 0xf6, 255, 40, 40, 44, 255, 0x8b, 0x5c, 0xf6, 0];
         tint_rgba(&mut rgba, 3, 1, &solid(Some("#22c55e")));
         let (hue, _, _) = to_hsv([rgba[0], rgba[1], rgba[2]]);
-        assert!((hue - to_hsv([0x22, 0xc5, 0x5e]).0).abs() < 2.0, "hue {hue}");
+        assert!(
+            (hue - to_hsv([0x22, 0xc5, 0x5e]).0).abs() < 2.0,
+            "hue {hue}"
+        );
         assert_eq!(&rgba[4..8], &[40, 40, 44, 255]);
         assert_eq!(&rgba[8..12], &[0x8b, 0x5c, 0xf6, 0]);
     }
@@ -218,7 +225,11 @@ mod tests {
         tint_rgba(&mut rgba, 1, 1, &solid(Some("#€ab1")));
         assert_eq!(rgba, [0x8b, 0x5c, 0xf6, 255]);
         // Both ends fall back to the violet.
-        let gradient = Accent { mode: AccentMode::Gradient, color_2: Some("#1€23".into()), ..solid(Some("#€ab1")) };
+        let gradient = Accent {
+            mode: AccentMode::Gradient,
+            color_2: Some("#1€23".into()),
+            ..solid(Some("#€ab1"))
+        };
         tint_rgba(&mut rgba, 1, 1, &gradient);
         for (a, b) in rgba.iter().zip([0x8b, 0x5c, 0xf6, 255]) {
             assert!(a.abs_diff(b) <= 1, "{rgba:?}");
@@ -241,6 +252,9 @@ mod tests {
         let (top, _, _) = to_hsv([rgba[0], rgba[1], rgba[2]]);
         assert!(top < 5.0 || top > 355.0, "top {top} should be red");
         let (lower, _, _) = to_hsv([rgba[4], rgba[5], rgba[6]]);
-        assert!(lower > 300.0 || lower < 5.0, "lower {lower} should be on the way to blue");
+        assert!(
+            lower > 300.0 || lower < 5.0,
+            "lower {lower} should be on the way to blue"
+        );
     }
 }

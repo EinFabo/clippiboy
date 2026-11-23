@@ -89,7 +89,12 @@ impl<W: Write> TsWriter<W> {
 
     /// One packet of a video PES: as much of `rest` as fits, the room left
     /// over filled with adaptation-field stuffing. Returns how much it took.
-    fn write_video_packet(&mut self, start: bool, pcr: Option<u64>, rest: &[u8]) -> std::io::Result<usize> {
+    fn write_video_packet(
+        &mut self,
+        start: bool,
+        pcr: Option<u64>,
+        rest: &[u8],
+    ) -> std::io::Result<usize> {
         // The adaptation field's fixed part: its length byte, the flags and
         // the PCR, when there is a clock to carry.
         let fixed = if pcr.is_some() { 8 } else { 0 };
@@ -133,7 +138,11 @@ impl<W: Write> TsWriter<W> {
     /// PAT and PMT, one packet each.
     fn write_tables(&mut self) -> std::io::Result<()> {
         // Program 1 is described on PMT_PID.
-        let pat = section(0x00, 0x0001, &[0x00, 0x01, 0xE0 | (PMT_PID >> 8) as u8, PMT_PID as u8]);
+        let pat = section(
+            0x00,
+            0x0001,
+            &[0x00, 0x01, 0xE0 | (PMT_PID >> 8) as u8, PMT_PID as u8],
+        );
         // The clock rides on the video PID; no program descriptors; one
         // H.264 stream on VIDEO_PID with no descriptors either.
         let pmt = section(
@@ -346,7 +355,10 @@ mod tests {
         for (pts, key) in [(0, true), (16_666, false), (1_516_666, false)] {
             ts.write_frame(pts, key, &[0, 0, 0, 1, 0x65, 0x88]).unwrap();
         }
-        assert_eq!(read_pts(&ts.finish().unwrap()), vec![63_000, 64_500, 199_500]);
+        assert_eq!(
+            read_pts(&ts.finish().unwrap()),
+            vec![63_000, 64_500, 199_500]
+        );
     }
 
     /// BUF-6: a 1 s hole stays a 1 s hole, instead of being spread over the clip.
@@ -354,12 +366,23 @@ mod tests {
     fn a_hole_stays_a_hole() {
         let mut ts = TsWriter::new(Vec::new());
         for tick in (0..60).chain(120..180) {
-            ts.write_frame(tick * 1_000_000 / 60, tick % 120 == 0, &[0, 0, 0, 1, 0x41]).unwrap();
+            ts.write_frame(tick * 1_000_000 / 60, tick % 120 == 0, &[0, 0, 0, 1, 0x41])
+                .unwrap();
         }
         let pts = read_pts(&ts.finish().unwrap());
         let steps: Vec<u64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
-        assert_eq!(steps.iter().filter(|s| (1_499..=1_501).contains(*s)).count(), 118);
-        assert!((91_490..=91_510).contains(&steps[59]), "the hole is {} ticks", steps[59]);
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|s| (1_499..=1_501).contains(*s))
+                .count(),
+            118
+        );
+        assert!(
+            (91_490..=91_510).contains(&steps[59]),
+            "the hole is {} ticks",
+            steps[59]
+        );
     }
 
     /// REC-6: a recording that never stopped cleanly takes its length from
@@ -369,7 +392,8 @@ mod tests {
     fn the_span_of_a_ts_file_is_read_from_its_ends() {
         let mut ts = TsWriter::new(Vec::new());
         for k in 0..120 {
-            ts.write_frame(k * 16_666, k % 60 == 0, &frame(12_000)).unwrap();
+            ts.write_frame(k * 16_666, k % 60 == 0, &frame(12_000))
+                .unwrap();
         }
         let mut bytes = ts.finish().unwrap();
         bytes.extend([0x47u8; 100]);
@@ -395,7 +419,8 @@ mod tests {
     fn a_zero_filled_end_does_not_hide_the_last_frame() {
         let mut ts = TsWriter::new(Vec::new());
         for k in 0..120 {
-            ts.write_frame(k * 16_666, k % 60 == 0, &frame(12_000)).unwrap();
+            ts.write_frame(k * 16_666, k % 60 == 0, &frame(12_000))
+                .unwrap();
         }
         let mut bytes = ts.finish().unwrap();
         bytes.extend(std::iter::repeat_n(0u8, (1 << 20) + 5_000));
@@ -422,7 +447,8 @@ mod tests {
     fn every_packet_is_188_bytes_with_its_sync_byte() {
         let mut ts = TsWriter::new(Vec::new());
         for (at, len) in [10, 500, 5_000].into_iter().enumerate() {
-            ts.write_frame(at as i64 * 16_666, at == 0, &frame(len)).unwrap();
+            ts.write_frame(at as i64 * 16_666, at == 0, &frame(len))
+                .unwrap();
         }
         let bytes = ts.finish().unwrap();
         assert_eq!(bytes.len() % 188, 0);
@@ -459,7 +485,8 @@ mod tests {
     fn tables_come_before_every_keyframe() {
         let mut ts = TsWriter::new(Vec::new());
         for (at, key) in [true, false, true].into_iter().enumerate() {
-            ts.write_frame(at as i64 * 16_666, key, &frame(400)).unwrap();
+            ts.write_frame(at as i64 * 16_666, key, &frame(400))
+                .unwrap();
         }
         let bytes = ts.finish().unwrap();
         let mut pids: Vec<u16> = packets(&bytes).into_iter().map(pid).collect();
@@ -490,9 +517,16 @@ mod tests {
         assert_eq!(u16::from(pat[10] & 0x1F) << 8 | u16::from(pat[11]), PMT_PID);
         let pmt = &payload(all[1])[1..];
         assert_eq!(pmt[0], 0x02);
-        assert_eq!(u16::from(pmt[8] & 0x1F) << 8 | u16::from(pmt[9]), VIDEO_PID, "PCR PID");
+        assert_eq!(
+            u16::from(pmt[8] & 0x1F) << 8 | u16::from(pmt[9]),
+            VIDEO_PID,
+            "PCR PID"
+        );
         assert_eq!(pmt[12], 0x1B, "stream type H.264");
-        assert_eq!(u16::from(pmt[13] & 0x1F) << 8 | u16::from(pmt[14]), VIDEO_PID);
+        assert_eq!(
+            u16::from(pmt[13] & 0x1F) << 8 | u16::from(pmt[14]),
+            VIDEO_PID
+        );
     }
 
     /// BUF-6: a keyframe is marked as a place to start, with the clock 0.7 s
@@ -533,12 +567,15 @@ mod tests {
     /// the decoder would read as picture.
     #[test]
     fn the_payload_comes_back_byte_for_byte() {
-        let lengths = [1, 5, 175, 176, 177, 182, 183, 184, 185, 360, 367, 368, 5_000];
+        let lengths = [
+            1, 5, 175, 176, 177, 182, 183, 184, 185, 360, 367, 368, 5_000,
+        ];
         for key in [true, false] {
             let mut ts = TsWriter::new(Vec::new());
             let sent: Vec<Vec<u8>> = lengths.iter().map(|len| frame(*len)).collect();
             for (at, data) in sent.iter().enumerate() {
-                ts.write_frame(at as i64 * 16_666, key && at % 2 == 0, data).unwrap();
+                ts.write_frame(at as i64 * 16_666, key && at % 2 == 0, data)
+                    .unwrap();
             }
             let bytes = ts.finish().unwrap();
             assert_eq!(bytes.len() % 188, 0);

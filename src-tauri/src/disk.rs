@@ -88,7 +88,8 @@ pub fn same_volume(a: &Path, b: &Path) -> bool {
 /// against `\\nas\clips\` is the same share. A `Path` compares those
 /// parts case by case.
 fn same_root(a: &Path, b: &Path) -> bool {
-    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 /// Do `a` and `b` name the same file — under any spelling, through a hard link
@@ -113,7 +114,11 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
             .ok()?;
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
-        Some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+        Some((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
     };
     match (identity(a), identity(b)) {
         (Some(a), Some(b)) => a == b,
@@ -147,9 +152,18 @@ mod tests {
     fn two_folders_on_one_drive_share_a_volume() {
         let root = std::env::temp_dir();
         let volume = volume_of(&root).expect("the temp folder has a volume");
-        assert_eq!(volume_of(&root.join("not-there-yet").join("deeper")), Some(volume.clone()));
+        assert_eq!(
+            volume_of(&root.join("not-there-yet").join("deeper")),
+            Some(volume.clone())
+        );
         let drive = &root.to_string_lossy()[..2];
-        assert!(volume.to_string_lossy().eq_ignore_ascii_case(&format!("{drive}\\")), "{}", volume.display());
+        assert!(
+            volume
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&format!("{drive}\\")),
+            "{}",
+            volume.display()
+        );
     }
 
     /// Final review: a clip folder on a share spelled in another case than
@@ -163,7 +177,10 @@ mod tests {
         assert!(!same_root(Path::new(r"C:\"), Path::new(r"D:\")));
         assert!(!same_root(upper, Path::new(r"\\nas\other\")));
         if cfg!(windows) {
-            assert_ne!(upper, lower, "what the comparison was: by `Path`, case by case");
+            assert_ne!(
+                upper, lower,
+                "what the comparison was: by `Path`, case by case"
+            );
         }
     }
 

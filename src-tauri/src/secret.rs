@@ -45,8 +45,8 @@ pub fn unprotect_coded(sealed: &[u8]) -> Result<Vec<u8>, (i32, String)> {
 /// How every DPAPI blob begins: version 1, then the provider's GUID
 /// (df9d8cd0-1501-11d1-8c7a-00c04fc297eb) as it lies in memory.
 const BLOB_HEAD: [u8; 20] = [
-    0x01, 0x00, 0x00, 0x00, 0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00, 0xc0, 0x4f, 0xc2,
-    0x97, 0xeb,
+    0x01, 0x00, 0x00, 0x00, 0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00, 0xc0,
+    0x4f, 0xc2, 0x97, 0xeb,
 ];
 
 /// Could `bytes` be a DPAPI blob at all? A file that does not even begin
@@ -62,7 +62,10 @@ pub fn seal_broken(code: i32) -> bool {
     const NTE_BAD_DATA: u32 = 0x8009_0005;
     const ERROR_INVALID_DATA: u32 = 0x8007_000D;
     const NTE_BAD_KEY_STATE: u32 = 0x8009_000B;
-    matches!(code as u32, NTE_BAD_DATA | ERROR_INVALID_DATA | NTE_BAD_KEY_STATE)
+    matches!(
+        code as u32,
+        NTE_BAD_DATA | ERROR_INVALID_DATA | NTE_BAD_KEY_STATE
+    )
 }
 
 fn dpapi(data: &[u8], seal: bool) -> Result<Vec<u8>, (i32, String)> {
@@ -70,7 +73,10 @@ fn dpapi(data: &[u8], seal: bool) -> Result<Vec<u8>, (i32, String)> {
         cbData: u32::try_from(data.len()).map_err(|_| (0, "too large to seal".to_string()))?,
         pbData: data.as_ptr() as *mut u8,
     };
-    let entropy = CRYPT_INTEGER_BLOB { cbData: ENTROPY.len() as u32, pbData: ENTROPY.as_ptr() as *mut u8 };
+    let entropy = CRYPT_INTEGER_BLOB {
+        cbData: ENTROPY.len() as u32,
+        pbData: ENTROPY.as_ptr() as *mut u8,
+    };
     let mut output = CRYPT_INTEGER_BLOB::default();
     // SAFETY: DPAPI only reads `input` and `entropy`, which outlive the call;
     // on success `output` is a LocalAlloc'd buffer of `cbData` bytes, copied
@@ -149,7 +155,10 @@ pub(crate) fn held<T: DeserializeOwned>(bytes: &[u8]) -> Held<T> {
 fn sealed<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     let plain = serde_json::to_vec(value).map_err(|err| err.to_string())?;
     let blob = protect(&plain)?;
-    serde_json::to_vec(&Envelope { sealed: crate::webhook::base64url(&blob) }).map_err(|err| err.to_string())
+    serde_json::to_vec(&Envelope {
+        sealed: crate::webhook::base64url(&blob),
+    })
+    .map_err(|err| err.to_string())
 }
 
 /// Reads a file with a secret in it: opens a sealed one, and takes a plain one
@@ -164,24 +173,38 @@ pub(crate) fn read<T: Serialize + DeserializeOwned>(path: &Path, what: &str) -> 
                 Ok(value) => Some(value),
                 // Not serde's words: they can quote what the file holds.
                 Err(_) => {
-                    warn_once(path, &format!("{what}: the stored one does not parse — taken as none"));
+                    warn_once(
+                        path,
+                        &format!("{what}: the stored one does not parse — taken as none"),
+                    );
                     None
                 }
             },
             Err(err) => {
-                warn_once(path, &format!("{what}: the stored one does not open here ({err}) — taken as none"));
+                warn_once(
+                    path,
+                    &format!("{what}: the stored one does not open here ({err}) — taken as none"),
+                );
                 None
             }
         },
         Held::Plain(value) => {
-            match sealed(&value).and_then(|bytes| write_file(path, &bytes).map_err(|err| err.to_string())) {
+            match sealed(&value)
+                .and_then(|bytes| write_file(path, &bytes).map_err(|err| err.to_string()))
+            {
                 Ok(()) => log::info!("{what}: sealed the one kept from before"),
-                Err(err) => warn_once(path, &format!("{what}: could not seal the one kept from before: {err}")),
+                Err(err) => warn_once(
+                    path,
+                    &format!("{what}: could not seal the one kept from before: {err}"),
+                ),
             }
             Some(value)
         }
         Held::Unreadable => {
-            warn_once(path, &format!("{what}: the stored one cannot be read — taken as none"));
+            warn_once(
+                path,
+                &format!("{what}: the stored one cannot be read — taken as none"),
+            );
             None
         }
     }
@@ -189,7 +212,11 @@ pub(crate) fn read<T: Serialize + DeserializeOwned>(path: &Path, what: &str) -> 
 
 /// Writes `value` sealed. Should DPAPI fail, it is kept in plain as before —
 /// the user stays signed in — and sealed on a later read.
-pub(crate) fn write_sealed<T: Serialize>(path: &Path, value: &T, what: &str) -> std::io::Result<()> {
+pub(crate) fn write_sealed<T: Serialize>(
+    path: &Path,
+    value: &T,
+    what: &str,
+) -> std::io::Result<()> {
     let bytes = match sealed(value) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -259,11 +286,24 @@ mod tests {
 
     #[test]
     fn a_seal_without_our_entropy_does_not_open() {
-        let input = CRYPT_INTEGER_BLOB { cbData: 4, pbData: b"abcd".as_ptr() as *mut u8 };
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: 4,
+            pbData: b"abcd".as_ptr() as *mut u8,
+        };
         let mut output = CRYPT_INTEGER_BLOB::default();
         unsafe {
-            CryptProtectData(&input, PCWSTR::null(), None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut output).unwrap();
-            let foreign = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            CryptProtectData(
+                &input,
+                PCWSTR::null(),
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+            .unwrap();
+            let foreign =
+                std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
             let _ = LocalFree(HLOCAL(output.pbData.cast()));
             assert!(unprotect(&foreign).is_err());
         }
@@ -289,7 +329,10 @@ mod tests {
         assert!(seal_broken(0x8009_0005_u32 as i32));
         assert!(seal_broken(0x8007_000D_u32 as i32));
         assert!(seal_broken(0x8009_000B_u32 as i32));
-        assert!(!seal_broken(0x8007_0005_u32 as i32), "access denied may pass");
+        assert!(
+            !seal_broken(0x8007_0005_u32 as i32),
+            "access denied may pass"
+        );
         assert!(!seal_broken(0));
     }
 
@@ -297,7 +340,10 @@ mod tests {
     /// behind.
     #[test]
     fn writes_leave_only_the_file() {
-        let dir = std::env::temp_dir().join(format!("clippiboy-secret-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!(
+            "clippiboy-secret-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let path = dir.join("webhook.json");
         let threads: Vec<_> = (0..8u8)
             .map(|n| {
@@ -314,16 +360,30 @@ mod tests {
         }
         let content = std::fs::read(&path).unwrap();
         assert_eq!(content.len(), 64);
-        assert!(content.iter().all(|byte| *byte == content[0]), "one write whole");
-        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert!(
+            content.iter().all(|byte| *byte == content[0]),
+            "one write whole"
+        );
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
         assert_eq!(names, ["webhook.json"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn files_from_before_and_sealed_ones_are_told_apart() {
-        assert_eq!(held::<Stored>(br#"{"token":"abc"}"#), Held::Plain(Stored { token: "abc".into() }));
-        assert_eq!(held::<Stored>(br#"{"sealed":"AQID"}"#), Held::Sealed(vec![1, 2, 3]));
+        assert_eq!(
+            held::<Stored>(br#"{"token":"abc"}"#),
+            Held::Plain(Stored {
+                token: "abc".into()
+            })
+        );
+        assert_eq!(
+            held::<Stored>(br#"{"sealed":"AQID"}"#),
+            Held::Sealed(vec![1, 2, 3])
+        );
         assert_eq!(held::<Stored>(br#"{"sealed":"*"}"#), Held::Unreadable);
         assert_eq!(held::<Stored>(br#"{"sealed":""}"#), Held::Unreadable);
         assert_eq!(held::<Stored>(b"{\"tok"), Held::Unreadable);
@@ -332,19 +392,47 @@ mod tests {
 
     #[test]
     fn a_plain_file_from_before_is_read_and_then_kept_sealed() {
-        let dir = std::env::temp_dir().join(format!("clippiboy-secret-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!(
+            "clippiboy-secret-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let path = dir.join("friends.json");
         write_file(&path, br#"{"token":"abc"}"#).unwrap();
-        assert_eq!(read::<Stored>(&path, "test"), Some(Stored { token: "abc".into() }));
+        assert_eq!(
+            read::<Stored>(&path, "test"),
+            Some(Stored {
+                token: "abc".into()
+            })
+        );
         let now = std::fs::read(&path).unwrap();
         assert!(matches!(held::<Stored>(&now), Held::Sealed(_)));
         assert!(!String::from_utf8_lossy(&now).contains("abc"));
-        assert_eq!(read::<Stored>(&path, "test"), Some(Stored { token: "abc".into() }));
+        assert_eq!(
+            read::<Stored>(&path, "test"),
+            Some(Stored {
+                token: "abc".into()
+            })
+        );
 
-        write_sealed(&path, &Stored { token: "def".into() }, "test").unwrap();
-        assert_eq!(read::<Stored>(&path, "test"), Some(Stored { token: "def".into() }));
+        write_sealed(
+            &path,
+            &Stored {
+                token: "def".into(),
+            },
+            "test",
+        )
+        .unwrap();
+        assert_eq!(
+            read::<Stored>(&path, "test"),
+            Some(Stored {
+                token: "def".into()
+            })
+        );
         // Sealed elsewhere (another PC, another user): signed out, no crash.
-        let foreign = serde_json::to_vec(&Envelope { sealed: crate::webhook::base64url(&[7; 200]) }).unwrap();
+        let foreign = serde_json::to_vec(&Envelope {
+            sealed: crate::webhook::base64url(&[7; 200]),
+        })
+        .unwrap();
         write_file(&path, &foreign).unwrap();
         assert_eq!(read::<Stored>(&path, "test"), None);
         assert_eq!(read::<Stored>(&dir.join("missing.json"), "test"), None);

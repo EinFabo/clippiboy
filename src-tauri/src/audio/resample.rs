@@ -43,7 +43,10 @@ impl Resampler {
             if i < 0 {
                 prev
             } else {
-                [stereo[CHANNELS * i as usize], stereo[CHANNELS * i as usize + 1]]
+                [
+                    stereo[CHANNELS * i as usize],
+                    stereo[CHANNELS * i as usize + 1],
+                ]
             }
         };
         while self.pos < n as f64 - 1.0 {
@@ -81,7 +84,11 @@ mod tests {
             resampler.process(&packet, &mut out);
         }
         // 448 000 × 48 000 / 44 100 = 487 619.05; the last fraction waits for the next packet.
-        assert!((out.len() / CHANNELS).abs_diff(487_619) <= 2, "{} frames", out.len() / CHANNELS);
+        assert!(
+            (out.len() / CHANNELS).abs_diff(487_619) <= 2,
+            "{} frames",
+            out.len() / CHANNELS
+        );
     }
 
     /// AUD-V2: SILENT packets from a 96 kHz device added 20 ms of timeline per
@@ -119,7 +126,12 @@ mod tests {
         assert!((whole.len() / CHANNELS).abs_diff(pieces.len() / CHANNELS) <= 1);
         let common = whole.len().min(pieces.len());
         for i in 0..common {
-            assert!((whole[i] - pieces[i]).abs() <= 1e-5, "sample {i}: {} vs {}", whole[i], pieces[i]);
+            assert!(
+                (whole[i] - pieces[i]).abs() <= 1e-5,
+                "sample {i}: {} vs {}",
+                whole[i],
+                pieces[i]
+            );
         }
     }
 
@@ -141,7 +153,10 @@ mod tests {
                 ring.write(&out, k * 100_000);
             }
             let end = ring.end_100ns().unwrap();
-            assert!((end - 100_000_000).abs() < 10_000, "{rate} Hz: ring ends at {end}");
+            assert!(
+                (end - 100_000_000).abs() < 10_000,
+                "{rate} Hz: ring ends at {end}"
+            );
         }
     }
 

@@ -71,13 +71,17 @@ impl Hook {
 
     /// Only the shapes Discord hands out: id and token go into a URL path.
     fn valid(&self) -> bool {
-        let snowflake = |s: &str| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit());
+        let snowflake =
+            |s: &str| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit());
         snowflake(&self.id)
             && snowflake(&self.guild_id)
             && snowflake(&self.channel_id)
             && !self.token.is_empty()
             && self.token.len() <= 200
-            && self.token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && self
+                .token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     }
 }
 
@@ -160,7 +164,10 @@ fn forget_if(hook: &Hook) -> bool {
 
 fn view() -> WebhookView {
     let hook = load();
-    let connecting = PENDING.lock().as_ref().is_some_and(|(_, at, _)| at.elapsed() < KEY_TTL);
+    let connecting = PENDING
+        .lock()
+        .as_ref()
+        .is_some_and(|(_, at, _)| at.elapsed() < KEY_TTL);
     WebhookView {
         connected: hook.is_some(),
         guild: hook.map(|hook| hook.guild),
@@ -203,7 +210,8 @@ pub async fn webhook_connect(app: AppHandle) -> Result<(), String> {
         crate::friends::session_rejected(&app);
         return Err("Sign in with Discord again first.".into());
     }
-    let value: serde_json::Value = serde_json::from_str(&response.text().await.unwrap_or_default()).unwrap_or_default();
+    let value: serde_json::Value =
+        serde_json::from_str(&response.text().await.unwrap_or_default()).unwrap_or_default();
     if !status.is_success() {
         return Err(value
             .get("error")
@@ -212,10 +220,18 @@ pub async fn webhook_connect(app: AppHandle) -> Result<(), String> {
             .unwrap_or_else(|| format!("The ClippiBoy server answered {status}.")));
     }
     let prefix = format!("{}/", crate::friends::SERVER);
-    let Some(start) = value.get("url").and_then(|u| u.as_str()).filter(|u| u.starts_with(&prefix)) else {
+    let Some(start) = value
+        .get("url")
+        .and_then(|u| u.as_str())
+        .filter(|u| u.starts_with(&prefix))
+    else {
         return Err("The ClippiBoy server gave no start page.".into());
     };
-    let state = value.get("state").and_then(|s| s.as_str()).unwrap_or_default().to_owned();
+    let state = value
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .to_owned();
     *PENDING.lock() = Some((key, Instant::now(), state));
     emit(&app);
     app.opener()
@@ -228,7 +244,9 @@ pub async fn webhook_connect(app: AppHandle) -> Result<(), String> {
 pub async fn webhook_cancel(app: AppHandle) {
     let pending = PENDING.lock().take();
     emit(&app);
-    let (Some((_, _, state)), Some(token)) = (pending, crate::friends::token(&app)) else { return };
+    let (Some((_, _, state)), Some(token)) = (pending, crate::friends::token(&app)) else {
+        return;
+    };
     if state.is_empty() {
         return;
     }
@@ -253,8 +271,16 @@ pub async fn webhook_disconnect(app: AppHandle) -> Result<(), String> {
     WAITING.lock().clear();
     emit(&app);
     if let Some(hook) = hook {
-        match client().delete(hook.url()).timeout(Duration::from_secs(20)).send().await {
-            Ok(response) => log::info!("webhook: disconnected, Discord answered {}", response.status()),
+        match client()
+            .delete(hook.url())
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+        {
+            Ok(response) => log::info!(
+                "webhook: disconnected, Discord answered {}",
+                response.status()
+            ),
             Err(_) => log::info!("webhook: disconnected, Discord not reachable to delete it"),
         }
     }
@@ -277,7 +303,9 @@ pub fn webhook_post(app: AppHandle, id: String) -> Result<(), String> {
 
 /// `clippiboy://webhook?data=…`. True when the link was one of these, used or not.
 pub fn handle_url(app: &AppHandle, url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("clippiboy://webhook") else { return false };
+    let Some(rest) = url.strip_prefix("clippiboy://webhook") else {
+        return false;
+    };
     if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('?')) {
         return false;
     }
@@ -298,7 +326,11 @@ pub fn handle_url(app: &AppHandle, url: &str) -> bool {
     // One that does not open leaves the waiting key: the right link may still come.
     let Some(hook) = unseal(&key, data).filter(Hook::valid) else {
         log::warn!("webhook: a channel link did not open with the waiting key");
-        crate::notify(app, "error", "Connecting the channel failed. Try again in Settings.");
+        crate::notify(
+            app,
+            "error",
+            "Connecting the channel failed. Try again in Settings.",
+        );
         return true;
     };
     *PENDING.lock() = None;
@@ -325,7 +357,11 @@ pub fn clip_saved(app: &AppHandle, clip: &crate::model::Clip) {
         && game_running(app)
         && !SAID_AFTER_GAME.swap(true, std::sync::atomic::Ordering::SeqCst)
     {
-        crate::notify(app, "ok", format!("Will post to {} after your game", hook.guild));
+        crate::notify(
+            app,
+            "ok",
+            format!("Will post to {} after your game", hook.guild),
+        );
     }
 }
 
@@ -359,7 +395,10 @@ fn enqueue(app: &AppHandle, id: &str, auto: bool) -> bool {
         match waiting.iter_mut().find(|job| job.id == id) {
             Some(job) if job.auto && !auto => job.auto = false,
             Some(_) => return false,
-            None => waiting.push_back(Job { id: id.to_owned(), auto }),
+            None => waiting.push_back(Job {
+                id: id.to_owned(),
+                auto,
+            }),
         }
     }
     WORKER.get_or_init(|| {
@@ -405,14 +444,27 @@ async fn work(app: AppHandle) {
         WAITING.lock().retain(|job| job.id != id);
         emit(&app);
         match outcome {
-            Some((Ok(Posted::File), hook)) => crate::notify(&app, "ok", format!("Posted to {}", hook.guild)),
-            Some((Ok(Posted::Link), hook)) => {
-                crate::notify(&app, "ok", format!("Too large for a file — posted a share link to {}", hook.guild))
+            Some((Ok(Posted::File), hook)) => {
+                crate::notify(&app, "ok", format!("Posted to {}", hook.guild))
             }
-            Some((Err(Failed::Quiet(why)), _)) => log::info!("webhook: clip {id} not posted: {why}"),
+            Some((Ok(Posted::Link), hook)) => crate::notify(
+                &app,
+                "ok",
+                format!(
+                    "Too large for a file — posted a share link to {}",
+                    hook.guild
+                ),
+            ),
+            Some((Err(Failed::Quiet(why)), _)) => {
+                log::info!("webhook: clip {id} not posted: {why}")
+            }
             Some((Err(Failed::Said(why)), hook)) => {
                 log::warn!("webhook: clip {id} not posted: {why}");
-                crate::notify(&app, "error", format!("Could not post to {}: {why}", hook.guild));
+                crate::notify(
+                    &app,
+                    "error",
+                    format!("Could not post to {}: {why}", hook.guild),
+                );
             }
             // Only if it is still the one connected: after a disconnect and a
             // new connect, this answer is about the old one.
@@ -426,7 +478,9 @@ async fn work(app: AppHandle) {
                     "The channel's webhook was removed in Discord. Connect the channel again in Settings.",
                 );
             }
-            Some((Err(Failed::Gone), _)) => log::info!("webhook: an old webhook was gone; the connected one stays"),
+            Some((Err(Failed::Gone), _)) => {
+                log::info!("webhook: an old webhook was gone; the connected one stays")
+            }
             None => {}
         }
     }
@@ -450,7 +504,9 @@ enum Failed {
 fn clip_now(app: &AppHandle, id: &str) -> Option<crate::model::Clip> {
     let state = app.state::<AppState>();
     let guard = state.library.lock();
-    guard.as_ref().and_then(|library| library.get(id).ok().flatten())
+    guard
+        .as_ref()
+        .and_then(|library| library.get(id).ok().flatten())
 }
 
 async fn post(app: &AppHandle, hook: &Hook, id: &str) -> Result<Posted, Failed> {
@@ -505,11 +561,17 @@ async fn post(app: &AppHandle, hook: &Hook, id: &str) -> Result<Posted, Failed> 
         )));
     }
     log::info!("webhook: clip {id} goes as a share link: {why_not_a_file}");
-    let link = crate::links::link_for(app, id).await.map_err(Failed::Said)?;
+    let link = crate::links::link_for(app, id)
+        .await
+        .map_err(Failed::Said)?;
     if !posting(id) || clip_now(app, id).is_none() {
         return Err(gone());
     }
-    let text = if content.is_empty() { link.url.clone() } else { format!("{content}\n{}", link.url) };
+    let text = if content.is_empty() {
+        link.url.clone()
+    } else {
+        format!("{content}\n{}", link.url)
+    };
     match send(hook, "application/json", payload_json(&text).into_bytes()).await {
         Ok(()) => Ok(Posted::Link),
         Err(Sent::Gone) => Err(Failed::Gone),
@@ -529,8 +591,19 @@ async fn send_file(hook: &Hook, content: &str, name: &str, path: &Path) -> Resul
         .await
         .map_err(|err| Sent::Failed(format!("Could not read the copy: {err}")))?;
     let boundary = format!("clippiboy-{}", uuid::Uuid::new_v4().simple());
-    let body = multipart(&boundary, &payload_json(content), name, content_type(path), &file);
-    send(hook, &format!("multipart/form-data; boundary={boundary}"), body).await
+    let body = multipart(
+        &boundary,
+        &payload_json(content),
+        name,
+        content_type(path),
+        &file,
+    );
+    send(
+        hook,
+        &format!("multipart/form-data; boundary={boundary}"),
+        body,
+    )
+    .await
 }
 
 /// One message to the webhook, Discord's rate limits waited out.
@@ -545,9 +618,18 @@ async fn send(hook: &Hook, content_type: &str, body: Vec<u8>) -> Result<(), Sent
             .await
             .map_err(|_| Sent::Failed("Discord is not reachable right now.".into()))?;
         let status = response.status().as_u16();
-        let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
-        let (retry_header, remaining, reset_after) =
-            (header("retry-after"), header("x-ratelimit-remaining"), header("x-ratelimit-reset-after"));
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let (retry_header, remaining, reset_after) = (
+            header("retry-after"),
+            header("x-ratelimit-remaining"),
+            header("x-ratelimit-reset-after"),
+        );
         let text = response.text().await.unwrap_or_default();
         match answer(status, retry_header.as_deref(), &text) {
             Answer::Done => {
@@ -558,13 +640,19 @@ async fn send(hook: &Hook, content_type: &str, body: Vec<u8>) -> Result<(), Sent
                 return Ok(());
             }
             Answer::Wait(wait) if wait <= LONGEST_WAIT => tokio::time::sleep(wait).await,
-            Answer::Wait(_) => return Err(Sent::Failed("Discord asks to wait — try again in a few minutes.".into())),
+            Answer::Wait(_) => {
+                return Err(Sent::Failed(
+                    "Discord asks to wait — try again in a few minutes.".into(),
+                ))
+            }
             Answer::TooLarge => return Err(Sent::TooLarge),
             Answer::Gone => return Err(Sent::Gone),
             Answer::Failed(why) => return Err(Sent::Failed(why)),
         }
     }
-    Err(Sent::Failed("Discord kept asking to wait — try again in a few minutes.".into()))
+    Err(Sent::Failed(
+        "Discord kept asking to wait — try again in a few minutes.".into(),
+    ))
 }
 
 /// Its own client: the file can take minutes on a slow upload line.
@@ -637,15 +725,24 @@ fn pause_after(remaining: Option<&str>, reset_after: Option<&str>) -> Option<Dur
     if remaining?.trim() != "0" {
         return None;
     }
-    let seconds = reset_after?.trim().parse::<f64>().ok().filter(|s| s.is_finite() && *s > 0.0)?;
-    Some(Duration::from_secs_f64(seconds.min(LONGEST_WAIT.as_secs_f64())))
+    let seconds = reset_after?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s > 0.0)?;
+    Some(Duration::from_secs_f64(
+        seconds.min(LONGEST_WAIT.as_secs_f64()),
+    ))
 }
 
 /// The text above the file: the clip's title in bold and the game, both as
 /// plain text — Discord's markdown in them is escaped, and no mention pings
 /// (`payload_json`).
 fn message(title: Option<&str>, game: Option<&str>) -> String {
-    let clean = |text: Option<&str>| text.map(|t| escape_markdown(t.trim())).filter(|t| !t.is_empty());
+    let clean = |text: Option<&str>| {
+        text.map(|t| escape_markdown(t.trim()))
+            .filter(|t| !t.is_empty())
+    };
     let text = match (clean(title), clean(game)) {
         (Some(title), Some(game)) => format!("**{title}** · {game}"),
         (Some(title), None) => format!("**{title}**"),
@@ -662,7 +759,10 @@ fn escape_markdown(text: &str) -> String {
             out.push(' ');
             continue;
         }
-        if matches!(c, '\\' | '*' | '_' | '~' | '`' | '|' | '>' | '#' | '[' | ']' | '<' | '@') {
+        if matches!(
+            c,
+            '\\' | '*' | '_' | '~' | '`' | '|' | '>' | '#' | '[' | ']' | '<' | '@'
+        ) {
             out.push('\\');
         }
         out.push(c);
@@ -676,10 +776,22 @@ fn payload_json(content: &str) -> String {
 }
 
 /// A `multipart/form-data` body: `payload_json`, then the file as `files[0]`.
-fn multipart(boundary: &str, payload: &str, file_name: &str, content_type: &str, file: &[u8]) -> Vec<u8> {
+fn multipart(
+    boundary: &str,
+    payload: &str,
+    file_name: &str,
+    content_type: &str,
+    file: &[u8],
+) -> Vec<u8> {
     let name: String = file_name
         .chars()
-        .map(|c| if c == '"' || c == '\\' || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if c == '"' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let mut body = Vec::with_capacity(file.len() + payload.len() + 512);
     body.extend_from_slice(
@@ -700,7 +812,12 @@ fn multipart(boundary: &str, payload: &str, file_name: &str, content_type: &str,
 }
 
 fn content_type(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         _ => "video/mp4",
@@ -710,7 +827,10 @@ fn content_type(path: &Path) -> &'static str {
 /// The name the file goes under in the channel: the clip's own, not the copy's
 /// `"<stem> (19 MB)"`, with the copy's extension (a screenshot may be a JPEG).
 fn upload_name(clip: &Path, copy: &Path) -> String {
-    let stem = clip.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "clip".into());
+    let stem = clip
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "clip".into());
     match copy.extension() {
         Some(ext) => format!("{stem}.{}", ext.to_string_lossy()),
         None => stem,
@@ -735,7 +855,9 @@ fn unseal(key: &[u8; 32], data: &str) -> Option<Hook> {
     let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).ok()?);
     let nonce = Nonce::try_assume_unique_for_key(&bytes[..NONCE_LEN]).ok()?;
     let mut sealed = bytes[NONCE_LEN..].to_vec();
-    let plain = key.open_in_place(nonce, Aad::from(SEAL_LABEL), &mut sealed).ok()?;
+    let plain = key
+        .open_in_place(nonce, Aad::from(SEAL_LABEL), &mut sealed)
+        .ok()?;
     serde_json::from_slice(plain).ok()
 }
 
@@ -744,7 +866,9 @@ pub(crate) fn base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
         for i in 0..=chunk.len() {
             out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
         }
@@ -806,7 +930,10 @@ mod tests {
         assert_eq!(hook.channel_id, "345626669224982402");
         assert_eq!(hook.guild, "The Squad");
         assert!(hook.valid());
-        assert_eq!(hook.url(), "https://discord.com/api/webhooks/347114750880120863/kKDd-_x");
+        assert_eq!(
+            hook.url(),
+            "https://discord.com/api/webhooks/347114750880120863/kKDd-_x"
+        );
     }
 
     #[test]
@@ -815,7 +942,14 @@ mod tests {
         other[0] ^= 1;
         assert!(unseal(&other, SERVER_SEALED).is_none());
         let mut changed = SERVER_SEALED.to_string();
-        changed.replace_range(30..31, if &SERVER_SEALED[30..31] == "A" { "B" } else { "A" });
+        changed.replace_range(
+            30..31,
+            if &SERVER_SEALED[30..31] == "A" {
+                "B"
+            } else {
+                "A"
+            },
+        );
         assert!(unseal(&key(), &changed).is_none());
         assert!(unseal(&key(), "").is_none());
         assert!(unseal(&key(), "not base64!").is_none());
@@ -825,7 +959,10 @@ mod tests {
     fn base64url_goes_both_ways() {
         for len in 0..40 {
             let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
-            assert_eq!(from_base64url(&base64url(&bytes)).as_deref(), Some(&bytes[..]));
+            assert_eq!(
+                from_base64url(&base64url(&bytes)).as_deref(),
+                Some(&bytes[..])
+            );
         }
         assert_eq!(base64url(&key()), SERVER_KEY);
         assert!(from_base64url("abc=").is_none());
@@ -835,16 +972,42 @@ mod tests {
     #[test]
     fn only_the_shapes_discord_hands_out_are_kept() {
         let good = unseal(&key(), SERVER_SEALED).unwrap();
-        assert!(!Hook { id: "../x".into(), ..good.clone() }.valid());
-        assert!(!Hook { token: "a/b".into(), ..good.clone() }.valid());
-        assert!(!Hook { token: String::new(), ..good.clone() }.valid());
-        assert!(!Hook { guild_id: "1".repeat(21), ..good.clone() }.valid());
-        assert!(!Hook { channel_id: "x".into(), ..good }.valid());
+        assert!(!Hook {
+            id: "../x".into(),
+            ..good.clone()
+        }
+        .valid());
+        assert!(!Hook {
+            token: "a/b".into(),
+            ..good.clone()
+        }
+        .valid());
+        assert!(!Hook {
+            token: String::new(),
+            ..good.clone()
+        }
+        .valid());
+        assert!(!Hook {
+            guild_id: "1".repeat(21),
+            ..good.clone()
+        }
+        .valid());
+        assert!(!Hook {
+            channel_id: "x".into(),
+            ..good
+        }
+        .valid());
     }
 
     #[test]
     fn the_multipart_body_carries_the_json_then_the_file() {
-        let body = multipart("XYZ", "{\"content\":\"hi\"}", "My \"clip\".mp4", "video/mp4", b"\x00\x01data");
+        let body = multipart(
+            "XYZ",
+            "{\"content\":\"hi\"}",
+            "My \"clip\".mp4",
+            "video/mp4",
+            b"\x00\x01data",
+        );
         let expected = b"--XYZ\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n{\"content\":\"hi\"}\r\n--XYZ\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"My _clip_.mp4\"\r\nContent-Type: video/mp4\r\n\r\n\x00\x01data\r\n--XYZ--\r\n";
         assert_eq!(body, expected.to_vec());
         // No line break can sneak a header in through the name.
@@ -854,7 +1017,8 @@ mod tests {
 
     #[test]
     fn the_payload_pings_nobody() {
-        let json: serde_json::Value = serde_json::from_str(&payload_json("@everyone look")).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&payload_json("@everyone look")).unwrap();
         assert_eq!(json["content"], "@everyone look");
         assert_eq!(json["allowed_mentions"]["parse"], serde_json::json!([]));
     }
@@ -866,7 +1030,10 @@ mod tests {
         assert_eq!(message(None, Some("CS2")), "CS2");
         assert_eq!(message(Some(" "), None), "");
         assert_eq!(message(None, None), "");
-        assert_eq!(message(Some("*bold* @here"), None), "**\\*bold\\* \\@here**");
+        assert_eq!(
+            message(Some("*bold* @here"), None),
+            "**\\*bold\\* \\@here**"
+        );
         assert_eq!(message(Some("a\nb"), None), "**a b**");
         assert!(message(Some(&"x".repeat(5000)), None).chars().count() <= CONTENT_MAX);
     }
@@ -874,11 +1041,20 @@ mod tests {
     #[test]
     fn a_429_waits_as_long_as_discord_says() {
         let wait = |d: Duration| Answer::Wait(d + Duration::from_millis(100));
-        assert_eq!(answer(429, Some("3"), r#"{"retry_after": 1.5, "global": false}"#), wait(Duration::from_millis(1500)));
-        assert_eq!(answer(429, Some("3"), "not json"), wait(Duration::from_secs(3)));
+        assert_eq!(
+            answer(429, Some("3"), r#"{"retry_after": 1.5, "global": false}"#),
+            wait(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            answer(429, Some("3"), "not json"),
+            wait(Duration::from_secs(3))
+        );
         assert_eq!(answer(429, None, ""), wait(Duration::from_secs(1)));
         assert_eq!(answer(429, Some("-5"), ""), wait(Duration::from_secs(1)));
-        assert_eq!(answer(429, None, r#"{"retry_after": 99999}"#), wait(Duration::from_secs(3600)));
+        assert_eq!(
+            answer(429, None, r#"{"retry_after": 99999}"#),
+            wait(Duration::from_secs(3600))
+        );
     }
 
     #[test]
@@ -886,20 +1062,44 @@ mod tests {
         assert_eq!(answer(200, None, "{}"), Answer::Done);
         assert_eq!(answer(204, None, ""), Answer::Done);
         assert_eq!(answer(413, None, ""), Answer::TooLarge);
-        assert_eq!(answer(400, None, r#"{"code": 40005, "message": "Request entity too large"}"#), Answer::TooLarge);
-        assert_eq!(answer(404, None, r#"{"code": 10015, "message": "Unknown Webhook"}"#), Answer::Gone);
+        assert_eq!(
+            answer(
+                400,
+                None,
+                r#"{"code": 40005, "message": "Request entity too large"}"#
+            ),
+            Answer::TooLarge
+        );
+        assert_eq!(
+            answer(
+                404,
+                None,
+                r#"{"code": 10015, "message": "Unknown Webhook"}"#
+            ),
+            Answer::Gone
+        );
         assert_eq!(answer(401, None, ""), Answer::Gone);
         assert_eq!(answer(403, None, r#"{"code": 10015}"#), Answer::Gone);
         assert_eq!(
-            answer(403, None, r#"{"code": 50013, "message": "Missing Permissions"}"#),
+            answer(
+                403,
+                None,
+                r#"{"code": 50013, "message": "Missing Permissions"}"#
+            ),
             Answer::Failed("Discord said: Missing Permissions".into())
         );
-        assert_eq!(answer(500, None, "oops"), Answer::Failed("Discord answered 500.".into()));
+        assert_eq!(
+            answer(500, None, "oops"),
+            Answer::Failed("Discord answered 500.".into())
+        );
     }
 
     #[test]
     fn an_empty_bucket_holds_the_next_post() {
-        assert_eq!(pause_after(Some("0"), Some("1.25")), Some(Duration::from_millis(1250)));
+        assert_eq!(
+            pause_after(Some("0"), Some("1.25")),
+            Some(Duration::from_millis(1250))
+        );
         assert_eq!(pause_after(Some("3"), Some("1.25")), None);
         assert_eq!(pause_after(None, Some("1.25")), None);
         assert_eq!(pause_after(Some("0"), None), None);
@@ -908,7 +1108,10 @@ mod tests {
     }
 
     fn job(id: &str, auto: bool) -> Job {
-        Job { id: id.into(), auto }
+        Job {
+            id: id.into(),
+            auto,
+        }
     }
 
     #[test]
@@ -927,17 +1130,26 @@ mod tests {
         let now = Instant::now();
         assert!(game_quiet(None, now));
         assert!(!game_quiet(Some(now), now));
-        assert!(!game_quiet(Some(now), now + AFTER_GAME - Duration::from_secs(1)));
+        assert!(!game_quiet(
+            Some(now),
+            now + AFTER_GAME - Duration::from_secs(1)
+        ));
         assert!(game_quiet(Some(now), now + AFTER_GAME));
     }
 
     #[test]
     fn the_file_goes_under_the_clips_own_name() {
         assert_eq!(
-            upload_name(Path::new(r"C:\Clips\Valorant 2026-11-09.mp4"), Path::new(r"C:\data\discord\x\Valorant 2026-11-09 (19 MB).mp4")),
+            upload_name(
+                Path::new(r"C:\Clips\Valorant 2026-11-09.mp4"),
+                Path::new(r"C:\data\discord\x\Valorant 2026-11-09 (19 MB).mp4")
+            ),
             "Valorant 2026-11-09.mp4"
         );
-        assert_eq!(upload_name(Path::new("shot.png"), Path::new("shot (19 MB).jpg")), "shot.jpg");
+        assert_eq!(
+            upload_name(Path::new("shot.png"), Path::new("shot (19 MB).jpg")),
+            "shot.jpg"
+        );
         assert_eq!(content_type(Path::new("a.JPG")), "image/jpeg");
         assert_eq!(content_type(Path::new("a.png")), "image/png");
         assert_eq!(content_type(Path::new("a.mp4")), "video/mp4");

@@ -1,7 +1,6 @@
 //! The facecam's store and facts: the cam cut to a clip's window, written as
 //! `originals/<id>/cam.mp4` with `facecam.json` beside it.
 
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -25,7 +24,10 @@ pub struct CamWindow {
 
 /// The stretch the cam is cut from, QPC in 100 ns.
 pub fn cut_window(w: &CamWindow) -> (i64, i64) {
-    (w.g0_100ns - MARGIN_100NS, w.g0_100ns + w.length_us as i64 * 10 + MARGIN_100NS)
+    (
+        w.g0_100ns - MARGIN_100NS,
+        w.g0_100ns + w.length_us as i64 * 10 + MARGIN_100NS,
+    )
 }
 
 /// The cam packets for one clip, and where they sit against it.
@@ -48,7 +50,9 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
     let origin = ring.origin_100ns;
     let g0 = window.g0_100ns;
     let end = g0 + window.length_us as i64 * 10;
-    let mut packets = ring.ring.snapshot_range((from - origin) / 10, (to - origin) / 10);
+    let mut packets = ring
+        .ring
+        .snapshot_range((from - origin) / 10, (to - origin) / 10);
     if let Some(after_hole) = packets
         .windows(2)
         .enumerate()
@@ -63,7 +67,11 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
     if !packets.iter().any(|p| (g0..end).contains(&at(p))) {
         return None;
     }
-    if ring.gaps.iter().any(|g| g.from_100ns <= g0 && g.to_100ns.map_or(true, |t| t >= end)) {
+    if ring
+        .gaps
+        .iter()
+        .any(|g| g.from_100ns <= g0 && g.to_100ns.map_or(true, |t| t >= end))
+    {
         return None;
     }
     let length_ms = window.length_us / 1000;
@@ -73,12 +81,19 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
         .filter(|g| g.from_100ns < end && g.to_100ns.map_or(true, |t| t > g0))
         .map(|g| {
             let from = ((g.from_100ns - g0).max(0) / 10_000) as u64;
-            let to = g.to_100ns.map_or(length_ms, |t| (((t - g0) / 10_000).max(0) as u64).min(length_ms));
+            let to = g.to_100ns.map_or(length_ms, |t| {
+                (((t - g0) / 10_000).max(0) as u64).min(length_ms)
+            });
             (from.min(length_ms), to)
         })
         .collect();
     let offset_us = (at(&packets[0]) - g0) / 10;
-    Some(CamCut { frames: packets.len() as u32, packets, offset_us, gaps_ms })
+    Some(CamCut {
+        frames: packets.len() as u32,
+        packets,
+        offset_us,
+        gaps_ms,
+    })
 }
 
 /// The delay a clip keeps: the setting, and another 40 ms earlier when the
@@ -133,17 +148,19 @@ pub struct FacecamFacts {
 /// ffmpeg's arguments for `cam.mp4`: the elementary stream at exactly 30
 /// fps — the grid made it constant — copied into an MP4.
 pub fn cam_mp4_arguments(h264: &std::path::Path, output: &std::path::Path) -> Vec<String> {
-    [
-        "-y", "-hide_banner", "-loglevel", "error",
-    ]
-    .into_iter()
-    .chain(crate::child::PROGRESS)
-    .chain(["-f", "h264", "-r", "30", "-i"])
-    .map(String::from)
-    .chain([h264.to_string_lossy().into_owned()])
-    .chain(["-c:v", "copy", "-an", "-movflags", "+faststart"].into_iter().map(String::from))
-    .chain([output.to_string_lossy().into_owned()])
-    .collect()
+    ["-y", "-hide_banner", "-loglevel", "error"]
+        .into_iter()
+        .chain(crate::child::PROGRESS)
+        .chain(["-f", "h264", "-r", "30", "-i"])
+        .map(String::from)
+        .chain([h264.to_string_lossy().into_owned()])
+        .chain(
+            ["-c:v", "copy", "-an", "-movflags", "+faststart"]
+                .into_iter()
+                .map(String::from),
+        )
+        .chain([output.to_string_lossy().into_owned()])
+        .collect()
 }
 
 /// The cam cut for one clip, with what the facts need to say about it.
@@ -161,7 +178,12 @@ pub struct CamCutOut {
 
 /// Writes `cam.mp4` and then `facecam.json` into the clip's store. Any
 /// failure removes what was started and costs the cam, never the clip.
-pub fn write_phase_one(clip_id: &str, out: &CamCutOut, clip_length_us: u64, game_gop: u32) -> Result<FacecamFacts, String> {
+pub fn write_phase_one(
+    clip_id: &str,
+    out: &CamCutOut,
+    clip_length_us: u64,
+    game_gop: u32,
+) -> Result<FacecamFacts, String> {
     let dir = crate::edit::dir(clip_id);
     let h264 = dir.join("cam.part.h264");
     let part = dir.join("cam.part.mp4");
@@ -172,10 +194,16 @@ pub fn write_phase_one(clip_id: &str, out: &CamCutOut, clip_length_us: u64, game
             stream.extend_from_slice(&packet.data);
         }
         std::fs::write(&h264, &stream).map_err(|err| format!("cam stream: {err}"))?;
-        let run = crate::child::output(crate::muxer::command("ffmpeg").args(cam_mp4_arguments(&h264, &part)), crate::child::MOVING)
-            .map_err(|err| format!("ffmpeg: {err}"))?;
+        let run = crate::child::output(
+            crate::muxer::command("ffmpeg").args(cam_mp4_arguments(&h264, &part)),
+            crate::child::MOVING,
+        )
+        .map_err(|err| format!("ffmpeg: {err}"))?;
         if !run.status.success() {
-            return Err(format!("ffmpeg: {}", String::from_utf8_lossy(&run.stderr).trim()));
+            return Err(format!(
+                "ffmpeg: {}",
+                String::from_utf8_lossy(&run.stderr).trim()
+            ));
         }
         crate::muxer::probe_duration_ms(&part).ok_or("cam.mp4 cannot be read back")?;
         std::fs::rename(&part, cam_path(clip_id)).map_err(|err| format!("cam.mp4: {err}"))?;
@@ -240,7 +268,11 @@ fn shows(facts: &FacecamFacts) -> bool {
 /// The view of `clip`, from its facts and whether a clean copy is stored.
 /// `None` without a cam, without a store, once baked, or when the file has
 /// the cam in it and no clean copy is left to show.
-pub fn view_from(clip: &crate::model::Clip, facts: Option<&FacecamFacts>, clean_stored: bool) -> Option<FacecamView> {
+pub fn view_from(
+    clip: &crate::model::Clip,
+    facts: Option<&FacecamFacts>,
+    clean_stored: bool,
+) -> Option<FacecamView> {
     let cam = clip.facecam.as_ref()?;
     if cam.state == crate::model::FacecamState::Baked {
         return None;
@@ -249,7 +281,12 @@ pub fn view_from(clip: &crate::model::Clip, facts: Option<&FacecamFacts>, clean_
     let shows_cam = shows(facts);
     let start_ms = clip.original.map(|o| o.start_ms).unwrap_or(0);
     let (clean_path, clean_lead_ms) = if clean_stored {
-        (crate::edit::video_path(&clip.id).to_string_lossy().into_owned(), start_ms as i64)
+        (
+            crate::edit::video_path(&clip.id)
+                .to_string_lossy()
+                .into_owned(),
+            start_ms as i64,
+        )
     } else if !shows_cam {
         (clip.path.clone(), 0)
     } else {
@@ -276,7 +313,11 @@ pub fn view_from(clip: &crate::model::Clip, facts: Option<&FacecamFacts>, clean_
 pub fn view_of(clip: &crate::model::Clip) -> Option<FacecamView> {
     clip.facecam.as_ref()?;
     let facts = read_facts(&clip.id)?;
-    view_from(clip, Some(&facts), crate::edit::video_path(&clip.id).is_file())
+    view_from(
+        clip,
+        Some(&facts),
+        crate::edit::video_path(&clip.id).is_file(),
+    )
 }
 
 pub fn cam_path(clip_id: &str) -> PathBuf {
@@ -343,7 +384,10 @@ pub(crate) mod tests {
     }
 
     fn window(g0: i64, length_s: f64) -> CamWindow {
-        CamWindow { g0_100ns: g0, length_us: (length_s * 1_000_000.0) as u64 }
+        CamWindow {
+            g0_100ns: g0,
+            length_us: (length_s * 1_000_000.0) as u64,
+        }
     }
 
     #[test]
@@ -431,10 +475,16 @@ pub(crate) mod tests {
     /// stream read at 30 fps is right; copied, never re-encoded or cut.
     #[test]
     fn the_cam_file_is_copied_at_exactly_thirty_frames() {
-        let args = cam_mp4_arguments(std::path::Path::new("cam.part.h264"), std::path::Path::new("cam.part.mp4"));
+        let args = cam_mp4_arguments(
+            std::path::Path::new("cam.part.h264"),
+            std::path::Path::new("cam.part.mp4"),
+        );
         let input = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(&args[input - 4..input], ["-f", "h264", "-r", "30"]);
-        assert!(args.windows(3).any(|w| w == crate::child::PROGRESS), "a stuck copy is ended: {args:?}");
+        assert!(
+            args.windows(3).any(|w| w == crate::child::PROGRESS),
+            "a stuck copy is ended: {args:?}"
+        );
         assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]));
         assert!(!args.iter().any(|a| a == "-filter_complex" || a == "-ss"));
         assert_eq!(args.last().map(String::as_str), Some("cam.part.mp4"));
@@ -469,7 +519,10 @@ pub(crate) mod tests {
         }
     }
 
-    fn facecam_clip(state: crate::model::FacecamState, start_ms: Option<u64>) -> crate::model::Clip {
+    fn facecam_clip(
+        state: crate::model::FacecamState,
+        start_ms: Option<u64>,
+    ) -> crate::model::Clip {
         let mut clip = crate::edit::tests::plain_clip(None, None);
         clip.facecam = Some(crate::model::ClipFacecam {
             layout: crate::model::CamLayout::default(),
@@ -477,21 +530,35 @@ pub(crate) mod tests {
             delay_ms: -40,
             state,
         });
-        clip.original = start_ms.map(|start| crate::model::ClipOriginal { duration_ms: 60_000, start_ms: start, end_ms: start + 30_000 });
+        clip.original = start_ms.map(|start| crate::model::ClipOriginal {
+            duration_ms: 60_000,
+            start_ms: start,
+            end_ms: start + 30_000,
+        });
         clip
     }
 
     fn shown(facts: FacecamFacts) -> FacecamFacts {
         let layout = crate::model::CamLayout::default();
         FacecamFacts {
-            applied: Some(FacecamApplied { layout, delay_ms: -40, start_ms: 0, length_ms: 30_000, size_bytes: 1 }),
+            applied: Some(FacecamApplied {
+                layout,
+                delay_ms: -40,
+                start_ms: 0,
+                length_ms: 30_000,
+                size_bytes: 1,
+            }),
             ..facts
         }
     }
 
     #[test]
     fn the_view_takes_its_leads_from_cam_timing() {
-        let facts = FacecamFacts { cam_offset_us: 120_000, video_start_us: Some(21_333), ..shown(facts()) };
+        let facts = FacecamFacts {
+            cam_offset_us: 120_000,
+            video_start_us: Some(21_333),
+            ..shown(facts())
+        };
         let clip = facecam_clip(crate::model::FacecamState::Ready, Some(5_000));
         let view = view_from(&clip, Some(&facts), true).expect("a view");
         let timing = crate::composite::cam_timing(120_000, -40, 21_333, 5_000, 30_000);
@@ -501,7 +568,10 @@ pub(crate) mod tests {
             let ours = t + view.cam_lead_ms as f64 / 1000.0;
             assert!((ours - c).abs() < 0.001, "t={t}: {ours} vs {c}");
         }
-        assert_eq!(view.clean_lead_ms, 5_000, "the stored clean picture is the whole recording");
+        assert_eq!(
+            view.clean_lead_ms, 5_000,
+            "the stored clean picture is the whole recording"
+        );
         assert!(view.shows_cam);
     }
 

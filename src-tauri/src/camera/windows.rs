@@ -10,8 +10,8 @@ use std::time::Duration;
 use ::windows::core::{implement, Result as WinResult, GUID, HRESULT, PCWSTR, PWSTR};
 use ::windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Register_Notification, CM_Unregister_Notification, CM_NOTIFY_ACTION, CM_NOTIFY_EVENT_DATA,
-    CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_0, CM_NOTIFY_FILTER_0_2, CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE, CR_SUCCESS,
-    HCMNOTIFICATION,
+    CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_0, CM_NOTIFY_FILTER_0_2,
+    CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE, CR_SUCCESS, HCMNOTIFICATION,
 };
 use ::windows::Win32::Foundation::{CloseHandle, BOOL, E_FAIL};
 use ::windows::Win32::Media::KernelStreaming::KSCATEGORY_VIDEO_CAMERA;
@@ -22,7 +22,10 @@ use ::windows::Win32::System::Threading::{
 };
 use parking_lot::Mutex;
 
-use super::{choose_stamp, classify, pick_native, CameraDevice, Error, Event, Frame, NativeType, OpenMode, ProbeFrame, Sink, Source};
+use super::{
+    choose_stamp, classify, pick_native, CameraDevice, Error, Event, Frame, NativeType, OpenMode,
+    ProbeFrame, Sink, Source,
+};
 use crate::audio::capture::now_100ns;
 use crate::gpu::SendPtr;
 
@@ -67,15 +70,23 @@ pub fn list() -> Vec<CameraDevice> {
 
 unsafe fn enumerate() -> WinResult<Vec<CameraDevice>> {
     let attrs = attributes(1)?;
-    attrs.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID)?;
+    attrs.SetGUID(
+        &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+        &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+    )?;
     let mut array: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
     MFEnumDeviceSources(&attrs, &mut array, &mut count)?;
     let mut out = Vec::new();
     for i in 0..count as usize {
         if let Some(activate) = std::ptr::read(array.add(i)) {
-            let name = alloc_string(&activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME).unwrap_or_default();
-            let id = alloc_string(&activate, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK).unwrap_or_default();
+            let name =
+                alloc_string(&activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME).unwrap_or_default();
+            let id = alloc_string(
+                &activate,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+            )
+            .unwrap_or_default();
             if !id.is_empty() && !name.starts_with(OWN_CAMERA) {
                 out.push(CameraDevice { id, name });
             }
@@ -111,8 +122,14 @@ unsafe fn media_source(link: &str, mode: OpenMode) -> WinResult<IMFMediaSource> 
         }
         OpenMode::Controlling { .. } => {
             let attrs = attributes(2)?;
-            attrs.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID)?;
-            attrs.SetString(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, PCWSTR(wide.as_ptr()))?;
+            attrs.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )?;
+            attrs.SetString(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                PCWSTR(wide.as_ptr()),
+            )?;
             MFCreateDeviceSource(&attrs)
         }
     }
@@ -161,7 +178,10 @@ impl Shared {
                 let size = t.GetUINT64(&MF_MT_FRAME_SIZE).unwrap_or(0);
                 let (w, h) = ((size >> 32) as u32, size as u32);
                 *self.size.lock() = (w, h);
-                *self.stride.lock() = t.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|s| (s as i32).unsigned_abs()).unwrap_or(w);
+                *self.stride.lock() = t
+                    .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+                    .map(|s| (s as i32).unsigned_abs())
+                    .unwrap_or(w);
             }
         }
     }
@@ -169,8 +189,14 @@ impl Shared {
     /// A tight NV12 copy with the stamps of the stage-1 rule.
     unsafe fn frame(&self, sample: &IMFSample, sample_time: i64) -> Option<Frame> {
         let arrival = now_100ns();
-        let device = sample.GetUINT64(&MFSampleExtension_DeviceTimestamp).ok().map(|v| v as i64);
-        let device_ref = sample.GetUINT64(&MFSampleExtension_DeviceReferenceSystemTime).ok().map(|v| v as i64);
+        let device = sample
+            .GetUINT64(&MFSampleExtension_DeviceTimestamp)
+            .ok()
+            .map(|v| v as i64);
+        let device_ref = sample
+            .GetUINT64(&MFSampleExtension_DeviceReferenceSystemTime)
+            .ok()
+            .map(|v| v as i64);
         let (qpc, clock) = choose_stamp(device, device_ref, Some(sample_time), arrival);
         let (w, h) = *self.size.lock();
         let (w, h) = (w as usize, h as usize);
@@ -218,7 +244,14 @@ struct Callback {
 }
 
 impl IMFSourceReaderCallback_Impl for Callback_Impl {
-    fn OnReadSample(&self, hr: HRESULT, _stream: u32, flags: u32, timestamp: i64, sample: Option<&IMFSample>) -> WinResult<()> {
+    fn OnReadSample(
+        &self,
+        hr: HRESULT,
+        _stream: u32,
+        flags: u32,
+        timestamp: i64,
+        sample: Option<&IMFSample>,
+    ) -> WinResult<()> {
         let shared = &self.shared;
         if shared.stop.load(Ordering::SeqCst) {
             return Ok(());
@@ -302,7 +335,11 @@ pub fn open(device: &CameraDevice, mode: OpenMode, sink: Sink) -> Result<Box<dyn
     unsafe { open_reader(device, mode, sink) }
 }
 
-unsafe fn open_reader(device: &CameraDevice, mode: OpenMode, sink: Sink) -> Result<Box<dyn Source>, Error> {
+unsafe fn open_reader(
+    device: &CameraDevice,
+    mode: OpenMode,
+    sink: Sink,
+) -> Result<Box<dyn Source>, Error> {
     let source = media_source(&device.id, mode).map_err(|err| classify(err.code().0))?;
     let shared = Arc::new(Shared {
         reader: Mutex::new(None),
@@ -313,7 +350,10 @@ unsafe fn open_reader(device: &CameraDevice, mode: OpenMode, sink: Sink) -> Resu
         stride: Mutex::new(0),
         lost: AtomicBool::new(false),
     });
-    let callback: IMFSourceReaderCallback = Callback { shared: shared.clone() }.into();
+    let callback: IMFSourceReaderCallback = Callback {
+        shared: shared.clone(),
+    }
+    .into();
     let build = || -> WinResult<IMFSourceReader> {
         let attrs = attributes(2)?;
         attrs.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, &callback)?;
@@ -361,7 +401,10 @@ unsafe fn open_reader(device: &CameraDevice, mode: OpenMode, sink: Sink) -> Resu
     };
     *shared.reader.lock() = Some(SendPtr(reader.clone()));
     shared.read_type();
-    let handle = Box::new(Handle { shared: shared.clone(), source: SendPtr(source) });
+    let handle = Box::new(Handle {
+        shared: shared.clone(),
+        source: SendPtr(source),
+    });
     if let Err(err) = reader.ReadSample(FIRST_VIDEO, 0, None, None, None, None) {
         return Err(classify(err.code().0));
     }
@@ -376,12 +419,16 @@ struct Reports {
 
 impl IMFSensorActivitiesReportCallback_Impl for Reports_Impl {
     fn OnActivitiesReport(&self, report: Option<&IMFSensorActivitiesReport>) -> WinResult<()> {
-        let Some(done) = self.found.lock().clone() else { return Ok(()) };
+        let Some(done) = self.found.lock().clone() else {
+            return Ok(());
+        };
         let mut pids = Vec::new();
         if let Some(report) = report {
             unsafe {
                 for i in 0..report.GetCount().unwrap_or(0) {
-                    let Ok(activity) = report.GetActivityReport(i) else { continue };
+                    let Ok(activity) = report.GetActivityReport(i) else {
+                        continue;
+                    };
                     let mut buf = [0u16; 512];
                     let mut written = 0u32;
                     if activity.GetSymbolicLink(&mut buf, &mut written).is_err() {
@@ -392,7 +439,10 @@ impl IMFSensorActivitiesReportCallback_Impl for Reports_Impl {
                         continue;
                     }
                     for j in 0..activity.GetProcessCount().unwrap_or(0) {
-                        if let Ok(pid) = activity.GetProcessActivity(j).and_then(|p| p.GetProcessId()) {
+                        if let Ok(pid) = activity
+                            .GetProcessActivity(j)
+                            .and_then(|p| p.GetProcessId())
+                        {
                             pids.push(pid);
                         }
                     }
@@ -410,8 +460,11 @@ pub fn holder(device: &CameraDevice) -> Option<String> {
     ensure_mf();
     let (done, found) = mpsc::channel();
     unsafe {
-        let callback: IMFSensorActivitiesReportCallback =
-            Reports { link: device.id.clone(), found: Mutex::new(Some(done)) }.into();
+        let callback: IMFSensorActivitiesReportCallback = Reports {
+            link: device.id.clone(),
+            found: Mutex::new(Some(done)),
+        }
+        .into();
         let monitor = MFCreateSensorActivityMonitor(&callback).ok()?;
         monitor.Start().ok()?;
         // The first report comes at once and is often empty; the one with the
@@ -427,7 +480,9 @@ pub fn holder(device: &CameraDevice) -> Option<String> {
         }
         let _ = monitor.Stop();
         let me = std::process::id();
-        pids.into_iter().find(|pid| *pid != me).and_then(|pid| process_name(pid))
+        pids.into_iter()
+            .find(|pid| *pid != me)
+            .and_then(|pid| process_name(pid))
     }
 }
 
@@ -435,11 +490,18 @@ unsafe fn process_name(pid: u32) -> Option<String> {
     let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, BOOL(0), pid).ok()?;
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
-    let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+    let named = QueryFullProcessImageNameW(
+        process,
+        PROCESS_NAME_WIN32,
+        PWSTR(buf.as_mut_ptr()),
+        &mut len,
+    );
     let _ = CloseHandle(process);
     named.ok()?;
     let path = String::from_utf16_lossy(&buf[..len as usize]);
-    std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned())
+    std::path::Path::new(&path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
 /// Cameras plugged in or out. Unregistered on drop.
@@ -492,12 +554,24 @@ pub fn watch_arrivals(on_change: impl Fn() + Send + Sync + 'static) -> Option<Ar
     let filter = CM_NOTIFY_FILTER {
         cbSize: std::mem::size_of::<CM_NOTIFY_FILTER>() as u32,
         FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
-        u: CM_NOTIFY_FILTER_0 { DeviceInterface: CM_NOTIFY_FILTER_0_2 { ClassGuid: KSCATEGORY_VIDEO_CAMERA } },
+        u: CM_NOTIFY_FILTER_0 {
+            DeviceInterface: CM_NOTIFY_FILTER_0_2 {
+                ClassGuid: KSCATEGORY_VIDEO_CAMERA,
+            },
+        },
         ..Default::default()
     };
     let mut handle = HCMNOTIFICATION::default();
     let result = unsafe {
-        CM_Register_Notification(&filter, Some(&*context as *const _ as *const c_void), Some(on_notify), &mut handle)
+        CM_Register_Notification(
+            &filter,
+            Some(&*context as *const _ as *const c_void),
+            Some(on_notify),
+            &mut handle,
+        )
     };
-    (result == CR_SUCCESS).then(|| ArrivalWatch { handle: SendPtr(handle), _context: context })
+    (result == CR_SUCCESS).then(|| ArrivalWatch {
+        handle: SendPtr(handle),
+        _context: context,
+    })
 }

@@ -115,7 +115,10 @@ const DELETED: &str = "The clip was deleted.";
 /// Is the clip going up as a share link right now? The clean-up by age
 /// leaves such a clip for its next round (`cleanup.rs`).
 pub fn uploading(id: &str) -> bool {
-    UPLOADS.lock().as_ref().is_some_and(|uploads| uploads.contains_key(id))
+    UPLOADS
+        .lock()
+        .as_ref()
+        .is_some_and(|uploads| uploads.contains_key(id))
 }
 
 /// Holds a clip's place in `UPLOADS` until the upload ends, however it ends.
@@ -272,7 +275,10 @@ async fn read(app: &AppHandle, response: reqwest::Response) -> Result<serde_json
         return Err("Sign in with Discord again to share links.".into());
     }
     if status == reqwest::StatusCode::FORBIDDEN {
-        return Err("This link was made with another Discord account. Sign in with that one to delete it.".into());
+        return Err(
+            "This link was made with another Discord account. Sign in with that one to delete it."
+                .into(),
+        );
     }
     if value.get("reason").and_then(|r| r.as_str()) == Some("quota") {
         let resets = value.get("resetsAt").and_then(|r| r.as_i64());
@@ -368,8 +374,13 @@ async fn linked(app: &AppHandle, id: String, copy: bool) -> Result<Link, String>
     let clip = {
         let state = app.state::<AppState>();
         let guard = state.library.lock();
-        let library = guard.as_ref().ok_or("The clip database is not available.")?;
-        library.get(&id).map_err(|err| err.to_string())?.ok_or("That clip is gone.")?
+        let library = guard
+            .as_ref()
+            .ok_or("The clip database is not available.")?;
+        library
+            .get(&id)
+            .map_err(|err| err.to_string())?
+            .ok_or("That clip is gone.")?
     };
     if clip.screenshot {
         return Err("Only clips can be shared as a link.".into());
@@ -498,7 +509,8 @@ async fn upload(
                 None => faststart(&source, &temp, "preparing a clip for its link"),
                 Some(remix) => {
                     // The tracks cut to the file's own length, not the row's.
-                    let length_ms = crate::muxer::probe_duration_ms(&source).unwrap_or(remix.length_ms);
+                    let length_ms =
+                        crate::muxer::probe_duration_ms(&source).unwrap_or(remix.length_ms);
                     let remix = crate::stems::Remix { length_ms, ..remix };
                     remix_copy(&source, &temp, &remix, "preparing a clip for its link")
                 }
@@ -506,7 +518,9 @@ async fn upload(
             .await
         };
         match moved {
-            Ok(Ok(())) if std::fs::metadata(&temp).is_ok_and(|meta| meta.len() <= MAX_BYTES) => true,
+            Ok(Ok(())) if std::fs::metadata(&temp).is_ok_and(|meta| meta.len() <= MAX_BYTES) => {
+                true
+            }
             other => {
                 log::warn!("share link {}: copy for the link failed or too big, shrinking instead: {other:?}", clip.id);
                 let _ = std::fs::remove_file(&temp);
@@ -564,9 +578,17 @@ async fn upload(
 
     // The preview picture for Discord and the page. Without it the link still
     // works, so a failure here is only logged.
-    if let Some(thumb) = clip.thumb_path.as_ref().and_then(|path| std::fs::read(path).ok()) {
+    if let Some(thumb) = clip
+        .thumb_path
+        .as_ref()
+        .and_then(|path| std::fs::read(path).ok())
+    {
         let sent = client()
-            .put(format!("{}/shares/{}/poster", crate::friends::SERVER, link.id))
+            .put(format!(
+                "{}/shares/{}/poster",
+                crate::friends::SERVER,
+                link.id
+            ))
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "image/jpeg")
             .body(thumb)
@@ -606,8 +628,18 @@ fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std
     args.push(source.into());
     args.extend(
         [
-            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-map_chapters", "-1", "-c", "copy",
-            "-movflags", "+faststart",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
         ]
         .iter()
         .map(std::ffi::OsString::from),
@@ -619,8 +651,14 @@ fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std
 /// The link copy without a track: the picture copied as it is, the sound
 /// mixed again from the tracks `remix` keeps (none: no sound), the index at
 /// the front.
-fn remix_args(source: &std::path::Path, output: &std::path::Path, remix: &crate::stems::Remix) -> Vec<String> {
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
+fn remix_args(
+    source: &std::path::Path,
+    output: &std::path::Path,
+    remix: &crate::stems::Remix,
+) -> Vec<String> {
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
+        .map(String::from)
+        .to_vec();
     args.extend(crate::child::PROGRESS.map(String::from));
     args.extend(crate::muxer::clip_input().map(String::from));
     args.push("-i".into());
@@ -629,12 +667,29 @@ fn remix_args(source: &std::path::Path, output: &std::path::Path, remix: &crate:
     args.extend(["-map", "0:v:0"].map(String::from));
     match remix.filter(1) {
         Some(graph) => {
-            args.extend(["-filter_complex".into(), graph, "-map".into(), crate::stems::MIX_LABEL.into()]);
+            args.extend([
+                "-filter_complex".into(),
+                graph,
+                "-map".into(),
+                crate::stems::MIX_LABEL.into(),
+            ]);
             args.extend(["-c:a", "aac", "-b:a", "192k"].map(String::from));
         }
         None => args.push("-an".into()),
     }
-    args.extend(["-map_metadata", "-1", "-map_chapters", "-1", "-c:v", "copy", "-movflags", "+faststart"].map(String::from));
+    args.extend(
+        [
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-c:v",
+            "copy",
+            "-movflags",
+            "+faststart",
+        ]
+        .map(String::from),
+    );
     args.push(output.to_string_lossy().to_string());
     args
 }
@@ -655,7 +710,11 @@ pub(crate) fn remix_copy(
 /// Copy the clip with its index at the front, as [`faststart_args`] says.
 /// Sending to a friend makes the same copy of a clip that still carries its
 /// source tracks (`share.rs`). `doing` names the step in an error.
-pub(crate) fn faststart(source: &std::path::Path, output: &std::path::Path, doing: &str) -> Result<(), String> {
+pub(crate) fn faststart(
+    source: &std::path::Path,
+    output: &std::path::Path,
+    doing: &str,
+) -> Result<(), String> {
     let mut command = crate::muxer::ffmpeg();
     command.args(faststart_args(source, output));
     crate::muxer::run(&mut command, doing, crate::child::MOVING)
@@ -688,12 +747,20 @@ async fn send(
     }
     // Not the friend tags ("with Luca"): who played along stays among
     // friends, a link is public.
-    for tag in clip.tags.iter().filter(|tag| !crate::clips::is_friend_tag(tag)) {
+    for tag in clip
+        .tags
+        .iter()
+        .filter(|tag| !crate::clips::is_friend_tag(tag))
+    {
         params.push(("tag", tag.clone()));
     }
-    params.extend(link_identity(friends.name_on_links, friends.friend_on_links));
-    let url = reqwest::Url::parse_with_params(&format!("{}/shares", crate::friends::SERVER), &params)
-        .map_err(|err| err.to_string())?;
+    params.extend(link_identity(
+        friends.name_on_links,
+        friends.friend_on_links,
+    ));
+    let url =
+        reqwest::Url::parse_with_params(&format!("{}/shares", crate::friends::SERVER), &params)
+            .map_err(|err| err.to_string())?;
 
     const CHUNK: usize = 256 * 1024;
     report.emit("uploading", 0.0, None);
@@ -744,7 +811,11 @@ pub async fn link_delete(app: AppHandle, id: String) -> Result<(), String> {
 pub fn clip_deleted(app: &AppHandle, id: &str) {
     // Still on its way up: the upload breaks off, or `link_create` takes the
     // link down should it land in the same moment.
-    if let Some(upload) = UPLOADS.lock().as_mut().and_then(|uploads| uploads.get_mut(id)) {
+    if let Some(upload) = UPLOADS
+        .lock()
+        .as_mut()
+        .and_then(|uploads| uploads.get_mut(id))
+    {
         upload.deleted = true;
         upload.cancel.notify_one();
     }
@@ -820,7 +891,10 @@ mod tests {
         assert!(pairs(false, true).is_empty());
         assert!(pairs(false, false).is_empty());
         assert_eq!(pairs(true, true), vec![("name", "1".to_string())]);
-        assert_eq!(pairs(true, false), vec![("name", "1".to_string()), ("friend", "0".to_string())]);
+        assert_eq!(
+            pairs(true, false),
+            vec![("name", "1".to_string()), ("friend", "0".to_string())]
+        );
     }
 
     use super::*;
@@ -832,11 +906,23 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        for pair in [["-map", "0:v:0"], ["-map", "0:a:0?"], ["-map_metadata", "-1"], ["-map_chapters", "-1"]] {
-            assert!(args.windows(2).any(|w| w == pair), "{pair:?} missing in {args:?}");
+        for pair in [
+            ["-map", "0:v:0"],
+            ["-map", "0:a:0?"],
+            ["-map_metadata", "-1"],
+            ["-map_chapters", "-1"],
+        ] {
+            assert!(
+                args.windows(2).any(|w| w == pair),
+                "{pair:?} missing in {args:?}"
+            );
         }
         let input = args.iter().position(|a| a == "-i").unwrap();
-        assert_eq!(args[input - 4..input], crate::muxer::clip_input(), "a clip may come from a friend");
+        assert_eq!(
+            args[input - 4..input],
+            crate::muxer::clip_input(),
+            "a clip may come from a friend"
+        );
         assert!(!args.windows(2).any(|w| w == ["-map", "0"]), "{args:?}");
     }
 
@@ -857,13 +943,25 @@ mod tests {
             "{joined}"
         );
         assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
-        assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]), "the picture is not encoded again: {joined}");
-        assert!(!joined.contains("0:a"), "the clip's own sound has Discord in it: {joined}");
+        assert!(
+            args.windows(2).any(|w| w == ["-c:v", "copy"]),
+            "the picture is not encoded again: {joined}"
+        );
+        assert!(
+            !joined.contains("0:a"),
+            "the clip's own sound has Discord in it: {joined}"
+        );
         assert_eq!(args.last().unwrap(), "out.mp4");
 
-        let silent = crate::stems::Remix { tracks: Vec::new(), ..remix };
+        let silent = crate::stems::Remix {
+            tracks: Vec::new(),
+            ..remix
+        };
         let args = remix_args(Path::new("in.mp4"), Path::new("out.mp4"), &silent);
-        assert!(args.iter().any(|a| a == "-an") && !args.iter().any(|a| a == "-c:a"), "{args:?}");
+        assert!(
+            args.iter().any(|a| a == "-an") && !args.iter().any(|a| a == "-c:a"),
+            "{args:?}"
+        );
     }
 
     #[test]

@@ -85,9 +85,13 @@ pub fn creation_times(
         asked.insert(pid, at);
     }
     cache.retain(|(pid, parent, exe), _| {
-        tree.get(pid).is_some_and(|(now_parent, now_exe)| now_parent == parent && now_exe == exe)
+        tree.get(pid)
+            .is_some_and(|(now_parent, now_exe)| now_parent == parent && now_exe == exe)
     });
-    asked.into_iter().filter_map(|(pid, at)| Some((pid, at?))).collect()
+    asked
+        .into_iter()
+        .filter_map(|(pid, at)| Some((pid, at?)))
+        .collect()
 }
 
 /// A process's ancestors, closest first. `pid` itself is not included.
@@ -147,8 +151,7 @@ pub fn app_of(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
         }
         match tree.get(parent) {
             // Never up into the shell or a system host: the helper stays.
-            Some((_, parent_exe)) if is_audio_helper(exe) && !is_system_host(parent_exe) =>
-            {
+            Some((_, parent_exe)) if is_audio_helper(exe) && !is_system_host(parent_exe) => {
                 current = app_root(*parent, tree)
             }
             _ => break,
@@ -199,11 +202,15 @@ const SYSTEM_HOSTS: &[&str] = &[
 ];
 
 fn is_system_host(exe: &str) -> bool {
-    SYSTEM_HOSTS.iter().any(|name| name.eq_ignore_ascii_case(exe))
+    SYSTEM_HOSTS
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(exe))
 }
 
 pub fn is_audio_helper(exe: &str) -> bool {
-    AUDIO_HELPERS.iter().any(|name| name.eq_ignore_ascii_case(exe))
+    AUDIO_HELPERS
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(exe))
 }
 
 /// Does `pid` sit in the process tree of `root` (or is it `root`)?
@@ -354,11 +361,17 @@ pub struct Note {
 
 impl Note {
     fn everywhere(text: String) -> Self {
-        Note { text, mixer_only: false }
+        Note {
+            text,
+            mixer_only: false,
+        }
     }
 
     fn mixer(text: String) -> Self {
-        Note { text, mixer_only: true }
+        Note {
+            text,
+            mixer_only: true,
+        }
     }
 }
 
@@ -460,7 +473,9 @@ pub fn missing_app_notes(
                         .unwrap_or_else(|| format!("PID {other}"));
                     out.insert(
                         source.id.clone(),
-                        Note::mixer(format!("is left out — it would record {name} a second time")),
+                        Note::mixer(format!(
+                            "is left out — it would record {name} a second time"
+                        )),
                     );
                     continue;
                 }
@@ -501,18 +516,27 @@ pub fn helper_migrations(
         return out;
     }
     for source in sources.iter().filter(|s| s.enabled) {
-        let SourceKind::Process { pid, exe: Some(exe), .. } = &source.kind else {
+        let SourceKind::Process {
+            pid,
+            exe: Some(exe),
+            ..
+        } = &source.kind
+        else {
             continue;
         };
         if !is_audio_helper(exe) {
             continue;
         }
-        let Some((_, running)) = tree.get(pid) else { continue };
+        let Some((_, running)) = tree.get(pid) else {
+            continue;
+        };
         if !running.eq_ignore_ascii_case(exe) {
             continue;
         }
         let host = app_of(*pid, tree);
-        let Some((_, host_exe)) = tree.get(&host) else { continue };
+        let Some((_, host_exe)) = tree.get(&host) else {
+            continue;
+        };
         if host == *pid || is_audio_helper(host_exe) || in_tree_of(host, own, tree) {
             continue;
         }
@@ -539,7 +563,12 @@ pub fn migrated_source(
     label: Option<String>,
 ) -> Option<AudioSource> {
     let current = current.filter(|now| *now == before)?;
-    let SourceKind::Process { exe: Some(old), mode, .. } = &current.kind else {
+    let SourceKind::Process {
+        exe: Some(old),
+        mode,
+        ..
+    } = &current.kind
+    else {
         return None;
     };
     if !is_audio_helper(old) {
@@ -626,16 +655,17 @@ fn is_app_source(kind: &SourceKind) -> bool {
 }
 
 fn records_single_applications_on(sources: &[AudioSource], supported: bool) -> bool {
-    supported && sources.iter().filter(|s| s.enabled).any(|source| {
-        matches!(
-            source.kind,
-            SourceKind::Game
-                | SourceKind::Process {
-                    mode: ProcessMode::Include,
-                    ..
-                }
-        )
-    })
+    supported
+        && sources.iter().filter(|s| s.enabled).any(|source| {
+            matches!(
+                source.kind,
+                SourceKind::Game
+                    | SourceKind::Process {
+                        mode: ProcessMode::Include,
+                        ..
+                    }
+            )
+        })
 }
 
 /// The sources with every "Windows default" device (an empty id) replaced by
@@ -649,10 +679,14 @@ pub fn pin_defaults(sources: &[AudioSource], output: &str, input: &str) -> Vec<A
         .map(|source| {
             let mut source = source.clone();
             match &mut source.kind {
-                SourceKind::OutputDevice { device_id } if device_id.is_empty() && !output.is_empty() => {
+                SourceKind::OutputDevice { device_id }
+                    if device_id.is_empty() && !output.is_empty() =>
+                {
                     *device_id = output.to_string();
                 }
-                SourceKind::InputDevice { device_id } if device_id.is_empty() && !input.is_empty() => {
+                SourceKind::InputDevice { device_id }
+                    if device_id.is_empty() && !input.is_empty() =>
+                {
                     *device_id = input.to_string();
                 }
                 _ => {}
@@ -725,9 +759,7 @@ fn live_pid(
     // a game behind anti-cheat. No process is called that, so searching by it
     // dropped the source even while the application ran.
     let exe = exe.filter(|name| !is_pid_placeholder(name));
-    let matches_exe = |name: &str| {
-        exe.is_some_and(|want| name.eq_ignore_ascii_case(want))
-    };
+    let matches_exe = |name: &str| exe.is_some_and(|want| name.eq_ignore_ascii_case(want));
     // ClippiBoy's own web views are never what a source means.
     let outside = |pid: u32| !in_tree_of(pid, own, tree);
     match tree.get(&pid) {
@@ -851,9 +883,10 @@ impl Leftovers {
             // Does this application have a session on that bucket's device, and
             // is it rendering there?
             let state = |device: &str| {
-                playing.get(device)?.iter().find_map(|(pid, active)| {
-                    (app_root(*pid, tree) == root).then_some(*active)
-                })
+                playing
+                    .get(device)?
+                    .iter()
+                    .find_map(|(pid, active)| (app_root(*pid, tree) == root).then_some(*active))
             };
 
             let owner = buckets
@@ -869,9 +902,9 @@ impl Leftovers {
                 })
                 // Playing nowhere in particular belongs on the catch-all.
                 .or_else(|| {
-                    buckets
-                        .iter()
-                        .find(|(_, device)| *device == self.default_device && state(device).is_some())
+                    buckets.iter().find(|(_, device)| {
+                        *device == self.default_device && state(device).is_some()
+                    })
                 })
                 .or_else(|| buckets.iter().find(|(_, device)| state(device).is_some()));
 
@@ -1057,7 +1090,9 @@ fn resolve_for(
 fn claim(tapped: &mut Vec<u32>, root: u32, label: &str) -> bool {
     if tapped.contains(&root) {
         // Every 2 s while it lasts: debug, the UI says it in the row's note.
-        log::debug!("'{label}' is already recorded by another source (process {root}) — tapped once");
+        log::debug!(
+            "'{label}' is already recorded by another source (process {root}) — tapped once"
+        );
         return false;
     }
     tapped.push(root);
@@ -1094,8 +1129,7 @@ pub fn configuration_warnings(
                 // around the clock would teach everybody to ignore the banner.
                 out.insert(
                     source.id.clone(),
-                    "no game detected right now — this track stays silent until one is"
-                        .to_string(),
+                    "no game detected right now — this track stays silent until one is".to_string(),
                 );
                 continue;
             }
@@ -1597,7 +1631,12 @@ mod tests {
     fn without_a_game_the_game_source_drops_out() {
         let sources = vec![
             of_kind("game", SourceKind::Game),
-            of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
+            of_kind(
+                "mic",
+                SourceKind::InputDevice {
+                    device_id: "m".into(),
+                },
+            ),
         ];
         let streams = resolve(&sources, None, &nothing(), &loose(), &ledger(""));
         assert_eq!(streams.len(), 1);
@@ -1671,16 +1710,31 @@ mod tests {
     }
 
     fn input_source(id: &str, device_id: &str) -> AudioSource {
-        of_kind(id, SourceKind::InputDevice { device_id: device_id.into() })
+        of_kind(
+            id,
+            SourceKind::InputDevice {
+                device_id: device_id.into(),
+            },
+        )
     }
 
     #[test]
     fn a_windows_default_source_names_the_real_device() {
-        let sources = vec![output_source("sys", ""), input_source("mic", ""), output_source("chat", "chat-dev")];
+        let sources = vec![
+            output_source("sys", ""),
+            input_source("mic", ""),
+            output_source("chat", "chat-dev"),
+        ];
         let pinned = pin_defaults(&sources, "spk-2", "mic-1");
-        assert!(matches!(&pinned[0].kind, SourceKind::OutputDevice { device_id } if device_id == "spk-2"));
-        assert!(matches!(&pinned[1].kind, SourceKind::InputDevice { device_id } if device_id == "mic-1"));
-        assert!(matches!(&pinned[2].kind, SourceKind::OutputDevice { device_id } if device_id == "chat-dev"));
+        assert!(
+            matches!(&pinned[0].kind, SourceKind::OutputDevice { device_id } if device_id == "spk-2")
+        );
+        assert!(
+            matches!(&pinned[1].kind, SourceKind::InputDevice { device_id } if device_id == "mic-1")
+        );
+        assert!(
+            matches!(&pinned[2].kind, SourceKind::OutputDevice { device_id } if device_id == "chat-dev")
+        );
         // No known default: the source stays "follow Windows".
         let unpinned = pin_defaults(&sources, "", "");
         assert_eq!(unpinned[0].kind, sources[0].kind);
@@ -1747,10 +1801,7 @@ mod tests {
             of_kind("system", leftovers("system")),
             of_kind("chat", leftovers("chat")),
         ];
-        let quiet_everywhere = playing(&[
-            ("system", &idle(&[5556])),
-            ("chat", &idle(&[5556])),
-        ]);
+        let quiet_everywhere = playing(&[("system", &idle(&[5556])), ("chat", &idle(&[5556]))]);
         let mut ledger = ledger("system");
         ledger.previous.insert(5556, "chat".into());
 
@@ -1826,7 +1877,10 @@ mod tests {
             (12604, 33264, "steamwebhelper.exe"),
             (5000, 33264, "cs2.exe"),
         ]);
-        let sources = vec![of_kind("game", SourceKind::Game), of_kind("rest", leftovers("spk"))];
+        let sources = vec![
+            of_kind("game", SourceKind::Game),
+            of_kind("rest", leftovers("spk")),
+        ];
         let streams = resolve(
             &sources,
             Some(5000),
@@ -1853,12 +1907,20 @@ mod tests {
     fn without_process_loopback_devices_stay_whole() {
         let sources = vec![
             recording_by_app(),
-            of_kind("proc", SourceKind::Process {
-                pid: 77,
-                exe: None,
-                mode: ProcessMode::Include,
-            }),
-            of_kind("spk", SourceKind::OutputDevice { device_id: "spk".into() }),
+            of_kind(
+                "proc",
+                SourceKind::Process {
+                    pid: 77,
+                    exe: None,
+                    mode: ProcessMode::Include,
+                },
+            ),
+            of_kind(
+                "spk",
+                SourceKind::OutputDevice {
+                    device_id: "spk".into(),
+                },
+            ),
         ];
         let procs = tree(&[(5000, 4, "game.exe"), (77, 4, "discord.exe")]);
         let streams = resolve_for(
@@ -1884,11 +1946,19 @@ mod tests {
     fn unsupported_application_sources_get_a_note() {
         let sources = vec![
             of_kind("game", SourceKind::Game),
-            of_kind("spk", SourceKind::OutputDevice { device_id: "spk".into() }),
+            of_kind(
+                "spk",
+                SourceKind::OutputDevice {
+                    device_id: "spk".into(),
+                },
+            ),
         ];
         let notes = app_capture_notes(&sources, false);
         assert_eq!(notes.len(), 1);
-        assert_eq!(notes["game"], "records nothing — per-app audio needs Windows 11");
+        assert_eq!(
+            notes["game"],
+            "records nothing — per-app audio needs Windows 11"
+        );
         assert!(app_capture_notes(&sources, true).is_empty());
     }
 
@@ -1909,7 +1979,19 @@ mod tests {
             &ledger("spk"),
         );
         assert_eq!(pids_of(&streams, "rest"), vec![5004]);
-        assert_eq!(pids_of(&resolve(&sources, None, &playing(&[("spk", &idle(&[5000, 5004]))]), &loose(), &ledger("spk")), "rest"), vec![5000, 5004]);
+        assert_eq!(
+            pids_of(
+                &resolve(
+                    &sources,
+                    None,
+                    &playing(&[("spk", &idle(&[5000, 5004]))]),
+                    &loose(),
+                    &ledger("spk")
+                ),
+                "rest"
+            ),
+            vec![5000, 5004]
+        );
     }
 
     /// Playing a clip back while the buffer runs must not end up in the next
@@ -1931,7 +2013,12 @@ mod tests {
     /// A disabled source that still held a stream would keep recording.
     #[test]
     fn disabled_sources_produce_no_streams() {
-        let mut source = of_kind("mic", SourceKind::InputDevice { device_id: "m".into() });
+        let mut source = of_kind(
+            "mic",
+            SourceKind::InputDevice {
+                device_id: "m".into(),
+            },
+        );
         source.enabled = false;
         assert!(resolve(&[source], Some(1), &nothing(), &loose(), &ledger("")).is_empty());
     }
@@ -1941,7 +2028,12 @@ mod tests {
     #[test]
     fn devices_pass_through_while_nothing_is_recorded_per_application() {
         let sources = vec![
-            of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
+            of_kind(
+                "mic",
+                SourceKind::InputDevice {
+                    device_id: "m".into(),
+                },
+            ),
             of_kind("desktop", output("speakers")),
         ];
         let streams = resolve(&sources, Some(1234), &nothing(), &loose(), &ledger(""));
@@ -1972,7 +2064,9 @@ mod tests {
         // 7 is already recorded, so only 8 is left over — and the device itself
         // is not opened at all.
         assert_eq!(pids_of(&streams, "desktop"), vec![8]);
-        assert!(!streams.iter().any(|s| matches!(s.kind, SourceKind::OutputDevice { .. })));
+        assert!(!streams
+            .iter()
+            .any(|s| matches!(s.kind, SourceKind::OutputDevice { .. })));
     }
 
     /// The track list must not shift underneath the recording just because a
@@ -1983,7 +2077,12 @@ mod tests {
         let sources = vec![
             of_kind("game", SourceKind::Game),
             of_kind("rest", leftovers("spk")),
-            of_kind("mic", SourceKind::InputDevice { device_id: "m".into() }),
+            of_kind(
+                "mic",
+                SourceKind::InputDevice {
+                    device_id: "m".into(),
+                },
+            ),
         ];
         assert_eq!(recorded(&sources).count(), 3);
 
@@ -2040,7 +2139,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pid, 10);
         assert_eq!(rows[0].exe, "Spotify.exe");
-        assert_eq!(rows[0].name, "Spotify", "a helper's own name is not the app's");
+        assert_eq!(
+            rows[0].name, "Spotify",
+            "a helper's own name is not the app's"
+        );
         assert_eq!(app_of(13, &tree), 10);
         // The leftovers' notion of a root is unchanged: the helper's own.
         assert_eq!(app_root(13, &tree), 12);
@@ -2078,7 +2180,11 @@ mod tests {
         ]);
         assert_eq!(live_pid(100, 7, Some("msedgewebview2.exe"), &tree), None);
         // Stored pid is alive but inside our tree: it is not followed.
-        let tree2 = self::tree(&[(100, 1, "clippiboy.exe"), (101, 100, "chat.exe"), (400, 1, "chat.exe")]);
+        let tree2 = self::tree(&[
+            (100, 1, "clippiboy.exe"),
+            (101, 100, "chat.exe"),
+            (400, 1, "chat.exe"),
+        ]);
         assert_eq!(live_pid(100, 101, Some("chat.exe"), &tree2), Some(400));
     }
 
@@ -2086,7 +2192,11 @@ mod tests {
     #[test]
     fn resource_display_names_fall_back_to_the_exe() {
         let tree = tree(&[(10, 1, "Game.exe")]);
-        let rows = group_apps(&[seen(10, false, Some("@%SystemRoot%\\x.dll,-1"))], &tree, 9999);
+        let rows = group_apps(
+            &[seen(10, false, Some("@%SystemRoot%\\x.dll,-1"))],
+            &tree,
+            9999,
+        );
         assert_eq!(rows[0].name, "Game");
     }
 
@@ -2097,7 +2207,15 @@ mod tests {
             app_source("a", 30988, Some("Discord.exe")),
             app_source("b", 2584, Some("Discord.exe")),
         ];
-        let streams = resolve_for(9999, true, &sources, None, &nothing(), &discord(), &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources,
+            None,
+            &nothing(),
+            &discord(),
+            &ledger(""),
+        );
         assert_eq!(pid_of(&streams, "a"), Some(5556));
         assert_eq!(pid_of(&streams, "b"), None);
     }
@@ -2108,8 +2226,15 @@ mod tests {
             of_kind("game", SourceKind::Game),
             app_source("chat", 5556, Some("Discord.exe")),
         ];
-        let streams =
-            resolve_for(9999, true, &sources, Some(30988), &nothing(), &discord(), &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources,
+            Some(30988),
+            &nothing(),
+            &discord(),
+            &ledger(""),
+        );
         assert_eq!(pid_of(&streams, "game"), Some(5556));
         assert_eq!(pid_of(&streams, "chat"), None);
     }
@@ -2124,7 +2249,9 @@ mod tests {
         // Follows the name ("Discord is not running …"), and only in the mixer.
         assert_eq!(
             notes.get("chat"),
-            Some(&Note::mixer("is not running — this track stays silent".into()))
+            Some(&Note::mixer(
+                "is not running — this track stays silent".into()
+            ))
         );
         assert!(missing_app_notes(&sources, None, &tree, 9999, false).is_empty());
         assert!(missing_app_notes(&sources, None, &discord(), 9999, true).is_empty());
@@ -2136,7 +2263,13 @@ mod tests {
             .into_iter()
             .collect();
         let named = name_taps(&taps, &discord());
-        assert_eq!(named["chat"][0], Tap { pid: 5556, name: "Discord".into() });
+        assert_eq!(
+            named["chat"][0],
+            Tap {
+                pid: 5556,
+                name: "Discord".into()
+            }
+        );
         assert_eq!(named["chat"][1].name, "PID 999");
     }
 
@@ -2147,7 +2280,10 @@ mod tests {
         let mut src = app_source("web", 77, Some("msedgewebview2.exe"));
         src.label = "Spotify".into();
         let notes = missing_app_notes(&[src], None, &tree(&[(5, 1, "x.exe")]), 9999, true);
-        assert_eq!(notes["web"], Note::everywhere("has to be added again from the list".into()));
+        assert_eq!(
+            notes["web"],
+            Note::everywhere("has to be added again from the list".into())
+        );
     }
 
     #[test]
@@ -2156,7 +2292,15 @@ mod tests {
         let mut src = app_source("web", 12, Some("msedgewebview2.exe"));
         src.label = "msedgewebview2".into();
         let moves = helper_migrations(&[src.clone()], &tree, 9999, true);
-        assert_eq!(moves, vec![("web".into(), 10, "Spotify.exe".into(), Some("Spotify".to_string()))]);
+        assert_eq!(
+            moves,
+            vec![(
+                "web".into(),
+                10,
+                "Spotify.exe".into(),
+                Some("Spotify".to_string())
+            )]
+        );
         // Windows 10: nothing can be tapped, nothing is rewritten.
         assert!(helper_migrations(&[src.clone()], &tree, 9999, false).is_empty());
         // A name the user chose stays.
@@ -2179,7 +2323,15 @@ mod tests {
             mode: ProcessMode::Exclude,
         };
         let sources = vec![ex, app_source("chat", 5556, Some("Discord.exe"))];
-        let streams = resolve_for(9999, true, &sources, None, &nothing(), &discord(), &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources,
+            None,
+            &nothing(),
+            &discord(),
+            &ledger(""),
+        );
         assert_eq!(pid_of(&streams, "chat"), Some(5556));
     }
 
@@ -2197,7 +2349,10 @@ mod tests {
         a.label = "Discord".into();
         let b = app_source("b", 2584, Some("Discord.exe"));
         let notes = missing_app_notes(&[a, b], None, &discord(), 9999, false);
-        assert_eq!(notes.get("b"), Some(&Note::everywhere("is already recorded by Discord".into())));
+        assert_eq!(
+            notes.get("b"),
+            Some(&Note::everywhere("is already recorded by Discord".into()))
+        );
         assert!(!notes.contains_key("a"));
     }
 
@@ -2235,7 +2390,10 @@ mod tests {
         // A source stored under it stays where it is and is found again.
         let src = app_source("steam", 11, Some("steamwebhelper.exe"));
         assert!(helper_migrations(std::slice::from_ref(&src), &tree, 9999, true).is_empty());
-        assert_eq!(live_pid(9999, 4242, Some("steamwebhelper.exe"), &tree), Some(11));
+        assert_eq!(
+            live_pid(9999, 4242, Some("steamwebhelper.exe"), &tree),
+            Some(11)
+        );
         let streams = resolve_for(9999, true, &[src], Some(20), &nothing(), &tree, &ledger(""));
         assert_eq!(pid_of(&streams, "steam"), Some(11));
     }
@@ -2249,13 +2407,24 @@ mod tests {
             (40, 30, "FortniteClient-Win64-Shipping.exe"),
         ]);
         assert_eq!(app_of(31, &tree), 31);
-        assert_eq!(group_apps(&[seen(31, true, None)], &tree, 9999)[0].name, "Epic Games (web)");
+        assert_eq!(
+            group_apps(&[seen(31, true, None)], &tree, 9999)[0].name,
+            "Epic Games (web)"
+        );
         // The launcher itself, picked by hand, would take in the game.
         let sources = vec![
             of_kind("game", SourceKind::Game),
             app_source("epic", 30, Some("EpicGamesLauncher.exe")),
         ];
-        let streams = resolve_for(9999, true, &sources, Some(40), &nothing(), &tree, &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources,
+            Some(40),
+            &nothing(),
+            &tree,
+            &ledger(""),
+        );
         assert_eq!(pid_of(&streams, "game"), Some(40));
         assert_eq!(pid_of(&streams, "epic"), None);
     }
@@ -2273,7 +2442,15 @@ mod tests {
             of_kind("rest", leftovers("spk")),
         ];
         let playing = playing(&[("spk", &idle(&[10, 12, 20]))]);
-        let streams = resolve_for(9999, true, &sources, Some(20), &playing, &tree, &ledger("spk"));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources,
+            Some(20),
+            &playing,
+            &tree,
+            &ledger("spk"),
+        );
         assert_eq!(pids_of(&streams, "game"), vec![20]);
         assert!(pids_of(&streams, "steam").is_empty());
         // The leftovers still get Steam's web view, and the game only once.
@@ -2281,17 +2458,43 @@ mod tests {
         let notes = missing_app_notes(&sources, Some(20), &tree, 9999, true);
         assert_eq!(
             notes.get("steam"),
-            Some(&Note::mixer("is left out — it would record cs2 a second time".into()))
+            Some(&Note::mixer(
+                "is left out — it would record cs2 a second time".into()
+            ))
         );
         // Nothing else records the game: Steam is tapped and carries it, once.
-        let streams = resolve_for(9999, true, &sources[1..2], Some(20), &nothing(), &tree, &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources[1..2],
+            Some(20),
+            &nothing(),
+            &tree,
+            &ledger(""),
+        );
         assert_eq!(pids_of(&streams, "steam"), vec![10]);
         assert!(missing_app_notes(&sources[1..2], Some(20), &tree, 9999, true).is_empty());
         // With only a Game source added, Steam is left out again.
-        let streams = resolve_for(9999, true, &sources[..2], Some(20), &nothing(), &tree, &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources[..2],
+            Some(20),
+            &nothing(),
+            &tree,
+            &ledger(""),
+        );
         assert!(pids_of(&streams, "steam").is_empty());
         // No game running: Steam is just an application.
-        let streams = resolve_for(9999, true, &sources[1..2], None, &nothing(), &tree, &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources[1..2],
+            None,
+            &nothing(),
+            &tree,
+            &ledger(""),
+        );
         assert_eq!(pids_of(&streams, "steam"), vec![10]);
         assert!(missing_app_notes(&sources[1..2], None, &tree, 9999, true).is_empty());
     }
@@ -2324,10 +2527,16 @@ mod tests {
             (70, 800, "msedgewebview2.exe"),
             (800, 1, "Spotify.exe"),
         ]);
-        let created: HashMap<u32, u64> =
-            [(1, 10), (40, 100), (70, 120), (500, 200), (600, 210), (800, 300)]
-                .into_iter()
-                .collect();
+        let created: HashMap<u32, u64> = [
+            (1, 10),
+            (40, 100),
+            (70, 120),
+            (500, 200),
+            (600, 210),
+            (800, 300),
+        ]
+        .into_iter()
+        .collect();
         assert!(in_tree_of(40, 500, &processes));
         cut_reused_parents(&mut processes, &created);
         assert!(!in_tree_of(40, 500, &processes));
@@ -2363,7 +2572,11 @@ mod tests {
         let created = creation_times(&processes, &mut cache, lookup);
         let mut first = asked.borrow().clone();
         first.sort_unstable();
-        assert_eq!(first, [1, 40, 41, 42, 500], "each once, the refusing launcher too");
+        assert_eq!(
+            first,
+            [1, 40, 41, 42, 500],
+            "each once, the refusing launcher too"
+        );
         assert_eq!(created.len(), 4);
         assert!(!created.contains_key(&500));
 
@@ -2384,7 +2597,10 @@ mod tests {
         let mut third = asked.borrow().clone();
         third.sort_unstable();
         assert_eq!(third, [42, 500]);
-        assert!(cache.keys().all(|(pid, _, _)| *pid != 41), "41 is forgotten");
+        assert!(
+            cache.keys().all(|(pid, _, _)| *pid != 41),
+            "41 is forgotten"
+        );
         assert!(cache.contains_key(&(42, 1, "other.exe".to_string())));
         assert!(!cache.contains_key(&(42, 500, "helper.exe".to_string())));
     }
@@ -2404,7 +2620,15 @@ mod tests {
             of_kind("game", SourceKind::Game),
             app_source("music", 12, Some("msedgewebview2.exe")),
         ];
-        let streams = resolve_for(9999, true, &sources, Some(20), &nothing(), &tree, &ledger(""));
+        let streams = resolve_for(
+            9999,
+            true,
+            &sources,
+            Some(20),
+            &nothing(),
+            &tree,
+            &ledger(""),
+        );
         assert_eq!(pid_of(&streams, "music"), Some(10));
         assert_eq!(pid_of(&streams, "game"), Some(20));
     }
@@ -2414,9 +2638,14 @@ mod tests {
     fn a_migration_never_writes_a_stale_copy() {
         let mut before = app_source("web", 12, Some("msedgewebview2.exe"));
         before.label = "msedgewebview2".into();
-        let moved =
-            migrated_source(&before, Some(&before), 10, "Spotify.exe".into(), Some("Spotify".into()))
-                .expect("unchanged source is migrated");
+        let moved = migrated_source(
+            &before,
+            Some(&before),
+            10,
+            "Spotify.exe".into(),
+            Some("Spotify".into()),
+        )
+        .expect("unchanged source is migrated");
         assert_eq!(moved.label, "Spotify");
         assert_eq!(
             moved.kind,
@@ -2434,6 +2663,8 @@ mod tests {
         assert!(migrated_source(&before, None, 10, "Spotify.exe".into(), None).is_none());
         // No longer a helper (picked again).
         let repicked = app_source("web", 10, Some("Spotify.exe"));
-        assert!(migrated_source(&repicked, Some(&repicked), 10, "Spotify.exe".into(), None).is_none());
+        assert!(
+            migrated_source(&repicked, Some(&repicked), 10, "Spotify.exe".into(), None).is_none()
+        );
     }
 }

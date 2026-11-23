@@ -62,7 +62,10 @@ pub fn pin_verdict(pins: &Pins, friend: &str, node: &str, stable: bool) -> PinVe
 
 /// An iroh id as its `Display` writes it: 32 bytes in lowercase hex.
 pub fn is_node(node: &str) -> bool {
-    node.len() == 64 && node.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    node.len() == 64
+        && node
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Keeps `node` as one of `friend`'s devices, or marks it seen again.
@@ -76,10 +79,16 @@ fn add_pin(pins: &mut Pins, friend: &str, node: &str, now: i64) {
         return;
     }
     while devices.len() >= MAX_DEVICES {
-        let oldest = (0..devices.len()).min_by_key(|&i| devices[i].last_seen).unwrap_or(0);
+        let oldest = (0..devices.len())
+            .min_by_key(|&i| devices[i].last_seen)
+            .unwrap_or(0);
         devices.remove(oldest);
     }
-    devices.push(Pin { node: node.to_owned(), first_seen: now, last_seen: now });
+    devices.push(Pin {
+        node: node.to_owned(),
+        first_seen: now,
+        last_seen: now,
+    });
 }
 
 // --- The file ---------------------------------------------------------------------
@@ -88,13 +97,19 @@ fn add_pin(pins: &mut Pins, friend: &str, node: &str, now: i64) {
 static FILE: Mutex<()> = Mutex::new(());
 
 fn path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_local_data_dir().ok().map(|dir| dir.join("peers.json"))
+    app.path()
+        .app_local_data_dir()
+        .ok()
+        .map(|dir| dir.join("peers.json"))
 }
 
 fn read(path: &std::path::Path) -> Pins {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-            log::warn!("peers: {} cannot be read ({err}) — starting over", path.display());
+            log::warn!(
+                "peers: {} cannot be read ({err}) — starting over",
+                path.display()
+            );
             Pins::new()
         }),
         Err(_) => Pins::new(),
@@ -104,7 +119,9 @@ fn read(path: &std::path::Path) -> Pins {
 /// Looks how `node` fits `friend`'s devices and logs it when it does not.
 /// `what` says what happened, for the log ("an offer", "a clip went").
 pub fn note(app: &AppHandle, friend: &str, node: &str, stable: bool, what: &str) -> PinVerdict {
-    let Some(path) = path(app) else { return PinVerdict::Unpinnable };
+    let Some(path) = path(app) else {
+        return PinVerdict::Unpinnable;
+    };
     let verdict = {
         let _guard = FILE.lock();
         pin_verdict(&read(&path), friend, node, stable)
@@ -114,7 +131,9 @@ pub fn note(app: &AppHandle, friend: &str, node: &str, stable: bool, what: &str)
         PinVerdict::Changed => {
             log::warn!("peers: {what} with {friend} on a device not seen with them before ({short}…) — noted only")
         }
-        PinVerdict::New => log::info!("peers: {what} with {friend}, no device known for them yet ({short}…)"),
+        PinVerdict::New => {
+            log::info!("peers: {what} with {friend}, no device known for them yet ({short}…)")
+        }
         PinVerdict::Known | PinVerdict::Unpinnable => {}
     }
     verdict
@@ -155,7 +174,10 @@ mod tests {
         assert_eq!(pin_verdict(&pins, "f1", &node(1), true), PinVerdict::New);
         add_pin(&mut pins, "f1", &node(1), 100);
         assert_eq!(pin_verdict(&pins, "f1", &node(1), true), PinVerdict::Known);
-        assert_eq!(pin_verdict(&pins, "f1", &node(2), true), PinVerdict::Changed);
+        assert_eq!(
+            pin_verdict(&pins, "f1", &node(2), true),
+            PinVerdict::Changed
+        );
         // Another friend's device is no reason for this one.
         assert_eq!(pin_verdict(&pins, "f2", &node(1), true), PinVerdict::New);
         // A second PC of the same account is kept beside the first.
@@ -169,10 +191,16 @@ mod tests {
     fn ids_that_do_not_last_or_are_no_ids_are_not_compared() {
         let mut pins = Pins::new();
         add_pin(&mut pins, "f1", &node(1), 100);
-        assert_eq!(pin_verdict(&pins, "f1", &node(2), false), PinVerdict::Unpinnable);
+        assert_eq!(
+            pin_verdict(&pins, "f1", &node(2), false),
+            PinVerdict::Unpinnable
+        );
         assert_eq!(pin_verdict(&pins, "f1", "zz", true), PinVerdict::Unpinnable);
         add_pin(&mut pins, "f1", &node(0xab), 150);
-        assert_eq!(pin_verdict(&pins, "f1", &node(0xab).to_uppercase(), true), PinVerdict::Unpinnable);
+        assert_eq!(
+            pin_verdict(&pins, "f1", &node(0xab).to_uppercase(), true),
+            PinVerdict::Unpinnable
+        );
         add_pin(&mut pins, "f1", "not an id", 200);
         assert_eq!(pins["f1"].len(), 2);
         // A friend whose list is there but empty counts as new.
@@ -186,7 +214,14 @@ mod tests {
         add_pin(&mut pins, "f1", &node(1), 100);
         add_pin(&mut pins, "f1", &node(1), 300);
         add_pin(&mut pins, "f1", &node(1), 200);
-        assert_eq!(pins["f1"], vec![Pin { node: node(1), first_seen: 100, last_seen: 300 }]);
+        assert_eq!(
+            pins["f1"],
+            vec![Pin {
+                node: node(1),
+                first_seen: 100,
+                last_seen: 300
+            }]
+        );
     }
 
     #[test]

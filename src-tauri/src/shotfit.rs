@@ -19,7 +19,11 @@ pub enum Fitted {
     /// The PNG on disk is small enough as it is.
     Png,
     /// A JPEG, with the size it came out at.
-    Jpeg { bytes: Vec<u8>, width: u32, height: u32 },
+    Jpeg {
+        bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Fit `shot` (whose PNG is `png_len` bytes) under `limit` bytes.
@@ -38,7 +42,11 @@ pub fn fit(shot: &Shot, png_len: u64, limit: u64) -> Result<Fitted, String> {
         for quality in QUALITIES {
             let bytes = jpeg(picture, quality)?;
             if bytes.len() as u64 <= limit {
-                return Ok(Fitted::Jpeg { bytes, width: picture.width, height: picture.height });
+                return Ok(Fitted::Jpeg {
+                    bytes,
+                    width: picture.width,
+                    height: picture.height,
+                });
             }
         }
     }
@@ -49,8 +57,10 @@ pub fn fit(shot: &Shot, png_len: u64, limit: u64) -> Result<Fitted, String> {
 }
 
 fn jpeg(shot: &Shot, quality: u8) -> Result<Vec<u8>, String> {
-    let width = u16::try_from(shot.width).map_err(|_| "The picture is too wide for a JPEG.".to_string())?;
-    let height = u16::try_from(shot.height).map_err(|_| "The picture is too tall for a JPEG.".to_string())?;
+    let width =
+        u16::try_from(shot.width).map_err(|_| "The picture is too wide for a JPEG.".to_string())?;
+    let height = u16::try_from(shot.height)
+        .map_err(|_| "The picture is too tall for a JPEG.".to_string())?;
     let mut out = Vec::new();
     jpeg_encoder::Encoder::new(&mut out, quality)
         .encode(&shot.rgb, width, height, jpeg_encoder::ColorType::Rgb)
@@ -121,7 +131,11 @@ mod tests {
     fn a_noisy_4k_picture_comes_in_under_ten_megabytes() {
         let shot = noise(3840, 2160);
         match fit(&shot, 30 * 1024 * 1024, LIMIT).unwrap() {
-            Fitted::Jpeg { bytes, width, height } => {
+            Fitted::Jpeg {
+                bytes,
+                width,
+                height,
+            } => {
                 assert!(bytes.len() as u64 <= LIMIT, "{} bytes", bytes.len());
                 assert_eq!(&bytes[..2], &[0xff, 0xd8], "a JPEG");
                 assert!(width >= 1920 && height >= 1080, "{width}x{height}");
@@ -149,7 +163,11 @@ mod tests {
 
     #[test]
     fn shrinking_averages_the_pixels_it_covers() {
-        let shot = Shot { width: 2, height: 2, rgb: vec![0, 0, 0, 200, 200, 200, 100, 100, 100, 100, 100, 100] };
+        let shot = Shot {
+            width: 2,
+            height: 2,
+            rgb: vec![0, 0, 0, 200, 200, 200, 100, 100, 100, 100, 100, 100],
+        };
         let half = shrink(&shot, 1, 2);
         assert_eq!((half.width, half.height), (1, 1));
         assert_eq!(half.rgb, vec![100, 100, 100]);

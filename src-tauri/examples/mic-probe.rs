@@ -99,7 +99,11 @@ fn main() {
                         if began.elapsed() >= next_report && elapsed_s > 1.0 {
                             let counted_s = (frames_total - base_frames) as f64 / rate;
                             let ppm = (counted_s / elapsed_s - 1.0) * 1e6;
-                            let hours = if ppm.abs() > 0.1 { 1e6 / ppm.abs() / 3600.0 } else { f64::INFINITY };
+                            let hours = if ppm.abs() > 0.1 {
+                                1e6 / ppm.abs() / 3600.0
+                            } else {
+                                f64::INFINITY
+                            };
                             // Averaged over a few reads: a single one lands
                             // anywhere within the last block.
                             let ring_now = (0..20)

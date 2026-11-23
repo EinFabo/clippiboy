@@ -44,19 +44,25 @@ pub fn run(app: &AppHandle) {
         return;
     }
     let now = crate::trash::now_ms();
-    let Some(Ok((clips, kept))) =
-        crate::clips::with_library(&state.library, |lib| Ok::<_, rusqlite::Error>((lib.list()?, lib.kept_since()?)))
-    else {
+    let Some(Ok((clips, kept))) = crate::clips::with_library(&state.library, |lib| {
+        Ok::<_, rusqlite::Error>((lib.list()?, lib.kept_since()?))
+    }) else {
         return;
     };
     let mut moved = 0u32;
     let mut stuck = 0u32;
-    for clip in clips.iter().filter(|clip| expired(clip, kept.get(&clip.id).copied(), days, now)) {
+    for clip in clips
+        .iter()
+        .filter(|clip| expired(clip, kept.get(&clip.id).copied(), days, now))
+    {
         if crate::clips::passes_stopped() {
             break;
         }
         // Going up as a link, out to a friend or to a channel: next round.
-        if crate::links::uploading(&clip.id) || crate::share::sending(app, &clip.id) || crate::webhook::posting(&clip.id) {
+        if crate::links::uploading(&clip.id)
+            || crate::share::sending(app, &clip.id)
+            || crate::webhook::posting(&clip.id)
+        {
             continue;
         }
         let kept_since = kept.get(&clip.id).copied();
@@ -110,7 +116,10 @@ mod tests {
     fn a_clip_goes_once_it_is_as_old_as_the_setting() {
         let day = DAY_MS;
         let now = 100 * day;
-        assert!(!expired(&clip(now - 30 * day + 1), None, 30, now), "a moment short of 30 days");
+        assert!(
+            !expired(&clip(now - 30 * day + 1), None, 30, now),
+            "a moment short of 30 days"
+        );
         assert!(expired(&clip(now - 30 * day), None, 30, now));
         assert!(expired(&clip(now - 31 * day), None, 30, now));
         assert!(!expired(&clip(now - 31 * day), None, 60, now));
@@ -133,7 +142,10 @@ mod tests {
         recording.recording = true;
         assert!(expired(&shot, None, 14, now));
         assert!(expired(&recording, None, 14, now));
-        assert!(!expired(&clip(now - DAY_MS), None, 14, now), "a fresh one of any kind stays");
+        assert!(
+            !expired(&clip(now - DAY_MS), None, 14, now),
+            "a fresh one of any kind stays"
+        );
     }
 
     #[test]
@@ -141,8 +153,14 @@ mod tests {
         let now = 100 * DAY_MS;
         let old = clip(now - 45 * DAY_MS);
         assert!(expired(&old, None, 30, now));
-        assert!(!expired(&old, Some(now - DAY_MS), 30, now), "restored yesterday");
-        assert!(expired(&old, Some(now - 30 * DAY_MS), 30, now), "restored a month ago");
+        assert!(
+            !expired(&old, Some(now - DAY_MS), 30, now),
+            "restored yesterday"
+        );
+        assert!(
+            expired(&old, Some(now - 30 * DAY_MS), 30, now),
+            "restored a month ago"
+        );
         // A restore moment before the creation (a clock set back) does not
         // make a clip older than it is.
         assert!(!expired(&clip(now - DAY_MS), Some(0), 30, now));

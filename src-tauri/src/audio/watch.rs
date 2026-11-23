@@ -129,7 +129,10 @@ impl Watcher {
         if let Err(e) = spawned {
             log::warn!("session watcher thread did not start: {e}");
         }
-        Self { tx, devices: Vec::new() }
+        Self {
+            tx,
+            devices: Vec::new(),
+        }
     }
 
     /// Watch exactly these output devices (empty: none). Cheap when unchanged.
@@ -160,7 +163,9 @@ fn run(rx: mpsc::Receiver<Cmd>, tx: Sender<Cmd>, fire: impl Fn()) {
             .into_iter()
             .flatten()
             .min()
-            .map_or(Duration::from_secs(3600), |at| at.saturating_duration_since(Instant::now()));
+            .map_or(Duration::from_secs(3600), |at| {
+                at.saturating_duration_since(Instant::now())
+            });
         match rx.recv_timeout(wait) {
             Ok(Cmd::Watch(devices)) => {
                 let complete = registrations.set(&devices);
@@ -247,7 +252,11 @@ mod platform {
 
     impl Registrations {
         pub fn new(tx: Sender<Cmd>) -> Self {
-            Self { tx, wanted: Vec::new(), active: Vec::new() }
+            Self {
+                tx,
+                wanted: Vec::new(),
+                active: Vec::new(),
+            }
         }
 
         /// Drop what is no longer wanted, register what is new. A device that
@@ -304,9 +313,16 @@ mod platform {
                 let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
                 // Notifications only start once the sessions were enumerated.
                 let _ = manager.GetSessionEnumerator()?;
-                let notify: IAudioSessionNotification = Notify { tx: self.tx.clone() }.into();
+                let notify: IAudioSessionNotification = Notify {
+                    tx: self.tx.clone(),
+                }
+                .into();
                 manager.RegisterSessionNotification(&notify)?;
-                Ok(Registration { device: id.to_string(), manager, notify })
+                Ok(Registration {
+                    device: id.to_string(),
+                    manager,
+                    notify,
+                })
             }
         }
 
@@ -319,7 +335,10 @@ mod platform {
 
     fn unregister(r: &Registration) {
         if let Err(e) = unsafe { r.manager.UnregisterSessionNotification(&r.notify) } {
-            log::warn!("session notifications on '{}' not unregistered: {e}", r.device);
+            log::warn!(
+                "session notifications on '{}' not unregistered: {e}",
+                r.device
+            );
         }
     }
 }

@@ -88,15 +88,19 @@ pub fn start(app: &tauri::AppHandle) {
         log::warn!("control port {port} will not open ({err}) — taking a free one");
         TcpListener::bind(("127.0.0.1", 0))
     });
-    let listener = match bound.and_then(|listener| listener.set_nonblocking(true).map(|()| listener)) {
-        Ok(listener) => listener,
-        Err(err) => {
-            log::warn!("control port will not open ({err}) — Stream Deck keys stay silent");
-            clear_handoff();
-            return;
-        }
-    };
-    let port = listener.local_addr().map(|address| address.port()).unwrap_or(port);
+    let listener =
+        match bound.and_then(|listener| listener.set_nonblocking(true).map(|()| listener)) {
+            Ok(listener) => listener,
+            Err(err) => {
+                log::warn!("control port will not open ({err}) — Stream Deck keys stay silent");
+                clear_handoff();
+                return;
+            }
+        };
+    let port = listener
+        .local_addr()
+        .map(|address| address.port())
+        .unwrap_or(port);
 
     let stop = Arc::new(AtomicBool::new(false));
     let thread = {
@@ -176,7 +180,8 @@ fn connection(app: &tauri::AppHandle, mut stream: TcpStream, token: &str) {
     if setup.is_err() {
         return;
     }
-    let (code, body) = match read_request(&mut stream, std::time::Instant::now() + REQUEST_DEADLINE) {
+    let (code, body) = match read_request(&mut stream, std::time::Instant::now() + REQUEST_DEADLINE)
+    {
         Ok(request) => handle(app, &request, token),
         Err((code, error)) => (code, json!({ "ok": false, "error": error })),
     };
@@ -201,7 +206,10 @@ struct Request {
 
 /// Read one request, within [`MAX_HEAD`] and [`MAX_BODY`] and by `deadline`.
 /// The error is the status to answer with.
-fn read_request(stream: &mut impl Read, deadline: std::time::Instant) -> Result<Request, (u16, &'static str)> {
+fn read_request(
+    stream: &mut impl Read,
+    deadline: std::time::Instant,
+) -> Result<Request, (u16, &'static str)> {
     let in_time = || {
         if std::time::Instant::now() > deadline {
             Err((408, "request too slow"))
@@ -235,13 +243,20 @@ fn read_request(stream: &mut impl Read, deadline: std::time::Instant) -> Result<
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
         .collect();
-    let header = |name: &str| headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str());
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
 
     if header("transfer-encoding").is_some() {
         return Err((411, "send a Content-Length"));
     }
     let length = match header("content-length") {
-        Some(value) => value.parse::<usize>().map_err(|_| (400, "bad Content-Length"))?,
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| (400, "bad Content-Length"))?,
         None => 0,
     };
     if length > MAX_BODY {
@@ -259,7 +274,12 @@ fn read_request(stream: &mut impl Read, deadline: std::time::Instant) -> Result<
         in_time()?;
     }
     let body = String::from_utf8(body).map_err(|_| (400, "unreadable body"))?;
-    Ok(Request { method, route, headers, body })
+    Ok(Request {
+        method,
+        route,
+        headers,
+        body,
+    })
 }
 
 fn write_response(stream: &mut impl Write, code: u16, body: &Value) -> std::io::Result<()> {
@@ -367,7 +387,10 @@ fn handle(app: &tauri::AppHandle, request: &Request, token: &str) -> (u16, Value
                 let active = app.state::<AppState>().status.lock().buffer_active;
                 (200, json!({ "ok": true, "bufferActive": active }))
             }
-            other => (400, json!({ "ok": false, "error": format!("unknown action '{other}'") })),
+            other => (
+                400,
+                json!({ "ok": false, "error": format!("unknown action '{other}'") }),
+            ),
         },
         ("POST", "/v1/recording") => match action().as_str() {
             // Answered once the work is done — for "stop" that is when the
@@ -394,10 +417,16 @@ fn handle(app: &tauri::AppHandle, request: &Request, token: &str) -> (u16, Value
                 let recording = app.state::<AppState>().is_recording();
                 match outcome {
                     Ok(()) => (200, json!({ "ok": true, "recording": recording })),
-                    Err(error) => (409, json!({ "ok": false, "error": error, "recording": recording })),
+                    Err(error) => (
+                        409,
+                        json!({ "ok": false, "error": error, "recording": recording }),
+                    ),
                 }
             }
-            other => (400, json!({ "ok": false, "error": format!("unknown action '{other}'") })),
+            other => (
+                400,
+                json!({ "ok": false, "error": format!("unknown action '{other}'") }),
+            ),
         },
         _ => (404, json!({ "ok": false, "error": "no such route" })),
     }
@@ -509,7 +538,11 @@ mod tests {
         crate::config::write_synced(&path, "first").unwrap();
         crate::config::write_synced(&path, "second").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "a temp file was left behind");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "a temp file was left behind"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -522,9 +555,11 @@ mod tests {
         assert!(!equals("", "something"));
     }
 
-
     fn read(raw: &[u8]) -> Result<Request, (u16, &'static str)> {
-        read_request(&mut std::io::Cursor::new(raw.to_vec()), std::time::Instant::now() + REQUEST_DEADLINE)
+        read_request(
+            &mut std::io::Cursor::new(raw.to_vec()),
+            std::time::Instant::now() + REQUEST_DEADLINE,
+        )
     }
 
     #[test]
@@ -536,7 +571,9 @@ mod tests {
         .unwrap();
         assert_eq!(request.method, "POST");
         assert_eq!(request.route, "/v1/clip");
-        assert!(request.headers.contains(&(TOKEN_HEADER.into(), "abc".into())));
+        assert!(request
+            .headers
+            .contains(&(TOKEN_HEADER.into(), "abc".into())));
         assert_eq!(request.body, "{\"seconds\": 30}");
     }
 
@@ -559,7 +596,12 @@ mod tests {
 
     #[test]
     fn a_body_that_stops_short_is_not_taken() {
-        assert_eq!(read(b"POST /v1/buffer HTTP/1.1\r\nContent-Length: 50\r\n\r\n{}").unwrap_err().0, 400);
+        assert_eq!(
+            read(b"POST /v1/buffer HTTP/1.1\r\nContent-Length: 50\r\n\r\n{}")
+                .unwrap_err()
+                .0,
+            400
+        );
     }
 
     /// Over a real socket, as the attack came: the server side reads with the
@@ -567,7 +609,10 @@ mod tests {
     /// connection open, sending nothing more, until the server is done or
     /// `hold` is up — not for a fixed time: under a loaded test run a client
     /// that hung up first turned the timeout into an "incomplete request".
-    fn served(send: &'static [u8], hold: Duration) -> (Result<Request, (u16, &'static str)>, Duration) {
+    fn served(
+        send: &'static [u8],
+        hold: Duration,
+    ) -> (Result<Request, (u16, &'static str)>, Duration) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let (done, released) = std::sync::mpsc::channel::<()>();
@@ -593,7 +638,10 @@ mod tests {
             Duration::from_secs(3),
         );
         assert_eq!(outcome.unwrap_err().0, 413);
-        assert!(took < Duration::from_millis(500), "waited {took:?} for a body that never comes");
+        assert!(
+            took < Duration::from_millis(500),
+            "waited {took:?} for a body that never comes"
+        );
     }
 
     /// Let go by the read timeout: not before it (less a timer tick's slack —
@@ -604,7 +652,10 @@ mod tests {
         let (outcome, took) = served(b"GET /v1/status HTTP/1.1\r\nX-Cl", Duration::from_secs(30));
         assert_eq!(outcome.unwrap_err().0, 408);
         let early = Duration::from_millis(100);
-        assert!(took >= READ_TIMEOUT - early && took < READ_TIMEOUT * 2, "took {took:?}");
+        assert!(
+            took >= READ_TIMEOUT - early && took < READ_TIMEOUT * 2,
+            "took {took:?}"
+        );
     }
 
     /// One byte per read, each well inside the read timeout.

@@ -80,7 +80,10 @@ pub enum Stage {
 
 impl Stage {
     fn over(self) -> bool {
-        matches!(self, Stage::Done | Stage::Declined | Stage::Expired | Stage::Cancelled | Stage::Failed)
+        matches!(
+            self,
+            Stage::Done | Stage::Declined | Stage::Expired | Stage::Cancelled | Stage::Failed
+        )
     }
 }
 
@@ -127,7 +130,10 @@ fn noun(screenshot: bool, recording: bool) -> &'static str {
 /// "clip" → "Clip", for the start of a sentence.
 fn capital(word: &str) -> String {
     let mut chars = word.chars();
-    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 // --- On the wire -------------------------------------------------------------------
@@ -292,8 +298,13 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     let clip = {
         let state = app.state::<AppState>();
         let guard = state.library.lock();
-        let library = guard.as_ref().ok_or("The clip database is not available.")?;
-        library.get(&clip_id).map_err(|err| err.to_string())?.ok_or("That clip is gone.")?
+        let library = guard
+            .as_ref()
+            .ok_or("The clip database is not available.")?;
+        library
+            .get(&clip_id)
+            .map_err(|err| err.to_string())?
+            .ok_or("That clip is gone.")?
     };
     let presence = crate::friends::presence_of(&app, &friend_id)
         .ok_or("They are offline — clips go across only while both of you are online.")?;
@@ -302,7 +313,12 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     }
     let path = PathBuf::from(&clip.path);
     let size = std::fs::metadata(&path)
-        .map_err(|_| format!("The {}'s file is missing.", noun(clip.screenshot, clip.recording)))?
+        .map_err(|_| {
+            format!(
+                "The {}'s file is missing.",
+                noun(clip.screenshot, clip.recording)
+            )
+        })?
         .len();
     let file_name = path
         .file_name()
@@ -324,7 +340,8 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     let transfer = Transfer {
         id: id.clone(),
         direction: Direction::Out,
-        friend_name: crate::friends::friend_name(&app, &friend_id).unwrap_or_else(|| "Friend".into()),
+        friend_name: crate::friends::friend_name(&app, &friend_id)
+            .unwrap_or_else(|| "Friend".into()),
         friend_id: friend_id.clone(),
         name: clip.title.clone().unwrap_or(file_name),
         size,
@@ -343,7 +360,11 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         let share = app.state::<Share>();
         let mut outgoing = share.outgoing.lock();
         if let Some(waiting) = unanswered(outgoing.values().map(|o| &o.transfer), &friend_id) {
-            return Err(format!("Wait until {} has answered the last {}.", waiting.friend_name, waiting.noun()));
+            return Err(format!(
+                "Wait until {} has answered the last {}.",
+                waiting.friend_name,
+                waiting.noun()
+            ));
         }
         outgoing.insert(
             id.clone(),
@@ -367,7 +388,11 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     let baked = clip.edit.as_ref().is_some_and(|edit| edit.baked);
     let (stems, mix) = match crate::stems::stored(&clip.id) {
         Some(stems) if !clip.screenshot && !baked => {
-            let levels = clip.edit.as_ref().map(|edit| edit.tracks.as_slice()).unwrap_or(&[]);
+            let levels = clip
+                .edit
+                .as_ref()
+                .map(|edit| edit.tracks.as_slice())
+                .unwrap_or(&[]);
             let (kept, mix) = audible_stems(stems, levels);
             ((!kept.is_empty()).then_some(kept), mix)
         }
@@ -379,13 +404,17 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     let copy = copy_path(&id);
     let (screenshot, what) = (clip.screenshot, noun(clip.screenshot, clip.recording));
     let prepared = async {
-        let hashing = tokio::task::spawn_blocking(move || file_to_send(&path, &copy, screenshot, what));
+        let hashing =
+            tokio::task::spawn_blocking(move || file_to_send(&path, &copy, screenshot, what));
         let cutting = tokio::task::spawn_blocking(move || match stems {
             Some(stems) => cut_tracks(&cut_id, &stems, start_ms, length_ms),
             None => Vec::new(),
         });
         let router = router(&app).await;
-        let file = hashing.await.map_err(|err| err.to_string()).and_then(|file| file);
+        let file = hashing
+            .await
+            .map_err(|err| err.to_string())
+            .and_then(|file| file);
         // The cutter is always awaited, error or not: it must be done before
         // a failure clears its folder, or it would make the folder again.
         let tracks = cutting.await.unwrap_or_default();
@@ -407,7 +436,11 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     if !tracks.is_empty() {
         meta.tracks = tracks
             .iter()
-            .map(|cut| TrackOffer { label: cut.label.clone(), size: cut.size, sha256: cut.sha256.clone() })
+            .map(|cut| TrackOffer {
+                label: cut.label.clone(),
+                size: cut.size,
+                sha256: cut.sha256.clone(),
+            })
             .collect();
         meta.mix = mix;
     }
@@ -422,7 +455,15 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
     }
     emit(&app);
     let stable = identity(&app).stable;
-    let offer = Signal::ShareOffer { id: id.clone(), size, sha256, secret, addr, meta, stable };
+    let offer = Signal::ShareOffer {
+        id: id.clone(),
+        size,
+        sha256,
+        secret,
+        addr,
+        meta,
+        stable,
+    };
     if !crate::friends::send_relay(&app, &friend_id, &offer) {
         let err = "Not connected to the friends server.".to_string();
         set_out(&app, &id, |t| fail(t, &err));
@@ -458,7 +499,15 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
     };
     emit(&app);
     let node = identity(&app).node();
-    crate::friends::send_relay(&app, &friend, &Signal::ShareAnswer { id: id.clone(), accept: true, node });
+    crate::friends::send_relay(
+        &app,
+        &friend,
+        &Signal::ShareAnswer {
+            id: id.clone(),
+            accept: true,
+            node,
+        },
+    );
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         match receive(&app, &id).await {
@@ -490,9 +539,18 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
                 log::warn!("share: receive of {id} failed: {err}");
                 set_in(&app, &id, |t| fail(t, &err));
                 // Otherwise the sender stands at whatever percentage it got to.
-                let friend = app.state::<Share>().incoming.lock().get(&id).map(|i| i.transfer.friend_id.clone());
+                let friend = app
+                    .state::<Share>()
+                    .incoming
+                    .lock()
+                    .get(&id)
+                    .map(|i| i.transfer.friend_id.clone());
                 if let Some(friend) = friend {
-                    crate::friends::send_relay(&app, &friend, &Signal::ShareCancel { id: id.clone() });
+                    crate::friends::send_relay(
+                        &app,
+                        &friend,
+                        &Signal::ShareCancel { id: id.clone() },
+                    );
                 }
             }
         }
@@ -505,7 +563,9 @@ pub fn share_decline(app: AppHandle, id: String) {
     let friend = {
         let share = app.state::<Share>();
         let mut incoming = share.incoming.lock();
-        let Some(entry) = incoming.get_mut(&id) else { return };
+        let Some(entry) = incoming.get_mut(&id) else {
+            return;
+        };
         if entry.transfer.stage != Stage::Asking {
             return;
         }
@@ -513,7 +573,15 @@ pub fn share_decline(app: AppHandle, id: String) {
         entry.transfer.friend_id.clone()
     };
     emit(&app);
-    crate::friends::send_relay(&app, &friend, &Signal::ShareAnswer { id, accept: false, node: None });
+    crate::friends::send_relay(
+        &app,
+        &friend,
+        &Signal::ShareAnswer {
+            id,
+            accept: false,
+            node: None,
+        },
+    );
 }
 
 /// Calls a transfer off, in either direction.
@@ -539,8 +607,14 @@ pub fn share_cancel(app: AppHandle, id: String) {
 #[tauri::command]
 pub fn share_dismiss(app: AppHandle, id: String) {
     let share = app.state::<Share>();
-    share.outgoing.lock().retain(|key, o| key != &id || !o.transfer.stage.over());
-    share.incoming.lock().retain(|key, i| key != &id || !i.transfer.stage.over());
+    share
+        .outgoing
+        .lock()
+        .retain(|key, o| key != &id || !o.transfer.stage.over());
+    share
+        .incoming
+        .lock()
+        .retain(|key, i| key != &id || !i.transfer.stage.over());
     share.cancelled.lock().remove(&id);
     // Whatever way the transfer ended, its cut tracks have no use any more —
     // but a stray dismiss for one still running must not take them away.
@@ -565,7 +639,10 @@ pub fn share_clear(app: AppHandle) {
     for id in &ended {
         drop_cuts(id);
     }
-    share.incoming.lock().retain(|_, i| !i.transfer.stage.over());
+    share
+        .incoming
+        .lock()
+        .retain(|_, i| !i.transfer.stage.over());
     emit(&app);
 }
 
@@ -579,15 +656,36 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
         return;
     };
     match signal {
-        Signal::ShareOffer { id, size, sha256, secret, addr, meta, stable } => {
-            let offer = Offer { id, size, sha256, secret, addr, meta, stable };
+        Signal::ShareOffer {
+            id,
+            size,
+            sha256,
+            secret,
+            addr,
+            meta,
+            stable,
+        } => {
+            let offer = Offer {
+                id,
+                size,
+                sha256,
+                secret,
+                addr,
+                meta,
+                stable,
+            };
             offered(app, from, offer, std::time::Instant::now())
         }
         Signal::ShareAnswer { id, accept, node } => {
             let asking = {
                 let share = app.state::<Share>();
                 let mut outgoing = share.outgoing.lock();
-                let Some(entry) = outgoing.get_mut(&id).filter(|o| o.transfer.friend_id == from) else { return };
+                let Some(entry) = outgoing
+                    .get_mut(&id)
+                    .filter(|o| o.transfer.friend_id == from)
+                else {
+                    return;
+                };
                 // Kept even when their dial beat the answer here (Moving, or
                 // Done already): it only names the device to keep.
                 if accept && entry.answered.is_none() {
@@ -600,13 +698,27 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
                 return;
             }
             // Accepted: the bytes start moving once they dial in.
-            set_out(app, &id, |t| t.stage = if accept { Stage::Moving } else { Stage::Declined });
+            set_out(app, &id, |t| {
+                t.stage = if accept {
+                    Stage::Moving
+                } else {
+                    Stage::Declined
+                }
+            });
         }
         Signal::ShareCancel { id } => {
             let theirs = |t: &Transfer| t.friend_id == from;
             let share = app.state::<Share>();
-            let ours = share.outgoing.lock().get(&id).is_some_and(|o| theirs(&o.transfer))
-                || share.incoming.lock().get(&id).is_some_and(|i| theirs(&i.transfer));
+            let ours = share
+                .outgoing
+                .lock()
+                .get(&id)
+                .is_some_and(|o| theirs(&o.transfer))
+                || share
+                    .incoming
+                    .lock()
+                    .get(&id)
+                    .is_some_and(|i| theirs(&i.transfer));
             if !ours {
                 return;
             }
@@ -654,7 +766,9 @@ fn offer_total(size: u64, tracks: &[TrackOffer]) -> Option<u64> {
     tracks
         .iter()
         .try_fold(size, |sum, track| sum.checked_add(track.size))
-        .filter(|_| size <= MAX_OFFER_BYTES && tracks.iter().all(|track| track.size <= MAX_TRACK_BYTES))
+        .filter(|_| {
+            size <= MAX_OFFER_BYTES && tracks.iter().all(|track| track.size <= MAX_TRACK_BYTES)
+        })
 }
 
 /// What to do with an offer before looking at what it holds.
@@ -747,7 +861,10 @@ fn open_for(arrived: std::time::Instant, now: std::time::Instant) -> Option<Dura
 /// already is not held twice. False when this one was not held.
 fn hold<T>(held: &mut Vec<Held<T>>, offer: Held<T>, now: std::time::Instant) -> bool {
     held.retain(|h| open_for(h.arrived, now).is_some());
-    if held.iter().any(|h| h.id == offer.id && h.from == offer.from) {
+    if held
+        .iter()
+        .any(|h| h.id == offer.id && h.from == offer.from)
+    {
         return false;
     }
     if held.len() >= MAX_HELD {
@@ -760,12 +877,18 @@ fn hold<T>(held: &mut Vec<Held<T>>, offer: Held<T>, now: std::time::Instant) -> 
 /// The lists have been loaded: the offers held for them are looked at again,
 /// in the order they came, those that have not run out meanwhile.
 pub(crate) fn retry_held(app: &AppHandle) {
-    let Some(share) = app.try_state::<Share>() else { return };
+    let Some(share) = app.try_state::<Share>() else {
+        return;
+    };
     let held = std::mem::take(&mut *share.held.lock());
     let now = std::time::Instant::now();
     for entry in held {
         if open_for(entry.arrived, now).is_some() {
-            log::info!("share: taking up the offer {} from {} held for the friends lists", entry.id, entry.from);
+            log::info!(
+                "share: taking up the offer {} from {} held for the friends lists",
+                entry.id,
+                entry.from
+            );
             offered(app, &entry.from, entry.offer, entry.arrived);
         }
     }
@@ -774,7 +897,15 @@ pub(crate) fn retry_held(app: &AppHandle) {
 /// An offer from `from`, which came at `arrived` — now, or earlier when it
 /// was held.
 fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instant) {
-    let Offer { id, size, sha256, secret, addr, meta, stable } = offer;
+    let Offer {
+        id,
+        size,
+        sha256,
+        secret,
+        addr,
+        meta,
+        stable,
+    } = offer;
     let config = app.state::<AppState>().config_snapshot().friends;
     let share = app.state::<Share>();
     // Relays come in one after another on the one connection to the server,
@@ -797,7 +928,11 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
     match verdict(&config, from, known, id.len() <= 64 && sha256.len() == 64) {
         Verdict::Ask => {}
         Verdict::Ignore => {
-            log::info!("share: an offer from {from} left unanswered (friend: {}, id taken: {})", known.friend, known.id_taken);
+            log::info!(
+                "share: an offer from {from} left unanswered (friend: {}, id taken: {})",
+                known.friend,
+                known.id_taken
+            );
             return;
         }
         Verdict::Hold => {
@@ -805,7 +940,15 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
                 from: from.to_owned(),
                 id: id.clone(),
                 arrived,
-                offer: Offer { id, size, sha256, secret, addr, meta, stable },
+                offer: Offer {
+                    id,
+                    size,
+                    sha256,
+                    secret,
+                    addr,
+                    meta,
+                    stable,
+                },
             };
             if hold(&mut share.held.lock(), entry, std::time::Instant::now()) {
                 log::info!("share: an offer from {from} held until the friends lists are loaded");
@@ -814,7 +957,15 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
         }
         // Busy, or not from someone welcome: a quiet no, without anything popping up.
         Verdict::Decline => {
-            crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false, node: None });
+            crate::friends::send_relay(
+                app,
+                from,
+                &Signal::ShareAnswer {
+                    id,
+                    accept: false,
+                    node: None,
+                },
+            );
             return;
         }
     }
@@ -828,7 +979,15 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
     }
     let Some(total) = offer_total(size, &meta.tracks) else {
         log::warn!("share: offer {id} from {from} with sizes that cannot be right — refused");
-        crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false, node: None });
+        crate::friends::send_relay(
+            app,
+            from,
+            &Signal::ShareAnswer {
+                id,
+                accept: false,
+                node: None,
+            },
+        );
         return;
     };
     let transfer = Transfer {
@@ -850,13 +1009,31 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
     crate::peers::note(app, from, &addr.id.to_string(), stable, "an offer");
     app.state::<Share>().incoming.lock().insert(
         id.clone(),
-        Incoming { transfer, size, sha256, secret, addr, meta, stable },
+        Incoming {
+            transfer,
+            size,
+            sha256,
+            secret,
+            addr,
+            meta,
+            stable,
+        },
     );
     emit(app);
-    crate::friends::announce_clip(app, &friend_name, &format!("{friend_name} wants to send you {name} ({})", megabytes(total)));
+    crate::friends::announce_clip(
+        app,
+        &friend_name,
+        &format!(
+            "{friend_name} wants to send you {name} ({})",
+            megabytes(total)
+        ),
+    );
     // Over the game too: the banner cannot be clicked, so it says where the
     // answer goes — the console has the buttons.
-    let hotkey = app.state::<AppState>().config_snapshot().console_hotkey_spoken();
+    let hotkey = app
+        .state::<AppState>()
+        .config_snapshot()
+        .console_hotkey_spoken();
     crate::sounds::play(app, crate::model::SoundKind::ClipReceived);
     crate::overlay::show_friend(
         app,
@@ -910,7 +1087,12 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
         ClipKind::Clip
     };
     let what = noun(meta.screenshot, meta.recording);
-    let dir = crate::filing::dir_for(Path::new(&config.clip_dir), meta.game.as_deref(), false, kind);
+    let dir = crate::filing::dir_for(
+        Path::new(&config.clip_dir),
+        meta.game.as_deref(),
+        false,
+        kind,
+    );
     std::fs::create_dir_all(&dir).map_err(|err| format!("Could not create the folder: {err}"))?;
     // Room for it first, on both drives: the clip goes to the clip folder,
     // its tracks to the app data folder — usually both on C:.
@@ -925,12 +1107,25 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
         .iter()
         .filter(|(key, entry)| key.as_str() != id && entry.transfer.stage == Stage::Moving)
         .map(|(_, entry)| still_to_come(entry.size, entry.transfer.size, entry.transfer.moved))
-        .fold((0u64, 0u64), |sum, left| (sum.0.saturating_add(left.0), sum.1.saturating_add(left.1)));
+        .fold((0u64, 0u64), |sum, left| {
+            (sum.0.saturating_add(left.0), sum.1.saturating_add(left.1))
+        });
     let data_dir = crate::config::data_dir();
     let tracks_anywhere = tracks_size > 0 || pending.1 > 0;
     let same_drive = tracks_anywhere && crate::disk::same_volume(&dir, &data_dir);
-    let data_free = if tracks_size > 0 { crate::disk::free_bytes(&data_dir) } else { None };
-    match room(size, tracks_size, crate::disk::free_bytes(&dir), data_free, same_drive, pending) {
+    let data_free = if tracks_size > 0 {
+        crate::disk::free_bytes(&data_dir)
+    } else {
+        None
+    };
+    match room(
+        size,
+        tracks_size,
+        crate::disk::free_bytes(&dir),
+        data_free,
+        same_drive,
+        pending,
+    ) {
         Room::Fits => {}
         Room::WithoutTracks => {
             // Tracks are a bonus everywhere else as well: the clip still comes.
@@ -939,7 +1134,12 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
             // The size shown counted them; without, the bar would stop short.
             set_in(app, id, |transfer| transfer.size = size);
         }
-        Room::None => return Err(format!("Not enough free space for this {what} ({}).", megabytes(size))),
+        Room::None => {
+            return Err(format!(
+                "Not enough free space for this {what} ({}).",
+                megabytes(size)
+            ))
+        }
     }
     let name = safe_file_name(&meta.file_name);
     let part = part_path(&dir, id);
@@ -949,7 +1149,17 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     // The tracks first: small, and the sender counts the transfer as done
     // once the clip is in — after that it would not hand them out any more.
     let clip_id = uuid::Uuid::new_v4().to_string();
-    let has_tracks = fetch_tracks(app, router.endpoint(), &addr, id, &secret, &meta.tracks, &clip_id, &cancelled).await;
+    let has_tracks = fetch_tracks(
+        app,
+        router.endpoint(),
+        &addr,
+        id,
+        &secret,
+        &meta.tracks,
+        &clip_id,
+        &cancelled,
+    )
+    .await;
     let base: u64 = meta.tracks.iter().map(|track| track.size).sum();
     let mut last_error = String::new();
     for attempt in 0..ATTEMPTS {
@@ -961,7 +1171,20 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(2u64.pow(attempt.min(4)))).await;
         }
-        match fetch(app, router.endpoint(), &addr, id, &secret, None, size, base, &part, &cancelled).await {
+        match fetch(
+            app,
+            router.endpoint(),
+            &addr,
+            id,
+            &secret,
+            None,
+            size,
+            base,
+            &part,
+            &cancelled,
+        )
+        .await
+        {
             Ok(connection) => {
                 let file = part.clone();
                 let expected = sha256.clone();
@@ -972,7 +1195,9 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                     let _ = std::fs::remove_file(&part);
                     crate::stems::remove(&clip_id);
                     connection.close(1u32.into(), b"bad hash");
-                    return Err(format!("The {what} arrived damaged — ask them to send it again."));
+                    return Err(format!(
+                        "The {what} arrived damaged — ask them to send it again."
+                    ));
                 }
                 // The whole clip came from the key `addr.id` names — the
                 // connection proved it — so that is a device of theirs.
@@ -995,7 +1220,9 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                 if target.exists() {
                     let _ = std::fs::remove_file(&part);
                     crate::stems::remove(&clip_id);
-                    return Err(format!("There is no free name for this {what} in its folder."));
+                    return Err(format!(
+                        "There is no free name for this {what} in its folder."
+                    ));
                 }
                 if let Err(err) = std::fs::rename(&part, &target) {
                     crate::stems::remove(&clip_id);
@@ -1043,10 +1270,14 @@ fn room(
     same_drive: bool,
     pending: (u64, u64),
 ) -> Room {
-    let on_clip_drive = pending.0.saturating_add(if same_drive { pending.1 } else { 0 });
+    let on_clip_drive = pending
+        .0
+        .saturating_add(if same_drive { pending.1 } else { 0 });
     let clip_free = clip_free.map(|free| free.saturating_sub(on_clip_drive));
     let data_free = data_free.map(|free| free.saturating_sub(pending.1));
-    let short = |free: Option<u64>, need: u64| free.is_some_and(|free| free < need.saturating_add(SPACE_MARGIN));
+    let short = |free: Option<u64>, need: u64| {
+        free.is_some_and(|free| free < need.saturating_add(SPACE_MARGIN))
+    };
     if short(clip_free, size) {
         return Room::None;
     }
@@ -1070,7 +1301,10 @@ fn room(
 /// bytes moved so far count against them first.
 fn still_to_come(clip: u64, total: u64, moved: u64) -> (u64, u64) {
     let tracks = total.saturating_sub(clip);
-    (clip.saturating_sub(moved.saturating_sub(tracks)), tracks.saturating_sub(moved))
+    (
+        clip.saturating_sub(moved.saturating_sub(tracks)),
+        tracks.saturating_sub(moved),
+    )
 }
 
 /// The individual tracks into the stems store of the clip to be, each checked
@@ -1106,21 +1340,40 @@ async fn fetch_tracks(
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_secs(2u64.pow(attempt.min(4)))).await;
             }
-            match fetch(app, endpoint, addr, id, secret, Some(index as u32), track.size, base, &part, cancelled).await {
+            match fetch(
+                app,
+                endpoint,
+                addr,
+                id,
+                secret,
+                Some(index as u32),
+                track.size,
+                base,
+                &part,
+                cancelled,
+            )
+            .await
+            {
                 Ok(connection) => {
                     // Every byte is in; the sender waits for this to let go.
                     connection.close(0u32.into(), b"track");
                     let file = part.clone();
-                    let whole = tokio::task::spawn_blocking(move || hash_file(&file, u64::MAX)).await;
+                    let whole =
+                        tokio::task::spawn_blocking(move || hash_file(&file, u64::MAX)).await;
                     kept = matches!(whole, Ok(Ok(hash)) if hash == track.sha256)
                         && std::fs::rename(&part, &target).is_ok();
                     break;
                 }
-                Err(err) => log::info!("share: track {index} of {id}, attempt {}: {err}", attempt + 1),
+                Err(err) => log::info!(
+                    "share: track {index} of {id}, attempt {}: {err}",
+                    attempt + 1
+                ),
             }
         }
         if !kept {
-            log::info!("share: track {index} of {id} did not arrive — the clip comes without its tracks");
+            log::info!(
+                "share: track {index} of {id} did not arrive — the clip comes without its tracks"
+            );
             crate::stems::remove(clip_id);
             return false;
         }
@@ -1151,24 +1404,45 @@ async fn fetch(
     part: &Path,
     cancelled: &AtomicBool,
 ) -> Result<Connection, String> {
-    let offset = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0).min(size);
-    let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(addr.clone(), ALPN))
+    let offset = std::fs::metadata(part)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        .min(size);
+    let connection = tokio::time::timeout(
+        Duration::from_secs(30),
+        endpoint.connect(addr.clone(), ALPN),
+    )
+    .await
+    .map_err(|_| "could not reach them".to_string())?
+    .map_err(net)?;
+    let (mut send, mut recv) =
+        within(HANDSHAKE, "opening the stream", connection.open_bi()).await?;
+    let ask = serde_json::to_vec(&Ask {
+        id: id.into(),
+        secret: secret.into(),
+        offset,
+        track,
+    })
+    .map_err(net)?;
+    send.write_all(&(ask.len() as u32).to_be_bytes())
         .await
-        .map_err(|_| "could not reach them".to_string())?
         .map_err(net)?;
-    let (mut send, mut recv) = within(HANDSHAKE, "opening the stream", connection.open_bi()).await?;
-    let ask = serde_json::to_vec(&Ask { id: id.into(), secret: secret.into(), offset, track }).map_err(net)?;
-    send.write_all(&(ask.len() as u32).to_be_bytes()).await.map_err(net)?;
     send.write_all(&ask).await.map_err(net)?;
     let _ = send.finish();
 
     let mut header = [0u8; 8];
-    within(HANDSHAKE, "reading the header", recv.read_exact(&mut header)).await?;
+    within(
+        HANDSHAKE,
+        "reading the header",
+        recv.read_exact(&mut header),
+    )
+    .await?;
     let rest = u64::from_be_bytes(header);
     if offset.checked_add(rest) != Some(size) {
         return Err("they offered a different file".into());
     }
-    let mut file = open_part(part, offset).map_err(|err| format!("Could not write the file: {err}"))?;
+    let mut file =
+        open_part(part, offset).map_err(|err| format!("Could not write the file: {err}"))?;
     let mut moved = offset;
     let mut buf = vec![0u8; CHUNK];
     let mut last_emit = std::time::Instant::now();
@@ -1183,7 +1457,8 @@ async fn fetch(
         };
         // Never past the size that was agreed on, whatever the other side sends.
         let n = n.min((size - moved) as usize);
-        file.write_all(&buf[..n]).map_err(|err| format!("Could not write the file: {err}"))?;
+        file.write_all(&buf[..n])
+            .map_err(|err| format!("Could not write the file: {err}"))?;
         moved += n as u64;
         if last_emit.elapsed() >= EMIT_EVERY {
             last_emit = std::time::Instant::now();
@@ -1249,9 +1524,13 @@ fn file_clip(
     };
     let state = app.state::<AppState>();
     let guard = state.library.lock();
-    let library = guard.as_ref().ok_or("The clip database is not available.")?;
+    let library = guard
+        .as_ref()
+        .ok_or("The clip database is not available.")?;
     library.insert(&clip).map_err(|err| err.to_string())?;
-    library.set_tags(&clip.id, &clip.tags).map_err(|err| err.to_string())?;
+    library
+        .set_tags(&clip.id, &clip.tags)
+        .map_err(|err| err.to_string())?;
     Ok(clip)
 }
 
@@ -1303,7 +1582,9 @@ fn key_file(
             Ok(key) => KeyFile::Use(key),
             Err(_) => KeyFile::Create(Some(format!("it holds {} bytes, not a key", bytes.len()))),
         },
-        Err((code, err)) if crate::secret::seal_broken(code) => KeyFile::Create(Some(format!("it does not open: {err}"))),
+        Err((code, err)) if crate::secret::seal_broken(code) => {
+            KeyFile::Create(Some(format!("it does not open: {err}")))
+        }
         Err((_, err)) => KeyFile::Ephemeral(err),
     }
 }
@@ -1356,10 +1637,13 @@ enum SenderPin {
 
 fn sender_pin(answered: Option<&str>, reached: Option<&str>) -> SenderPin {
     match (answered, reached) {
-        (Some(answered), Some(reached)) if answered == reached => SenderPin::Pin(reached.to_owned()),
-        (Some(answered), Some(reached)) => {
-            SenderPin::Mismatch { answered: answered.to_owned(), reached: reached.to_owned() }
+        (Some(answered), Some(reached)) if answered == reached => {
+            SenderPin::Pin(reached.to_owned())
         }
+        (Some(answered), Some(reached)) => SenderPin::Mismatch {
+            answered: answered.to_owned(),
+            reached: reached.to_owned(),
+        },
         _ => SenderPin::Wait,
     }
 }
@@ -1370,7 +1654,9 @@ fn settle_pin(app: &AppHandle, id: &str) {
     let (friend, verdict) = {
         let share = app.state::<Share>();
         let mut outgoing = share.outgoing.lock();
-        let Some(entry) = outgoing.get_mut(id) else { return };
+        let Some(entry) = outgoing.get_mut(id) else {
+            return;
+        };
         let verdict = sender_pin(entry.answered.as_deref(), entry.reached.as_deref());
         if verdict == SenderPin::Wait {
             return;
@@ -1438,7 +1724,8 @@ impl ProtocolHandler for Serve {
 
 /// A receiver dialled in: check the ask, then stream the file from its offset.
 async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
-    let (mut send, mut recv) = within(HANDSHAKE, "waiting for the ask", connection.accept_bi()).await?;
+    let (mut send, mut recv) =
+        within(HANDSHAKE, "waiting for the ask", connection.accept_bi()).await?;
     let mut length = [0u8; 4];
     within(HANDSHAKE, "reading the ask", recv.read_exact(&mut length)).await?;
     let length = u32::from_be_bytes(length) as usize;
@@ -1474,7 +1761,9 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
     };
     emit(app);
     let offset = ask.offset.min(size);
-    send.write_all(&(size - offset).to_be_bytes()).await.map_err(net)?;
+    send.write_all(&(size - offset).to_be_bytes())
+        .await
+        .map_err(net)?;
 
     let mut file = std::fs::File::open(&path).map_err(net)?;
     file.seek(SeekFrom::Start(offset)).map_err(net)?;
@@ -1534,7 +1823,11 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
             .map(|o| {
                 o.tracks.clear();
                 o.reached = Some(connection.remote_id().to_string());
-                (o.transfer.friend_name.clone(), o.transfer.friend_id.clone(), o.transfer.noun())
+                (
+                    o.transfer.friend_name.clone(),
+                    o.transfer.friend_id.clone(),
+                    o.transfer.noun(),
+                )
             })
             .unwrap_or_else(|| ("Your friend".into(), String::new(), "clip"));
         settle_pin(app, &ask.id);
@@ -1553,7 +1846,12 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
     } else if bad_hash(connection) {
         // Every byte went out, and what arrived did not match. A line that
         // merely dropped stays open instead: they dial again for the rest.
-        set_out(app, &ask.id, |t| fail(t, "It arrived damaged on their side — try sending it again."));
+        set_out(app, &ask.id, |t| {
+            fail(
+                t,
+                "It arrived damaged on their side — try sending it again.",
+            )
+        });
     }
     Ok(())
 }
@@ -1571,7 +1869,9 @@ fn bad_hash(connection: &Connection) -> bool {
 /// Is one of the clip's sends to a friend still under way? The clean-up by
 /// age leaves such a clip for its next round (`cleanup.rs`).
 pub fn sending(app: &AppHandle, clip_id: &str) -> bool {
-    let Some(share) = app.try_state::<Share>() else { return false };
+    let Some(share) = app.try_state::<Share>() else {
+        return false;
+    };
     let outgoing = share.outgoing.lock();
     outgoing
         .values()
@@ -1599,7 +1899,10 @@ fn set_out(app: &AppHandle, id: &str, change: impl FnOnce(&mut Transfer)) {
     let changed = {
         let share = app.state::<Share>();
         let mut outgoing = share.outgoing.lock();
-        outgoing.get_mut(id).map(|o| change(&mut o.transfer)).is_some()
+        outgoing
+            .get_mut(id)
+            .map(|o| change(&mut o.transfer))
+            .is_some()
     };
     if changed {
         emit(app);
@@ -1610,7 +1913,10 @@ fn set_in(app: &AppHandle, id: &str, change: impl FnOnce(&mut Transfer)) {
     let changed = {
         let share = app.state::<Share>();
         let mut incoming = share.incoming.lock();
-        incoming.get_mut(id).map(|i| change(&mut i.transfer)).is_some()
+        incoming
+            .get_mut(id)
+            .map(|i| change(&mut i.transfer))
+            .is_some()
     };
     if changed {
         emit(app);
@@ -1618,7 +1924,11 @@ fn set_in(app: &AppHandle, id: &str, change: impl FnOnce(&mut Transfer)) {
 }
 
 fn out_stage(app: &AppHandle, id: &str) -> Option<Stage> {
-    app.state::<Share>().outgoing.lock().get(id).map(|o| o.transfer.stage)
+    app.state::<Share>()
+        .outgoing
+        .lock()
+        .get(id)
+        .map(|o| o.transfer.stage)
 }
 
 fn in_friend_name(app: &AppHandle, id: &str) -> String {
@@ -1631,7 +1941,12 @@ fn in_friend_name(app: &AppHandle, id: &str) -> String {
 }
 
 fn cancel_flag(app: &AppHandle, id: &str) -> Arc<AtomicBool> {
-    app.state::<Share>().cancelled.lock().entry(id.to_owned()).or_default().clone()
+    app.state::<Share>()
+        .cancelled
+        .lock()
+        .entry(id.to_owned())
+        .or_default()
+        .clone()
 }
 
 fn fail(transfer: &mut Transfer, error: &str) {
@@ -1645,7 +1960,10 @@ fn fail(transfer: &mut Transfer, error: &str) {
 /// mix renumbered `0..n` in that order — the slots `cut_tracks` writes and the
 /// receiver stores. A track without a mix entry counts as 0 dB and unmuted;
 /// with no mix at all everything stays.
-fn audible_stems(mut stems: Vec<crate::model::ClipTrack>, mix: &[TrackMix]) -> (Vec<crate::model::ClipTrack>, Vec<TrackMix>) {
+fn audible_stems(
+    mut stems: Vec<crate::model::ClipTrack>,
+    mix: &[TrackMix],
+) -> (Vec<crate::model::ClipTrack>, Vec<TrackMix>) {
     stems.sort_by_key(|track| track.index);
     if mix.is_empty() {
         return (stems, Vec::new());
@@ -1654,11 +1972,17 @@ fn audible_stems(mut stems: Vec<crate::model::ClipTrack>, mix: &[TrackMix]) -> (
     let mut levels = Vec::new();
     for track in stems {
         let entry = mix.iter().find(|entry| entry.index == track.index);
-        let (gain_db, muted) = entry.map(|entry| (entry.gain_db, entry.muted)).unwrap_or((0.0, false));
+        let (gain_db, muted) = entry
+            .map(|entry| (entry.gain_db, entry.muted))
+            .unwrap_or((0.0, false));
         if muted || !crate::stems::audible(gain_db) {
             continue;
         }
-        levels.push(TrackMix { index: levels.len() as u32, gain_db, muted: false });
+        levels.push(TrackMix {
+            index: levels.len() as u32,
+            gain_db,
+            muted: false,
+        });
         kept.push(track);
     }
     (kept, levels)
@@ -1668,7 +1992,10 @@ fn audible_stems(mut stems: Vec<crate::model::ClipTrack>, mix: &[TrackMix]) -> (
 /// Their side ignores a second offer from us meanwhile (`verdict`, the
 /// backstop against a flood), so a second one would only end in "didn't
 /// answer" — and that clip would be lost without a word.
-fn unanswered<'a>(outgoing: impl IntoIterator<Item = &'a Transfer>, friend: &str) -> Option<&'a Transfer> {
+fn unanswered<'a>(
+    outgoing: impl IntoIterator<Item = &'a Transfer>,
+    friend: &str,
+) -> Option<&'a Transfer> {
     outgoing
         .into_iter()
         .find(|t| t.friend_id == friend && matches!(t.stage, Stage::Preparing | Stage::Asking))
@@ -1694,8 +2021,17 @@ fn copy_path(id: &str) -> PathBuf {
 /// or — when it still carries its source tracks — a copy at `copy` with the
 /// picture and the mix only, made the way a link's copy is. A copy that fails
 /// stops the send: the file itself would take the tracks along.
-fn file_to_send(source: &Path, copy: &Path, screenshot: bool, what: &str) -> Result<(PathBuf, u64, String), String> {
-    let streams = (!screenshot).then(|| crate::stems::tracks_in_file(source).ok().map(|tracks| tracks.len()));
+fn file_to_send(
+    source: &Path,
+    copy: &Path,
+    screenshot: bool,
+    what: &str,
+) -> Result<(PathBuf, u64, String), String> {
+    let streams = (!screenshot).then(|| {
+        crate::stems::tracks_in_file(source)
+            .ok()
+            .map(|tracks| tracks.len())
+    });
     let path = match streams {
         Some(streams) if sends_a_copy(streams) => {
             if let Some(dir) = copy.parent() {
@@ -1719,7 +2055,9 @@ fn file_to_send(source: &Path, copy: &Path, screenshot: bool, what: &str) -> Res
 
 /// Where an outgoing transfer's cut tracks lie.
 fn cuts_dir(id: &str) -> PathBuf {
-    std::env::temp_dir().join("clippiboy-share").join(crate::muxer::sanitize(id))
+    std::env::temp_dir()
+        .join("clippiboy-share")
+        .join(crate::muxer::sanitize(id))
 }
 
 /// Whether an outgoing transfer in `stage` (`None`: not on the list) is done
@@ -1739,7 +2077,10 @@ fn drop_cuts(id: &str) {
 /// Named after the offer, never after the clip: two offers of one name get
 /// parts of their own, and a leftover cannot lend its length to another file.
 fn part_path(dir: &Path, offer_id: &str) -> PathBuf {
-    dir.join(format!("{PART_PREFIX}{}.part", crate::muxer::sanitize(offer_id)))
+    dir.join(format!(
+        "{PART_PREFIX}{}.part",
+        crate::muxer::sanitize(offer_id)
+    ))
 }
 
 const PART_PREFIX: &str = ".clippiboy-";
@@ -1748,7 +2089,9 @@ const PART_PREFIX: &str = ".clippiboy-";
 fn is_part_name(name: &str) -> bool {
     name.strip_prefix(PART_PREFIX)
         .and_then(|rest| rest.strip_suffix(".part"))
-        .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .is_some_and(|id| {
+            !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
 }
 
 /// Removes our part files, last changed more than `older_than` ago, from the
@@ -1776,7 +2119,9 @@ pub fn sweep_parts(clip_dir: &Path, older_than: Duration) -> usize {
                 }
             } else if kind.is_file()
                 && is_part_name(&name)
-                && std::fs::metadata(&path).and_then(|m| m.modified()).is_ok_and(|at| at < before)
+                && std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at < before)
                 && std::fs::remove_file(&path).is_ok()
             {
                 removed += 1;
@@ -1788,7 +2133,12 @@ pub fn sweep_parts(clip_dir: &Path, older_than: Duration) -> usize {
 
 /// The individual tracks cut to the clip, into the temp folder. Best effort:
 /// whatever goes wrong, the clip still goes — only without its tracks.
-fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length_ms: u64) -> Vec<Cut> {
+fn cut_tracks(
+    id: &str,
+    stems: &[crate::model::ClipTrack],
+    start_ms: u64,
+    length_ms: u64,
+) -> Vec<Cut> {
     let dir = cuts_dir(id);
     let cut = || -> Result<Vec<Cut>, String> {
         if stems.len() > MAX_TRACKS {
@@ -1799,15 +2149,34 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
         let mut sorted: Vec<_> = stems.iter().collect();
         sorted.sort_by_key(|track| track.index);
         for (slot, track) in sorted.into_iter().enumerate() {
-            let source = track.preview_path.as_deref().ok_or("track without a file")?;
+            let source = track
+                .preview_path
+                .as_deref()
+                .ok_or("track without a file")?;
             let path = dir.join(format!("{slot}.m4a"));
             // Copying AAC cuts on a frame, some 20 ms — nothing an ear hears.
             let mut command = crate::muxer::ffmpeg();
-            command.args(cut_track_args(Path::new(source), &path, start_ms, length_ms));
-            crate::muxer::run(&mut command, "cutting a track to send", crate::child::MOVING)?;
-            let size = std::fs::metadata(&path).map_err(|err| err.to_string())?.len();
+            command.args(cut_track_args(
+                Path::new(source),
+                &path,
+                start_ms,
+                length_ms,
+            ));
+            crate::muxer::run(
+                &mut command,
+                "cutting a track to send",
+                crate::child::MOVING,
+            )?;
+            let size = std::fs::metadata(&path)
+                .map_err(|err| err.to_string())?
+                .len();
             let sha256 = hash_file(&path, u64::MAX)?;
-            cuts.push(Cut { label: track.label.clone(), path, size, sha256 });
+            cuts.push(Cut {
+                label: track.label.clone(),
+                path,
+                size,
+                sha256,
+            });
         }
         Ok(cuts)
     };
@@ -1825,10 +2194,17 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
 /// clip's own, but read as no more than one all the same.
 fn cut_track_args(source: &Path, output: &Path, start_ms: u64, length_ms: u64) -> Vec<String> {
     let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
+        .map(String::from)
+        .to_vec();
     args.extend(crate::child::PROGRESS.map(String::from));
     args.extend(crate::muxer::clip_input().map(String::from));
-    args.extend(["-ss".into(), seconds(start_ms), "-i".into(), source.to_string_lossy().into_owned()]);
+    args.extend([
+        "-ss".into(),
+        seconds(start_ms),
+        "-i".into(),
+        source.to_string_lossy().into_owned(),
+    ]);
     args.extend(["-t".into(), seconds(length_ms)]);
     args.extend(["-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"].map(String::from));
     args.push(output.to_string_lossy().into_owned());
@@ -1837,11 +2213,17 @@ fn cut_track_args(source: &Path, output: &Path, start_ms: u64, length_ms: u64) -
 
 /// SHA-256 of the first `limit` bytes, as hex.
 fn hash_file(path: &Path, limit: u64) -> Result<String, String> {
-    let file = std::fs::File::open(path).map_err(|err| format!("Could not read the file: {err}"))?;
+    let file =
+        std::fs::File::open(path).map_err(|err| format!("Could not read the file: {err}"))?;
     let mut reader = std::io::BufReader::with_capacity(CHUNK, file.take(limit));
     let mut hasher = Sha256::new();
-    std::io::copy(&mut reader, &mut hasher).map_err(|err| format!("Could not read the file: {err}"))?;
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    std::io::copy(&mut reader, &mut hasher)
+        .map_err(|err| format!("Could not read the file: {err}"))?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// The part file, cut back to `offset` and positioned there.
@@ -1850,7 +2232,11 @@ fn hash_file(path: &Path, limit: u64) -> Result<String, String> {
 /// file then fails with "access denied" — which dropped every connection
 /// before its first byte.
 fn open_part(part: &Path, offset: u64) -> std::io::Result<std::fs::File> {
-    let mut file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(part)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(part)?;
     file.set_len(offset)?;
     file.seek(SeekFrom::Start(offset))?;
     Ok(file)
@@ -1879,7 +2265,13 @@ fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = base
         .chars()
-        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let cleaned = cleaned.trim().trim_matches('.').to_owned();
     let (stem, ext) = match cleaned.rsplit_once('.') {
@@ -1891,7 +2283,11 @@ fn safe_file_name(name: &str) -> String {
         _ => "mp4".into(),
     };
     let stem: String = stem.chars().take(120).collect();
-    let stem = if stem.trim().is_empty() { "clip".to_owned() } else { stem };
+    let stem = if stem.trim().is_empty() {
+        "clip".to_owned()
+    } else {
+        stem
+    };
     crate::filing::unreserved(&format!("{stem}.{ext}"))
 }
 
@@ -1924,45 +2320,110 @@ mod tests {
     fn a_track_is_cut_from_a_file_read_only_as_a_clip() {
         let args = cut_track_args(Path::new("t/0.m4a"), Path::new("cuts/0.m4a"), 4_000, 12_500);
         let input = args.iter().position(|a| a == "-i").unwrap();
-        assert_eq!(args[input - 6..input - 2], crate::muxer::clip_input(), "{args:?}");
-        assert_eq!(args[input - 2..input + 4], ["-ss", "4.000", "-i", "t/0.m4a", "-t", "12.500"]);
-        assert!(args.windows(3).any(|w| w == crate::child::PROGRESS), "{args:?}");
+        assert_eq!(
+            args[input - 6..input - 2],
+            crate::muxer::clip_input(),
+            "{args:?}"
+        );
+        assert_eq!(
+            args[input - 2..input + 4],
+            ["-ss", "4.000", "-i", "t/0.m4a", "-t", "12.500"]
+        );
+        assert!(
+            args.windows(3).any(|w| w == crate::child::PROGRESS),
+            "{args:?}"
+        );
         assert_eq!(args.last().map(String::as_str), Some("cuts/0.m4a"));
     }
 
     #[test]
     fn a_peer_that_goes_quiet_is_given_up_on() {
         let quiet = std::future::pending::<Result<(), String>>();
-        let outcome = tauri::async_runtime::block_on(within(Duration::from_millis(50), "reading", quiet));
+        let outcome =
+            tauri::async_runtime::block_on(within(Duration::from_millis(50), "reading", quiet));
         assert_eq!(outcome, Err("reading timed out".to_string()));
     }
 
     fn stem(index: u32, label: &str) -> ClipTrack {
-        ClipTrack { index, label: label.into(), channels: 2, preview_path: Some(format!("{index}.m4a")) }
+        ClipTrack {
+            index,
+            label: label.into(),
+            channels: 2,
+            preview_path: Some(format!("{index}.m4a")),
+        }
     }
     fn level(index: u32, gain_db: f32, muted: bool) -> TrackMix {
-        TrackMix { index, gain_db, muted }
+        TrackMix {
+            index,
+            gain_db,
+            muted,
+        }
     }
 
     /// A friend's first offer under a new id.
-    const FRESH: Known = Known { lists_loaded: true, friend: true, id_taken: false, asking_already: false };
+    const FRESH: Known = Known {
+        lists_loaded: true,
+        friend: true,
+        id_taken: false,
+        asking_already: false,
+    };
     const NO_PENDING: (u64, u64) = (0, 0);
 
     #[test]
     fn an_offer_from_someone_not_on_the_list_or_under_a_used_id_gets_no_answer() {
         let config = FriendsConfig::default();
-        assert_eq!(verdict(&config, "f", Known { friend: false, ..FRESH }, true), Verdict::Ignore);
-        assert_eq!(verdict(&config, "f", Known { id_taken: true, ..FRESH }, true), Verdict::Ignore);
+        assert_eq!(
+            verdict(
+                &config,
+                "f",
+                Known {
+                    friend: false,
+                    ..FRESH
+                },
+                true
+            ),
+            Verdict::Ignore
+        );
+        assert_eq!(
+            verdict(
+                &config,
+                "f",
+                Known {
+                    id_taken: true,
+                    ..FRESH
+                },
+                true
+            ),
+            Verdict::Ignore
+        );
         // Not even the quiet no a busy user gives: that would answer about the
         // offer whose id it took.
-        let busy = FriendsConfig { busy: true, ..Default::default() };
-        assert_eq!(verdict(&busy, "f", Known { id_taken: true, ..FRESH }, true), Verdict::Ignore);
+        let busy = FriendsConfig {
+            busy: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            verdict(
+                &busy,
+                "f",
+                Known {
+                    id_taken: true,
+                    ..FRESH
+                },
+                true
+            ),
+            Verdict::Ignore
+        );
         assert_eq!(verdict(&config, "f", FRESH, true), Verdict::Ask);
     }
 
     #[test]
     fn an_invisible_user_neither_asks_nor_answers() {
-        let config = FriendsConfig { invisible: true, busy: true, ..Default::default() };
+        let config = FriendsConfig {
+            invisible: true,
+            busy: true,
+            ..Default::default()
+        };
         assert_eq!(verdict(&config, "f", FRESH, true), Verdict::Ignore);
     }
 
@@ -1971,10 +2432,31 @@ mod tests {
     /// invisible, which no list changes.
     #[test]
     fn an_offer_before_the_lists_were_loaded_is_held() {
-        let unloaded = Known { lists_loaded: false, friend: false, ..FRESH };
-        assert_eq!(verdict(&FriendsConfig::default(), "f", unloaded, true), Verdict::Hold);
-        assert_eq!(verdict(&FriendsConfig { busy: true, ..Default::default() }, "f", unloaded, true), Verdict::Hold);
-        let invisible = FriendsConfig { invisible: true, ..Default::default() };
+        let unloaded = Known {
+            lists_loaded: false,
+            friend: false,
+            ..FRESH
+        };
+        assert_eq!(
+            verdict(&FriendsConfig::default(), "f", unloaded, true),
+            Verdict::Hold
+        );
+        assert_eq!(
+            verdict(
+                &FriendsConfig {
+                    busy: true,
+                    ..Default::default()
+                },
+                "f",
+                unloaded,
+                true
+            ),
+            Verdict::Hold
+        );
+        let invisible = FriendsConfig {
+            invisible: true,
+            ..Default::default()
+        };
         assert_eq!(verdict(&invisible, "f", unloaded, true), Verdict::Ignore);
     }
 
@@ -1990,10 +2472,18 @@ mod tests {
         assert_eq!(open_for(at(0), at(60)), None);
         assert_eq!(open_for(at(0), at(600)), None);
 
-        let held_at = |id: &str, s: u64| Held { from: "f".into(), id: id.into(), arrived: at(s), offer: () };
+        let held_at = |id: &str, s: u64| Held {
+            from: "f".into(),
+            id: id.into(),
+            arrived: at(s),
+            offer: (),
+        };
         let mut held = Vec::new();
         assert!(hold(&mut held, held_at("a", 0), at(0)));
-        assert!(!hold(&mut held, held_at("a", 1), at(1)), "the same offer twice");
+        assert!(
+            !hold(&mut held, held_at("a", 1), at(1)),
+            "the same offer twice"
+        );
         assert!(hold(&mut held, held_at("b", 30), at(30)));
         assert!(hold(&mut held, held_at("c", 70), at(70)));
         let ids: Vec<&str> = held.iter().map(|h| h.id.as_str()).collect();
@@ -2007,7 +2497,18 @@ mod tests {
 
     #[test]
     fn a_second_offer_from_the_same_friend_waits_for_the_first() {
-        assert_eq!(verdict(&FriendsConfig::default(), "f", Known { asking_already: true, ..FRESH }, true), Verdict::Ignore);
+        assert_eq!(
+            verdict(
+                &FriendsConfig::default(),
+                "f",
+                Known {
+                    asking_already: true,
+                    ..FRESH
+                },
+                true
+            ),
+            Verdict::Ignore
+        );
     }
 
     fn outgoing(friend: &str, stage: Stage) -> Transfer {
@@ -2034,10 +2535,23 @@ mod tests {
     #[test]
     fn a_second_clip_waits_until_the_friend_answered_the_first() {
         for stage in [Stage::Preparing, Stage::Asking] {
-            assert!(unanswered([&outgoing("f", stage)], "f").is_some(), "{stage:?}");
+            assert!(
+                unanswered([&outgoing("f", stage)], "f").is_some(),
+                "{stage:?}"
+            );
         }
-        for stage in [Stage::Moving, Stage::Done, Stage::Declined, Stage::Expired, Stage::Cancelled, Stage::Failed] {
-            assert!(unanswered([&outgoing("f", stage)], "f").is_none(), "{stage:?}");
+        for stage in [
+            Stage::Moving,
+            Stage::Done,
+            Stage::Declined,
+            Stage::Expired,
+            Stage::Cancelled,
+            Stage::Failed,
+        ] {
+            assert!(
+                unanswered([&outgoing("f", stage)], "f").is_none(),
+                "{stage:?}"
+            );
         }
         assert!(unanswered([&outgoing("g", Stage::Asking)], "f").is_none());
         assert!(unanswered([], "f").is_none());
@@ -2059,27 +2573,73 @@ mod tests {
     #[test]
     fn the_copy_to_send_lies_in_the_scratch_folder() {
         let copy = copy_path("abc");
-        assert!(copy.starts_with(crate::config::data_dir().join("temp")), "{}", copy.display());
+        assert!(
+            copy.starts_with(crate::config::data_dir().join("temp")),
+            "{}",
+            copy.display()
+        );
         assert_ne!(copy, copy_path("abd"));
         assert!(copy_path("../x").starts_with(crate::config::data_dir().join("temp")));
     }
 
     #[test]
     fn busy_or_unwelcome_is_a_quiet_no() {
-        let favorites = FriendsConfig { accept_clips: AcceptClips::Favorites, favorites: vec!["g".into()], ..Default::default() };
-        assert_eq!(verdict(&FriendsConfig { busy: true, ..Default::default() }, "f", FRESH, true), Verdict::Decline);
-        assert_eq!(verdict(&FriendsConfig { accept_clips: AcceptClips::Off, ..Default::default() }, "f", FRESH, true), Verdict::Decline);
+        let favorites = FriendsConfig {
+            accept_clips: AcceptClips::Favorites,
+            favorites: vec!["g".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            verdict(
+                &FriendsConfig {
+                    busy: true,
+                    ..Default::default()
+                },
+                "f",
+                FRESH,
+                true
+            ),
+            Verdict::Decline
+        );
+        assert_eq!(
+            verdict(
+                &FriendsConfig {
+                    accept_clips: AcceptClips::Off,
+                    ..Default::default()
+                },
+                "f",
+                FRESH,
+                true
+            ),
+            Verdict::Decline
+        );
         assert_eq!(verdict(&favorites, "f", FRESH, true), Verdict::Decline);
         assert_eq!(verdict(&favorites, "g", FRESH, true), Verdict::Ask);
-        assert_eq!(verdict(&FriendsConfig::default(), "f", FRESH, false), Verdict::Decline);
+        assert_eq!(
+            verdict(&FriendsConfig::default(), "f", FRESH, false),
+            Verdict::Decline
+        );
     }
 
     #[test]
     fn muted_and_silent_tracks_stay_home() {
-        let stems = vec![stem(0, "Game"), stem(1, "Mic"), stem(2, "Discord"), stem(3, "Music")];
-        let mix = [level(0, 0.0, false), level(1, -3.0, true), level(2, -60.0, false), level(3, 4.0, false)];
+        let stems = vec![
+            stem(0, "Game"),
+            stem(1, "Mic"),
+            stem(2, "Discord"),
+            stem(3, "Music"),
+        ];
+        let mix = [
+            level(0, 0.0, false),
+            level(1, -3.0, true),
+            level(2, -60.0, false),
+            level(3, 4.0, false),
+        ];
         let (kept, mix) = audible_stems(stems, &mix);
-        assert_eq!(kept.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(), ["Game", "Music"]);
+        assert_eq!(
+            kept.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(),
+            ["Game", "Music"]
+        );
         assert_eq!(mix, [level(0, 0.0, false), level(1, 4.0, false)]);
     }
 
@@ -2100,15 +2660,49 @@ mod tests {
     fn room_is_checked_for_the_clip_and_its_tracks_together_on_one_drive() {
         const GB: u64 = 1 << 30;
         // Without tracks the app data drive does not matter.
-        assert_eq!(room(3 << 20, 0, Some(10 * GB), Some(0), false, NO_PENDING), Room::Fits);
+        assert_eq!(
+            room(3 << 20, 0, Some(10 * GB), Some(0), false, NO_PENDING),
+            Room::Fits
+        );
         // Only the app data drive is short: the clip comes alone.
-        assert_eq!(room(GB, GB, Some(10 * GB), Some(GB / 2), false, NO_PENDING), Room::WithoutTracks);
+        assert_eq!(
+            room(GB, GB, Some(10 * GB), Some(GB / 2), false, NO_PENDING),
+            Room::WithoutTracks
+        );
         // Both on C:, 11 GB free, 10 GB clip and 6 GB tracks: each alone fits,
         // together they do not.
-        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), true, NO_PENDING), Room::WithoutTracks);
-        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), false, NO_PENDING), Room::Fits);
-        assert_eq!(room(10 * GB, 0, Some(10 * GB), None, false, NO_PENDING), Room::None, "the margin counts");
-        assert_eq!(room(10 * GB, 6 * GB, None, None, true, NO_PENDING), Room::Fits, "unknown counts as room");
+        assert_eq!(
+            room(
+                10 * GB,
+                6 * GB,
+                Some(11 * GB),
+                Some(11 * GB),
+                true,
+                NO_PENDING
+            ),
+            Room::WithoutTracks
+        );
+        assert_eq!(
+            room(
+                10 * GB,
+                6 * GB,
+                Some(11 * GB),
+                Some(11 * GB),
+                false,
+                NO_PENDING
+            ),
+            Room::Fits
+        );
+        assert_eq!(
+            room(10 * GB, 0, Some(10 * GB), None, false, NO_PENDING),
+            Room::None,
+            "the margin counts"
+        );
+        assert_eq!(
+            room(10 * GB, 6 * GB, None, None, true, NO_PENDING),
+            Room::Fits,
+            "unknown counts as room"
+        );
     }
 
     #[test]
@@ -2116,19 +2710,41 @@ mod tests {
         const GB: u64 = 1 << 30;
         // 10 GB free, two 6 GB clips: the first fits, the second does not
         // while the first still has all of its bytes to come.
-        assert_eq!(room(6 * GB, 0, Some(10 * GB), None, false, NO_PENDING), Room::Fits);
-        assert_eq!(room(6 * GB, 0, Some(10 * GB), None, false, (6 * GB, 0)), Room::None);
+        assert_eq!(
+            room(6 * GB, 0, Some(10 * GB), None, false, NO_PENDING),
+            Room::Fits
+        );
+        assert_eq!(
+            room(6 * GB, 0, Some(10 * GB), None, false, (6 * GB, 0)),
+            Room::None
+        );
         // What has arrived is gone from the free space already and is not
         // counted twice: 5 of the first 6 GB in, 5 GB free, a 3 GB clip fits.
         let left = still_to_come(6 * GB, 6 * GB, 5 * GB);
         assert_eq!(left, (GB, 0));
         assert_eq!(room(3 * GB, 0, Some(5 * GB), None, false, left), Room::Fits);
-        assert_eq!(room(3 * GB, 0, Some(5 * GB), None, false, (6 * GB, 0)), Room::None);
+        assert_eq!(
+            room(3 * GB, 0, Some(5 * GB), None, false, (6 * GB, 0)),
+            Room::None
+        );
         // Their tracks weigh on the clip drive only when it is the data drive too.
-        assert_eq!(room(GB, GB, Some(3 * GB), Some(3 * GB), true, (0, 2 * GB)), Room::None);
-        assert_eq!(room(GB, GB, Some(3 * GB), Some(3 * GB), false, (0, 2 * GB)), Room::WithoutTracks);
-        assert_eq!(room(GB, GB, Some(3 * GB), Some(5 * GB), false, (0, 2 * GB)), Room::Fits);
-        assert_eq!(room(GB, 0, None, None, true, (u64::MAX, u64::MAX)), Room::Fits, "unknown still counts as room");
+        assert_eq!(
+            room(GB, GB, Some(3 * GB), Some(3 * GB), true, (0, 2 * GB)),
+            Room::None
+        );
+        assert_eq!(
+            room(GB, GB, Some(3 * GB), Some(3 * GB), false, (0, 2 * GB)),
+            Room::WithoutTracks
+        );
+        assert_eq!(
+            room(GB, GB, Some(3 * GB), Some(5 * GB), false, (0, 2 * GB)),
+            Room::Fits
+        );
+        assert_eq!(
+            room(GB, 0, None, None, true, (u64::MAX, u64::MAX)),
+            Room::Fits,
+            "unknown still counts as room"
+        );
     }
 
     #[test]
@@ -2146,10 +2762,17 @@ mod tests {
 
     #[test]
     fn a_long_recording_may_be_offered_but_no_size_that_cannot_be_right() {
-        let track = |size| TrackOffer { label: "Game".into(), size, sha256: "0".repeat(64) };
+        let track = |size| TrackOffer {
+            label: "Game".into(),
+            size,
+            sha256: "0".repeat(64),
+        };
         // Some two and a half hours at 100 Mbit/s, with two tracks.
         let long = 100 << 30;
-        assert_eq!(offer_total(long, &[track(300 << 20), track(300 << 20)]), Some(long + (600 << 20)));
+        assert_eq!(
+            offer_total(long, &[track(300 << 20), track(300 << 20)]),
+            Some(long + (600 << 20))
+        );
         assert_eq!(offer_total(u64::MAX, &[]), None);
         assert_eq!(offer_total(1 << 20, &[track(MAX_TRACK_BYTES + 1)]), None);
         assert!(offer_total(MAX_OFFER_BYTES, &vec![track(MAX_TRACK_BYTES); MAX_TRACKS]).is_some());
@@ -2171,7 +2794,9 @@ mod tests {
     fn signals_round_trip() {
         let text = r#"{"kind":"shareAnswer","id":"o1","accept":true}"#;
         match serde_json::from_str::<Signal>(text).unwrap() {
-            Signal::ShareAnswer { id, accept, node } => assert!(id == "o1" && accept && node.is_none()),
+            Signal::ShareAnswer { id, accept, node } => {
+                assert!(id == "o1" && accept && node.is_none())
+            }
             _ => panic!("wrong kind"),
         }
         let cancel = serde_json::to_value(Signal::ShareCancel { id: "x".into() }).unwrap();
@@ -2184,7 +2809,14 @@ mod tests {
     #[allow(clippy::large_enum_variant)]
     enum OldSignal {
         #[serde(rename_all = "camelCase")]
-        ShareOffer { id: String, size: u64, sha256: String, secret: String, addr: EndpointAddr, meta: Meta },
+        ShareOffer {
+            id: String,
+            size: u64,
+            sha256: String,
+            secret: String,
+            addr: EndpointAddr,
+            meta: Meta,
+        },
         #[serde(rename_all = "camelCase")]
         ShareAnswer { id: String, accept: bool },
         #[serde(rename_all = "camelCase")]
@@ -2223,10 +2855,16 @@ mod tests {
         let text = serde_json::to_string(&offer).unwrap();
         assert!(text.contains(r#""stable":true"#));
         match serde_json::from_str::<OldSignal>(&text).unwrap() {
-            OldSignal::ShareOffer { id, addr: old_addr, .. } => assert!(id == "o1" && old_addr == addr),
+            OldSignal::ShareOffer {
+                id, addr: old_addr, ..
+            } => assert!(id == "o1" && old_addr == addr),
             other => panic!("wrong kind: {other:?}"),
         }
-        let answer = Signal::ShareAnswer { id: "o1".into(), accept: true, node: Some(node.clone()) };
+        let answer = Signal::ShareAnswer {
+            id: "o1".into(),
+            accept: true,
+            node: Some(node.clone()),
+        };
         let text = serde_json::to_string(&answer).unwrap();
         assert!(text.contains(&format!(r#""node":"{node}""#)));
         match serde_json::from_str::<OldSignal>(&text).unwrap() {
@@ -2234,7 +2872,12 @@ mod tests {
             other => panic!("wrong kind: {other:?}"),
         }
         // A no names no device, and leaves the field out.
-        let no = serde_json::to_string(&Signal::ShareAnswer { id: "o1".into(), accept: false, node: None }).unwrap();
+        let no = serde_json::to_string(&Signal::ShareAnswer {
+            id: "o1".into(),
+            accept: false,
+            node: None,
+        })
+        .unwrap();
         assert!(!no.contains("node"));
     }
 
@@ -2250,17 +2893,29 @@ mod tests {
             meta: test_meta(),
         };
         match serde_json::from_str::<Signal>(&serde_json::to_string(&old).unwrap()).unwrap() {
-            Signal::ShareOffer { id, addr: new_addr, stable, .. } => assert!(id == "o2" && new_addr == addr && !stable),
+            Signal::ShareOffer {
+                id,
+                addr: new_addr,
+                stable,
+                ..
+            } => assert!(id == "o2" && new_addr == addr && !stable),
             _ => panic!("wrong kind"),
         }
-        let old = serde_json::to_string(&OldSignal::ShareAnswer { id: "o2".into(), accept: true }).unwrap();
+        let old = serde_json::to_string(&OldSignal::ShareAnswer {
+            id: "o2".into(),
+            accept: true,
+        })
+        .unwrap();
         match serde_json::from_str::<Signal>(&old).unwrap() {
             Signal::ShareAnswer { node, accept, .. } => assert!(accept && node.is_none()),
             _ => panic!("wrong kind"),
         }
         // A node that is not an id still leaves the answer standing.
         let odd = r#"{"kind":"shareAnswer","id":"o2","accept":true,"node":"?"}"#;
-        assert!(matches!(serde_json::from_str::<Signal>(odd), Ok(Signal::ShareAnswer { accept: true, .. })));
+        assert!(matches!(
+            serde_json::from_str::<Signal>(odd),
+            Ok(Signal::ShareAnswer { accept: true, .. })
+        ));
         // The ids pins are kept under are what `Display` writes.
         assert!(crate::peers::is_node(&addr.id.to_string()));
     }
@@ -2278,17 +2933,29 @@ mod tests {
         let missing = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         assert!(matches!(key_file(missing, opens), KeyFile::Create(None)));
         // Opens, but is no key: broken, made again.
-        assert!(matches!(key_file(blob(&[3; 31]), opens), KeyFile::Create(Some(_))));
+        assert!(matches!(
+            key_file(blob(&[3; 31]), opens),
+            KeyFile::Create(Some(_))
+        ));
         // Not even the head of a seal: never ours, made again.
-        assert!(matches!(key_file(Ok(vec![3; 200]), opens), KeyFile::Create(Some(_))));
+        assert!(matches!(
+            key_file(Ok(vec![3; 200]), opens),
+            KeyFile::Create(Some(_))
+        ));
         // A seal that is broken, or sealed under a key this user no longer has.
         for code in [0x8009_0005_u32, 0x8007_000D, 0x8009_000B] {
             let broken = |_: &[u8]| Err::<Vec<u8>, _>((code as i32, "no".to_string()));
-            assert!(matches!(key_file(blob(&[3; 200]), broken), KeyFile::Create(Some(_))), "{code:#x}");
+            assert!(
+                matches!(key_file(blob(&[3; 200]), broken), KeyFile::Create(Some(_))),
+                "{code:#x}"
+            );
         }
         // Does not open just now: this run only, the file left alone.
         let fails = |_: &[u8]| Err::<Vec<u8>, _>((0x8007_0005_u32 as i32, "no".to_string()));
-        assert!(matches!(key_file(blob(&[3; 200]), fails), KeyFile::Ephemeral(_)));
+        assert!(matches!(
+            key_file(blob(&[3; 200]), fails),
+            KeyFile::Ephemeral(_)
+        ));
         let denied = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
         assert!(matches!(key_file(denied, opens), KeyFile::Ephemeral(_)));
     }
@@ -2297,7 +2964,9 @@ mod tests {
     fn a_key_kept_sealed_is_the_same_key_again() {
         let key = SecretKey::generate();
         let sealed = crate::secret::protect(&key.to_bytes()).unwrap();
-        let KeyFile::Use(bytes) = key_file(Ok(sealed), crate::secret::unprotect_coded) else { panic!("did not open") };
+        let KeyFile::Use(bytes) = key_file(Ok(sealed), crate::secret::unprotect_coded) else {
+            panic!("did not open")
+        };
         assert_eq!(SecretKey::from_bytes(&bytes).public(), key.public());
     }
 
@@ -2311,7 +2980,10 @@ mod tests {
         assert_eq!(sender_pin(Some(&a), Some(&a)), SenderPin::Pin(a.clone()));
         assert_eq!(
             sender_pin(Some(&a), Some(&b)),
-            SenderPin::Mismatch { answered: a.clone(), reached: b.clone() }
+            SenderPin::Mismatch {
+                answered: a.clone(),
+                reached: b.clone()
+            }
         );
     }
 
@@ -2334,7 +3006,10 @@ mod tests {
     fn two_offers_of_one_name_get_parts_of_their_own() {
         let dir = Path::new("C:/clips/CS2/Videos");
         assert_ne!(part_path(dir, "a1"), part_path(dir, "b2"));
-        assert_eq!(part_path(dir, "../x").file_name().unwrap(), ".clippiboy-___x.part");
+        assert_eq!(
+            part_path(dir, "../x").file_name().unwrap(),
+            ".clippiboy-___x.part"
+        );
     }
 
     #[test]
@@ -2351,8 +3026,14 @@ mod tests {
                 file.set_modified(hour_ago).unwrap();
             }
         };
-        let (a, b) = (videos.join(".clippiboy-a.part"), top.join(".clippiboy-b.part"));
-        let (c, movie) = (videos.join(".clippiboy-c.part"), videos.join("movie.mp4.part"));
+        let (a, b) = (
+            videos.join(".clippiboy-a.part"),
+            top.join(".clippiboy-b.part"),
+        );
+        let (c, movie) = (
+            videos.join(".clippiboy-c.part"),
+            videos.join("movie.mp4.part"),
+        );
         let odd = videos.join(".clippiboy-.part");
         make(&a, true);
         make(&b, true);
@@ -2403,7 +3084,12 @@ mod tests {
 
     #[test]
     fn an_ask_for_the_clip_reads_as_before_0_7_3() {
-        let ask = Ask { id: "a".into(), secret: "s".into(), offset: 7, track: None };
+        let ask = Ask {
+            id: "a".into(),
+            secret: "s".into(),
+            offset: 7,
+            track: None,
+        };
         let text = serde_json::to_string(&ask).unwrap();
         assert!(!text.contains("track"), "{text}");
         let old: Ask = serde_json::from_str(r#"{"id":"a","secret":"s","offset":0}"#).unwrap();

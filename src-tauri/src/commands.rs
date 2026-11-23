@@ -9,13 +9,13 @@ use crate::capture;
 use crate::clips::Library;
 use crate::edit;
 use crate::encode;
-use crate::preview;
-use crate::stems;
 use crate::model::{
     AppConfig, AudioDevice, AudioProcess, AudioSource, CaptureTarget, Clip, ClipEdit, ClipTrack,
     EncoderInfo, EngineStatus, StorageUsage, TrackMix, TrimOriginals,
 };
+use crate::preview;
 use crate::state::AppState;
+use crate::stems;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -29,27 +29,23 @@ type Result<T> = std::result::Result<T, String>;
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     match tauri::async_runtime::spawn_blocking(work).await {
         Ok(value) => value,
-        Err(tauri::Error::JoinError(err)) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+        Err(tauri::Error::JoinError(err)) if err.is_panic() => {
+            std::panic::resume_unwind(err.into_panic())
+        }
         Err(err) => panic!("blocking command work was lost: {err}"),
     }
 }
 
 #[tauri::command]
 pub async fn list_audio_devices() -> Vec<AudioDevice> {
-    blocking(move || -> Vec<AudioDevice> {
-        devices::list_devices()
-    })
-    .await
+    blocking(move || -> Vec<AudioDevice> { devices::list_devices() }).await
 }
 
 /// The cameras for the Facecam tab. Async: listing takes a moment and runs on
 /// a worker, which joins the multithreaded apartment itself.
 #[tauri::command]
 pub async fn list_cameras() -> Vec<crate::model::CameraDevice> {
-    blocking(move || -> Vec<crate::model::CameraDevice> {
-        crate::camera::list()
-    })
-    .await
+    blocking(move || -> Vec<crate::model::CameraDevice> { crate::camera::list() }).await
 }
 
 /// The applications holding an audio session, with their program's icon —
@@ -94,7 +90,9 @@ pub async fn capture_thumbs(app: tauri::AppHandle, ids: Vec<String>) -> Vec<crat
         // Tauri hands out its own `windows` version's HWND — only the pointer counts.
         #[cfg(windows)]
         let main = {
-            app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize)
+            app.get_webview_window("main")
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| h.0 as isize)
         };
         #[cfg(not(windows))]
         let main = {
@@ -179,7 +177,11 @@ pub fn set_config(
         }
     });
     if source_kept.get() {
-        crate::notify(&app, "error", "Stop the recording before changing the source.");
+        crate::notify(
+            &app,
+            "error",
+            "Stop the recording before changing the source.",
+        );
     }
     if previous.friends != next.friends {
         crate::friends::config_changed(&app);
@@ -221,7 +223,11 @@ pub fn set_config(
         // and that is no change worth a word.
         let running = state.active_recording.lock().clone();
         if state.is_recording() && crate::state::restart_needed(running.as_ref(), &next.recording) {
-            crate::notify(&app, "ok", "The new video settings apply once the recording stops.");
+            crate::notify(
+                &app,
+                "ok",
+                "The new video settings apply once the recording stops.",
+            );
         }
         // Not here: this runs on the main thread, and stopping waits for a
         // save while starting brings up the whole capture — every window
@@ -393,26 +399,21 @@ fn apply_hotkeys(
     let pad_bindings: Vec<crate::bindings::Binding> = pads
         .present()
         .iter()
-        .flat_map(|(_, set)| crate::inputpoll::Action::ALL.map(|action| set.get(action).to_string()))
+        .flat_map(|(_, set)| {
+            crate::inputpoll::Action::ALL.map(|action| set.get(action).to_string())
+        })
         .filter_map(|text| crate::bindings::parse(&text).ok())
         .collect();
-    let [
-        save_clip,
-        toggle_buffer,
-        screenshot,
-        record,
-        console,
-        save_clip_alt,
-        toggle_buffer_alt,
-        screenshot_alt,
-        record_alt,
-        console_alt,
-    ] = written;
+    let [save_clip, toggle_buffer, screenshot, record, console, save_clip_alt, toggle_buffer_alt, screenshot_alt, record_alt, console_alt] =
+        written;
 
     let mut config = previous.clone();
     // The first lone game button and the first Guide binding come with a
     // line in the settings, once: the page sees these go from false to true.
-    if pad_bindings.iter().any(|binding| binding.is_lone_game_button()) {
+    if pad_bindings
+        .iter()
+        .any(|binding| binding.is_lone_game_button())
+    {
         config.pad_button_hint_shown = true;
     }
     if pad_bindings.iter().any(|binding| binding.has_guide()) {
@@ -468,9 +469,14 @@ pub fn clean_pad_profiles(
         playstation,
         nintendo,
     } = &mut pads;
-    for set in [Some(all), xbox.as_mut(), playstation.as_mut(), nintendo.as_mut()]
-        .into_iter()
-        .flatten()
+    for set in [
+        Some(all),
+        xbox.as_mut(),
+        playstation.as_mut(),
+        nintendo.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
     {
         let mut keyed = Vec::new();
         for action in Action::ALL {
@@ -543,7 +549,10 @@ pub fn watch_controllers() -> crate::inputpoll::Controllers {
 /// Windows folder or a share (whose mere touch sends the user's NTLM hash out).
 /// `None` when the dialog was cancelled.
 #[tauri::command]
-pub async fn pick_clip_dir(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<Option<AppConfig>> {
+pub async fn pick_clip_dir(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<Option<AppConfig>> {
     blocking(move || {
         use tauri_plugin_dialog::DialogExt;
         let state = app.state::<AppState>();
@@ -568,7 +577,9 @@ pub async fn pick_clip_dir(window: tauri::WebviewWindow, app: tauri::AppHandle) 
         // Checked as it really is, too: a junction onto the profile is the
         // profile. Only for what it lies in — a mapped network drive resolves
         // to its share, and that drive is the user's to pick, as before.
-        if dunce::canonicalize(&picked).is_ok_and(|real| !crate::grantable_dir(&real) || !clear_of(&real, &guard)) {
+        if dunce::canonicalize(&picked)
+            .is_ok_and(|real| !crate::grantable_dir(&real) || !clear_of(&real, &guard))
+        {
             return Err(CLIP_DIR_REFUSED.into());
         }
         adopt_clip_dir(&state, &app, &picked).map(Some)
@@ -609,7 +620,8 @@ fn adopt_clip_dir(state: &AppState, app: &tauri::AppHandle, dir: &Path) -> Resul
     if !crate::grantable_dir(dir) {
         return Err(CLIP_DIR_REFUSED.into());
     }
-    std::fs::create_dir_all(dir).map_err(|err| format!("Folder \"{shown}\" cannot be created: {err}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|err| format!("Folder \"{shown}\" cannot be created: {err}"))?;
     // Checked as it really is: a junction onto a drive is a whole drive as
     // well. Kept as picked, though — the clips already filed carry that
     // spelling, and `filing` compares paths as text.
@@ -617,7 +629,8 @@ fn adopt_clip_dir(state: &AppState, app: &tauri::AppHandle, dir: &Path) -> Resul
         return Err(CLIP_DIR_REFUSED.into());
     }
     let probe = dir.join(".clippiboy-schreibtest");
-    std::fs::write(&probe, b"").map_err(|err| format!("ClippiBoy is not allowed to write in \"{shown}\": {err}"))?;
+    std::fs::write(&probe, b"")
+        .map_err(|err| format!("ClippiBoy is not allowed to write in \"{shown}\": {err}"))?;
     let _ = std::fs::remove_file(&probe);
 
     let mut config = state.config_snapshot();
@@ -645,7 +658,12 @@ impl ClipDirGuard {
         let mut kept_out = vec![data.clone()];
         kept_out.extend(dirs::home_dir());
         let mut fenced = vec![data];
-        fenced.extend(["SystemRoot", "windir"].iter().filter_map(std::env::var_os).map(PathBuf::from));
+        fenced.extend(
+            ["SystemRoot", "windir"]
+                .iter()
+                .filter_map(std::env::var_os)
+                .map(PathBuf::from),
+        );
         Self { kept_out, fenced }
     }
 }
@@ -656,7 +674,12 @@ impl ClipDirGuard {
 /// hash), no `\\?\`, `\\.\` or `\??\` form that skips Windows' own checks.
 fn form_allowed(dir: &Path) -> bool {
     let text = dir.to_string_lossy();
-    let two_slashes = text.chars().take(2).filter(|c| matches!(c, '\\' | '/')).count() == 2;
+    let two_slashes = text
+        .chars()
+        .take(2)
+        .filter(|c| matches!(c, '\\' | '/'))
+        .count()
+        == 2;
     !two_slashes && crate::grantable_dir(dir)
 }
 
@@ -689,8 +712,12 @@ fn export_target(chosen: &Path) -> Result<std::path::PathBuf> {
     if path.extension().is_none() {
         path.set_extension("mp4");
     }
-    let mp4 = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
-    let up = path.components().any(|part| matches!(part, std::path::Component::ParentDir));
+    let mp4 = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+    let up = path
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir));
     if !path.is_absolute() || !mp4 || up {
         return Err("Export to a .mp4 file.".into());
     }
@@ -727,7 +754,10 @@ fn export_part(target: &Path) -> std::path::PathBuf {
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_else(|| "export".into());
-    target.with_file_name(format!("{stem}.{}.clippiboy-export.mp4", std::process::id()))
+    target.with_file_name(format!(
+        "{stem}.{}.clippiboy-export.mp4",
+        std::process::id()
+    ))
 }
 
 /// The name a manual export is offered under: `"<stem> - <n> MB.mp4"`. Not
@@ -755,9 +785,19 @@ fn discord_dir(root: &Path, clip_id: &str) -> std::path::PathBuf {
 /// Discord track ("Mute Discord voices when sharing") lie in a folder of their
 /// own inside it, under the same name: one made before the setting changed
 /// is never handed out for the other kind.
-fn discord_copy(root: &Path, clip_id: &str, clip_stem: &str, megabytes: u64, without_discord: bool) -> std::path::PathBuf {
+fn discord_copy(
+    root: &Path,
+    clip_id: &str,
+    clip_stem: &str,
+    megabytes: u64,
+    without_discord: bool,
+) -> std::path::PathBuf {
     let dir = discord_dir(root, clip_id);
-    let dir = if without_discord { dir.join("without-discord") } else { dir };
+    let dir = if without_discord {
+        dir.join("without-discord")
+    } else {
+        dir
+    };
     dir.join(format!("{clip_stem} ({megabytes} MB).mp4"))
 }
 
@@ -773,7 +813,10 @@ fn remove_discord_copies(root: &Path, clip_id: &str) {
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => log::warn!("could not remove the Discord copies in {}: {err}", dir.display()),
+        Err(err) => log::warn!(
+            "could not remove the Discord copies in {}: {err}",
+            dir.display()
+        ),
     }
 }
 
@@ -832,7 +875,9 @@ pub async fn cam_preview_frame(
     .map_err(String::from)?;
     if webview.label() == "main" {
         let now = crate::audio::capture::now_100ns();
-        let before = state.cam_preview_until.swap(now + 30_000_000, Ordering::SeqCst);
+        let before = state
+            .cam_preview_until
+            .swap(now + 30_000_000, Ordering::SeqCst);
         if before <= now {
             // The lease starts: the camera opens without waiting for the tick.
             state.reconcile_cam();
@@ -840,11 +885,19 @@ pub async fn cam_preview_frame(
     }
     let handle = app.clone();
     let frame = tauri::async_runtime::spawn_blocking(move || {
-        handle.state::<AppState>().camera.preview().wait_after(after, std::time::Duration::from_millis(500))
+        handle
+            .state::<AppState>()
+            .camera
+            .preview()
+            .wait_after(after, std::time::Duration::from_millis(500))
     })
     .await
     .map_err(|err| err.to_string())?;
-    Ok(tauri::ipc::Response::new(frame.map(|f| crate::camtrack::encode_preview(&f)).unwrap_or_default()))
+    Ok(tauri::ipc::Response::new(
+        frame
+            .map(|f| crate::camtrack::encode_preview(&f))
+            .unwrap_or_default(),
+    ))
 }
 
 /// The facecam's master switch on its own — the console has no `set_config`.
@@ -884,7 +937,12 @@ pub fn open_camera_privacy(app: tauri::AppHandle) -> Result<()> {
 pub async fn set_virtual_camera(app: tauri::AppHandle, on: bool) -> Result<AppConfig> {
     blocking(move || -> Result<AppConfig> {
         let state = app.state::<AppState>();
-        if on && crate::vcam::needs_setup(state.vcam.installed().as_deref(), vcam_protocol::DLL_VERSION) {
+        if on
+            && crate::vcam::needs_setup(
+                state.vcam.installed().as_deref(),
+                vcam_protocol::DLL_VERSION,
+            )
+        {
             run_vcam_setup(&state, &app, "install")?;
         }
         let mut next = state.config_snapshot();
@@ -921,7 +979,10 @@ fn run_vcam_setup(state: &AppState, app: &tauri::AppHandle, verb: &str) -> Resul
     let exe = crate::vcam::setup_exe(app.path().resource_dir().ok())
         .ok_or_else(|| "The virtual camera's setup is missing".to_string())?;
     #[cfg(windows)]
-    let owner = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize);
+    let owner = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize);
     #[cfg(not(windows))]
     let owner = None;
     let outcome = crate::vcam::run_setup(&exe, verb, owner);
@@ -972,7 +1033,10 @@ pub fn update_audio_source(
     source: AudioSource,
     revision: Option<u64>,
 ) -> Result<AppConfig> {
-    Ok(source_written(&webview, state.update_source(source, revision)?))
+    Ok(source_written(
+        &webview,
+        state.update_source(source, revision)?,
+    ))
 }
 
 #[tauri::command]
@@ -1056,10 +1120,7 @@ pub async fn toggle_recording(app: tauri::AppHandle) -> Result<bool> {
 /// the while — including the window calls the overlay banner sends there.
 #[tauri::command]
 pub async fn save_clip(app: tauri::AppHandle, seconds: Option<u32>) -> Result<Clip> {
-    blocking(move || -> Result<Clip> {
-        crate::save_clip_and_notify(&app, seconds)
-    })
-    .await
+    blocking(move || -> Result<Clip> { crate::save_clip_and_notify(&app, seconds) }).await
 }
 
 /// One picture from the recording source, like the hotkey and the tray entry.
@@ -1068,10 +1129,7 @@ pub async fn save_clip(app: tauri::AppHandle, seconds: Option<u32>) -> Result<Cl
 /// take a few hundred milliseconds, and the window should keep painting.
 #[tauri::command]
 pub async fn take_screenshot(app: tauri::AppHandle) -> Result<Clip> {
-    blocking(move || -> Result<Clip> {
-        crate::take_screenshot_and_notify(&app)
-    })
-    .await
+    blocking(move || -> Result<Clip> { crate::take_screenshot_and_notify(&app) }).await
 }
 
 /// One step of the annotation, in the order it was drawn.
@@ -1315,8 +1373,7 @@ fn keep_original(clip: &Clip) -> Result<()> {
     }
     let original = crate::shot::original_path(&clip.id);
     if let Some(parent) = original.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("could not create folder: {err}"))?;
+        std::fs::create_dir_all(parent).map_err(|err| format!("could not create folder: {err}"))?;
     }
     // Copied, not moved: the clip folder may sit on another drive than the
     // store, and the file has to stay where it is anyway. To a `.part` first:
@@ -1349,7 +1406,9 @@ fn write_picture(
         return Err(err);
     }
 
-    let size_bytes = std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
+    let size_bytes = std::fs::metadata(&target)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     // The old thumbnail shows the picture from before this edit — with what was
     // just blurred still readable. If no new one can be made, none is better.
     let stale_thumb = match crate::thumbs::make_still(&target, &clip.id) {
@@ -1484,12 +1543,18 @@ pub(crate) fn trash_clip(
         // keeps the clip, record and all, and the notice says why.
         let folder = crate::trash::folder_for(&from, Path::new(&clip_dir));
         let target = crate::trash::ensure_folder(&folder)
-            .map(|()| crate::filing::free_name(&folder, &from.file_name().unwrap_or_default().to_string_lossy()))
+            .map(|()| {
+                crate::filing::free_name(
+                    &folder,
+                    &from.file_name().unwrap_or_default().to_string_lossy(),
+                )
+            })
             .and_then(|target| move_patiently(&from, &target, 10).map(|()| target));
         let target = match target {
             Ok(target) => target,
             Err(err) => {
-                let msg = format!("Could not delete the clip ({err}). Is it open somewhere right now?");
+                let msg =
+                    format!("Could not delete the clip ({err}). Is it open somewhere right now?");
                 if asked == Asked::ByHand {
                     crate::notify(app, "error", msg.clone());
                 }
@@ -1499,7 +1564,8 @@ pub(crate) fn trash_clip(
         let mut gone = clip.clone();
         gone.path = target.to_string_lossy().to_string();
         let trashed = with_library(state, |lib| {
-            lib.trash(&gone, &clip.path, crate::trash::now_ms()).map_err(|e| e.to_string())
+            lib.trash(&gone, &clip.path, crate::trash::now_ms())
+                .map_err(|e| e.to_string())
         });
         if let Err(err) = trashed {
             // The row stays, so the file goes back where the row says it is.
@@ -1576,13 +1642,20 @@ pub async fn restore_clip(app: tauri::AppHandle, id: String) -> Result<Clip> {
         let state = app.state::<AppState>();
         let own = edit::clip_lock(&id);
         let _clip = own.lock();
-        let Some(trashed) = with_library(&state, |lib| lib.trashed_one(&id).map_err(|e| e.to_string()))? else {
+        let Some(trashed) = with_library(&state, |lib| {
+            lib.trashed_one(&id).map_err(|e| e.to_string())
+        })?
+        else {
             return Err("This clip is no longer in Recently deleted.".into());
         };
         let from = PathBuf::from(&trashed.clip.path);
         let home = PathBuf::from(&trashed.from_path);
         let folder = home.parent().map(Path::to_path_buf).unwrap_or_default();
-        let name = home.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = home
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if let Err(err) = std::fs::create_dir_all(&folder) {
             return Err(format!("Could not restore the clip: {err}"));
         }
@@ -1591,7 +1664,9 @@ pub async fn restore_clip(app: tauri::AppHandle, id: String) -> Result<Clip> {
             return Err(format!("Could not restore the clip: {err}"));
         }
         let target_text = target.to_string_lossy().to_string();
-        let restored = with_library(&state, |lib| lib.restore(&id, &target_text).map_err(|e| e.to_string()));
+        let restored = with_library(&state, |lib| {
+            lib.restore(&id, &target_text).map_err(|e| e.to_string())
+        });
         match restored {
             Ok(Some(clip)) => {
                 // A folder the player was never granted (an old clip folder made
@@ -1603,7 +1678,10 @@ pub async fn restore_clip(app: tauri::AppHandle, id: String) -> Result<Clip> {
             other => {
                 // The row stays in the trash, so the file goes back with it.
                 if let Err(back) = edit::move_across(&target, &from) {
-                    log::warn!("restored file of '{id}' left at '{}': {back}", target.display());
+                    log::warn!(
+                        "restored file of '{id}' left at '{}': {back}",
+                        target.display()
+                    );
                 }
                 Err(match other {
                     Err(err) => format!("Could not restore the clip: {err}"),
@@ -1664,14 +1742,20 @@ pub fn purge_expired(app: &tauri::AppHandle) {
         .and_then(std::result::Result::ok)
         .unwrap_or_default();
     let mut gone = 0;
-    for trashed in all.iter().filter(|t| crate::trash::expired(t.deleted_at, now)) {
+    for trashed in all
+        .iter()
+        .filter(|t| crate::trash::expired(t.deleted_at, now))
+    {
         match purge_one(&state.library, &trashed.clip.id) {
             Ok(()) => gone += 1,
             Err(err) => log::warn!("deleted clip '{}' not cleared: {err}", trashed.clip.id),
         }
     }
     if gone > 0 {
-        log::info!("{gone} clip(s) left Recently deleted after {} days", crate::trash::KEEP_DAYS);
+        log::info!(
+            "{gone} clip(s) left Recently deleted after {} days",
+            crate::trash::KEEP_DAYS
+        );
         announce_change(app);
     }
 }
@@ -1693,7 +1777,10 @@ fn purge_one(library: &parking_lot::Mutex<Option<Library>>, id: &str) -> Result<
     };
     let path = PathBuf::from(&trashed.clip.path);
     if let Err(err) = crate::clips::remove_file_patiently(&path, 10) {
-        return Err(format!("Could not delete '{}' ({err}). Is it open somewhere right now?", clip_display_name(&trashed.clip)));
+        return Err(format!(
+            "Could not delete '{}' ({err}). Is it open somewhere right now?",
+            clip_display_name(&trashed.clip)
+        ));
     }
     crate::clips::with_library(library, |lib| lib.forget(id))
         .ok_or_else(|| "clip database is not available".to_string())?
@@ -1701,7 +1788,10 @@ fn purge_one(library: &parking_lot::Mutex<Option<Library>>, id: &str) -> Result<
     erase_stores(&trashed.clip);
     // The `.deleted` folder goes with its last file.
     if let Some(folder) = path.parent() {
-        if folder.file_name().is_some_and(|name| name == crate::trash::DIR) {
+        if folder
+            .file_name()
+            .is_some_and(|name| name == crate::trash::DIR)
+        {
             let _ = std::fs::remove_dir(folder);
         }
     }
@@ -1709,9 +1799,16 @@ fn purge_one(library: &parking_lot::Mutex<Option<Library>>, id: &str) -> Result<
 }
 
 fn clip_display_name(clip: &Clip) -> String {
-    clip.title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| {
-        Path::new(&clip.path).file_name().unwrap_or_default().to_string_lossy().to_string()
-    })
+    clip.title
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            Path::new(&clip.path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        })
 }
 
 /// Set or take away a clip's heart.
@@ -1760,7 +1857,8 @@ pub async fn file_clip(app: tauri::AppHandle, id: String) -> Result<Clip> {
         // goes first; the row is read only after.
         let own = edit::clip_lock(&id);
         let _clip = own.lock();
-        let clip = file_into_place(&state, &id, &clip_dir)?.ok_or_else(|| "clip not found".to_string())?;
+        let clip =
+            file_into_place(&state, &id, &clip_dir)?.ok_or_else(|| "clip not found".to_string())?;
         announce_change(&app);
         Ok(clip)
     })
@@ -1804,7 +1902,9 @@ pub async fn clear_game(app: tauri::AppHandle, game: String) -> Result<()> {
     blocking(move || -> Result<()> {
         let state = app.state::<AppState>();
         let clip_dir = state.config_snapshot().clip_dir;
-        let cleared = with_library(&state, |lib| lib.clear_game(&game).map_err(|e| e.to_string()));
+        let cleared = with_library(&state, |lib| {
+            lib.clear_game(&game).map_err(|e| e.to_string())
+        });
         // The game is off every clip now; the moves below can take a while (each
         // waits for its clip), and the lists should not show the old game meanwhile.
         if cleared.is_ok() {
@@ -1825,11 +1925,7 @@ pub async fn clear_game(app: tauri::AppHandle, game: String) -> Result<()> {
 }
 
 #[tauri::command]
-pub fn reveal_clip(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-    id: String,
-) -> Result<()> {
+pub fn reveal_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
     use tauri_plugin_opener::OpenerExt;
 
     let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
@@ -2002,9 +2098,25 @@ pub(crate) fn discord_copy_of(
         // folder — `export_target` would rightly refuse it for the dialog.
         let landscape = crate::export::Orientation::Landscape;
         if announce {
-            export_to(state, app, id, target_bytes, &output, landscape, mute_discord)?;
+            export_to(
+                state,
+                app,
+                id,
+                target_bytes,
+                &output,
+                landscape,
+                mute_discord,
+            )?;
         } else {
-            let shrunk = shrink(state, id, target_bytes, &output, &|_: f32| {}, landscape, mute_discord)?;
+            let shrunk = shrink(
+                state,
+                id,
+                target_bytes,
+                &output,
+                &|_: f32| {},
+                landscape,
+                mute_discord,
+            )?;
             if shrunk.discord_kept {
                 crate::notify(app, "error", DISCORD_KEPT);
             }
@@ -2062,7 +2174,9 @@ pub(crate) fn shot_discord_copy_of(
         let _clip = own.lock();
         // Made before and still newer than the picture: no need to encode again.
         let ready = ["png", "jpg"].into_iter().map(named).find(|path| {
-            std::fs::metadata(path).map(|m| m.len() > 0 && m.len() <= limit).unwrap_or(false)
+            std::fs::metadata(path)
+                .map(|m| m.len() > 0 && m.len() <= limit)
+                .unwrap_or(false)
                 && stems::is_newer(path, &source)
         });
         match ready {
@@ -2072,8 +2186,9 @@ pub(crate) fn shot_discord_copy_of(
                     .map_err(|err| format!("could not read the screenshot: {err}"))?
                     .len();
                 let shot = crate::shot::read_png(&source)?;
-                std::fs::create_dir_all(&folder)
-                    .map_err(|err| format!("Could not make a folder for the Discord copy: {err}"))?;
+                std::fs::create_dir_all(&folder).map_err(|err| {
+                    format!("Could not make a folder for the Discord copy: {err}")
+                })?;
                 match crate::shotfit::fit(&shot, png_len, limit)? {
                     crate::shotfit::Fitted::Png => {
                         let path = named("png");
@@ -2147,8 +2262,13 @@ pub fn update_clip(
     let (title, description, game) = (trimmed(title), trimmed(description), trimmed(game));
 
     let clip = with_library(&state, |lib| {
-        lib.update_meta(&id, title.as_deref(), description.as_deref(), game.as_deref())
-            .map_err(|e| e.to_string())?;
+        lib.update_meta(
+            &id,
+            title.as_deref(),
+            description.as_deref(),
+            game.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
         lib.get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "clip not found".to_string())
@@ -2206,7 +2326,11 @@ pub async fn clip_tracks(app: tauri::AppHandle, id: String) -> Result<Vec<ClipTr
         refuse_still(&clip)?;
         // From the untouched recording if the clip is trimmed — the individual
         // tracks are always in coordinates of the original.
-        stems::tracks(&clip.id, &edit::source_path(&clip), edit::audio_untouched(&clip))
+        stems::tracks(
+            &clip.id,
+            &edit::source_path(&clip),
+            edit::audio_untouched(&clip),
+        )
     })
     .await
 }
@@ -2302,7 +2426,11 @@ pub async fn restore_clip_original(app: tauri::AppHandle, id: String) -> Result<
             progress(&app, &id),
         );
         let tracks = match &applied {
-            Ok((clip, _)) => clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default(),
+            Ok((clip, _)) => clip
+                .edit
+                .as_ref()
+                .map(|e| e.tracks.clone())
+                .unwrap_or_default(),
             Err(_) => Vec::new(),
         };
         store(&state, &app, applied, tracks, loaded.get(), true)
@@ -2340,7 +2468,9 @@ pub async fn discard_clip_original(app: tauri::AppHandle, id: String) -> Result<
         let state = app.state::<AppState>();
         // Before the clip's lock: the composite it waits for takes that lock.
         if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
-            return Err("The cam is still being added to this clip — try again in a moment.".into());
+            return Err(
+                "The cam is still being added to this clip — try again in a moment.".into(),
+            );
         }
         let own = edit::clip_lock(&id);
         let Some(_clip) = own.try_lock() else {
@@ -2368,15 +2498,22 @@ pub async fn discard_clip_original(app: tauri::AppHandle, id: String) -> Result<
 /// A clip whose store was baked: `baked` when its file shows the cam, no
 /// facecam at all when it never did.
 fn note_baked(state: &State<'_, AppState>, clip: &Clip) -> Result<()> {
-    let composited = clip.facecam.as_ref().is_some_and(|cam| {
-        cam.state == crate::model::FacecamState::Ready && cam.layout.visible
-    });
+    let composited = clip
+        .facecam
+        .as_ref()
+        .is_some_and(|cam| cam.state == crate::model::FacecamState::Ready && cam.layout.visible);
     let next = clip
         .facecam
         .clone()
         .filter(|_| composited)
-        .map(|cam| crate::model::ClipFacecam { state: crate::model::FacecamState::Baked, ..cam });
-    with_library(state, |lib| lib.set_facecam(&clip.id, next.as_ref()).map_err(|e| e.to_string()))
+        .map(|cam| crate::model::ClipFacecam {
+            state: crate::model::FacecamState::Baked,
+            ..cam
+        });
+    with_library(state, |lib| {
+        lib.set_facecam(&clip.id, next.as_ref())
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Where a clip's 9:16 export cuts its band and its game window. Rewrites no
@@ -2393,14 +2530,19 @@ pub async fn set_clip_portrait(
         let _clip = own.lock();
         let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
             .ok_or_else(|| "clip not found".to_string())?;
-        let mut cam = clip.facecam.ok_or_else(|| "This clip has no camera.".to_string())?;
+        let mut cam = clip
+            .facecam
+            .ok_or_else(|| "This clip has no camera.".to_string())?;
         cam.portrait = crate::model::PortraitLayout {
             split: portrait.split.clamp(0.25, 0.5),
             game_x: portrait.game_x.clamp(0.0, 1.0),
         };
         with_library(&state, |lib| {
-            lib.set_facecam(&id, Some(&cam)).map_err(|e| e.to_string())?;
-            lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+            lib.set_facecam(&id, Some(&cam))
+                .map_err(|e| e.to_string())?;
+            lib.get(&id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "clip not found".to_string())
         })
     })
     .await
@@ -2417,12 +2559,22 @@ pub async fn retry_recording_cam(app: tauri::AppHandle, id: String) -> Result<Cl
             let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
                 .ok_or_else(|| "clip not found".to_string())?;
             let stored = crate::reccam::read_stored(&id).is_some();
-            let cam = clip.facecam.clone().filter(|cam| crate::reccam::retryable(clip.recording, Some(cam.state), stored));
-            let cam = cam.ok_or_else(|| "The camera of this recording is no longer there.".to_string())?;
-            let next = crate::model::ClipFacecam { state: crate::model::FacecamState::Pending, ..cam };
+            let cam = clip
+                .facecam
+                .clone()
+                .filter(|cam| crate::reccam::retryable(clip.recording, Some(cam.state), stored));
+            let cam =
+                cam.ok_or_else(|| "The camera of this recording is no longer there.".to_string())?;
+            let next = crate::model::ClipFacecam {
+                state: crate::model::FacecamState::Pending,
+                ..cam
+            };
             with_library(&state, |lib| {
-                lib.set_facecam(&id, Some(&next)).map_err(|e| e.to_string())?;
-                lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+                lib.set_facecam(&id, Some(&next))
+                    .map_err(|e| e.to_string())?;
+                lib.get(&id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "clip not found".to_string())
             })?
         };
         crate::composite::enqueue_recording(&id);
@@ -2453,7 +2605,9 @@ pub async fn bake_clip_cam(app: tauri::AppHandle, id: String) -> Result<Clip> {
     blocking(move || -> Result<Clip> {
         let state = app.state::<AppState>();
         if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
-            return Err("The cam is still being added to this clip — try again in a moment.".into());
+            return Err(
+                "The cam is still being added to this clip — try again in a moment.".into(),
+            );
         }
         let own = edit::clip_lock(&id);
         let _clip = own.lock();
@@ -2462,7 +2616,9 @@ pub async fn bake_clip_cam(app: tauri::AppHandle, id: String) -> Result<Clip> {
         edit::bake(&clip.id)?;
         note_baked(&state, &clip)?;
         let clip = with_library(&state, |lib| {
-            lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+            lib.get(&id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "clip not found".to_string())
         })?;
         announce_change(&app);
         Ok(clip)
@@ -2477,7 +2633,10 @@ pub async fn bake_all_cams(app: tauri::AppHandle) -> Result<TrimOriginals> {
         let state = app.state::<AppState>();
         let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))?;
         let mut freed = TrimOriginals::default();
-        for clip in clips.into_iter().filter(|c| edit::bakeable(c) && crate::facecam::has_store(&c.id)) {
+        for clip in clips
+            .into_iter()
+            .filter(|c| edit::bakeable(c) && crate::facecam::has_store(&c.id))
+        {
             // A cam job still running gets a moment; past it the clip waits for
             // the next time instead of holding every other one up.
             if !crate::composite::wait_settled(&clip.id, std::time::Duration::from_secs(5)) {
@@ -2541,7 +2700,11 @@ pub(crate) fn shrink(
     }
     // The settings before any lock: nothing takes one before `AppState.config`.
     let (encoder, _) = encoder_for(state);
-    let sources = if mute_discord { state.config_snapshot().sources } else { Vec::new() };
+    let sources = if mute_discord {
+        state.config_snapshot().sources
+    } else {
+        Vec::new()
+    };
     // Held for the whole ffmpeg run, which reads the clip file throughout: a
     // save, a move or a delete of this clip waits for it, and it for them.
     let own = edit::clip_lock(id);
@@ -2579,7 +2742,10 @@ pub(crate) fn shrink(
         log::warn!("export of {id}: Discord was to stay out, but the clip's tracks are not there to mix without it");
     }
     let remix = match without {
-        stems::WithoutDiscord::Remix(remix) => Some(stems::Remix { length_ms: duration_ms, ..remix }),
+        stems::WithoutDiscord::Remix(remix) => Some(stems::Remix {
+            length_ms: duration_ms,
+            ..remix
+        }),
         _ => None,
     };
 
@@ -2587,7 +2753,9 @@ pub(crate) fn shrink(
     // would only make it bigger and worse (a 30 s clip at Nitro's 475 MB). The
     // picture is copied; the sound too, or mixed again without Discord. Should
     // the copy come out over the target after all, the encode below runs.
-    let source_bytes = std::fs::metadata(&source).map(|meta| meta.len()).unwrap_or(u64::MAX);
+    let source_bytes = std::fs::metadata(&source)
+        .map(|meta| meta.len())
+        .unwrap_or(u64::MAX);
     if !portrait && source_bytes <= target_bytes {
         let copied = match &remix {
             None => crate::links::faststart(&source, &part, "copying the clip"),
@@ -2602,7 +2770,11 @@ pub(crate) fn shrink(
                     return Err(format!("Could not put the export in place — is \"{name}\" open somewhere right now?"));
                 }
                 on_progress(1.0);
-                return Ok(Shrunk { bytes: written, too_long: false, discord_kept });
+                return Ok(Shrunk {
+                    bytes: written,
+                    too_long: false,
+                    discord_kept,
+                });
             }
             other => {
                 log::info!("export of {id}: the copy did not fit ({other:?}, {written} bytes) — encoding instead");
@@ -2611,7 +2783,11 @@ pub(crate) fn shrink(
         }
     }
 
-    let (width, height) = if portrait { crate::export::PORTRAIT } else { (clip.width, clip.height) };
+    let (width, height) = if portrait {
+        crate::export::PORTRAIT
+    } else {
+        (clip.width, clip.height)
+    };
     // Never more than the clip itself spends: bits beyond it buy nothing.
     let source_kbps = (!portrait && source_bytes != u64::MAX)
         .then(|| (source_bytes.saturating_mul(8) / duration_ms.max(1)).min(u32::MAX as u64) as u32);
@@ -2624,8 +2800,23 @@ pub(crate) fn shrink(
     });
     let job = portrait.then(|| portrait_job(&clip, duration_ms, (recipe.width, recipe.height)));
     let build = |encoder| match &job {
-        Some(job) => crate::export::portrait_arguments(&job.inputs(), &job.graph, &part, &recipe, duration_ms, encoder, remix.as_ref()),
-        None => crate::export::arguments(&source, &part, &recipe, clip.height, encoder, remix.as_ref()),
+        Some(job) => crate::export::portrait_arguments(
+            &job.inputs(),
+            &job.graph,
+            &part,
+            &recipe,
+            duration_ms,
+            encoder,
+            remix.as_ref(),
+        ),
+        None => crate::export::arguments(
+            &source,
+            &part,
+            &recipe,
+            clip.height,
+            encoder,
+            remix.as_ref(),
+        ),
     };
     let args = build(encoder);
 
@@ -2637,11 +2828,9 @@ pub(crate) fn shrink(
             log::warn!("export with {encoder:?} failed ({err}) — retrying with x264");
             let _ = std::fs::remove_file(&part);
             let args = build(crate::model::EncoderId::X264);
-            edit::run_with_progress(&args, duration_ms, on_progress).inspect_err(
-                |_| {
-                    let _ = std::fs::remove_file(&part);
-                },
-            )?;
+            edit::run_with_progress(&args, duration_ms, on_progress).inspect_err(|_| {
+                let _ = std::fs::remove_file(&part);
+            })?;
         }
         Err(err) => {
             // A half-written file looks like a finished one in the folder.
@@ -2657,9 +2846,15 @@ pub(crate) fn shrink(
     if crate::muxer::replace_file(&part, &output).is_err() {
         let _ = std::fs::remove_file(&part);
         let name = output.file_name().unwrap_or_default().to_string_lossy();
-        return Err(format!("Could not put the export in place — is \"{name}\" open somewhere right now?"));
+        return Err(format!(
+            "Could not put the export in place — is \"{name}\" open somewhere right now?"
+        ));
     }
-    Ok(Shrunk { bytes: written, too_long: recipe.too_long, discord_kept })
+    Ok(Shrunk {
+        bytes: written,
+        too_long: recipe.too_long,
+        discord_kept,
+    })
 }
 
 /// What a 9:16 export reads and the graph that puts it together.
@@ -2677,7 +2872,10 @@ impl PortraitJob {
         crate::export::PortraitInputs {
             game: &self.game,
             game_seek_ms: self.game_seek_ms,
-            cam: self.cam.as_ref().map(|(path, seek)| (path.as_path(), *seek)),
+            cam: self
+                .cam
+                .as_ref()
+                .map(|(path, seek)| (path.as_path(), *seek)),
             audio: Path::new(&self.audio),
             mark: self.mark.as_deref(),
         }
@@ -2687,17 +2885,30 @@ impl PortraitJob {
 /// The 9:16 export of `clip`: from the clean picture and the camera when it
 /// has them (a portrait never rewrites the clip), the game alone otherwise.
 pub fn portrait_job(clip: &Clip, length_ms: u64, out: (u32, u32)) -> PortraitJob {
-    use crate::composite::{cam_timing, mark_redrawn, portrait_filter, portrait_geometry, MarkInput, PortraitCam};
+    use crate::composite::{
+        cam_timing, mark_redrawn, portrait_filter, portrait_geometry, MarkInput, PortraitCam,
+    };
     let view = crate::facecam::view_of(clip);
-    let facts = view.as_ref().and_then(|_| crate::facecam::read_facts(&clip.id));
+    let facts = view
+        .as_ref()
+        .and_then(|_| crate::facecam::read_facts(&clip.id));
     let (game, game_seek_ms) = match &view {
-        Some(view) => (std::path::PathBuf::from(&view.clean_path), view.clean_lead_ms.max(0) as u64),
+        Some(view) => (
+            std::path::PathBuf::from(&view.clean_path),
+            view.clean_lead_ms.max(0) as u64,
+        ),
         None => (std::path::PathBuf::from(&clip.path), 0),
     };
     let cam = match (&view, &facts, clip.facecam.as_ref()) {
         (Some(view), Some(facts), Some(row)) if row.layout.visible => {
             let video_start_us = crate::muxer::probe_video_start_us(&game).unwrap_or(0);
-            let timing = cam_timing(facts.cam_offset_us, row.delay_ms, video_start_us, game_seek_ms, length_ms);
+            let timing = cam_timing(
+                facts.cam_offset_us,
+                row.delay_ms,
+                video_start_us,
+                game_seek_ms,
+                length_ms,
+            );
             // The gaps were noted in the clean picture's time; this cut starts later.
             let end = game_seek_ms + length_ms;
             let gaps_ms = facts
@@ -2708,13 +2919,29 @@ pub fn portrait_job(clip: &Clip, length_ms: u64, out: (u32, u32)) -> PortraitJob
                 .collect();
             Some((
                 std::path::PathBuf::from(&view.cam_path),
-                PortraitCam { input: 1, size: (facts.width, facts.height), timing, gaps_ms, video_start_us, mirror: row.layout.mirror },
+                PortraitCam {
+                    input: 1,
+                    size: (facts.width, facts.height),
+                    timing,
+                    gaps_ms,
+                    video_start_us,
+                    mirror: row.layout.mirror,
+                },
             ))
         }
         _ => None,
     };
-    let layout = clip.facecam.as_ref().map(|row| row.portrait).unwrap_or_default();
-    let geometry = portrait_geometry((clip.width, clip.height), cam.as_ref().map(|(_, c)| c.size), &layout, out);
+    let layout = clip
+        .facecam
+        .as_ref()
+        .map(|row| row.portrait)
+        .unwrap_or_default();
+    let geometry = portrait_geometry(
+        (clip.width, clip.height),
+        cam.as_ref().map(|(_, c)| c.size),
+        &layout,
+        out,
+    );
     // As large as on a landscape frame of the same width, bottom left.
     let mark = mark_redrawn(crate::watermark::enabled(), &geometry)
         .then(|| {
@@ -2724,7 +2951,12 @@ pub fn portrait_job(clip: &Clip, length_ms: u64, out: (u32, u32)) -> PortraitJob
             std::fs::create_dir_all(png.parent()?).ok()?;
             std::fs::write(&png, crate::watermark::png()).ok()?;
             let below = (out.0 * 9 / 16) - at.y;
-            let rect = crate::camera::Rect { x: at.x, y: out.1 - below, w: at.width, h: at.height };
+            let rect = crate::camera::Rect {
+                x: at.x,
+                y: out.1 - below,
+                w: at.width,
+                h: at.height,
+            };
             Some((png, rect))
         })
         .flatten();
@@ -2732,7 +2964,12 @@ pub fn portrait_job(clip: &Clip, length_ms: u64, out: (u32, u32)) -> PortraitJob
     let graph = portrait_filter(
         &geometry,
         cam.as_ref().map(|(_, c)| c),
-        mark.as_ref().map(|(_, rect)| MarkInput { input: mark_input, rect: *rect }).as_ref(),
+        mark.as_ref()
+            .map(|(_, rect)| MarkInput {
+                input: mark_input,
+                rect: *rect,
+            })
+            .as_ref(),
     );
     PortraitJob {
         game,
@@ -2830,14 +3067,25 @@ fn export_to(
 ) -> Result<()> {
     // The target is settled: the window can show the copy being written.
     progress(app, id)(0.0);
-    let shrunk = shrink(state, id, target_bytes, output, &progress(app, id), orientation, mute_discord)
-        .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
+    let shrunk = shrink(
+        state,
+        id,
+        target_bytes,
+        output,
+        &progress(app, id),
+        orientation,
+        mute_discord,
+    )
+    .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
     let written = shrunk.bytes;
     progress(app, id)(1.0);
     if shrunk.discord_kept {
         crate::notify(app, "error", DISCORD_KEPT);
     }
-    let (size, asked) = (crate::export::megabytes(written), crate::export::megabytes(target_bytes));
+    let (size, asked) = (
+        crate::export::megabytes(written),
+        crate::export::megabytes(target_bytes),
+    );
     if written > target_bytes && shrunk.too_long {
         // Said by the core: the console's "Export for Discord" and the Stream
         // Deck have no dialog that could have warned before.
@@ -2855,11 +3103,7 @@ fn export_to(
             format!("Exported at {size} MB — a little over the {asked} MB asked for."),
         );
     } else {
-        crate::notify(
-            app,
-            "ok",
-            format!("Exported · {size} MB"),
-        );
+        crate::notify(app, "ok", format!("Exported · {size} MB"));
     }
     Ok(())
 }
@@ -2878,7 +3122,8 @@ fn export_to(
 pub async fn storage_usage(app: tauri::AppHandle) -> Result<StorageUsage> {
     blocking(move || -> Result<StorageUsage> {
         let state = app.state::<AppState>();
-        let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string())).unwrap_or_default();
+        let clips =
+            with_library(&state, |lib| lib.list().map_err(|e| e.to_string())).unwrap_or_default();
         let clips_bytes = clips
             .iter()
             .filter_map(|clip| std::fs::metadata(&clip.path).ok())
@@ -2887,8 +3132,15 @@ pub async fn storage_usage(app: tauri::AppHandle) -> Result<StorageUsage> {
         let local = app.path().app_local_data_dir().ok();
         // ffmpeg lives in the same folder as the web views' cache (`tools.rs`), but
         // unlike the cache it does not come and go — it gets a row of its own.
-        let tools_bytes = local.as_ref().map(|dir| dir_bytes(&dir.join("ffmpeg"))).unwrap_or(0);
-        let cache_bytes = local.as_ref().map(|dir| dir_bytes(dir)).unwrap_or(0).saturating_sub(tools_bytes);
+        let tools_bytes = local
+            .as_ref()
+            .map(|dir| dir_bytes(&dir.join("ffmpeg")))
+            .unwrap_or(0);
+        let cache_bytes = local
+            .as_ref()
+            .map(|dir| dir_bytes(dir))
+            .unwrap_or(0)
+            .saturating_sub(tools_bytes);
         // One store for both: a trimmed clip leaves its `video.mp4` there, a
         // screenshot its pictures. Only the first is what the row and "Clear all
         // trims" speak of.
@@ -2905,7 +3157,9 @@ pub async fn storage_usage(app: tauri::AppHandle) -> Result<StorageUsage> {
             clips_bytes,
             originals_bytes,
             facecam_bytes,
-            shot_edits_bytes: store_bytes.saturating_sub(originals_bytes).saturating_sub(facecam_bytes),
+            shot_edits_bytes: store_bytes
+                .saturating_sub(originals_bytes)
+                .saturating_sub(facecam_bytes),
             tracks_bytes: dir_bytes(&crate::stems::root()),
             thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
             cache_bytes,
@@ -2943,7 +3197,9 @@ pub async fn discard_all_originals(app: tauri::AppHandle) -> Result<TrimOriginal
 /// the original aside and putting the trimmed file in its place. There the
 /// original is the only copy. Without the library there is no telling which
 /// those are, so nothing is cleared at all.
-fn originals_still_needed(state: &State<'_, AppState>) -> Result<std::collections::HashSet<String>> {
+fn originals_still_needed(
+    state: &State<'_, AppState>,
+) -> Result<std::collections::HashSet<String>> {
     let clips = with_library(state, |lib| lib.list().map_err(|e| e.to_string()))?;
     Ok(clips
         .iter()
@@ -3040,11 +3296,20 @@ fn store(
 
     // A save that asked for a camera: the row follows the file.
     if let Some(cam) = &applied.facecam {
-        let _ = with_library(state, |lib| lib.set_facecam(&clip.id, Some(cam)).map_err(|e| e.to_string()));
+        let _ = with_library(state, |lib| {
+            lib.set_facecam(&clip.id, Some(cam))
+                .map_err(|e| e.to_string())
+        });
     } else if applied.composited {
         if let Some(cam) = clip.facecam.clone() {
-            let ready = crate::model::ClipFacecam { state: crate::model::FacecamState::Ready, ..cam };
-            let _ = with_library(state, |lib| lib.set_facecam(&clip.id, Some(&ready)).map_err(|e| e.to_string()));
+            let ready = crate::model::ClipFacecam {
+                state: crate::model::FacecamState::Ready,
+                ..cam
+            };
+            let _ = with_library(state, |lib| {
+                lib.set_facecam(&clip.id, Some(&ready))
+                    .map_err(|e| e.to_string())
+            });
         }
     }
 
@@ -3070,7 +3335,8 @@ fn store(
         baked: baked_after(applied.mix_baked, clip, undo),
     };
     let stored = with_library(state, |lib| {
-        lib.set_edit(&clip.id, Some(&edit)).map_err(|e| e.to_string())?;
+        lib.set_edit(&clip.id, Some(&edit))
+            .map_err(|e| e.to_string())?;
         lib.set_original(&clip.id, applied.original.as_ref())
             .map_err(|e| e.to_string())?;
         lib.set_file_state(&clip.id, applied.duration_ms, applied.size_bytes)
@@ -3144,7 +3410,9 @@ fn answer_after_swap(
         Ok(stored) => (stored, None),
         Err(err) => (
             reread().unwrap_or_else(written),
-            Some(format!("The clip was written, but its record could not be updated: {err}")),
+            Some(format!(
+                "The clip was written, but its record could not be updated: {err}"
+            )),
         ),
     }
 }
@@ -3161,10 +3429,7 @@ fn refuse_still(clip: &Clip) -> Result<()> {
     Ok(())
 }
 
-fn with_library<T>(
-    state: &AppState,
-    f: impl FnOnce(&Library) -> Result<T>,
-) -> Result<T> {
+fn with_library<T>(state: &AppState, f: impl FnOnce(&Library) -> Result<T>) -> Result<T> {
     let guard = state.library.lock();
     match guard.as_ref() {
         Some(lib) => f(lib),
@@ -3293,11 +3558,22 @@ mod tests {
     #[test]
     fn undoing_the_trim_takes_the_baked_mix_out_again() {
         let baked = Clip {
-            edit: Some(ClipEdit { start_ms: 0, end_ms: 1_000, tracks: Vec::new(), baked: true }),
+            edit: Some(ClipEdit {
+                start_ms: 0,
+                end_ms: 1_000,
+                tracks: Vec::new(),
+                baked: true,
+            }),
             ..saved_clip("baked-undo", 1_000)
         };
-        assert!(!baked_after(false, &baked, true), "an undo kept the old bake");
-        assert!(baked_after(true, &baked, true), "a mix baked by the undo itself was lost");
+        assert!(
+            !baked_after(false, &baked, true),
+            "an undo kept the old bake"
+        );
+        assert!(
+            baked_after(true, &baked, true),
+            "a mix baked by the undo itself was lost"
+        );
         assert!(baked_after(false, &baked, false), "a cut forgot the bake");
         assert!(!baked_after(false, &saved_clip("plain", 1_000), false));
     }
@@ -3363,7 +3639,11 @@ mod tests {
 
     #[test]
     fn an_export_goes_to_an_mp4_outside_clippiboys_data() {
-        let local = if cfg!(windows) { r"C:\Users\me\Videos\clip.mp4" } else { "/home/me/clip.mp4" };
+        let local = if cfg!(windows) {
+            r"C:\Users\me\Videos\clip.mp4"
+        } else {
+            "/home/me/clip.mp4"
+        };
         let target = |path: &str| export_target(Path::new(path));
         assert_eq!(target(local).unwrap(), Path::new(local));
         assert!(target("clip.mp4").is_err(), "relative");
@@ -3375,31 +3655,62 @@ mod tests {
                 "UNC"
             );
         }
-        assert!(target(&local.replace(".mp4", ".exe")).is_err(), "another extension");
+        assert!(
+            target(&local.replace(".mp4", ".exe")).is_err(),
+            "another extension"
+        );
         let upper = local.replace(".mp4", ".MP4");
-        assert_eq!(target(&upper).unwrap(), Path::new(&upper), "the extension in any case");
+        assert_eq!(
+            target(&upper).unwrap(),
+            Path::new(&upper),
+            "the extension in any case"
+        );
         assert_eq!(
             target(&local.replace(".mp4", "")).unwrap(),
             Path::new(local),
             "no extension gets one"
         );
-        let own = crate::config::data_dir().join("originals").join("x").join("video.mp4");
-        assert!(target(&own.to_string_lossy()).is_err(), "ClippiBoy's own data");
+        let own = crate::config::data_dir()
+            .join("originals")
+            .join("x")
+            .join("video.mp4");
+        assert!(
+            target(&own.to_string_lossy()).is_err(),
+            "ClippiBoy's own data"
+        );
         let shouted = own.to_string_lossy().to_uppercase().replace(".MP4", ".mp4");
-        assert!(target(&shouted).is_err(), "ClippiBoy's own data in another case");
+        assert!(
+            target(&shouted).is_err(),
+            "ClippiBoy's own data in another case"
+        );
         let around = crate::config::data_dir()
             .join("..")
             .join(crate::config::data_dir().file_name().unwrap())
             .join("video.mp4");
-        assert!(target(&around.to_string_lossy()).is_err(), "a way round through ..");
+        assert!(
+            target(&around.to_string_lossy()).is_err(),
+            "a way round through .."
+        );
     }
 
     #[test]
     fn the_suggested_name_is_only_a_file_name() {
-        assert_eq!(export_file_name("Valorant (10 MB).mp4").as_deref(), Some("Valorant (10 MB).mp4"));
-        assert_eq!(export_file_name(r"C:\Windows\evil.mp4").as_deref(), Some("evil.mp4"));
-        assert_eq!(export_file_name("../../up/there.mp4").as_deref(), Some("there.mp4"));
-        assert_eq!(export_file_name(r"\\server\share\x.mp4").as_deref(), Some("x.mp4"));
+        assert_eq!(
+            export_file_name("Valorant (10 MB).mp4").as_deref(),
+            Some("Valorant (10 MB).mp4")
+        );
+        assert_eq!(
+            export_file_name(r"C:\Windows\evil.mp4").as_deref(),
+            Some("evil.mp4")
+        );
+        assert_eq!(
+            export_file_name("../../up/there.mp4").as_deref(),
+            Some("there.mp4")
+        );
+        assert_eq!(
+            export_file_name(r"\\server\share\x.mp4").as_deref(),
+            Some("x.mp4")
+        );
         assert_eq!(export_file_name("C:x.mp4").as_deref(), Some("Cx.mp4"));
         assert_eq!(export_file_name("  "), None);
         assert_eq!(export_file_name("a/"), None);
@@ -3413,9 +3724,14 @@ mod tests {
         assert_eq!(part.parent(), target.parent());
         assert_eq!(
             part.file_name().unwrap().to_string_lossy(),
-            format!("Valorant (10 MB).{}.clippiboy-export.mp4", std::process::id())
+            format!(
+                "Valorant (10 MB).{}.clippiboy-export.mp4",
+                std::process::id()
+            )
         );
-        assert!(crate::sweep::is_scratch_name(&part.file_name().unwrap().to_string_lossy()));
+        assert!(crate::sweep::is_scratch_name(
+            &part.file_name().unwrap().to_string_lossy()
+        ));
     }
 
     #[test]
@@ -3423,9 +3739,16 @@ mod tests {
         assert_eq!(discord_megabytes(19), 19);
         assert_eq!(discord_megabytes(0), 1);
         assert_eq!(discord_megabytes(u64::MAX), MAX_DISCORD_MB);
-        assert_eq!(megabytes_in_bytes(discord_megabytes(u64::MAX)), MAX_DISCORD_MB * 1024 * 1024);
+        assert_eq!(
+            megabytes_in_bytes(discord_megabytes(u64::MAX)),
+            MAX_DISCORD_MB * 1024 * 1024
+        );
         assert_eq!(megabytes_in_bytes(10), 10 * 1024 * 1024);
-        assert_eq!(megabytes_in_bytes(u64::MAX), u64::MAX, "no wrap round to a small limit");
+        assert_eq!(
+            megabytes_in_bytes(u64::MAX),
+            u64::MAX,
+            "no wrap round to a small limit"
+        );
     }
 
     #[test]
@@ -3466,7 +3789,10 @@ mod tests {
         std::fs::write(&beside, b"x").unwrap();
 
         remove_discord_copies(&root, id);
-        assert!(!discord_dir(&root, id).exists(), "the clip's copies are gone");
+        assert!(
+            !discord_dir(&root, id).exists(),
+            "the clip's copies are gone"
+        );
         assert!(kept.is_file(), "another clip's copies stay");
         assert!(beside.is_file(), "a file of the user's beside the clip");
         remove_discord_copies(&root, id);
@@ -3482,7 +3808,9 @@ mod tests {
         assert_eq!(name, "Valorant_2026-10-22_12-00-00-123 - 10 MB.mp4");
         assert_ne!(
             Some(name.as_str()),
-            discord_copy(Path::new("d"), "id", stem, 10, false).file_name().and_then(|n| n.to_str())
+            discord_copy(Path::new("d"), "id", stem, 10, false)
+                .file_name()
+                .and_then(|n| n.to_str())
         );
     }
 
@@ -3493,8 +3821,14 @@ mod tests {
     #[cfg(windows)]
     fn guard() -> ClipDirGuard {
         ClipDirGuard {
-            kept_out: vec![PathBuf::from(r"C:\Users\me"), PathBuf::from(r"C:\Users\me\AppData\Roaming\ClippiBoy")],
-            fenced: vec![PathBuf::from(r"C:\Users\me\AppData\Roaming\ClippiBoy"), PathBuf::from(r"C:\Windows")],
+            kept_out: vec![
+                PathBuf::from(r"C:\Users\me"),
+                PathBuf::from(r"C:\Users\me\AppData\Roaming\ClippiBoy"),
+            ],
+            fenced: vec![
+                PathBuf::from(r"C:\Users\me\AppData\Roaming\ClippiBoy"),
+                PathBuf::from(r"C:\Windows"),
+            ],
         }
     }
 
@@ -3517,7 +3851,10 @@ mod tests {
             assert!(!form_allowed(Path::new(dir)), "{dir}");
         }
         assert!(form_allowed(Path::new(r"D:\clips")));
-        assert!(form_allowed(Path::new(r"Z:\Clips")), "a mapped drive is the user's choice");
+        assert!(
+            form_allowed(Path::new(r"Z:\Clips")),
+            "a mapped drive is the user's choice"
+        );
     }
 
     /// A mapped drive resolves to its share: that form is refused only as
@@ -3566,12 +3903,20 @@ mod tests {
 
     #[test]
     fn a_whole_drive_is_no_clip_folder() {
-        let (root, folder) = if cfg!(windows) { (r"C:\", r"C:\Videos\ClippiBoy") } else { ("/", "/home/me/clips") };
+        let (root, folder) = if cfg!(windows) {
+            (r"C:\", r"C:\Videos\ClippiBoy")
+        } else {
+            ("/", "/home/me/clips")
+        };
         assert!(usable_clip_dir(folder));
         assert!(!usable_clip_dir(root));
         assert!(!usable_clip_dir(""));
         assert!(!usable_clip_dir("clips"));
-        let climbs: &[&str] = if cfg!(windows) { &[r"C:\..", r"D:\x\..\.."] } else { &["/home/..", "/home/x/../.."] };
+        let climbs: &[&str] = if cfg!(windows) {
+            &[r"C:\..", r"D:\x\..\.."]
+        } else {
+            &["/home/..", "/home/x/../.."]
+        };
         for dir in climbs {
             assert!(!usable_clip_dir(dir), "{dir}");
         }
@@ -3580,14 +3925,27 @@ mod tests {
     #[test]
     fn a_way_up_out_of_the_clip_folder_is_no_clip_folder() {
         let dirs: &[&str] = if cfg!(windows) {
-            &[r"D:\clips\..", r"D:\clips\.\..", r"D:\clips\sub\..\..", r"\\server\share\a\.."]
+            &[
+                r"D:\clips\..",
+                r"D:\clips\.\..",
+                r"D:\clips\sub\..\..",
+                r"\\server\share\a\..",
+            ]
         } else {
-            &["/home/me/clips/..", "/home/me/clips/./..", "/home/me/clips/sub/../.."]
+            &[
+                "/home/me/clips/..",
+                "/home/me/clips/./..",
+                "/home/me/clips/sub/../..",
+            ]
         };
         for dir in dirs {
             assert!(!usable_clip_dir(dir), "{dir}");
         }
-        assert!(usable_clip_dir(if cfg!(windows) { r"D:\clips" } else { "/home/me/clips" }));
+        assert!(usable_clip_dir(if cfg!(windows) {
+            r"D:\clips"
+        } else {
+            "/home/me/clips"
+        }));
     }
 
     #[test]

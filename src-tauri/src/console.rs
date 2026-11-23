@@ -603,7 +603,6 @@ fn foreground() -> isize {
     0
 }
 
-
 #[cfg(not(windows))]
 fn restore_foreground(raw: isize) {
     let _ = raw;

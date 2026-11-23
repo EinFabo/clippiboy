@@ -269,7 +269,11 @@ mod tests {
         assert_eq!(pads.round(2050, pad::START, (0, 0)), vec![Nav::Close]);
         // West, North, Back, Guide mean nothing here.
         assert!(pads
-            .round(2060, pad::WEST | pad::NORTH | pad::BACK | pad::GUIDE, (0, 0))
+            .round(
+                2060,
+                pad::WEST | pad::NORTH | pad::BACK | pad::GUIDE,
+                (0, 0)
+            )
             .is_empty());
     }
 
@@ -288,8 +292,14 @@ mod tests {
         assert_eq!(swap_confirm(pad::SOUTH | pad::EAST), pad::SOUTH | pad::EAST);
         assert_eq!(swap_confirm(pad::LB), pad::LB);
         let mut pads = Pads::new(0);
-        assert_eq!(pads.round(0, swap_confirm(pad::EAST), (0, 0)), vec![Nav::Activate]);
-        assert_eq!(pads.round(10, swap_confirm(pad::SOUTH), (0, 0)), vec![Nav::Back]);
+        assert_eq!(
+            pads.round(0, swap_confirm(pad::EAST), (0, 0)),
+            vec![Nav::Activate]
+        );
+        assert_eq!(
+            pads.round(10, swap_confirm(pad::SOUTH), (0, 0)),
+            vec![Nav::Back]
+        );
     }
 
     #[test]
@@ -299,7 +309,10 @@ mod tests {
         assert!(pads.round(500, pad::DOWN, (0, 0)).is_empty());
         assert!(pads.round(1000, pad::DOWN, (0, 0)).is_empty());
         // Another direction beside it still goes.
-        assert_eq!(pads.round(1010, pad::DOWN | pad::LEFT, (0, 0)), vec![Nav::Left]);
+        assert_eq!(
+            pads.round(1010, pad::DOWN | pad::LEFT, (0, 0)),
+            vec![Nav::Left]
+        );
         assert!(pads.round(1020, 0, (0, 0)).is_empty());
         assert_eq!(pads.round(1030, pad::DOWN, (0, 0)), vec![Nav::Down]);
     }
@@ -322,7 +335,10 @@ mod tests {
         // South alone: a step, only later.
         assert!(pads.round(0, pad::SOUTH, (0, 0)).is_empty());
         assert!(pads.round(40, pad::SOUTH, (0, 0)).is_empty());
-        assert_eq!(pads.round(CHORD_MS, pad::SOUTH, (0, 0)), vec![Nav::Activate]);
+        assert_eq!(
+            pads.round(CHORD_MS, pad::SOUTH, (0, 0)),
+            vec![Nav::Activate]
+        );
         // South, and Back right after: the console's binding fires, the
         // step goes.
         assert!(pads.round(100, 0, (0, 0)).is_empty());

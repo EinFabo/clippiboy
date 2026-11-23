@@ -13,12 +13,24 @@ use clippiboy_lib::model::{CamLayout, CamShape, EncoderId};
 use clippiboy_lib::{camera::ClockKind, muxer};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
-    args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn size_of(path: &Path) -> (u32, u32) {
     let out = muxer::command("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
         .arg(path)
         .output()
         .expect("ffprobe");
@@ -29,8 +41,14 @@ fn size_of(path: &Path) -> (u32, u32) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let (clip, cam, output) = (Path::new(&args[1]), Path::new(&args[2]), Path::new(&args[3]));
-    let offset_us: i64 = arg(&args, "--offset-us").and_then(|v| v.parse().ok()).unwrap_or(-412_000);
+    let (clip, cam, output) = (
+        Path::new(&args[1]),
+        Path::new(&args[2]),
+        Path::new(&args[3]),
+    );
+    let offset_us: i64 = arg(&args, "--offset-us")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(-412_000);
     let encoder = match arg(&args, "--encoder").as_deref() {
         Some("amf") => EncoderId::Amf,
         Some("qsv") => EncoderId::Qsv,
@@ -42,7 +60,11 @@ fn main() {
         Some("circle") => CamShape::Circle,
         _ => CamShape::Rounded,
     };
-    let layout = CamLayout { shape, mirror: args.iter().any(|a| a == "--mirror"), ..CamLayout::default() };
+    let layout = CamLayout {
+        shape,
+        mirror: args.iter().any(|a| a == "--mirror"),
+        ..CamLayout::default()
+    };
     let frame = size_of(clip);
     let cam_size = size_of(cam);
     let length_ms = muxer::probe_duration_ms(clip).expect("clip length");
@@ -92,7 +114,10 @@ fn main() {
     let line = composite::composite_arguments(&job);
     println!("ffmpeg {}", line.join(" "));
     let start = Instant::now();
-    let run = muxer::command("ffmpeg").args(&line).output().expect("ffmpeg");
+    let run = muxer::command("ffmpeg")
+        .args(&line)
+        .output()
+        .expect("ffmpeg");
     let took = start.elapsed().as_secs_f64();
     println!(
         "exit {:?} in {took:.1} s ({:.1}x realtime) {}",
@@ -100,5 +125,8 @@ fn main() {
         length_ms as f64 / 1000.0 / took,
         String::from_utf8_lossy(&run.stderr).trim()
     );
-    println!("output length {:?} ms, clip {length_ms} ms", muxer::probe_duration_ms(output));
+    println!(
+        "output length {:?} ms, clip {length_ms} ms",
+        muxer::probe_duration_ms(output)
+    );
 }

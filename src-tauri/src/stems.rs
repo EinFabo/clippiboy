@@ -113,7 +113,9 @@ fn from_index(clip_id: &str) -> Option<Vec<ClipTrack>> {
                 label: entry.label,
                 channels: 2,
                 preview_path: Some(
-                    track_path(clip_id, entry.index).to_string_lossy().to_string(),
+                    track_path(clip_id, entry.index)
+                        .to_string_lossy()
+                        .to_string(),
                 ),
             })
             .collect(),
@@ -208,7 +210,16 @@ pub fn tracks_in_file(source: &Path) -> Result<Vec<ClipTrack>, String> {
     let mut probe = command("ffprobe");
     probe
         .args(crate::muxer::clip_input())
-        .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index,channels:stream_tags", "-of", "json"])
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index,channels:stream_tags",
+            "-of",
+            "json",
+        ])
         .arg(source);
     let output = crate::child::output(&mut probe, crate::child::PROBE)
         .map_err(|err| format!("could not run ffprobe: {err}"))?;
@@ -299,12 +310,23 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
             .args(crate::muxer::clip_input())
             .arg("-i")
             .arg(source)
-            .args(["-map", &format!("0:a:{index}"), "-c:a", "aac", "-b:a", "192k"])
+            .args([
+                "-map",
+                &format!("0:a:{index}"),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ])
             .args(["-movflags", "+faststart"])
             .arg("-f")
             .arg("mp4")
             .arg(&temp);
-        outcome = run(&mut encode, "extracting an audio track", crate::child::MOVING);
+        outcome = run(
+            &mut encode,
+            "extracting an audio track",
+            crate::child::MOVING,
+        );
     }
 
     if let Err(err) = outcome {
@@ -349,11 +371,11 @@ pub fn mix_filter(inputs: &[(String, f32)]) -> Option<String> {
     let mut chains: Vec<String> = audible
         .iter()
         .enumerate()
-        .map(|(slot, (stream, gain_db))| {
-            format!("[{stream}]volume={}[m{slot}]", factor(*gain_db))
-        })
+        .map(|(slot, (stream, gain_db))| format!("[{stream}]volume={}[m{slot}]", factor(*gain_db)))
         .collect();
-    let marks: String = (0..audible.len()).map(|slot| format!("[m{slot}]")).collect();
+    let marks: String = (0..audible.len())
+        .map(|slot| format!("[m{slot}]"))
+        .collect();
 
     if audible.len() > 1 {
         // `normalize=0`, otherwise amix divides the levels by the number of
@@ -374,13 +396,13 @@ pub fn mix_filter(inputs: &[(String, f32)]) -> Option<String> {
 pub fn levels(tracks: &[ClipTrack], mix: &[TrackMix]) -> Vec<f32> {
     tracks
         .iter()
-        .map(|track| {
-            match mix.iter().find(|entry| entry.index == track.index) {
+        .map(
+            |track| match mix.iter().find(|entry| entry.index == track.index) {
                 Some(entry) if entry.muted => f32::NEG_INFINITY,
                 Some(entry) => entry.gain_db,
                 None => 0.0,
-            }
-        })
+            },
+        )
         .collect()
 }
 
@@ -502,7 +524,9 @@ pub fn without_discord(clip: &Clip, sources: &[AudioSource]) -> WithoutDiscord {
             let in_file = tracks_in_file(&source).ok().map(|list| list.len());
             match unstored(in_file, dir(&clip.id).exists()) {
                 Unstored::Extract => match tracks(&clip.id, &source, false) {
-                    Ok(list) if list.len() > 1 && list.iter().all(|t| t.preview_path.is_some()) => list,
+                    Ok(list) if list.len() > 1 && list.iter().all(|t| t.preview_path.is_some()) => {
+                        list
+                    }
                     _ => return WithoutDiscord::Impossible,
                 },
                 Unstored::Single => return WithoutDiscord::Unchanged,
@@ -562,7 +586,10 @@ mod tests {
         remove(id);
 
         write_index(id, &["Mix".into(), "Microphone".into()]).unwrap();
-        assert!(from_index(id).is_none(), "an index without tracks must not count");
+        assert!(
+            from_index(id).is_none(),
+            "an index without tracks must not count"
+        );
 
         for index in 0..2 {
             std::fs::write(track_path(id, index), b"not empty").unwrap();
@@ -573,7 +600,10 @@ mod tests {
         assert!(tracks[0].preview_path.is_some());
 
         remove(id);
-        assert!(from_index(id).is_none(), "remove must clear everything away");
+        assert!(
+            from_index(id).is_none(),
+            "remove must clear everything away"
+        );
     }
 
     #[test]
@@ -602,8 +632,7 @@ mod tests {
 
     #[test]
     fn several_inputs_are_summed_without_normalising() {
-        let filter =
-            mix_filter(&[("1:a".into(), 0.0), ("2:a".into(), -6.0)]).unwrap();
+        let filter = mix_filter(&[("1:a".into(), 0.0), ("2:a".into(), -6.0)]).unwrap();
         assert!(filter.contains("amix=inputs=2"), "{filter}");
         // Without `normalize=0` amix halves the levels and the clip would be
         // quieter than what was heard while playing.
@@ -614,11 +643,7 @@ mod tests {
     /// at level 0 and only lengthens the chain.
     #[test]
     fn muted_inputs_drop_out() {
-        let filter = mix_filter(&[
-            ("1:a".into(), 0.0),
-            ("2:a".into(), f32::NEG_INFINITY),
-        ])
-        .unwrap();
+        let filter = mix_filter(&[("1:a".into(), 0.0), ("2:a".into(), f32::NEG_INFINITY)]).unwrap();
         assert!(filter.contains("anull"), "{filter}");
         assert!(!filter.contains("2:a"), "{filter}");
     }
@@ -632,12 +657,30 @@ mod tests {
     #[test]
     fn a_muted_entry_becomes_silence() {
         let tracks = vec![
-            ClipTrack { index: 0, label: "Mix".into(), channels: 2, preview_path: None },
-            ClipTrack { index: 1, label: "Mic".into(), channels: 2, preview_path: None },
+            ClipTrack {
+                index: 0,
+                label: "Mix".into(),
+                channels: 2,
+                preview_path: None,
+            },
+            ClipTrack {
+                index: 1,
+                label: "Mic".into(),
+                channels: 2,
+                preview_path: None,
+            },
         ];
         let mix = vec![
-            TrackMix { index: 0, gain_db: -3.0, muted: false },
-            TrackMix { index: 1, gain_db: 0.0, muted: true },
+            TrackMix {
+                index: 0,
+                gain_db: -3.0,
+                muted: false,
+            },
+            TrackMix {
+                index: 1,
+                gain_db: 0.0,
+                muted: true,
+            },
         ];
         assert_eq!(levels(&tracks, &mix), vec![-3.0, f32::NEG_INFINITY]);
     }
@@ -646,7 +689,11 @@ mod tests {
         AudioSource {
             id: label.to_lowercase(),
             label: label.into(),
-            kind: SourceKind::Process { pid: 1, exe: exe.map(String::from), mode: crate::model::ProcessMode::Include },
+            kind: SourceKind::Process {
+                pid: 1,
+                exe: exe.map(String::from),
+                mode: crate::model::ProcessMode::Include,
+            },
             enabled: true,
             gain_db: 0.0,
             muted: false,
@@ -656,7 +703,12 @@ mod tests {
     }
 
     fn track(index: u32, label: &str) -> ClipTrack {
-        ClipTrack { index, label: label.into(), channels: 2, preview_path: Some(format!("t/{index}.m4a")) }
+        ClipTrack {
+            index,
+            label: label.into(),
+            channels: 2,
+            preview_path: Some(format!("t/{index}.m4a")),
+        }
     }
 
     #[test]
@@ -664,11 +716,20 @@ mod tests {
         assert!(is_discord("Discord", &[]));
         assert!(is_discord(" discord voice ", &[]));
         assert!(!is_discord("Microphone", &[]));
-        assert!(!is_discord("Main mix", &[process("Main mix", Some("Discord.exe"))]));
+        assert!(!is_discord(
+            "Main mix",
+            &[process("Main mix", Some("Discord.exe"))]
+        ));
         // Renamed in the settings: the process still says what it is.
-        let sources = [process("Squad", Some("Discord.exe")), process("Music", Some("Spotify.exe"))];
+        let sources = [
+            process("Squad", Some("Discord.exe")),
+            process("Music", Some("Spotify.exe")),
+        ];
         assert!(is_discord("Squad", &sources));
-        assert!(is_discord("squad", &[process("Squad", Some("DiscordPTB.exe"))]));
+        assert!(is_discord(
+            "squad",
+            &[process("Squad", Some("DiscordPTB.exe"))]
+        ));
         assert!(!is_discord("Music", &sources));
         assert!(!is_discord("Squad", &[process("Squad", None)]));
         // Everything but Discord: the track is the rest of the PC, not Discord.
@@ -681,22 +742,46 @@ mod tests {
 
     #[test]
     fn a_clip_without_a_store_is_told_apart_by_its_file() {
-        assert_eq!(unstored(Some(3), false), Unstored::Extract, "tracks inside the MP4, from before the store");
+        assert_eq!(
+            unstored(Some(3), false),
+            Unstored::Extract,
+            "tracks inside the MP4, from before the store"
+        );
         assert_eq!(unstored(Some(1), false), Unstored::Single);
         assert_eq!(unstored(Some(0), false), Unstored::Single);
-        assert_eq!(unstored(Some(1), true), Unstored::Lost, "a store folder whose tracks are gone");
+        assert_eq!(
+            unstored(Some(1), true),
+            Unstored::Lost,
+            "a store folder whose tracks are gone"
+        );
         assert_eq!(unstored(None, false), Unstored::Lost);
     }
 
     #[test]
     fn the_discord_track_stays_home_and_the_rest_keeps_its_levels() {
-        let tracks = vec![track(0, "Main mix"), track(1, "Microphone"), track(2, "Discord")];
+        let tracks = vec![
+            track(0, "Main mix"),
+            track(1, "Microphone"),
+            track(2, "Discord"),
+        ];
         let mix = vec![
-            TrackMix { index: 0, gain_db: -3.0, muted: false },
-            TrackMix { index: 1, gain_db: 0.0, muted: true },
+            TrackMix {
+                index: 0,
+                gain_db: -3.0,
+                muted: false,
+            },
+            TrackMix {
+                index: 1,
+                gain_db: 0.0,
+                muted: true,
+            },
         ];
         let kept = kept_tracks(&tracks, &mix, |t| is_discord(&t.label, &[])).unwrap();
-        assert_eq!(kept, vec![(PathBuf::from("t/0.m4a"), -3.0)], "muted and Discord tracks both stay out");
+        assert_eq!(
+            kept,
+            vec![(PathBuf::from("t/0.m4a"), -3.0)],
+            "muted and Discord tracks both stay out"
+        );
     }
 
     #[test]
@@ -712,7 +797,10 @@ mod tests {
     #[test]
     fn a_remix_cuts_every_track_where_the_clip_starts() {
         let remix = Remix {
-            tracks: vec![(PathBuf::from("a.m4a"), 0.0), (PathBuf::from("b.m4a"), -6.0)],
+            tracks: vec![
+                (PathBuf::from("a.m4a"), 0.0),
+                (PathBuf::from("b.m4a"), -6.0),
+            ],
             start_ms: 4_000,
             length_ms: 12_500,
         };
@@ -723,9 +811,16 @@ mod tests {
         };
         assert_eq!(remix.inputs(), [input("a.m4a"), input("b.m4a")].concat());
         let filter = remix.filter(1).unwrap();
-        assert!(filter.starts_with("[1:a]volume=1[m0];[2:a]volume="), "{filter}");
+        assert!(
+            filter.starts_with("[1:a]volume=1[m0];[2:a]volume="),
+            "{filter}"
+        );
         assert!(filter.ends_with(MIX_LABEL));
-        let silent = Remix { tracks: Vec::new(), start_ms: 0, length_ms: 1_000 };
+        let silent = Remix {
+            tracks: Vec::new(),
+            start_ms: 0,
+            length_ms: 1_000,
+        };
         assert!(silent.filter(1).is_none());
         assert!(silent.inputs().is_empty());
     }

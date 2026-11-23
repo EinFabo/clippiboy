@@ -10,8 +10,8 @@ use serde_json::{Map, Value};
 
 use crate::encode;
 use crate::model::{
-    AppConfig, AudioSource, BufferConfig, ControlConfig, OverlayConfig, RecordingConfig, SourceKind,
-    TargetKind,
+    AppConfig, AudioSource, BufferConfig, ControlConfig, OverlayConfig, RecordingConfig,
+    SourceKind, TargetKind,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -165,8 +165,7 @@ pub fn effective_cam_memory_bytes(ring_seconds: u32, bitrate_kbps: u32) -> u64 {
 /// and the "MB per clip" and memory estimates with it (CFG-7). The keyframe
 /// interval stays within what the ring and the encoder are built for.
 pub fn normalize_recording(recording: &mut RecordingConfig) {
-    recording.bitrate_kbps =
-        encode::bitrate_for(recording.width, recording.height, recording.fps);
+    recording.bitrate_kbps = encode::bitrate_for(recording.width, recording.height, recording.fps);
     recording.keyframe_seconds = recording.keyframe_seconds.clamp(1, 10);
 }
 
@@ -193,10 +192,7 @@ fn migrate_sources(config: &mut AppConfig) {
                 source.kind = SourceKind::OutputDevice {
                     device_id: String::new(),
                 };
-                log::info!(
-                    "'{}' is the default output device again",
-                    source.label
-                );
+                log::info!("'{}' is the default output device again", source.label);
             }
             SourceKind::OutputDevice { .. } if !source.enabled => {
                 source.enabled = true;
@@ -222,12 +218,18 @@ pub fn migrate_pad_bindings(config: &mut AppConfig) -> bool {
     let mut moved = false;
     for action in Action::ALL {
         let (first, second) = match action {
-            Action::SaveClip => (&mut config.save_clip_hotkey, &mut config.save_clip_hotkey_alt),
+            Action::SaveClip => (
+                &mut config.save_clip_hotkey,
+                &mut config.save_clip_hotkey_alt,
+            ),
             Action::ToggleBuffer => (
                 &mut config.toggle_buffer_hotkey,
                 &mut config.toggle_buffer_hotkey_alt,
             ),
-            Action::Screenshot => (&mut config.screenshot_hotkey, &mut config.screenshot_hotkey_alt),
+            Action::Screenshot => (
+                &mut config.screenshot_hotkey,
+                &mut config.screenshot_hotkey_alt,
+            ),
             Action::Record => (&mut config.record_hotkey, &mut config.record_hotkey_alt),
             Action::Console => (&mut config.console_hotkey, &mut config.console_hotkey_alt),
         };
@@ -579,7 +581,11 @@ pub fn unread(revision: u64, current: &AppConfig) -> bool {
 /// longer in the history is taken as it stands. One built on no read at all
 /// (revision 0, [`unread`]) is not taken: the config stays as it is. The
 /// result always counts up, so the window hears the real config back.
-pub fn accept(current: &AppConfig, history: &VecDeque<AppConfig>, incoming: AppConfig) -> AppConfig {
+pub fn accept(
+    current: &AppConfig,
+    history: &VecDeque<AppConfig>,
+    incoming: AppConfig,
+) -> AppConfig {
     if unread(incoming.revision, current) {
         log::warn!(
             "a settings write built on no settings read (revision 0, now {}) — refused",
@@ -592,7 +598,11 @@ pub fn accept(current: &AppConfig, history: &VecDeque<AppConfig>, incoming: AppC
     let mut next = if incoming.revision >= current.revision {
         incoming
     } else {
-        match history.iter().rev().find(|old| old.revision == incoming.revision) {
+        match history
+            .iter()
+            .rev()
+            .find(|old| old.revision == incoming.revision)
+        {
             Some(base) => merge_stale(base, &incoming, current),
             None => {
                 log::warn!(
@@ -659,7 +669,9 @@ pub fn merge_stale(base: &AppConfig, incoming: &AppConfig, current: &AppConfig) 
     };
     let merged = merge_value(&base_json, &incoming_json, &current_json);
     serde_json::from_value(merged).unwrap_or_else(|err| {
-        log::warn!("a merged settings write is no config ({err}) — the window's taken as it stands");
+        log::warn!(
+            "a merged settings write is no config ({err}) — the window's taken as it stands"
+        );
         incoming.clone()
     })
 }
@@ -682,7 +694,9 @@ fn merge_value(base: &Value, incoming: &Value, current: &Value) -> Value {
             Value::Object(merge_objects(base, incoming, current))
         }
         (Value::Array(base), Value::Array(incoming), Value::Array(current))
-            if [base, incoming, current].iter().all(|list| list.iter().all(|item| item_id(item).is_some())) =>
+            if [base, incoming, current]
+                .iter()
+                .all(|list| list.iter().all(|item| item_id(item).is_some())) =>
         {
             Value::Array(merge_by_id(base, incoming, current))
         }
@@ -725,13 +739,17 @@ fn item_id(item: &Value) -> Option<&str> {
 /// window → appended, in all three → merged, removed elsewhere → stays
 /// removed. The order is the current one, unless the window reordered.
 fn merge_by_id(base: &[Value], incoming: &[Value], current: &[Value]) -> Vec<Value> {
-    let find = |list: &[Value], id: &str| list.iter().find(|item| item_id(item) == Some(id)).cloned();
+    let find =
+        |list: &[Value], id: &str| list.iter().find(|item| item_id(item) == Some(id)).cloned();
     let ids = |list: &[Value]| -> Vec<String> {
         list.iter().filter_map(item_id).map(str::to_owned).collect()
     };
     let (base_ids, incoming_ids) = (ids(base), ids(incoming));
     let kept_order = |list: &[String], other: &[String]| -> Vec<String> {
-        list.iter().filter(|id| other.contains(id)).cloned().collect()
+        list.iter()
+            .filter(|id| other.contains(id))
+            .cloned()
+            .collect()
     };
     let reordered = kept_order(&base_ids, &incoming_ids) != kept_order(&incoming_ids, &base_ids);
     let (first, then) = if reordered {
@@ -743,15 +761,17 @@ fn merge_by_id(base: &[Value], incoming: &[Value], current: &[Value]) -> Vec<Val
     let order = first.into_iter().chain(extra);
 
     order
-        .filter_map(|id| match (find(base, &id), find(incoming, &id), find(current, &id)) {
-            (Some(was), Some(value), Some(now)) => Some(merge_value(&was, &value, &now)),
-            // Removed in the window, or elsewhere.
-            (Some(_), _, _) => None,
-            // Added in the window (here and there both: the window's).
-            (None, Some(value), _) => Some(value),
-            // Added elsewhere.
-            (None, None, now) => now,
-        })
+        .filter_map(
+            |id| match (find(base, &id), find(incoming, &id), find(current, &id)) {
+                (Some(was), Some(value), Some(now)) => Some(merge_value(&was, &value, &now)),
+                // Removed in the window, or elsewhere.
+                (Some(_), _, _) => None,
+                // Added in the window (here and there both: the window's).
+                (None, Some(value), _) => Some(value),
+                // Added elsewhere.
+                (None, None, now) => now,
+            },
+        )
         .collect()
 }
 
@@ -911,7 +931,10 @@ mod tests {
         let mut next = default_config();
         next.pad_families_seen = vec!["xbox".into()];
         keep_once_flags(&mut next, &previous);
-        assert_eq!(next.pad_families_seen, vec!["xbox".to_string(), "nintendo".to_string()]);
+        assert_eq!(
+            next.pad_families_seen,
+            vec!["xbox".to_string(), "nintendo".to_string()]
+        );
         assert_eq!(next.pad_last_used.as_deref(), Some("nintendo"));
     }
 
@@ -921,7 +944,10 @@ mod tests {
         let config = default_config();
         let next = crate::model::remember_pads(&config, &[PadType::Xbox, PadType::Other], None)
             .expect("two new types");
-        assert_eq!(next.pad_families_seen, vec!["xbox".to_string(), "other".to_string()]);
+        assert_eq!(
+            next.pad_families_seen,
+            vec!["xbox".to_string(), "other".to_string()]
+        );
         assert_eq!(next.pad_last_used, None);
         // Nothing new: nothing to write.
         assert!(crate::model::remember_pads(&next, &[PadType::Xbox], None).is_none());
@@ -973,7 +999,11 @@ mod tests {
     fn a_configuration_written_before_the_facecam_still_loads() {
         let mut written =
             serde_json::to_value(with(vec![source("mic", endpoint("dev-1"), true)])).unwrap();
-        written.as_object_mut().unwrap().remove("facecam").expect("called 'facecam' in JSON");
+        written
+            .as_object_mut()
+            .unwrap()
+            .remove("facecam")
+            .expect("called 'facecam' in JSON");
         let parsed: AppConfig = serde_json::from_value(written).unwrap();
         assert!(!parsed.facecam.enabled);
         assert_eq!(parsed.facecam.layout.size, 0.25);
@@ -1057,7 +1087,10 @@ mod tests {
         // The kind carried no device, so the default output device it is.
         assert_eq!(config.sources[0].kind, endpoint(""));
         for source in &config.sources[1..] {
-            assert!(source.enabled, "switched off by the detour, not by the user");
+            assert!(
+                source.enabled,
+                "switched off by the detour, not by the user"
+            );
             assert_eq!(
                 source.kind,
                 endpoint(&format!("dev-{}", source.id)),
@@ -1133,7 +1166,11 @@ mod tests {
         let (config, loaded) = read_config(&dir, 1);
         assert!(config.is_none());
         assert_eq!(loaded, Loaded::Fine);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "nothing written");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "nothing written"
+        );
     }
 
     #[test]
@@ -1144,7 +1181,10 @@ mod tests {
         let (config, loaded) = read_config(&dir, 1);
         assert!(config.is_some());
         assert_eq!(loaded, Loaded::Fine);
-        assert_eq!(std::fs::read_to_string(dir.join("config.json.bak")).unwrap(), text);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.json.bak")).unwrap(),
+            text
+        );
     }
 
     /// A hand-edited accent that is no `#rrggbb` loads as the violet instead
@@ -1155,7 +1195,11 @@ mod tests {
         let mut edited = default_config();
         edited.accent_color = Some("#€ab1".into());
         edited.accent_color_2 = Some(" #3B82F6 ".into());
-        std::fs::write(dir.join("config.json"), serde_json::to_string(&edited).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_string(&edited).unwrap(),
+        )
+        .unwrap();
         let (config, loaded) = read_config(&dir, 1);
         let mut config = config.expect("the file is a config");
         assert_eq!(loaded, Loaded::Fine);
@@ -1173,13 +1217,23 @@ mod tests {
             let dir = config_dir();
             let mut good = default_config();
             good.clip_dir = r"D:\Clips".into();
-            std::fs::write(dir.join("config.json.bak"), serde_json::to_string(&good).unwrap()).unwrap();
+            std::fs::write(
+                dir.join("config.json.bak"),
+                serde_json::to_string(&good).unwrap(),
+            )
+            .unwrap();
             std::fs::write(dir.join("config.json"), &damage).unwrap();
             let (config, loaded) = read_config(&dir, 1234);
             assert_eq!(config.expect("the backup").clip_dir, r"D:\Clips");
             let aside = dir.join("config.json.broken-1234");
-            assert!(matches!(&loaded, Loaded::Recovered { aside: Some(path), from_backup: true, .. } if *path == aside));
-            assert_eq!(std::fs::read(&aside).unwrap(), damage, "the damaged file is kept as it was");
+            assert!(
+                matches!(&loaded, Loaded::Recovered { aside: Some(path), from_backup: true, .. } if *path == aside)
+            );
+            assert_eq!(
+                std::fs::read(&aside).unwrap(),
+                damage,
+                "the damaged file is kept as it was"
+            );
             assert!(!dir.join("config.json").exists());
         }
     }
@@ -1190,7 +1244,14 @@ mod tests {
         std::fs::write(dir.join("config.json"), b"{\"recording\": ").unwrap();
         let (config, loaded) = read_config(&dir, 7);
         assert!(config.is_none());
-        assert!(matches!(loaded, Loaded::Recovered { aside: Some(_), from_backup: false, .. }));
+        assert!(matches!(
+            loaded,
+            Loaded::Recovered {
+                aside: Some(_),
+                from_backup: false,
+                ..
+            }
+        ));
         assert!(dir.join("config.json.broken-7").is_file());
     }
 
@@ -1201,18 +1262,41 @@ mod tests {
         std::fs::create_dir_all(dir.join("config.json")).unwrap();
         let mut good = default_config();
         good.clip_dir = r"D:\Clips".into();
-        std::fs::write(dir.join("config.json.bak"), serde_json::to_string(&good).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("config.json.bak"),
+            serde_json::to_string(&good).unwrap(),
+        )
+        .unwrap();
         let (config, loaded) = read_config(&dir, 9);
-        assert!(matches!(loaded, Loaded::Recovered { aside: None, from_backup: true, .. }), "{loaded:?}");
+        assert!(
+            matches!(
+                loaded,
+                Loaded::Recovered {
+                    aside: None,
+                    from_backup: true,
+                    ..
+                }
+            ),
+            "{loaded:?}"
+        );
         assert_eq!(config.expect("the backup").clip_dir, r"D:\Clips");
-        assert!(dir.join("config.json").is_dir(), "a file that could not be read is never moved");
+        assert!(
+            dir.join("config.json").is_dir(),
+            "a file that could not be read is never moved"
+        );
         assert!(!dir.join("config.json.broken-9").exists());
         assert!(
-            loaded.message().unwrap().starts_with("The settings file could not be opened ("),
+            loaded
+                .message()
+                .unwrap()
+                .starts_with("The settings file could not be opened ("),
             "{:?}",
             loaded.message()
         );
-        assert!(loaded.message().unwrap().ends_with("leaves the file alone until the next start."));
+        assert!(loaded
+            .message()
+            .unwrap()
+            .ends_with("leaves the file alone until the next start."));
     }
 
     #[test]
@@ -1233,7 +1317,9 @@ mod tests {
         }
         let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
         assert!(serde_json::from_str::<AppConfig>(&text).is_ok());
-        let temps = std::fs::read_dir(&dir).unwrap().flatten()
+        let temps = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temps, 0);
@@ -1254,11 +1340,21 @@ mod tests {
     }
 
     fn ids(config: &AppConfig) -> Vec<&str> {
-        config.sources.iter().map(|source| source.id.as_str()).collect()
+        config
+            .sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect()
     }
 
     fn mic() -> AudioSource {
-        source("mic", SourceKind::InputDevice { device_id: "dev-mic".into() }, true)
+        source(
+            "mic",
+            SourceKind::InputDevice {
+                device_id: "dev-mic".into(),
+            },
+            true,
+        )
     }
 
     fn game() -> AudioSource {
@@ -1476,7 +1572,10 @@ mod tests {
         core = accept(&core, &history, incoming);
 
         assert!(core.sources[0].muted, "the console's mute was lost");
-        assert_eq!(core.sources[0].gain_db, -6.0, "the main window's level came undone");
+        assert_eq!(
+            core.sources[0].gain_db, -6.0,
+            "the main window's level came undone"
+        );
         assert_eq!(ids(&core), ["mic", "game"]);
         assert_eq!(core.revision, 6);
     }
@@ -1490,7 +1589,9 @@ mod tests {
         core.sources[1].gain_db = 3.0;
         remember(&mut history, &core);
         for base in [None, Some(2)] {
-            let incoming = with_sources(&core, &history, base, |sources| put_source(sources, muted(mic())));
+            let incoming = with_sources(&core, &history, base, |sources| {
+                put_source(sources, muted(mic()))
+            });
             let accepted = accept(&core, &history, incoming);
             assert!(accepted.sources[0].muted);
             assert_eq!(accepted.sources[1].gain_db, 3.0);
@@ -1509,7 +1610,9 @@ mod tests {
         core = accept(&core, &history, main);
         remember(&mut history, &core);
 
-        let incoming = with_sources(&core, &history, Some(4), |sources| sources.retain(|s| s.id != "mic"));
+        let incoming = with_sources(&core, &history, Some(4), |sources| {
+            sources.retain(|s| s.id != "mic")
+        });
         core = accept(&core, &history, incoming);
         assert_eq!(ids(&core), ["game"]);
         assert!(core.sources[0].muted);
@@ -1537,14 +1640,25 @@ mod tests {
         stand_in.watermark = !current.watermark;
 
         let accepted = accept(&current, &history, stand_in);
-        assert_eq!(accepted.revision, FIRST_REVISION + 1, "still counts up, so the window hears back");
+        assert_eq!(
+            accepted.revision,
+            FIRST_REVISION + 1,
+            "still counts up, so the window hears back"
+        );
         let mut expected = current.clone();
         expected.revision = FIRST_REVISION + 1;
         assert_eq!(json(&accepted), json(&expected));
 
         let row = with_sources(&current, &history, Some(0), |sources| sources.push(game()));
-        assert_eq!(json(&row), json(&current), "a source row from it is no change either");
-        assert!(!unread(0, &revision(with(vec![]), 0)), "a core that never loaded is at 0 itself");
+        assert_eq!(
+            json(&row),
+            json(&current),
+            "a source row from it is no change either"
+        );
+        assert!(
+            !unread(0, &revision(with(vec![]), 0)),
+            "a core that never loaded is at 0 itself"
+        );
     }
 
     /// Final review (state M1): the screen watcher corrected the source of a
@@ -1570,7 +1684,10 @@ mod tests {
         let mut switched = current.clone();
         switched.recording.target_id = Some(r"\\.\DISPLAY3".into());
         let mut next = accept(&current, &history, switched);
-        assert!(keep_recording_source(&mut next, &current), "a real switch is refused");
+        assert!(
+            keep_recording_source(&mut next, &current),
+            "a real switch is refused"
+        );
         assert_eq!(next.recording.target_id.as_deref(), Some(r"\\.\DISPLAY2"));
     }
 
@@ -1578,7 +1695,11 @@ mod tests {
     #[test]
     fn a_configuration_without_a_revision_loads_at_zero() {
         let mut written = json(&default_config());
-        written.as_object_mut().unwrap().remove("revision").expect("called 'revision'");
+        written
+            .as_object_mut()
+            .unwrap()
+            .remove("revision")
+            .expect("called 'revision'");
         let parsed: AppConfig = serde_json::from_value(written).unwrap();
         assert_eq!(parsed.revision, 0);
     }
@@ -1588,22 +1709,38 @@ mod tests {
     fn each_recovery_says_what_happened() {
         assert_eq!(Loaded::Fine.message(), None);
         let aside = Some(PathBuf::from(r"C:\x\config.json.broken-5"));
-        let restored = Loaded::Recovered { aside: aside.clone(), from_backup: true, reason: "x".into() };
+        let restored = Loaded::Recovered {
+            aside: aside.clone(),
+            from_backup: true,
+            reason: "x".into(),
+        };
         assert_eq!(
             restored.message().unwrap(),
             "The settings file was damaged. ClippiBoy restored the copy from the last good start; the damaged file is kept as config.json.broken-5."
         );
-        let lost = Loaded::Recovered { aside, from_backup: false, reason: "x".into() };
+        let lost = Loaded::Recovered {
+            aside,
+            from_backup: false,
+            reason: "x".into(),
+        };
         assert_eq!(
             lost.message().unwrap(),
             "The settings file was damaged and no good copy was left. ClippiBoy starts with default settings; the damaged file is kept as config.json.broken-5."
         );
-        let held = Loaded::Recovered { aside: None, from_backup: true, reason: "in use".into() };
+        let held = Loaded::Recovered {
+            aside: None,
+            from_backup: true,
+            reason: "in use".into(),
+        };
         assert_eq!(
             held.message().unwrap(),
             "The settings file could not be opened (in use). ClippiBoy runs on the last good copy for now and leaves the file alone until the next start."
         );
-        let held = Loaded::Recovered { aside: None, from_backup: false, reason: "in use".into() };
+        let held = Loaded::Recovered {
+            aside: None,
+            from_backup: false,
+            reason: "in use".into(),
+        };
         assert_eq!(
             held.message().unwrap(),
             "The settings file could not be opened (in use). ClippiBoy runs on default settings for now and leaves the file alone until the next start."

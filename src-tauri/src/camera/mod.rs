@@ -45,11 +45,24 @@ const PLAUSIBLE_100NS: i64 = 20_000_000;
 /// The first of `device`, `device_ref`, `sample` within ±2 s of `arrival`,
 /// else `arrival`. A stream-relative sample time (one that starts at zero)
 /// never passes.
-pub fn choose_stamp(device: Option<i64>, device_ref: Option<i64>, sample: Option<i64>, arrival: i64) -> (i64, ClockKind) {
-    [(device, ClockKind::Device), (device_ref, ClockKind::DeviceReference), (sample, ClockKind::SampleTime)]
-        .into_iter()
-        .find_map(|(stamp, kind)| stamp.filter(|t| (t - arrival).abs() <= PLAUSIBLE_100NS).map(|t| (t, kind)))
-        .unwrap_or((arrival, ClockKind::Arrival))
+pub fn choose_stamp(
+    device: Option<i64>,
+    device_ref: Option<i64>,
+    sample: Option<i64>,
+    arrival: i64,
+) -> (i64, ClockKind) {
+    [
+        (device, ClockKind::Device),
+        (device_ref, ClockKind::DeviceReference),
+        (sample, ClockKind::SampleTime),
+    ]
+    .into_iter()
+    .find_map(|(stamp, kind)| {
+        stamp
+            .filter(|t| (t - arrival).abs() <= PLAUSIBLE_100NS)
+            .map(|t| (t, kind))
+    })
+    .unwrap_or((arrival, ClockKind::Arrival))
 }
 
 /// What a frame came with, for the grid and the diagnostics.
@@ -96,7 +109,9 @@ pub enum Error {
     /// Windows' camera privacy blocks desktop apps.
     Denied,
     /// Another app holds the camera.
-    Busy { by: Option<String> },
+    Busy {
+        by: Option<String>,
+    },
     /// Unplugged.
     Gone,
     NoCamera,
@@ -131,7 +146,11 @@ pub fn classify(hresult: i32) -> Error {
 /// The chosen camera: by id (case-insensitive), else by a name only one camera
 /// has — the same camera on another USB port gets another id — else the first
 /// when nothing was chosen. A chosen camera that is gone is not replaced.
-pub fn pick_device<'a>(list: &'a [CameraDevice], id: Option<&str>, name: Option<&str>) -> Option<&'a CameraDevice> {
+pub fn pick_device<'a>(
+    list: &'a [CameraDevice],
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Option<&'a CameraDevice> {
     if id.is_none() && name.is_none() {
         return list.first();
     }
@@ -165,14 +184,29 @@ pub fn cover_crop(src: (u32, u32), dst: (u32, u32)) -> Rect {
     let (sw, sh) = (src.0 as u64, src.1 as u64);
     let (dw, dh) = (dst.0 as u64, dst.1 as u64);
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
-        return Rect { x: 0, y: 0, w: src.0, h: src.1 };
+        return Rect {
+            x: 0,
+            y: 0,
+            w: src.0,
+            h: src.1,
+        };
     }
     if sw * dh > dw * sh {
         let w = even((sh * dw) as f64 / dh as f64).min(src.0);
-        Rect { x: even((src.0 - w) as f64 / 2.0), y: 0, w, h: src.1 }
+        Rect {
+            x: even((src.0 - w) as f64 / 2.0),
+            y: 0,
+            w,
+            h: src.1,
+        }
     } else {
         let h = even((sw * dh) as f64 / dw as f64).min(src.1);
-        Rect { x: 0, y: even((src.1 - h) as f64 / 2.0), w: src.0, h }
+        Rect {
+            x: 0,
+            y: even((src.1 - h) as f64 / 2.0),
+            w: src.0,
+            h,
+        }
     }
 }
 
@@ -246,7 +280,10 @@ pub fn find_for_open(
     dshow_names: impl FnOnce() -> Vec<String>,
 ) -> Option<CameraDevice> {
     if let Some(id) = id.filter(|id| id.starts_with(dshow::PREFIX)) {
-        return dshow::name_of(id).map(|name| CameraDevice { id: id.to_string(), name: name.to_string() });
+        return dshow::name_of(id).map(|name| CameraDevice {
+            id: id.to_string(),
+            name: name.to_string(),
+        });
     }
     let mf = dshow::without_our_camera(mf);
     if let Some(device) = pick_device(&mf, id, name) {
@@ -289,7 +326,12 @@ pub fn list() -> Vec<CameraDevice> {
 /// Opens `device`; frames and events go to `sink` on a thread of the camera's.
 /// `cancelled` says the open is no longer wanted; only the slow DirectShow
 /// open looks at it.
-pub fn open(device: &CameraDevice, mode: OpenMode, sink: Sink, cancelled: &dyn Fn() -> bool) -> Result<Box<dyn Source>, Error> {
+pub fn open(
+    device: &CameraDevice,
+    mode: OpenMode,
+    sink: Sink,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Box<dyn Source>, Error> {
     #[cfg(windows)]
     {
         if device.id.starts_with(dshow::PREFIX) {
@@ -312,40 +354,70 @@ mod tests {
 
     #[test]
     fn a_device_stamp_half_a_second_old_is_used() {
-        assert_eq!(choose_stamp(Some(A), None, None, A + 5_000_000), (A, ClockKind::Device));
+        assert_eq!(
+            choose_stamp(Some(A), None, None, A + 5_000_000),
+            (A, ClockKind::Device)
+        );
     }
 
     #[test]
     fn a_stamp_three_seconds_off_falls_back_to_arrival() {
-        assert_eq!(choose_stamp(Some(A), None, None, A + 30_000_000), (A + 30_000_000, ClockKind::Arrival));
+        assert_eq!(
+            choose_stamp(Some(A), None, None, A + 30_000_000),
+            (A + 30_000_000, ClockKind::Arrival)
+        );
     }
 
     #[test]
     fn a_stream_relative_sample_time_is_not_taken() {
-        assert_eq!(choose_stamp(None, None, Some(1_000), A), (A, ClockKind::Arrival));
+        assert_eq!(
+            choose_stamp(None, None, Some(1_000), A),
+            (A, ClockKind::Arrival)
+        );
     }
 
     #[test]
     fn the_device_reference_is_second_choice() {
-        assert_eq!(choose_stamp(Some(A - 30_000_000), Some(A - 1), None, A), (A - 1, ClockKind::DeviceReference));
+        assert_eq!(
+            choose_stamp(Some(A - 30_000_000), Some(A - 1), None, A),
+            (A - 1, ClockKind::DeviceReference)
+        );
     }
 
     #[test]
     fn the_device_stamp_wins_when_all_are_plausible() {
-        assert_eq!(choose_stamp(Some(A - 3), Some(A - 2), Some(A - 1), A), (A - 3, ClockKind::Device));
+        assert_eq!(
+            choose_stamp(Some(A - 3), Some(A - 2), Some(A - 1), A),
+            (A - 3, ClockKind::Device)
+        );
     }
 
     #[test]
     fn the_sample_time_is_used_when_it_is_the_only_plausible_one() {
-        assert_eq!(choose_stamp(None, Some(5), Some(A - 7), A), (A - 7, ClockKind::SampleTime));
+        assert_eq!(
+            choose_stamp(None, Some(5), Some(A - 7), A),
+            (A - 7, ClockKind::SampleTime)
+        );
     }
 
     #[test]
     fn two_seconds_exactly_is_still_plausible() {
-        assert_eq!(choose_stamp(Some(A - 20_000_000), None, None, A), (A - 20_000_000, ClockKind::Device));
-        assert_eq!(choose_stamp(Some(A - 20_000_001), None, None, A).1, ClockKind::Arrival);
-        assert_eq!(choose_stamp(Some(A + 20_000_000), None, None, A), (A + 20_000_000, ClockKind::Device));
-        assert_eq!(choose_stamp(Some(A + 20_000_001), None, None, A).1, ClockKind::Arrival);
+        assert_eq!(
+            choose_stamp(Some(A - 20_000_000), None, None, A),
+            (A - 20_000_000, ClockKind::Device)
+        );
+        assert_eq!(
+            choose_stamp(Some(A - 20_000_001), None, None, A).1,
+            ClockKind::Arrival
+        );
+        assert_eq!(
+            choose_stamp(Some(A + 20_000_000), None, None, A),
+            (A + 20_000_000, ClockKind::Device)
+        );
+        assert_eq!(
+            choose_stamp(Some(A + 20_000_001), None, None, A).1,
+            ClockKind::Arrival
+        );
     }
 
     #[test]
@@ -353,11 +425,17 @@ mod tests {
         assert_eq!(classify(0x8007_0005_u32 as i32), Error::Denied);
         assert_eq!(classify(0xC00D_3704_u32 as i32), Error::Busy { by: None });
         assert_eq!(classify(0xC00D_3EA2_u32 as i32), Error::Gone);
-        assert_eq!(classify(0x8000_4005_u32 as i32), Error::Other("0x80004005".into()));
+        assert_eq!(
+            classify(0x8000_4005_u32 as i32),
+            Error::Other("0x80004005".into())
+        );
     }
 
     fn cam(id: &str, name: &str) -> CameraDevice {
-        CameraDevice { id: id.into(), name: name.into() }
+        CameraDevice {
+            id: id.into(),
+            name: name.into(),
+        }
     }
 
     fn never_listed() -> Vec<String> {
@@ -366,34 +444,69 @@ mod tests {
 
     #[test]
     fn a_directshow_camera_opens_by_its_name_without_listing() {
-        let found = find_for_open(Some("dshow:OBS Virtual Camera"), Some("OBS Virtual Camera"), vec![], never_listed);
-        assert_eq!(found, Some(cam("dshow:OBS Virtual Camera", "OBS Virtual Camera")));
-        assert_eq!(find_for_open(Some("dshow:Capture: Card"), None, vec![], never_listed), None);
+        let found = find_for_open(
+            Some("dshow:OBS Virtual Camera"),
+            Some("OBS Virtual Camera"),
+            vec![],
+            never_listed,
+        );
+        assert_eq!(
+            found,
+            Some(cam("dshow:OBS Virtual Camera", "OBS Virtual Camera"))
+        );
+        assert_eq!(
+            find_for_open(Some("dshow:Capture: Card"), None, vec![], never_listed),
+            None
+        );
     }
 
     #[test]
     fn a_webcam_needs_only_media_foundations_list() {
-        let mf = vec![cam("usb#c960", "HD Webcam eMeet C960"), cam("usb#c920", "HD Pro Webcam C920")];
-        assert_eq!(find_for_open(Some("usb#c920"), None, mf.clone(), never_listed), Some(cam("usb#c920", "HD Pro Webcam C920")));
-        assert_eq!(find_for_open(None, None, mf.clone(), never_listed), Some(cam("usb#c960", "HD Webcam eMeet C960")));
-        assert_eq!(find_for_open(Some("usb#gone"), Some("Gone Cam"), mf, never_listed), None);
+        let mf = vec![
+            cam("usb#c960", "HD Webcam eMeet C960"),
+            cam("usb#c920", "HD Pro Webcam C920"),
+        ];
+        assert_eq!(
+            find_for_open(Some("usb#c920"), None, mf.clone(), never_listed),
+            Some(cam("usb#c920", "HD Pro Webcam C920"))
+        );
+        assert_eq!(
+            find_for_open(None, None, mf.clone(), never_listed),
+            Some(cam("usb#c960", "HD Webcam eMeet C960"))
+        );
+        assert_eq!(
+            find_for_open(Some("usb#gone"), Some("Gone Cam"), mf, never_listed),
+            None
+        );
     }
 
     #[test]
     fn the_first_camera_is_never_clippiboy_camera() {
-        let mf = vec![cam("swd#vcam", "ClippiBoy Camera (Windows virtuelle Kamera)"), cam("usb#c920", "HD Pro Webcam C920")];
-        assert_eq!(find_for_open(None, None, mf, never_listed), Some(cam("usb#c920", "HD Pro Webcam C920")));
+        let mf = vec![
+            cam("swd#vcam", "ClippiBoy Camera (Windows virtuelle Kamera)"),
+            cam("usb#c920", "HD Pro Webcam C920"),
+        ];
+        assert_eq!(
+            find_for_open(None, None, mf, never_listed),
+            Some(cam("usb#c920", "HD Pro Webcam C920"))
+        );
     }
 
     #[test]
     fn directshow_is_asked_only_when_no_other_camera_is_there() {
         let found = find_for_open(None, None, vec![], || vec!["OBS Virtual Camera".into()]);
-        assert_eq!(found, Some(cam("dshow:OBS Virtual Camera", "OBS Virtual Camera")));
+        assert_eq!(
+            found,
+            Some(cam("dshow:OBS Virtual Camera", "OBS Virtual Camera"))
+        );
     }
 
     #[test]
     fn a_replugged_camera_is_found_by_its_name() {
-        let list = [cam("usb#new-port", "HD Pro Webcam C920"), cam("usb#other", "EMEET SmartCam C960")];
+        let list = [
+            cam("usb#new-port", "HD Pro Webcam C920"),
+            cam("usb#other", "EMEET SmartCam C960"),
+        ];
         let found = pick_device(&list, Some("usb#old-port"), Some("HD Pro Webcam C920"));
         assert_eq!(found.map(|d| d.id.as_str()), Some("usb#new-port"));
         // The id wins, case-insensitively.
@@ -410,7 +523,10 @@ mod tests {
     #[test]
     fn no_choice_takes_the_first() {
         let list = [cam("usb#a", "First"), cam("usb#b", "Second")];
-        assert_eq!(pick_device(&list, None, None).map(|d| d.id.as_str()), Some("usb#a"));
+        assert_eq!(
+            pick_device(&list, None, None).map(|d| d.id.as_str()),
+            Some("usb#a")
+        );
         assert!(pick_device(&[], None, None).is_none());
     }
 
@@ -422,9 +538,33 @@ mod tests {
 
     #[test]
     fn a_four_by_three_camera_is_cropped_to_fill() {
-        assert_eq!(cover_crop((640, 480), (1280, 720)), Rect { x: 0, y: 60, w: 640, h: 360 });
-        assert_eq!(cover_crop((1920, 1080), (1280, 720)), Rect { x: 0, y: 0, w: 1920, h: 1080 });
-        assert_eq!(cover_crop((1080, 1920), (1280, 720)), Rect { x: 0, y: 656, w: 1080, h: 608 });
+        assert_eq!(
+            cover_crop((640, 480), (1280, 720)),
+            Rect {
+                x: 0,
+                y: 60,
+                w: 640,
+                h: 360
+            }
+        );
+        assert_eq!(
+            cover_crop((1920, 1080), (1280, 720)),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080
+            }
+        );
+        assert_eq!(
+            cover_crop((1080, 1920), (1280, 720)),
+            Rect {
+                x: 0,
+                y: 656,
+                w: 1080,
+                h: 608
+            }
+        );
     }
 
     #[test]
@@ -453,7 +593,12 @@ mod tests {
     }
 
     fn native(fourcc: &[u8; 4], w: u32, h: u32, fps: f32) -> NativeType {
-        NativeType { subtype: *fourcc, width: w, height: h, fps }
+        NativeType {
+            subtype: *fourcc,
+            width: w,
+            height: h,
+            fps,
+        }
     }
 
     /// What a C920 offers over USB 2.0: YUY2 at 720p only at 10 fps.
@@ -475,19 +620,28 @@ mod tests {
 
     #[test]
     fn a_camera_without_the_tracks_size_takes_the_next_larger_one() {
-        let list = vec![native(b"NV12", 1920, 1080, 30.0), native(b"NV12", 640, 360, 30.0)];
+        let list = vec![
+            native(b"NV12", 1920, 1080, 30.0),
+            native(b"NV12", 640, 360, 30.0),
+        ];
         assert_eq!(pick_native(&list, (1280, 720)), Some(0));
     }
 
     #[test]
     fn a_small_camera_gives_its_largest_picture() {
-        let list = vec![native(b"YUY2", 320, 240, 30.0), native(b"YUY2", 640, 480, 30.0)];
+        let list = vec![
+            native(b"YUY2", 320, 240, 30.0),
+            native(b"YUY2", 640, 480, 30.0),
+        ];
         assert_eq!(pick_native(&list, (1280, 720)), Some(1));
     }
 
     #[test]
     fn a_camera_that_never_reaches_thirty_takes_its_fastest() {
-        let list = vec![native(b"YUY2", 1280, 720, 10.0), native(b"YUY2", 640, 480, 15.0)];
+        let list = vec![
+            native(b"YUY2", 1280, 720, 10.0),
+            native(b"YUY2", 640, 480, 15.0),
+        ];
         assert_eq!(pick_native(&list, (1280, 720)), Some(1));
         assert_eq!(pick_native(&[], (1280, 720)), None);
     }

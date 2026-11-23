@@ -416,7 +416,11 @@ pub struct ErrorSlot {
 
 impl ErrorSlot {
     pub fn new() -> Self {
-        Self { error: Mutex::new(None), seen: AtomicBool::new(false), reports: AtomicU64::new(0) }
+        Self {
+            error: Mutex::new(None),
+            seen: AtomicBool::new(false),
+            reports: AtomicU64::new(0),
+        }
     }
 
     /// Record a problem. A failure that repeats per frame is logged at warn
@@ -588,7 +592,10 @@ impl Shared {
 
     /// What an audio ring is sized to now — see [`ring_seconds`].
     pub fn ring_seconds(&self) -> u32 {
-        ring_seconds(self.buffer_seconds.load(Ordering::Relaxed), self.keyframe_seconds)
+        ring_seconds(
+            self.buffer_seconds.load(Ordering::Relaxed),
+            self.keyframe_seconds,
+        )
     }
 
     /// Resize every audio ring to a new buffer length, and the ones added later
@@ -772,7 +779,10 @@ impl Shared {
     pub fn encoder_failure(&self) -> Option<String> {
         #[cfg(windows)]
         {
-            self.encoder_stats.lock().as_ref().and_then(|stats| stats.failure())
+            self.encoder_stats
+                .lock()
+                .as_ref()
+                .and_then(|stats| stats.failure())
         }
         #[cfg(not(windows))]
         {
@@ -894,10 +904,7 @@ mod win {
         }
     }
 
-    pub fn start(
-        shared: Arc<Shared>,
-        recording: &RecordingConfig,
-    ) -> Result<Running, String> {
+    pub fn start(shared: Arc<Shared>, recording: &RecordingConfig) -> Result<Running, String> {
         // Settled once, before anything is built: the same answer chooses the
         // graphics adapter below and drives the MFT further down. Resolving it
         // twice is how the encoder and the device it runs on came apart.
@@ -974,11 +981,9 @@ mod win {
                 recording.target_stable_id.as_deref(),
                 recording.fps,
                 move |frame| {
-                    if let Err(err) = latest.submit(
-                        frame.texture,
-                        (frame.width, frame.height),
-                        frame.qpc_100ns,
-                    ) {
+                    if let Err(err) =
+                        latest.submit(frame.texture, (frame.width, frame.height), frame.qpc_100ns)
+                    {
                         shared.dropped.fetch_add(1, Ordering::Relaxed);
                         shared.report(err);
                     }
@@ -1082,7 +1087,10 @@ struct MixClock {
 
 impl MixClock {
     fn new(origin_100ns: i64) -> Self {
-        Self { origin_100ns, frames: 0 }
+        Self {
+            origin_100ns,
+            frames: 0,
+        }
     }
 
     /// Where the next window starts.
@@ -1139,7 +1147,10 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         // allocation failed and took the app and the buffer with it. Nobody
         // was playing in that gap, so it is counted as silence instead.
         if target - from > MAX_WINDOW_100NS {
-            log::warn!("audio: {} s without a window — counted as silence", (target - from) / 10_000_000);
+            log::warn!(
+                "audio: {} s without a window — counted as silence",
+                (target - from) / 10_000_000
+            );
             let rings = shared.tracks.lock();
             let recording = shared.recorder.lock().clone();
             let recording = recording.filter(|recorder| recorder.begin_window(&rings, from));
@@ -1158,7 +1169,9 @@ fn mix_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             continue;
         }
 
-        shared.audio.mix_window(&sources, from, frames, &mut buffers);
+        shared
+            .audio
+            .mix_window(&sources, from, frames, &mut buffers);
 
         // Every ring gets something in every window — whatever is audible right
         // now gets its mix, whatever is muted or soloed out gets silence. Pushing
@@ -1520,8 +1533,11 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             &bytes[44..],
-            &77i16.to_le_bytes()[..].iter().chain(88i16.to_le_bytes().iter())
-                .copied().collect::<Vec<u8>>()[..],
+            &77i16.to_le_bytes()[..]
+                .iter()
+                .chain(88i16.to_le_bytes().iter())
+                .copied()
+                .collect::<Vec<u8>>()[..],
             "the window sits in the wrong place"
         );
         let _ = std::fs::remove_file(&path);
@@ -1604,11 +1620,19 @@ mod tests {
         for at in 5..12 {
             ring.push(&block, qpc_of_frame(at * SAMPLE_RATE as i64));
         }
-        assert_eq!(ring.inner.lock().samples.len(), 4 * second, "longer fills up");
+        assert_eq!(
+            ring.inner.lock().samples.len(),
+            4 * second,
+            "longer fills up"
+        );
 
         ring.set_seconds(1);
         ring.push(&block, qpc_of_frame(12 * SAMPLE_RATE as i64));
-        assert_eq!(ring.inner.lock().samples.len(), second, "shorter is cut down");
+        assert_eq!(
+            ring.inner.lock().samples.len(),
+            second,
+            "shorter is cut down"
+        );
     }
 
     /// BUF-1: a clip as long as the buffer starts up to one keyframe interval
@@ -1619,11 +1643,18 @@ mod tests {
         let ring = TrackRing::new("a".into(), "A".into(), ring_seconds(10, 4)); // 24 s
         let second = SAMPLE_RATE as i64;
         for at in 0..31 {
-            ring.push(&vec![(at + 1) as i16; second as usize * CHANNELS], qpc_of_frame(at * second));
+            ring.push(
+                &vec![(at + 1) as i16; second as usize * CHANNELS],
+                qpc_of_frame(at * second),
+            );
         }
         // Newest at 30 s, cut at the worst keyframe phase: 30 − 10 − 3.9 = 16.1 s,
         // read after a 1 s write (the 31st block).
-        assert_eq!(ring.window(qpc_of_frame(772_800), 1)[0], 17, "the clip's start was trimmed away");
+        assert_eq!(
+            ring.window(qpc_of_frame(772_800), 1)[0],
+            17,
+            "the clip's start was trimmed away"
+        );
     }
 
     /// BUF-1: what the slack has to cover.
@@ -1631,9 +1662,21 @@ mod tests {
     fn a_ring_covers_the_buffer_a_keyframe_interval_and_ten_seconds() {
         assert_eq!(ring_seconds(120, 2), 132);
         assert_eq!(ring_seconds(120, 4), 134);
-        assert_eq!(ring_seconds(30, 0), 41, "an interval of 0 counts as one second");
-        assert_eq!(ring_seconds(120, 600), 140, "an interval from the config counts at most 10 s");
-        assert_eq!(ring_seconds(u32::MAX, 4), u32::MAX, "a huge buffer saturates");
+        assert_eq!(
+            ring_seconds(30, 0),
+            41,
+            "an interval of 0 counts as one second"
+        );
+        assert_eq!(
+            ring_seconds(120, 600),
+            140,
+            "an interval from the config counts at most 10 s"
+        );
+        assert_eq!(
+            ring_seconds(u32::MAX, 4),
+            u32::MAX,
+            "a huge buffer saturates"
+        );
     }
 
     /// ffmpeg closes up a TS hole above 10 s (`-dts_delta_threshold`), so a
@@ -1642,11 +1685,18 @@ mod tests {
     #[test]
     fn a_clip_keeps_its_timestamps_only_across_holes_ffmpeg_leaves_alone() {
         assert_eq!(ts_jump_limit_us(4), 8_000_000);
-        assert_eq!(ts_jump_limit_us(2), 6_000_000, "below the cap the ring's limit holds");
+        assert_eq!(
+            ts_jump_limit_us(2),
+            6_000_000,
+            "below the cap the ring's limit holds"
+        );
         assert_eq!(ts_jump_limit_us(1), 3_000_000);
         let pts = [0, 16_666, 11_016_666, 11_033_333];
         let step = crate::muxer::largest_step_us(&pts);
-        assert!(!crate::muxer::keeps_timestamps(&pts, step, ts_jump_limit_us(4)), "an 11 s freeze takes the raw path");
+        assert!(
+            !crate::muxer::keeps_timestamps(&pts, step, ts_jump_limit_us(4)),
+            "an 11 s freeze takes the raw path"
+        );
     }
 
     /// Final review I-1: with 4 s keyframes the ring kept holes up to 12 s,
@@ -1673,19 +1723,33 @@ mod tests {
 
         let clip = ring.snapshot(30);
         let pts: Vec<i64> = clip.iter().map(|p| p.pts_us).collect();
-        assert!(pts[0] >= 19_000_000, "the clip still reaches back over the hole to {} us", pts[0]);
+        assert!(
+            pts[0] >= 19_000_000,
+            "the clip still reaches back over the hole to {} us",
+            pts[0]
+        );
         let step = crate::muxer::largest_step_us(&pts);
-        assert!(crate::muxer::keeps_timestamps(&pts, step, ts_jump_limit_us(4)), "what is left keeps its timestamps");
+        assert!(
+            crate::muxer::keeps_timestamps(&pts, step, ts_jump_limit_us(4)),
+            "what is left keeps its timestamps"
+        );
     }
 
     /// Final review: with its own timestamps the audio is as long as the span
     /// they cover, not the span spread evenly over the frames.
     #[test]
     fn a_timestamped_clip_takes_its_audio_length_from_the_span() {
-        let timing = crate::muxer::Timing { rate: "60".into(), span_us: 1_000_000 };
+        let timing = crate::muxer::Timing {
+            rate: "60".into(),
+            span_us: 1_000_000,
+        };
         assert_eq!(clip_audio_frames(true, Some(1_500_000), &timing), 72_000);
         assert_eq!(clip_audio_frames(false, Some(1_500_000), &timing), 48_000);
-        assert_eq!(clip_audio_frames(true, None, &timing), 48_000, "no span: the timing's");
+        assert_eq!(
+            clip_audio_frames(true, None, &timing),
+            48_000,
+            "no span: the timing's"
+        );
     }
 
     /// BUF-1, the tail: a save waits for the mixer to pass the clip's end, so the
@@ -1695,9 +1759,11 @@ mod tests {
         let mixed = Arc::new(MixPosition::default());
         let mixer = {
             let mixed = mixed.clone();
-            std::thread::spawn(move || for step in 1..=5 {
-                std::thread::sleep(Duration::from_millis(10));
-                mixed.publish(step * 100_000);
+            std::thread::spawn(move || {
+                for step in 1..=5 {
+                    std::thread::sleep(Duration::from_millis(10));
+                    mixed.publish(step * 100_000);
+                }
             })
         };
         assert!(mixed.wait_until(500_000, MIX_WAIT));
@@ -1771,7 +1837,10 @@ mod tests {
             clock.advance(frames);
         }
         let w = ring.window(last, 2);
-        assert!(w[0] == 1 || w[0] == 2 || w[CHANNELS] == 1, "the last block reads back at {w:?}");
+        assert!(
+            w[0] == 1 || w[0] == 2 || w[CHANNELS] == 1,
+            "the last block reads back at {w:?}"
+        );
     }
 
     /// Silence is the normal state of most tracks — a device nobody plays on,
@@ -1817,7 +1886,8 @@ mod tests {
         let dir = std::env::temp_dir().join("clippiboy-test-gap");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("gap.wav");
-        ring.write_wav_window(&path, qpc_of_frame(STEP * 2), 1).unwrap();
+        ring.write_wav_window(&path, qpc_of_frame(STEP * 2), 1)
+            .unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             &bytes[44..],
@@ -1842,7 +1912,10 @@ mod tests {
 
         let inner = ring.inner.lock();
         assert!(inner.samples.is_empty(), "stale audio was kept");
-        assert!(!inner.primed, "the timeline has to start again with the sound");
+        assert!(
+            !inner.primed,
+            "the timeline has to start again with the sound"
+        );
         assert_eq!(inner.silence, 0);
     }
 
@@ -1875,7 +1948,10 @@ mod tests {
         sources[0].label = "My mic".into();
         let second = tracks_for(&sources, &first, 5);
 
-        assert!(Arc::ptr_eq(&first[0], &second[0]), "microphone track was recreated");
+        assert!(
+            Arc::ptr_eq(&first[0], &second[0]),
+            "microphone track was recreated"
+        );
         assert_eq!(second[0].label(), "My mic", "name was not carried over");
         assert_eq!(second[0].inner.lock().samples.len(), 2, "Ton verloren");
     }

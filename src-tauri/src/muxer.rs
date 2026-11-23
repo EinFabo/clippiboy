@@ -48,11 +48,18 @@ fn tool(name: &str) -> PathBuf {
     } else {
         name.to_string()
     };
-    resolve_tool(TOOL_DIR.get().map(PathBuf::as_path), name, &file, &|path| path.is_file())
+    resolve_tool(TOOL_DIR.get().map(PathBuf::as_path), name, &file, &|path| {
+        path.is_file()
+    })
 }
 
 /// `file` in `dir` when it is there, otherwise the bare `name`.
-fn resolve_tool(dir: Option<&Path>, name: &str, file: &str, is_file: &dyn Fn(&Path) -> bool) -> PathBuf {
+fn resolve_tool(
+    dir: Option<&Path>,
+    name: &str,
+    file: &str,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> PathBuf {
     match dir.map(|dir| dir.join(file)) {
         Some(path) if is_file(&path) => path,
         _ => PathBuf::from(name),
@@ -108,7 +115,12 @@ const CLIP_FORMATS: &str = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,image2,png_pip
 /// readers. Only the formats ClippiBoy itself writes are let in, and only from
 /// a file.
 pub fn clip_input() -> [&'static str; 4] {
-    ["-format_whitelist", CLIP_FORMATS, "-protocol_whitelist", "file"]
+    [
+        "-format_whitelist",
+        CLIP_FORMATS,
+        "-protocol_whitelist",
+        "file",
+    ]
 }
 
 /// A tool that carries a live picture, above normal priority. It does little
@@ -139,7 +151,10 @@ pub fn run(command: &mut Command, what: &str, limit: crate::child::Limit) -> Res
 pub fn available() -> bool {
     // A first start can outlast the limit while an antivirus scans the
     // program; one that started and did not answer in time is there.
-    let answers = |mut program: Command| match crate::child::output(program.arg("-version"), crate::child::PROBE) {
+    let answers = |mut program: Command| match crate::child::output(
+        program.arg("-version"),
+        crate::child::PROBE,
+    ) {
         Ok(out) => out.status.success(),
         Err(err) => err.kind() == std::io::ErrorKind::TimedOut,
     };
@@ -185,7 +200,11 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // Beside the clip, like the `.part.mp4` it is written as: on the drive the
     // free space was checked for. In the app data folder they went to C:
     // whatever drive the clips are on — a buffer's worth per save.
-    let scratch = |kind: &str| request.output.with_file_name(scratch_name(&request.clip_id, kind));
+    let scratch = |kind: &str| {
+        request
+            .output
+            .with_file_name(scratch_name(&request.clip_id, kind))
+    };
 
     // Video packets straight into the file: gathered in one buffer first, a
     // long buffer at a high bitrate cost its own size in memory a second time,
@@ -232,7 +251,10 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
     // zeros. Writing the video usually took longer than that and this returns
     // at once. Bounded, and no lock is held here: a stalled mixer costs the
     // tail, never the save.
-    if !snapshot.mixed.wait_until(snapshot.end_100ns(), pipeline::MIX_WAIT) {
+    if !snapshot
+        .mixed
+        .wait_until(snapshot.end_100ns(), pipeline::MIX_WAIT)
+    {
         log::info!("audio: the mixer has not reached the clip's end — its tail is silent");
     }
 
@@ -352,12 +374,7 @@ pub struct Timing {
 ///
 /// Without a largest step (a recording folder written before it was kept) the
 /// old ratio decides: a span up to half again the nominal one is stretched.
-pub fn timing(
-    frames: u64,
-    span_us: Option<u64>,
-    largest_step_us: Option<i64>,
-    fps: u32,
-) -> Timing {
+pub fn timing(frames: u64, span_us: Option<u64>, largest_step_us: Option<i64>, fps: u32) -> Timing {
     let fps = fps.max(1) as u64;
     let nominal = frames * 1_000_000 / fps;
     let stretch = |span: u64| {
@@ -478,7 +495,13 @@ pub fn encode(
 
     let mut command = ffmpeg();
     command.args(arguments(video, wavs, &pending, &stem_outputs));
-    let outcome = run_reporting(&mut command, "writing the clip", crate::child::MOVING, length_ms, on_progress);
+    let outcome = run_reporting(
+        &mut command,
+        "writing the clip",
+        crate::child::MOVING,
+        length_ms,
+        on_progress,
+    );
 
     // Everything from here that says "no" has to leave the half-written file
     // behind it gone, not lying in the clip folder.
@@ -496,7 +519,9 @@ pub fn encode(
         return give_up(err);
     }
 
-    let size_bytes = std::fs::metadata(&pending).map(|meta| meta.len()).unwrap_or(0);
+    let size_bytes = std::fs::metadata(&pending)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     if size_bytes == 0 {
         return give_up("The clip came out empty.".into());
     }
@@ -680,10 +705,11 @@ fn run_reporting(
             on_progress((us.max(0) as f32 / 1000.0 / length.max(1) as f32).clamp(0.0, 0.99));
         }
     };
-    let output = crate::child::run(command, limit, &report, &|| false).map_err(|err| match err.kind() {
-        std::io::ErrorKind::TimedOut => format!("ffmpeg failed at '{what}': {err}"),
-        _ => format!("could not start ffmpeg ({what}): {err}"),
-    })?;
+    let output =
+        crate::child::run(command, limit, &report, &|| false).map_err(|err| match err.kind() {
+            std::io::ErrorKind::TimedOut => format!("ffmpeg failed at '{what}': {err}"),
+            _ => format!("could not start ffmpeg ({what}): {err}"),
+        })?;
     if output.status.success() {
         return Ok(());
     }
@@ -721,18 +747,30 @@ pub fn probe_duration(path: &Path) -> Result<Option<u64>, String> {
 /// ffprobe on a clip file: read only as what [`clip_input`] lets in, since a
 /// clip may come from a friend, and within [`crate::child::PROBE`].
 fn probe(program: Command, entries: &[&str], path: &Path) -> std::io::Result<std::process::Output> {
-    crate::child::output(&mut probe_command(program, entries, path), crate::child::PROBE)
+    crate::child::output(
+        &mut probe_command(program, entries, path),
+        crate::child::PROBE,
+    )
 }
 
 fn probe_command(mut program: Command, entries: &[&str], path: &Path) -> Command {
-    program.args(clip_input()).args(["-v", "error"]).args(entries).arg(path);
+    program
+        .args(clip_input())
+        .args(["-v", "error"])
+        .args(entries)
+        .arg(path);
     program
 }
 
 fn probe_duration_by(program: Command, path: &Path) -> Result<Option<u64>, String> {
     let output = probe(
         program,
-        &["-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"],
+        &[
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ],
         path,
     )
     .map_err(|err| format!("could not run ffprobe: {err}"))?;
@@ -747,14 +785,28 @@ fn probe_duration_by(program: Command, path: &Path) -> Result<Option<u64>, Strin
 /// Where a file's video really starts, in µs: a clip's first frame sits a
 /// little after 0 (SAVE-7), and the cam has to follow it.
 pub fn probe_video_start_us(path: &Path) -> Option<i64> {
-    let entries = ["-select_streams", "v:0", "-show_entries", "stream=start_time", "-of", "default=noprint_wrappers=1:nokey=1"];
+    let entries = [
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=start_time",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+    ];
     let output = probe(command("ffprobe"), &entries, path).ok()?;
     parse_start_us(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// A file's first video stream's size.
 pub fn probe_video_size(path: &Path) -> Option<(u32, u32)> {
-    let entries = ["-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"];
+    let entries = [
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0",
+    ];
     let output = probe(command("ffprobe"), &entries, path).ok()?;
     parse_size(&String::from_utf8_lossy(&output.stdout))
 }
@@ -788,7 +840,9 @@ mod tests {
             assert!(formats.contains(&reader), "{reader} missing");
         }
         // The ones that open further files or addresses stay out.
-        for reader in ["hls", "concat", "dash", "tee", "lavfi", "mpegts", "rtsp", "sdp"] {
+        for reader in [
+            "hls", "concat", "dash", "tee", "lavfi", "mpegts", "rtsp", "sdp",
+        ] {
             assert!(!formats.contains(&reader), "{reader} let in");
         }
         assert_eq!(args[2..], ["-protocol_whitelist", "file"]);
@@ -796,16 +850,31 @@ mod tests {
 
     #[test]
     fn a_probe_reads_the_file_only_as_a_clip() {
-        let probe = probe_command(Command::new("ffprobe"), &["-show_entries", "format=duration"], Path::new("in.mp4"));
-        let args: Vec<String> = probe.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let probe = probe_command(
+            Command::new("ffprobe"),
+            &["-show_entries", "format=duration"],
+            Path::new("in.mp4"),
+        );
+        let args: Vec<String> = probe
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(args[..4], clip_input());
         assert_eq!(args.last().map(String::as_str), Some("in.mp4"));
     }
 
     #[test]
     fn ffmpeg_never_waits_for_a_key_press() {
-        for program in [command("ffmpeg"), background("ffmpeg"), live("ffmpeg"), ffmpeg()] {
-            assert_eq!(program.get_args().next().and_then(|a| a.to_str()), Some("-nostdin"));
+        for program in [
+            command("ffmpeg"),
+            background("ffmpeg"),
+            live("ffmpeg"),
+            ffmpeg(),
+        ] {
+            assert_eq!(
+                program.get_args().next().and_then(|a| a.to_str()),
+                Some("-nostdin")
+            );
         }
         // ffprobe knows no `-nostdin`.
         assert_eq!(command("ffprobe").get_args().count(), 0);
@@ -816,12 +885,24 @@ mod tests {
         let dir = Path::new("C:/data/ffmpeg/9.0.1");
         let there = |_: &Path| true;
         let gone = |_: &Path| false;
-        assert_eq!(resolve_tool(Some(dir), "ffmpeg", "ffmpeg.exe", &there), dir.join("ffmpeg.exe"));
+        assert_eq!(
+            resolve_tool(Some(dir), "ffmpeg", "ffmpeg.exe", &there),
+            dir.join("ffmpeg.exe")
+        );
         // Quarantined, or not fetched yet: the bare name, which a release
         // does not start.
-        assert_eq!(resolve_tool(Some(dir), "ffmpeg", "ffmpeg.exe", &gone), PathBuf::from("ffmpeg"));
-        assert_eq!(resolve_tool(None, "ffprobe", "ffprobe.exe", &there), PathBuf::from("ffprobe"));
-        assert!(!crate::child::may_start(&resolve_tool(None, "ffprobe", "ffprobe.exe", &there), false));
+        assert_eq!(
+            resolve_tool(Some(dir), "ffmpeg", "ffmpeg.exe", &gone),
+            PathBuf::from("ffmpeg")
+        );
+        assert_eq!(
+            resolve_tool(None, "ffprobe", "ffprobe.exe", &there),
+            PathBuf::from("ffprobe")
+        );
+        assert!(!crate::child::may_start(
+            &resolve_tool(None, "ffprobe", "ffprobe.exe", &there),
+            false
+        ));
     }
 
     #[test]
@@ -898,9 +979,21 @@ mod tests {
     #[test]
     fn a_single_input_writes_the_clip_alone() {
         let wavs = &two_wavs()[..1];
-        let args = arguments(&raw("C:/c/x.part.h264", "60"), wavs, Path::new("C:/c/x.part.mp4"), &[]);
-        assert_eq!(args.last().map(String::as_str), Some("C:/c/x.part.mp4"), "{args:?}");
-        assert!(args.contains(&"[1:a]volume=1[m0];[m0]anull[aout]".to_string()), "{args:?}");
+        let args = arguments(
+            &raw("C:/c/x.part.h264", "60"),
+            wavs,
+            Path::new("C:/c/x.part.mp4"),
+            &[],
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("C:/c/x.part.mp4"),
+            "{args:?}"
+        );
+        assert!(
+            args.contains(&"[1:a]volume=1[m0];[m0]anull[aout]".to_string()),
+            "{args:?}"
+        );
         assert!(!args.contains(&"s16le".to_string()), "{args:?}");
     }
 
@@ -914,7 +1007,11 @@ mod tests {
             Path::new("C:/c/x.part.mp4"),
             &two_stems(),
         );
-        assert_eq!(args.iter().filter(|a| *a == "-avoid_negative_ts").count(), 0, "{args:?}");
+        assert_eq!(
+            args.iter().filter(|a| *a == "-avoid_negative_ts").count(),
+            0,
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -934,8 +1031,17 @@ mod tests {
     #[test]
     fn a_stream_without_losses_plays_at_the_configured_rate() {
         // 1800 frames at 60 fps, timestamps 0 … 29.983 s.
-        let timing = timing(1800, span_of(0, 1799 * 1_000_000 / 60, 60), Some(16_667), 60);
-        assert!(timing.span_us.abs_diff(30_000_000) < 100, "{}", timing.span_us);
+        let timing = timing(
+            1800,
+            span_of(0, 1799 * 1_000_000 / 60, 60),
+            Some(16_667),
+            60,
+        );
+        assert!(
+            timing.span_us.abs_diff(30_000_000) < 100,
+            "{}",
+            timing.span_us
+        );
         let rate = match timing.rate.split_once('/') {
             Some((a, b)) => a.parse::<f64>().unwrap() / b.parse::<f64>().unwrap(),
             None => timing.rate.parse::<f64>().unwrap(),
@@ -975,7 +1081,10 @@ mod tests {
     #[test]
     fn a_folder_without_a_largest_step_keeps_the_old_rule() {
         assert_eq!(timing(1080, Some(30_000_000), None, 60).rate, "60");
-        assert_eq!(timing(1500, Some(30_000_000), None, 60).rate, "1500000000/30000000");
+        assert_eq!(
+            timing(1500, Some(30_000_000), None, 60).rate,
+            "1500000000/30000000"
+        );
     }
 
     /// BUF-6: a snapshot that can carry its timestamps does, including a 3 s hang,
@@ -983,22 +1092,37 @@ mod tests {
     #[test]
     fn an_ordinary_snapshot_keeps_its_timestamps() {
         let limit = jump_limit_us(2); // 6 s
-        assert!(keeps_timestamps(&[0, 16_666, 33_333, 1_033_333], 1_000_000, limit));
+        assert!(keeps_timestamps(
+            &[0, 16_666, 33_333, 1_033_333],
+            1_000_000,
+            limit
+        ));
         assert!(keeps_timestamps(&[0, 16_666, 3_016_666], 3_000_000, limit));
     }
 
     /// Review Focus: B-frames arrive out of order and keep the raw path.
     #[test]
     fn reordered_frames_keep_the_raw_path() {
-        assert!(!keeps_timestamps(&[0, 50_000, 16_666, 33_333], 33_334, jump_limit_us(2)));
+        assert!(!keeps_timestamps(
+            &[0, 50_000, 16_666, 33_333],
+            33_334,
+            jump_limit_us(2)
+        ));
     }
 
     /// Review Focus: a sleep inside a snapshot keeps today's path, until BUF-5
     /// (stage 2) cuts such snapshots.
     #[test]
     fn a_snapshot_across_a_discontinuity_keeps_the_raw_path() {
-        assert!(!keeps_timestamps(&[0, 16_666, 600_000_000], 599_983_334, jump_limit_us(2)));
-        assert_eq!((jump_limit_us(0), jump_limit_us(4)), (1_000_000, 12_000_000));
+        assert!(!keeps_timestamps(
+            &[0, 16_666, 600_000_000],
+            599_983_334,
+            jump_limit_us(2)
+        ));
+        assert_eq!(
+            (jump_limit_us(0), jump_limit_us(4)),
+            (1_000_000, 12_000_000)
+        );
     }
 
     /// BUF-6: a timestamped input is read as MPEG-TS, with no rate.
@@ -1006,7 +1130,9 @@ mod tests {
     fn a_timestamped_input_is_read_without_a_rate() {
         let input = VideoInput::Timestamped("C:/c/x.part.ts".into());
         let args = arguments(&input, &[], Path::new("C:/c/x.part.mp4"), &[]);
-        assert!(args.windows(4).any(|w| w == ["-f", "mpegts", "-i", "C:/c/x.part.ts"]));
+        assert!(args
+            .windows(4)
+            .any(|w| w == ["-f", "mpegts", "-i", "C:/c/x.part.ts"]));
         assert!(!args.iter().any(|a| a == "-r"));
     }
 

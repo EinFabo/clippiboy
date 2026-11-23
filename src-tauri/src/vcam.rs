@@ -1,7 +1,6 @@
 //! ClippiBoy Camera, the producer side: the shared memory the media source
 //! reads, the virtual camera object, and whether an app is watching it.
 
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -13,7 +12,10 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum VcamStatus {
     NotInstalled,
-    NeedsUpdate { installed: String, bundled: String },
+    NeedsUpdate {
+        installed: String,
+        bundled: String,
+    },
     Off,
     /// Listed for other apps, none watching.
     Ready,
@@ -23,7 +25,11 @@ pub enum VcamStatus {
 
 /// `a` is an older version than `b`, number by number.
 pub fn older(a: &str, b: &str) -> bool {
-    let parts = |v: &str| v.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    let parts = |v: &str| {
+        v.split('.')
+            .map(|p| p.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
     parts(a) < parts(b)
 }
 
@@ -59,10 +65,21 @@ pub fn someone_streams(report: &[(String, Vec<(u32, bool)>)], link: &str, me: u3
         .any(|(pid, streaming)| *streaming && *pid != me)
 }
 
-pub fn status_for(installed: Option<&str>, bundled: &str, switched_on: bool, running: bool, watching: bool) -> VcamStatus {
-    let Some(installed) = installed else { return VcamStatus::NotInstalled };
+pub fn status_for(
+    installed: Option<&str>,
+    bundled: &str,
+    switched_on: bool,
+    running: bool,
+    watching: bool,
+) -> VcamStatus {
+    let Some(installed) = installed else {
+        return VcamStatus::NotInstalled;
+    };
     if older(installed, bundled) {
-        return VcamStatus::NeedsUpdate { installed: installed.into(), bundled: bundled.into() };
+        return VcamStatus::NeedsUpdate {
+            installed: installed.into(),
+            bundled: bundled.into(),
+        };
     }
     match (switched_on && running, watching) {
         (false, _) => VcamStatus::Off,
@@ -182,7 +199,8 @@ impl Vcam {
     pub fn apply(&self, on: bool, shared: &crate::camtrack::CamShared) {
         #[cfg(windows)]
         {
-            let feeding = on && !needs_setup(self.installed().as_deref(), vcam_protocol::DLL_VERSION);
+            let feeding =
+                on && !needs_setup(self.installed().as_deref(), vcam_protocol::DLL_VERSION);
             let mut running = self.running.lock();
             match change(feeding, running.is_some()) {
                 Change::Start => {
@@ -235,7 +253,11 @@ impl Vcam {
     fn to_placeholder(shared: &crate::camtrack::CamShared) {
         shared.vcam_on.store(false, Ordering::SeqCst);
         if let Some(writer) = shared.vcam.lock().as_ref() {
-            writer.set_state(vcam_protocol::State::Idle, vcam_protocol::IdleReason::CamOff, crate::audio::capture::now_100ns());
+            writer.set_state(
+                vcam_protocol::State::Idle,
+                vcam_protocol::IdleReason::CamOff,
+                crate::audio::capture::now_100ns(),
+            );
         }
     }
 
@@ -282,15 +304,26 @@ pub fn setup_exe(resource_dir: Option<std::path::PathBuf>) -> Option<std::path::
     const NAME: &str = "clippiboy-vcam-setup.exe";
     let bundled = resource_dir.map(|dir| dir.join("resources").join(NAME));
     #[cfg(debug_assertions)]
-    let dev = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vcam/target/release").join(NAME));
+    let dev = Some(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../vcam/target/release")
+            .join(NAME),
+    );
     #[cfg(not(debug_assertions))]
     let dev: Option<std::path::PathBuf> = None;
-    [bundled, dev].into_iter().flatten().find(|path| path.is_file())
+    [bundled, dev]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
 }
 
 /// Runs the setup with "runas": Windows asks once, then the helper does its
 /// work and ends. Blocks until it has.
-pub fn run_setup(exe: &std::path::Path, verb: &str, owner: Option<isize>) -> Result<SetupDone, String> {
+pub fn run_setup(
+    exe: &std::path::Path,
+    verb: &str,
+    owner: Option<isize>,
+) -> Result<SetupDone, String> {
     #[cfg(windows)]
     {
         setup_outcome(win::run_elevated(exe, verb, owner)?)
@@ -307,18 +340,30 @@ mod win {
     use windows::core::{implement, Interface, Result as WinResult, HSTRING, PCWSTR};
     use windows::Win32::Foundation::{BOOL, E_NOTIMPL, INVALID_HANDLE_VALUE};
     use windows::Win32::Media::MediaFoundation::*;
-    use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-    use windows::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE};
+    use windows::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+    };
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
     use crate::gpu::SendPtr;
 
     /// The helper elevated; the exit code, or why it never ran.
-    pub fn run_elevated(exe: &std::path::Path, verb: &str, owner: Option<isize>) -> Result<u32, String> {
+    pub fn run_elevated(
+        exe: &std::path::Path,
+        verb: &str,
+        owner: Option<isize>,
+    ) -> Result<u32, String> {
         use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_OBJECT_0};
-        use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
-        use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, WaitForSingleObject, INFINITE,
+        };
+        use windows::Win32::UI::Shell::{
+            ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+        };
         use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
         let file = HSTRING::from(exe.as_os_str());
@@ -362,7 +407,15 @@ mod win {
         let mut buf = [0u16; 64];
         let mut size = (buf.len() * 2) as u32;
         let found = unsafe {
-            RegGetValueW(HKEY_LOCAL_MACHINE, &key, &name, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut size))
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                &key,
+                &name,
+                RRF_RT_REG_SZ,
+                None,
+                Some(buf.as_mut_ptr() as *mut _),
+                Some(&mut size),
+            )
         };
         if found.is_err() {
             return None;
@@ -399,13 +452,27 @@ mod win {
             )
             .map_err(|err| log::warn!("ClippiBoy Camera's memory: {err}"))
             .ok()?;
-            let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, vcam_protocol::TOTAL_BYTES);
+            let view = MapViewOfFile(
+                handle,
+                FILE_MAP_ALL_ACCESS,
+                0,
+                0,
+                vcam_protocol::TOTAL_BYTES,
+            );
             // The handle stays open with the app; the view keeps the section.
-            let writer = vcam_protocol::Writer::new(view.Value as *mut u8, vcam_protocol::TOTAL_BYTES)?;
+            let writer =
+                vcam_protocol::Writer::new(view.Value as *mut u8, vcam_protocol::TOTAL_BYTES)?;
             let mut session = 0u32;
-            let _ = windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(std::process::id(), &mut session);
+            let _ = windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(
+                std::process::id(),
+                &mut session,
+            );
             writer.init(std::process::id(), session);
-            writer.set_state(vcam_protocol::State::Idle, vcam_protocol::IdleReason::CamOff, crate::audio::capture::now_100ns());
+            writer.set_state(
+                vcam_protocol::State::Idle,
+                vcam_protocol::IdleReason::CamOff,
+                crate::audio::capture::now_100ns(),
+            );
             Some(writer)
         }
     }
@@ -426,8 +493,14 @@ mod win {
             // The documentation says only that the callback "may be invoked
             // with an IMFMediaEvent"; it is looked for in both places.
             let event = result.and_then(|r| {
-                let state = unsafe { r.GetState() }.ok().and_then(|s| s.cast::<IMFMediaEvent>().ok());
-                state.or_else(|| unsafe { r.GetObject() }.ok().and_then(|o| o.cast::<IMFMediaEvent>().ok()))
+                let state = unsafe { r.GetState() }
+                    .ok()
+                    .and_then(|s| s.cast::<IMFMediaEvent>().ok());
+                state.or_else(|| {
+                    unsafe { r.GetObject() }
+                        .ok()
+                        .and_then(|o| o.cast::<IMFMediaEvent>().ok())
+                })
             });
             let Some(event) = event else {
                 log::info!("ClippiBoy Camera: a notice without an event");
@@ -466,7 +539,9 @@ mod win {
             let mut entries = Vec::new();
             unsafe {
                 for i in 0..report.GetCount().unwrap_or(0) {
-                    let Ok(activity) = report.GetActivityReport(i) else { continue };
+                    let Ok(activity) = report.GetActivityReport(i) else {
+                        continue;
+                    };
                     let mut buf = [0u16; 512];
                     let mut written = 0u32;
                     if activity.GetSymbolicLink(&mut buf, &mut written).is_err() {
@@ -475,12 +550,21 @@ mod win {
                     let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
                     let processes = (0..activity.GetProcessCount().unwrap_or(0))
                         .filter_map(|j| activity.GetProcessActivity(j).ok())
-                        .filter_map(|p| Some((p.GetProcessId().ok()?, p.GetStreamingState().ok()?.as_bool())))
+                        .filter_map(|p| {
+                            Some((
+                                p.GetProcessId().ok()?,
+                                p.GetStreamingState().ok()?.as_bool(),
+                            ))
+                        })
                         .collect();
                     entries.push((String::from_utf16_lossy(&buf[..end]), processes));
                 }
             }
-            (self.on_active)(super::someone_streams(&entries, &self.link, std::process::id()));
+            (self.on_active)(super::someone_streams(
+                &entries,
+                &self.link,
+                std::process::id(),
+            ));
             Ok(())
         }
     }
@@ -489,7 +573,10 @@ mod win {
     /// stays in Windows' camera list across restarts and reboots until it is
     /// removed. The same parameters open the same listing again.
     unsafe fn listing() -> Result<IMFVirtualCamera, String> {
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
         crate::mft::startup()?;
         let name = HSTRING::from(vcam_protocol::FRIENDLY_NAME);
         let clsid = HSTRING::from(vcam_protocol::CLSID);
@@ -526,34 +613,61 @@ mod win {
             let on_active: OnActive = std::sync::Arc::new(on_active);
             unsafe {
                 let camera = listing()?;
-                let events: IMFAsyncCallback = Events { on_active: on_active.clone() }.into();
-                camera.Start(&events).map_err(|err| format!("Start: {err}"))?;
+                let events: IMFAsyncCallback = Events {
+                    on_active: on_active.clone(),
+                }
+                .into();
+                camera
+                    .Start(&events)
+                    .map_err(|err| format!("Start: {err}"))?;
                 log::info!("ClippiBoy Camera is listed for other apps");
                 let monitor = Self::watch(&camera, on_active);
-                Ok(Self { camera: SendPtr(camera), monitor })
+                Ok(Self {
+                    camera: SendPtr(camera),
+                    monitor,
+                })
             }
         }
 
         /// The activity monitor on the link Windows gave the camera; without
         /// it, "watching" stays unknown and frames still go out.
-        unsafe fn watch(camera: &IMFVirtualCamera, on_active: OnActive) -> Option<SendPtr<IMFSensorActivityMonitor>> {
+        unsafe fn watch(
+            camera: &IMFVirtualCamera,
+            on_active: OnActive,
+        ) -> Option<SendPtr<IMFSensorActivityMonitor>> {
             let mut link = windows::core::PWSTR::null();
             let mut len = 0u32;
-            camera.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &mut link, &mut len).ok()?;
+            camera
+                .GetAllocatedString(
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                    &mut link,
+                    &mut len,
+                )
+                .ok()?;
             let text = link.to_string().unwrap_or_default();
             windows::Win32::System::Com::CoTaskMemFree(Some(link.0 as *const _));
-            let callback: IMFSensorActivitiesReportCallback = Activity { link: text, on_active }.into();
+            let callback: IMFSensorActivitiesReportCallback = Activity {
+                link: text,
+                on_active,
+            }
+            .into();
             let monitor = MFCreateSensorActivityMonitor(&callback)
                 .map_err(|err| log::warn!("ClippiBoy Camera's activity monitor: {err}"))
                 .ok()?;
-            monitor.Start().map_err(|err| log::warn!("ClippiBoy Camera's activity monitor: {err}")).ok()?;
+            monitor
+                .Start()
+                .map_err(|err| log::warn!("ClippiBoy Camera's activity monitor: {err}"))
+                .ok()?;
             Some(SendPtr(monitor))
         }
 
         /// Lets go of the camera; it stays listed and shows the placeholder.
         pub fn shutdown(self) {
             unsafe {
-                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                let _ = windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_MULTITHREADED,
+                );
                 if let Some(monitor) = &self.monitor {
                     let _ = monitor.Stop();
                 }
@@ -565,13 +679,18 @@ mod win {
         /// Takes the camera off the list for good.
         pub fn remove(self) {
             unsafe {
-                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                let _ = windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_MULTITHREADED,
+                );
                 if let Some(monitor) = &self.monitor {
                     let _ = monitor.Stop();
                 }
                 match self.camera.Remove() {
                     Ok(()) => log::info!("ClippiBoy Camera taken off the list"),
-                    Err(err) => log::warn!("ClippiBoy Camera could not be taken off the list: {err}"),
+                    Err(err) => {
+                        log::warn!("ClippiBoy Camera could not be taken off the list: {err}")
+                    }
                 }
                 let _ = self.camera.Shutdown();
             }
@@ -604,17 +723,38 @@ mod tests {
 
     #[test]
     fn the_status_says_what_the_switch_can_do() {
-        assert_eq!(status_for(None, "1.0.0", false, false, false), VcamStatus::NotInstalled);
-        assert_eq!(status_for(None, "1.0.0", true, false, false), VcamStatus::NotInstalled);
+        assert_eq!(
+            status_for(None, "1.0.0", false, false, false),
+            VcamStatus::NotInstalled
+        );
+        assert_eq!(
+            status_for(None, "1.0.0", true, false, false),
+            VcamStatus::NotInstalled
+        );
         assert_eq!(
             status_for(Some("0.9.0"), "1.0.0", true, false, false),
-            VcamStatus::NeedsUpdate { installed: "0.9.0".into(), bundled: "1.0.0".into() }
+            VcamStatus::NeedsUpdate {
+                installed: "0.9.0".into(),
+                bundled: "1.0.0".into()
+            }
         );
-        assert_eq!(status_for(Some("1.0.0"), "1.0.0", false, false, false), VcamStatus::Off);
-        assert_eq!(status_for(Some("1.0.0"), "1.0.0", true, true, false), VcamStatus::Ready);
-        assert_eq!(status_for(Some("1.0.0"), "1.0.0", true, true, true), VcamStatus::Live);
+        assert_eq!(
+            status_for(Some("1.0.0"), "1.0.0", false, false, false),
+            VcamStatus::Off
+        );
+        assert_eq!(
+            status_for(Some("1.0.0"), "1.0.0", true, true, false),
+            VcamStatus::Ready
+        );
+        assert_eq!(
+            status_for(Some("1.0.0"), "1.0.0", true, true, true),
+            VcamStatus::Live
+        );
         // A newer DLL than this app carries is fine: the protocol keeps its major.
-        assert_eq!(status_for(Some("1.2.0"), "1.0.0", true, true, false), VcamStatus::Ready);
+        assert_eq!(
+            status_for(Some("1.2.0"), "1.0.0", true, true, false),
+            VcamStatus::Ready
+        );
     }
 
     #[test]
@@ -639,13 +779,33 @@ mod tests {
         let other = r"\\?\usb#vid_046d";
         let me = 100;
         let report = |entries: Vec<(&str, Vec<(u32, bool)>)>| {
-            entries.into_iter().map(|(l, p)| (l.to_string(), p)).collect::<Vec<_>>()
+            entries
+                .into_iter()
+                .map(|(l, p)| (l.to_string(), p))
+                .collect::<Vec<_>>()
         };
-        assert!(someone_streams(&report(vec![(ours, vec![(7, true)])]), ours, me));
-        assert!(someone_streams(&report(vec![(&ours.to_uppercase(), vec![(7, true)])]), ours, me));
-        assert!(!someone_streams(&report(vec![(ours, vec![(7, false)])]), ours, me), "opened, not streaming");
-        assert!(!someone_streams(&report(vec![(other, vec![(7, true)])]), ours, me), "another camera");
-        assert!(!someone_streams(&report(vec![(ours, vec![(me, true)])]), ours, me), "ClippiBoy itself");
+        assert!(someone_streams(
+            &report(vec![(ours, vec![(7, true)])]),
+            ours,
+            me
+        ));
+        assert!(someone_streams(
+            &report(vec![(&ours.to_uppercase(), vec![(7, true)])]),
+            ours,
+            me
+        ));
+        assert!(
+            !someone_streams(&report(vec![(ours, vec![(7, false)])]), ours, me),
+            "opened, not streaming"
+        );
+        assert!(
+            !someone_streams(&report(vec![(other, vec![(7, true)])]), ours, me),
+            "another camera"
+        );
+        assert!(
+            !someone_streams(&report(vec![(ours, vec![(me, true)])]), ours, me),
+            "ClippiBoy itself"
+        );
         assert!(!someone_streams(&[], ours, me));
     }
 

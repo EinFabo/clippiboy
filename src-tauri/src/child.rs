@@ -162,7 +162,9 @@ impl Watchdog {
     pub fn expired(&self, at: Duration) -> bool {
         match self.limit {
             Limit::Total(limit) => at.saturating_sub(self.asleep) >= limit,
-            Limit::Stall(limit) => self.still_for(at) >= self.allowance(limit) || self.past_backstop(at),
+            Limit::Stall(limit) => {
+                self.still_for(at) >= self.allowance(limit) || self.past_backstop(at)
+            }
         }
     }
 
@@ -179,7 +181,9 @@ impl Watchdog {
     /// How long the run may stand still: `stall`, or for a big output the
     /// time a slow drive needs to read it through and write it again.
     fn allowance(&self, stall: Duration) -> Duration {
-        stall.max(Duration::from_secs(self.size.saturating_mul(2) / SLOW_DRIVE_BYTES_PER_SEC))
+        stall.max(Duration::from_secs(
+            self.size.saturating_mul(2) / SLOW_DRIVE_BYTES_PER_SEC,
+        ))
     }
 }
 
@@ -208,7 +212,10 @@ pub fn may_start(program: &Path, search_allowed: bool) -> bool {
 /// long as its caller wants (a camera); everything else goes through [`run`].
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
     if !may_start(Path::new(command.get_program()), cfg!(debug_assertions)) {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "ffmpeg is not ready yet"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "ffmpeg is not ready yet",
+        ));
     }
     #[allow(unused_mut)]
     let mut child = command.spawn()?;
@@ -246,7 +253,12 @@ pub fn run(
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
     let started = Instant::now();
-    let mut child = spawn(command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+    let mut child = spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?;
 
     // Both pipes drained on threads of their own: a full one stalls ffmpeg.
     // What came through them is counted, to tell it from the run's own I/O.
@@ -341,9 +353,14 @@ pub fn run(
                 Limit::Stall(_) if watchdog.past_backstop(at) => {
                     format!("ran for {} hours", BACKSTOP.as_secs() / 3600)
                 }
-                Limit::Stall(_) => format!("stood still for {} s", watchdog.still_for(at).as_secs()),
+                Limit::Stall(_) => {
+                    format!("stood still for {} s", watchdog.still_for(at).as_secs())
+                }
             };
-            break Err(io::Error::new(io::ErrorKind::TimedOut, format!("{name} {words} and was ended")));
+            break Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{name} {words} and was ended"),
+            ));
         }
     };
     if ended.is_err() {
@@ -353,7 +370,11 @@ pub fn run(
     // The pipes are closed now that the program is gone.
     let stdout = reader.join().unwrap_or_default();
     let stderr = errors.join().unwrap_or_default();
-    Ok(Output { status: ended?, stdout, stderr })
+    Ok(Output {
+        status: ended?,
+        stdout,
+        stderr,
+    })
 }
 
 /// How much `child` has read and written so far, pipes included.
@@ -367,7 +388,11 @@ fn io_bytes(child: &Child) -> Option<u64> {
     // SAFETY: the process handle is open while `child` is borrowed, and the
     // counters are written into a struct of the right type.
     unsafe { GetProcessIoCounters(HANDLE(child.as_raw_handle()), &mut counters) }.ok()?;
-    Some(counters.ReadTransferCount.saturating_add(counters.WriteTransferCount))
+    Some(
+        counters
+            .ReadTransferCount
+            .saturating_add(counters.WriteTransferCount),
+    )
 }
 
 #[cfg(not(windows))]
@@ -393,8 +418,9 @@ mod job {
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
     /// The job's handle, kept as a number (a raw handle is not `Sync`).
@@ -452,7 +478,9 @@ mod job {
         if matches!(child.try_wait(), Ok(Some(_))) {
             return;
         }
-        let mut warned = WARNED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut warned = WARNED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !warned.contains(&err.code().0) {
             warned.push(err.code().0);
             log::warn!("ffmpeg not tied to the app, it may outlive it: {err}");
@@ -519,7 +547,10 @@ mod tests {
     #[test]
     fn the_same_time_again_is_no_progress() {
         let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
-        assert!(watchdog.progress(S(5), 0), "the first report is a sign of life");
+        assert!(
+            watchdog.progress(S(5), 0),
+            "the first report is a sign of life"
+        );
         assert!(watchdog.progress(S(10), 3_000_000));
         // A stuck encoder repeats its last time twice a second.
         for second in 11..200 {
@@ -618,7 +649,10 @@ mod tests {
         assert_eq!(deadline_for(10_000), Limit::Total(S(120)));
         assert_eq!(deadline_for(60_000), Limit::Total(S(300)));
         assert_eq!(deadline_for(3_600_000), Limit::Total(S(18_000)));
-        assert_eq!(deadline_for(u64::MAX), Limit::Total(Duration::from_millis(u64::MAX)));
+        assert_eq!(
+            deadline_for(u64::MAX),
+            Limit::Total(Duration::from_millis(u64::MAX))
+        );
     }
 
     #[test]
@@ -637,7 +671,11 @@ mod tests {
 
     #[test]
     fn a_release_starts_tools_only_by_their_full_path() {
-        let full = if cfg!(windows) { "C:\\data\\ffmpeg\\9.0.1\\ffmpeg.exe" } else { "/data/ffmpeg/ffmpeg" };
+        let full = if cfg!(windows) {
+            "C:\\data\\ffmpeg\\9.0.1\\ffmpeg.exe"
+        } else {
+            "/data/ffmpeg/ffmpeg"
+        };
         assert!(may_start(Path::new(full), false));
         assert!(!may_start(Path::new("ffmpeg"), false));
         assert!(!may_start(Path::new("ffmpeg.exe"), false));
@@ -705,9 +743,18 @@ mod tests {
     #[test]
     #[ignore]
     fn the_real_ffmpeg_moves_on_or_is_ended() {
-        let Some(local) = std::env::var_os("LOCALAPPDATA") else { return };
-        let tools = std::path::PathBuf::from(local).join("gg.clippiboy.app").join("ffmpeg").join("9.0.1");
-        assert!(tools.join("ffmpeg.exe").is_file(), "no ffmpeg in {}", tools.display());
+        let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+            return;
+        };
+        let tools = std::path::PathBuf::from(local)
+            .join("gg.clippiboy.app")
+            .join("ffmpeg")
+            .join("9.0.1");
+        assert!(
+            tools.join("ffmpeg.exe").is_file(),
+            "no ffmpeg in {}",
+            tools.display()
+        );
         crate::muxer::set_tool_dir(tools);
         let dir = std::env::temp_dir().join(format!("clippiboy-child-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -719,25 +766,73 @@ mod tests {
         encode
             .args(["-y", "-hide_banner", "-loglevel", "error"])
             .args(PROGRESS)
-            .args(["-f", "lavfi", "-i", "testsrc=size=640x360:rate=30", "-f", "lavfi", "-i", "sine"])
-            .args(["-t", "10", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-c:a", "aac", "-movflags", "+faststart"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine",
+            ])
+            .args([
+                "-t",
+                "10",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-qp",
+                "0",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+            ])
             .arg(&clip);
-        let done = run(&mut encode, MOVING, &|us| {
-            reports.set(reports.get() + 1);
-            last.set(us);
-        }, &|| false)
+        let done = run(
+            &mut encode,
+            MOVING,
+            &|us| {
+                reports.set(reports.get() + 1);
+                last.set(us);
+            },
+            &|| false,
+        )
         .unwrap();
-        assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
-        assert!(reports.get() > 0 && last.get() >= 9_000_000, "{} reports, last {}", reports.get(), last.get());
-        assert_eq!(crate::muxer::probe_duration(&clip).unwrap().map(|ms| ms / 100), Some(100));
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        assert!(
+            reports.get() > 0 && last.get() >= 9_000_000,
+            "{} reports, last {}",
+            reports.get(),
+            last.get()
+        );
+        assert_eq!(
+            crate::muxer::probe_duration(&clip)
+                .unwrap()
+                .map(|ms| ms / 100),
+            Some(100)
+        );
 
         // No progress reported, but the file read at its own pace for ten
         // seconds: alive all along under a two-second stall.
         let started = Instant::now();
         let mut reading = crate::muxer::ffmpeg();
-        reading.args(["-hide_banner", "-loglevel", "error", "-re", "-i"]).arg(&clip).args(["-c", "copy", "-f", "null", "-"]);
+        reading
+            .args(["-hide_banner", "-loglevel", "error", "-re", "-i"])
+            .arg(&clip)
+            .args(["-c", "copy", "-f", "null", "-"]);
         let done = output(&mut reading, Limit::Stall(S(2))).unwrap();
-        assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
         assert!(started.elapsed() >= S(9), "{:?}", started.elapsed());
 
         // Endless input, nothing let through to the output: it stands still.
@@ -746,7 +841,18 @@ mod tests {
         stuck
             .args(["-hide_banner", "-loglevel", "error"])
             .args(PROGRESS)
-            .args(["-re", "-f", "lavfi", "-i", "testsrc=rate=30", "-vf", "select=0", "-f", "null", "-"]);
+            .args([
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=rate=30",
+                "-vf",
+                "select=0",
+                "-f",
+                "null",
+                "-",
+            ]);
         let err = output(&mut stuck, Limit::Stall(S(3))).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
         assert!(started.elapsed() < S(8), "{:?}", started.elapsed());

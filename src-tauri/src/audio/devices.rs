@@ -10,12 +10,8 @@ mod win {
     use super::*;
     use std::collections::HashMap;
     use windows::core::Interface;
-    use windows::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::Media::Audio::{
         eCapture, eMultimedia, eRender, AudioSessionStateActive, EDataFlow, IAudioSessionControl2,
         IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
@@ -23,6 +19,10 @@ mod win {
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+    };
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
     use windows::Win32::System::Threading::{
@@ -113,10 +113,13 @@ mod win {
     /// child separately records the child twice, and an application that holds
     /// several sessions gets torn apart across sources.
     pub fn process_tree() -> HashMap<u32, (u32, String)> {
-        static CREATED: std::sync::Mutex<Option<crate::audio::CreatedCache>> = std::sync::Mutex::new(None);
+        static CREATED: std::sync::Mutex<Option<crate::audio::CreatedCache>> =
+            std::sync::Mutex::new(None);
         let mut out = process_snapshot();
         let created = {
-            let mut cache = CREATED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut cache = CREATED
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             crate::audio::creation_times(&out, cache.get_or_insert_with(HashMap::new), created_at)
         };
         crate::audio::cut_reused_parents(&mut out, &created);
@@ -165,8 +168,11 @@ mod win {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
             let mut created = FILETIME::default();
-            let (mut exited, mut kernel, mut user) =
-                (FILETIME::default(), FILETIME::default(), FILETIME::default());
+            let (mut exited, mut kernel, mut user) = (
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+            );
             let read = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
             let _ = CloseHandle(handle);
             read.ok()?;
@@ -409,7 +415,6 @@ pub fn process_snapshot() -> std::collections::HashMap<u32, (u32, String)> {
 pub fn process_snapshot() -> std::collections::HashMap<u32, (u32, String)> {
     std::collections::HashMap::new()
 }
-
 
 #[cfg(windows)]
 pub fn list_processes() -> Vec<AudioProcess> {

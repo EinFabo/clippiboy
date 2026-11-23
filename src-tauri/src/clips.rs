@@ -18,7 +18,8 @@ pub struct Library {
 pub static STOP_PASSES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Is a start-up pass still working through the library?
-pub static PASSES_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static PASSES_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub fn passes_stopped() -> bool {
     STOP_PASSES.load(std::sync::atomic::Ordering::SeqCst)
@@ -37,7 +38,9 @@ pub fn with_library<R>(
 /// One clip's row as it is now — the list a pass started from may be minutes
 /// old by the time a slow disk gets to this clip.
 pub fn fresh(library: &parking_lot::Mutex<Option<Library>>, id: &str) -> Option<Clip> {
-    with_library(library, |library| library.get(id)).and_then(Result::ok).flatten()
+    with_library(library, |library| library.get(id))
+        .and_then(Result::ok)
+        .flatten()
 }
 
 impl Library {
@@ -143,7 +146,11 @@ impl Library {
             .collect::<rusqlite::Result<_>>()?;
         // A column `Clip` does not carry would go with the old row too.
         let kept_since: Option<i64> = tx
-            .query_row("SELECT kept_since FROM clips WHERE id = ?1", params![clip.id], |row| row.get(0))
+            .query_row(
+                "SELECT kept_since FROM clips WHERE id = ?1",
+                params![clip.id],
+                |row| row.get(0),
+            )
             .optional()?
             .flatten();
         put_row(&tx, "INSERT OR REPLACE", clip)?;
@@ -154,14 +161,19 @@ impl Library {
             )?;
         }
         if kept_since.is_some() {
-            tx.execute("UPDATE clips SET kept_since = ?2 WHERE id = ?1", params![clip.id, kept_since])?;
+            tx.execute(
+                "UPDATE clips SET kept_since = ?2 WHERE id = ?1",
+                params![clip.id, kept_since],
+            )?;
         }
         tx.commit()
     }
 
     /// The clips that came back from Recently deleted, and when (Unix ms).
     pub fn kept_since(&self) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-        let mut stmt = self.conn.prepare("SELECT id, kept_since FROM clips WHERE kept_since IS NOT NULL")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, kept_since FROM clips WHERE kept_since IS NOT NULL")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
     }
@@ -170,15 +182,17 @@ impl Library {
     /// to a clip from one a save left behind (`sweep.rs`). The clips in
     /// Recently deleted count too: their stores wait for a restore.
     pub fn ids(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM clips UNION SELECT id FROM trash")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM clips UNION SELECT id FROM trash")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect()
     }
 
     pub fn list(&self) -> rusqlite::Result<Vec<Clip>> {
-        let mut stmt = self.conn.prepare(
-            &format!("{CLIP_COLUMNS} ORDER BY created_at DESC"),
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{CLIP_COLUMNS} ORDER BY created_at DESC"))?;
         let rows = stmt.query_map([], row_to_clip)?;
         let mut clips = rows.collect::<rusqlite::Result<Vec<Clip>>>()?;
 
@@ -203,11 +217,15 @@ impl Library {
     /// One clip by id: its row and its tags, nothing else. Same result as the
     /// entry `list` returns for it.
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<Clip>> {
-        let mut stmt = self.conn.prepare(&format!("{CLIP_COLUMNS} WHERE id = ?1"))?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{CLIP_COLUMNS} WHERE id = ?1"))?;
         let Some(mut clip) = stmt.query_row([id], row_to_clip).optional()? else {
             return Ok(None);
         };
-        let mut stmt = self.conn.prepare("SELECT tag FROM tags WHERE clip_id = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tag FROM tags WHERE clip_id = ?1")?;
         let mut own = stmt
             .query_map([id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
@@ -254,7 +272,10 @@ impl Library {
             let rows = stmt.query_map(params![game], |r| r.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
-        tx.execute("UPDATE clips SET game = NULL WHERE game = ?1", params![game])?;
+        tx.execute(
+            "UPDATE clips SET game = NULL WHERE game = ?1",
+            params![game],
+        )?;
         tx.commit()?;
         Ok(self
             .list()?
@@ -349,7 +370,11 @@ impl Library {
     }
 
     /// The clip's cam; `None` takes it off the row.
-    pub fn set_facecam(&self, id: &str, facecam: Option<&crate::model::ClipFacecam>) -> rusqlite::Result<()> {
+    pub fn set_facecam(
+        &self,
+        id: &str,
+        facecam: Option<&crate::model::ClipFacecam>,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET facecam = ?2 WHERE id = ?1",
             params![id, encode_facecam(facecam)],
@@ -437,7 +462,10 @@ impl Library {
                 params![clip.id, tag],
             )?;
         }
-        tx.execute("UPDATE clips SET kept_since = ?2 WHERE id = ?1", params![clip.id, now])?;
+        tx.execute(
+            "UPDATE clips SET kept_since = ?2 WHERE id = ?1",
+            params![clip.id, now],
+        )?;
         tx.execute("DELETE FROM trash WHERE id = ?1", params![id])?;
         tx.commit()?;
         self.get(id)
@@ -445,7 +473,8 @@ impl Library {
 
     /// Drops a clip from Recently deleted. Its files are the caller's.
     pub fn forget(&self, id: &str) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM trash WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM trash WHERE id = ?1", params![id])?;
         Ok(())
     }
 }
@@ -473,7 +502,9 @@ pub fn from_tag(name: &str) -> String {
 pub fn is_friend_tag(tag: &str) -> bool {
     // Any case: `clean_tags` keeps the first spelling of a tag, so a friend
     // tag can live on as a hand-typed "With Luca".
-    tag.get(..5).is_some_and(|start| start.eq_ignore_ascii_case("with ") || start.eq_ignore_ascii_case("from "))
+    tag.get(..5).is_some_and(|start| {
+        start.eq_ignore_ascii_case("with ") || start.eq_ignore_ascii_case("from ")
+    })
 }
 
 pub fn clean_tags(tags: &[String]) -> Vec<String> {
@@ -608,8 +639,9 @@ fn put_row(conn: &Connection, verb: &str, clip: &Clip) -> rusqlite::Result<()> {
 
 fn row_to_trashed(row: &rusqlite::Row) -> rusqlite::Result<Trashed> {
     let json: String = row.get(0)?;
-    let clip: Clip = serde_json::from_str(&json)
-        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err)))?;
+    let clip: Clip = serde_json::from_str(&json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
     let deleted_at: i64 = row.get(1)?;
     Ok(Trashed {
         clip,
@@ -699,7 +731,11 @@ mod tests {
         let cleared = lib.clear_game("Chrome").unwrap();
         assert_eq!(cleared.len(), 2);
         assert!(cleared.iter().all(|c| c.game.is_none()));
-        assert!(lib.list().unwrap().iter().all(|c| c.game.as_deref() != Some("Chrome")));
+        assert!(lib
+            .list()
+            .unwrap()
+            .iter()
+            .all(|c| c.game.as_deref() != Some("Chrome")));
         assert_eq!(lib.get("c").unwrap().unwrap().game.as_deref(), Some("CS2"));
     }
 
@@ -727,7 +763,10 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         assert!(remove_file_patiently(&file, 1).is_ok());
         assert!(!file.exists());
-        assert!(remove_file_patiently(&file, 1).is_ok(), "already gone is fine");
+        assert!(
+            remove_file_patiently(&file, 1).is_ok(),
+            "already gone is fine"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -747,7 +786,8 @@ mod tests {
         let lib = Library::in_memory().unwrap();
         lib.insert(&clip("a", 1)).unwrap();
         lib.insert(&clip("b", 2)).unwrap();
-        lib.set_tags("a", &["ace".to_string(), "with Mika".to_string()]).unwrap();
+        lib.set_tags("a", &["ace".to_string(), "with Mika".to_string()])
+            .unwrap();
         lib.set_favorite("a", true).unwrap();
         let mut gone = lib.get("a").unwrap().unwrap();
         let from = gone.path.clone();
@@ -778,7 +818,10 @@ mod tests {
         let lib = Library::in_memory().unwrap();
         lib.insert(&clip("a", 1)).unwrap();
         lib.insert(&clip("b", 2)).unwrap();
-        assert!(lib.kept_since().unwrap().is_empty(), "a clip never deleted counts from its creation");
+        assert!(
+            lib.kept_since().unwrap().is_empty(),
+            "a clip never deleted counts from its creation"
+        );
         let gone = lib.get("a").unwrap().unwrap();
         lib.trash(&gone, &gone.path, 10).unwrap();
         lib.restore_at("a", &gone.path, 9_000).unwrap().unwrap();
@@ -803,7 +846,11 @@ mod tests {
 
         assert!(lib.restore("a", &gone.path).is_err());
         assert!(lib.get("n").unwrap().is_some());
-        assert_eq!(lib.trashed().unwrap().len(), 1, "still waiting in the trash");
+        assert_eq!(
+            lib.trashed().unwrap().len(),
+            1,
+            "still waiting in the trash"
+        );
     }
 
     #[test]
@@ -890,7 +937,10 @@ mod tests {
 
     fn sample_facecam() -> crate::model::ClipFacecam {
         crate::model::ClipFacecam {
-            layout: crate::model::CamLayout { x: 0.0, ..Default::default() },
+            layout: crate::model::CamLayout {
+                x: 0.0,
+                ..Default::default()
+            },
             portrait: Default::default(),
             delay_ms: -80,
             state: crate::model::FacecamState::Pending,
@@ -903,7 +953,10 @@ mod tests {
         lib.insert(&clip("a", 1)).unwrap();
         assert!(lib.get("a").unwrap().unwrap().facecam.is_none());
         lib.set_facecam("a", Some(&sample_facecam())).unwrap();
-        assert_eq!(lib.get("a").unwrap().unwrap().facecam, Some(sample_facecam()));
+        assert_eq!(
+            lib.get("a").unwrap().unwrap().facecam,
+            Some(sample_facecam())
+        );
         lib.set_facecam("a", None).unwrap();
         assert!(lib.get("a").unwrap().unwrap().facecam.is_none());
     }
@@ -918,7 +971,10 @@ mod tests {
         lib.insert(&with_cam).unwrap();
         let back = lib.get("a").unwrap().unwrap();
         lib.insert(&back).unwrap();
-        assert_eq!(lib.get("a").unwrap().unwrap().facecam, Some(sample_facecam()));
+        assert_eq!(
+            lib.get("a").unwrap().unwrap().facecam,
+            Some(sample_facecam())
+        );
     }
 
     #[test]
@@ -978,8 +1034,16 @@ mod tests {
         c.recording = true;
         lib.insert(&c).unwrap();
         lib.set_tags("x", &tags(&["b", "A"])).unwrap();
-        let from_list = lib.list().unwrap().into_iter().find(|c| c.id == "x").unwrap();
-        assert_eq!(format!("{:?}", lib.get("x").unwrap().unwrap()), format!("{from_list:?}"));
+        let from_list = lib
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == "x")
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", lib.get("x").unwrap().unwrap()),
+            format!("{from_list:?}")
+        );
     }
 
     fn tags(list: &[&str]) -> Vec<String> {
@@ -990,7 +1054,15 @@ mod tests {
     #[test]
     fn tags_are_cleaned_up_before_they_are_kept() {
         assert_eq!(
-            clean_tags(&tags(&["  Clutch ", "#clutch", "ace", "", "  ", "ACE", "funny   moment"])),
+            clean_tags(&tags(&[
+                "  Clutch ",
+                "#clutch",
+                "ace",
+                "",
+                "  ",
+                "ACE",
+                "funny   moment"
+            ])),
             tags(&["ace", "Clutch", "funny moment"]),
         );
         let long = "x".repeat(40);

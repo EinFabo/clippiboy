@@ -71,7 +71,9 @@ fn invoke_hits(source: &str) -> Vec<(usize, String)> {
             continue;
         }
         let name_start = at + 1;
-        let Some(len) = source[name_start..].find('"') else { continue };
+        let Some(len) = source[name_start..].find('"') else {
+            continue;
+        };
         hits.push((start, source[name_start..name_start + len].to_string()));
     }
     hits
@@ -120,8 +122,15 @@ fn wrapper_at(source: &str, start: usize, command: &str) -> Option<Wrapper> {
     }
     let member = source[at..end].to_string();
     let decl = source[..at].rfind("const ")? + "const ".len();
-    let object: String = source[decl..].chars().take_while(|c| is_ident(*c as u8)).collect();
-    Some(Wrapper { object, member, command: command.to_string() })
+    let object: String = source[decl..]
+        .chars()
+        .take_while(|c| is_ident(*c as u8))
+        .collect();
+    Some(Wrapper {
+        object,
+        member,
+        command: command.to_string(),
+    })
 }
 
 fn wrappers(source: &str) -> Vec<Wrapper> {
@@ -183,7 +192,9 @@ fn reachable(entry: &Path) -> Vec<PathBuf> {
         if seen.contains(&file) {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(&file) else { continue };
+        let Ok(source) = std::fs::read_to_string(&file) else {
+            continue;
+        };
         seen.push(file.clone());
         for spec in specifiers(&source) {
             let base = if let Some(rest) = spec.strip_prefix("@/") {
@@ -226,7 +237,10 @@ fn specifiers(source: &str) -> Vec<String> {
             }
             // `import type …` is erased by the build: it reaches nothing at run time.
             let head = &source[..pos];
-            let statement = ["import ", "export "].iter().filter_map(|k| head.rfind(k)).max();
+            let statement = ["import ", "export "]
+                .iter()
+                .filter_map(|k| head.rfind(k))
+                .max();
             if let Some(start) = statement {
                 if keyword == "from" && head[start + 7..].trim_start().starts_with("type ") {
                     continue;
@@ -249,7 +263,11 @@ fn permissions(capability: &str) -> Vec<String> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| p.as_str().unwrap_or_else(|| panic!("{capability}: {p} is no plain permission")).to_string())
+        .map(|p| {
+            p.as_str()
+                .unwrap_or_else(|| panic!("{capability}: {p} is no plain permission"))
+                .to_string()
+        })
         .collect()
 }
 
@@ -265,7 +283,10 @@ fn granted(capability: &str) -> BTreeSet<String> {
 fn needed(entry: &str) -> BTreeSet<String> {
     let files = reachable(&src_root().join(entry));
     assert!(!files.is_empty(), "{entry} could not be read");
-    let sources: Vec<String> = files.iter().filter_map(|f| std::fs::read_to_string(f).ok()).collect();
+    let sources: Vec<String> = files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .collect();
     let all: Vec<Wrapper> = sources.iter().flat_map(|s| wrappers(s)).collect();
     let mut found = BTreeSet::new();
     for source in &sources {
@@ -277,8 +298,16 @@ fn needed(entry: &str) -> BTreeSet<String> {
 
 const WINDOWS: [(&str, &str, &str); 3] = [
     ("main", "src/main.tsx", "capabilities/default.json"),
-    ("console", "src/console/main.tsx", "capabilities/console.json"),
-    ("overlay", "src/overlay/main.tsx", "capabilities/overlay.json"),
+    (
+        "console",
+        "src/console/main.tsx",
+        "capabilities/console.json",
+    ),
+    (
+        "overlay",
+        "src/overlay/main.tsx",
+        "capabilities/overlay.json",
+    ),
 ];
 /// Reachable by import but never called there: `installAccent` draws the
 /// tray icon only with `turning: true`, which only the main window passes
@@ -301,11 +330,22 @@ const NOT_CALLED: [(&str, &str); 6] = [
 fn a_call_split_over_lines_is_still_seen() {
     let ipc = "export const api = {\n  linkExists: (id: string) => invoke<boolean>(\"link_exists\", { id }),\n  setHotkeys: (\n    a: string,\n  ) =>\n    invoke<AppConfig>(\"set_hotkeys\", { a }),\n};\n";
     let mut found = wrappers(ipc);
-    assert!(found.iter().any(|w| w.object == "api" && w.member == "linkExists" && w.command == "link_exists"));
-    assert!(found.iter().any(|w| w.member == "setHotkeys" && w.command == "set_hotkeys"));
-    found.push(Wrapper { object: "api".into(), member: "send".into(), command: "not_this_one".into() });
+    assert!(found
+        .iter()
+        .any(|w| w.object == "api" && w.member == "linkExists" && w.command == "link_exists"));
+    assert!(found
+        .iter()
+        .any(|w| w.member == "setHotkeys" && w.command == "set_hotkeys"));
+    found.push(Wrapper {
+        object: "api".into(),
+        member: "send".into(),
+        command: "not_this_one".into(),
+    });
     let page = "void api\n  .linkExists(clip.id)\n  .then(() => {});\nshareApi.send(a, b);";
-    assert_eq!(calls(page, &found), BTreeSet::from(["link_exists".to_string()]));
+    assert_eq!(
+        calls(page, &found),
+        BTreeSet::from(["link_exists".to_string()])
+    );
 }
 
 #[test]
@@ -316,7 +356,10 @@ fn every_command_a_window_calls_is_granted_to_it() {
             .filter(|command| !NOT_CALLED.contains(&(window, command.as_str())))
             .cloned()
             .collect();
-        assert!(missing.is_empty(), "{window} calls commands it is not granted: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "{window} calls commands it is not granted: {missing:?}"
+        );
     }
 }
 
@@ -326,7 +369,14 @@ fn every_command_a_window_calls_is_granted_to_it() {
 #[test]
 fn the_console_and_the_banner_may_only_listen() {
     for capability in ["capabilities/console.json", "capabilities/overlay.json"] {
-        let core: Vec<String> = permissions(capability).into_iter().filter(|p| p.starts_with("core:")).collect();
-        assert_eq!(core, ["core:event:allow-listen", "core:event:allow-unlisten"], "{capability}");
+        let core: Vec<String> = permissions(capability)
+            .into_iter()
+            .filter(|p| p.starts_with("core:"))
+            .collect();
+        assert_eq!(
+            core,
+            ["core:event:allow-listen", "core:event:allow-unlisten"],
+            "{capability}"
+        );
     }
 }

@@ -39,7 +39,12 @@ pub struct SegmentLog {
 
 impl SegmentLog {
     pub fn new(start_100ns: i64) -> Self {
-        Self { start_100ns, segments: Vec::new(), current: None, keyed: false }
+        Self {
+            start_100ns,
+            segments: Vec::new(),
+            current: None,
+            keyed: false,
+        }
     }
 
     /// A header of `session`: a session not seen yet begins a segment, whose
@@ -51,7 +56,12 @@ impl SegmentLog {
         self.current = Some((session, origin_100ns));
         self.keyed = false;
         let index = self.segments.len();
-        self.segments.push(Segment { file: format!("cam.{index}.h264"), session, offset_us: 0, frames: 0 });
+        self.segments.push(Segment {
+            file: format!("cam.{index}.h264"),
+            session,
+            offset_us: 0,
+            frames: 0,
+        });
         Some(index)
     }
 
@@ -76,12 +86,21 @@ impl SegmentLog {
 
     /// Every segment begun — what a crash leaves to recover; counts may lag.
     pub fn file(&self) -> CamFile {
-        CamFile { segments: self.segments.clone() }
+        CamFile {
+            segments: self.segments.clone(),
+        }
     }
 
     /// At the end: the segments that got a frame, with their counts.
     pub fn final_file(&self) -> CamFile {
-        CamFile { segments: self.segments.iter().filter(|s| s.frames > 0).cloned().collect() }
+        CamFile {
+            segments: self
+                .segments
+                .iter()
+                .filter(|s| s.frames > 0)
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -104,11 +123,16 @@ impl RecordingCam {
     pub fn start(dir: &std::path::Path, start_100ns: i64) -> std::sync::Arc<Self> {
         let (tx, rx) = std::sync::mpsc::channel::<Write>();
         let dir = dir.to_path_buf();
-        let spawned = std::thread::Builder::new().name("clippiboy-reccam".into()).spawn(move || write_loop(&dir, rx));
+        let spawned = std::thread::Builder::new()
+            .name("clippiboy-reccam".into())
+            .spawn(move || write_loop(&dir, rx));
         if let Err(err) = spawned {
             log::warn!("recording camera: no writer ({err}) — the recording stays without it");
         }
-        std::sync::Arc::new(Self { log: parking_lot::Mutex::new(SegmentLog::new(start_100ns)), queue: parking_lot::Mutex::new(Some(tx)) })
+        std::sync::Arc::new(Self {
+            log: parking_lot::Mutex::new(SegmentLog::new(start_100ns)),
+            queue: parking_lot::Mutex::new(Some(tx)),
+        })
     }
 
     fn send(&self, write: Write) {
@@ -120,12 +144,16 @@ impl RecordingCam {
     /// Stops taking packets, lets the writer finish, and says what it wrote.
     pub fn close(&self) -> CamFile {
         let last = self.log.lock().final_file();
-        let Some(tx) = self.queue.lock().take() else { return last };
+        let Some(tx) = self.queue.lock().take() else {
+            return last;
+        };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let _ = tx.send(Write::Describe(last.clone()));
         let _ = tx.send(Write::Close(done_tx));
         drop(tx);
-        done_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or(last)
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or(last)
     }
 }
 
@@ -183,7 +211,10 @@ fn write_loop(dir: &std::path::Path, rx: std::sync::mpsc::Receiver<Write>) {
                 }
             }
             Write::Packet(index, data) => {
-                if let Some((current, file)) = open.as_mut().filter(|(current, _)| *current == index && !broken) {
+                if let Some((current, file)) = open
+                    .as_mut()
+                    .filter(|(current, _)| *current == index && !broken)
+                {
                     if file.write_all(&data).is_err() {
                         log::warn!("recording camera: writing cam.{current}.h264 failed");
                         broken = true;
@@ -204,9 +235,14 @@ fn write_loop(dir: &std::path::Path, rx: std::sync::mpsc::Receiver<Write>) {
 }
 
 fn describe(dir: &std::path::Path, file: &CamFile) {
-    let Ok(text) = serde_json::to_string_pretty(file) else { return };
+    let Ok(text) = serde_json::to_string_pretty(file) else {
+        return;
+    };
     let temp = dir.join("cam.json.tmp");
-    if std::fs::write(&temp, text).and_then(|_| std::fs::rename(&temp, dir.join("cam.json"))).is_err() {
+    if std::fs::write(&temp, text)
+        .and_then(|_| std::fs::rename(&temp, dir.join("cam.json")))
+        .is_err()
+    {
         log::warn!("recording camera: cam.json not written");
     }
 }
@@ -255,7 +291,10 @@ pub fn read_stored(clip_id: &str) -> Option<StoredCam> {
 fn write_stored(clip_id: &str, stored: &StoredCam) -> std::io::Result<()> {
     let path = stored_path(clip_id);
     let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, serde_json::to_string_pretty(stored).map_err(std::io::Error::other)?)?;
+    std::fs::write(
+        &temp,
+        serde_json::to_string_pretty(stored).map_err(std::io::Error::other)?,
+    )?;
     std::fs::rename(&temp, &path)
 }
 
@@ -273,7 +312,11 @@ fn drop_stored(clip_id: &str) {
 /// The segments whose file holds something — after a crash the counts in
 /// `cam.json` may still be zero, the disk is what counts.
 pub fn worth_keeping(file: &CamFile, size_of: impl Fn(&str) -> u64) -> Vec<Segment> {
-    file.segments.iter().filter(|s| size_of(&s.file) > 0).cloned().collect()
+    file.segments
+        .iter()
+        .filter(|s| size_of(&s.file) > 0)
+        .cloned()
+        .collect()
 }
 
 /// Where a moment `real_us` after the recording's first frame lies in the
@@ -301,7 +344,11 @@ pub fn secure(
     fps: u32,
 ) -> Option<StoredCam> {
     let file = read_cam_file(work_dir)?;
-    let size_of = |name: &str| std::fs::metadata(work_dir.join(name)).map(|m| m.len()).unwrap_or(0);
+    let size_of = |name: &str| {
+        std::fs::metadata(work_dir.join(name))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
     let keep = worth_keeping(&file, size_of);
     if keep.is_empty() {
         return None;
@@ -313,10 +360,16 @@ pub fn secure(
         let name = segment.file.replace(".h264", ".mp4");
         let out = store.join(&name);
         let args = crate::facecam::cam_mp4_arguments(&work_dir.join(&segment.file), &out);
-        match crate::child::output(crate::muxer::command("ffmpeg").args(&args), crate::child::MOVING) {
+        match crate::child::output(
+            crate::muxer::command("ffmpeg").args(&args),
+            crate::child::MOVING,
+        ) {
             Ok(done) if done.status.success() => {}
             Ok(done) => {
-                log::warn!("recording camera: {name}: {}", String::from_utf8_lossy(&done.stderr).trim());
+                log::warn!(
+                    "recording camera: {name}: {}",
+                    String::from_utf8_lossy(&done.stderr).trim()
+                );
                 let _ = std::fs::remove_file(&out);
                 continue;
             }
@@ -330,18 +383,31 @@ pub fn secure(
             let _ = std::fs::remove_file(&out);
             continue;
         };
-        segments.push(StoredSegment { file: name, offset_us: recording_time(segment.offset_us, gaps), width, height });
+        segments.push(StoredSegment {
+            file: name,
+            offset_us: recording_time(segment.offset_us, gaps),
+            width,
+            height,
+        });
     }
     if segments.is_empty() {
         let _ = std::fs::remove_dir(&store);
         return None;
     }
-    let stored = StoredCam { fps, segments, clean_bytes, applying_bytes: None };
+    let stored = StoredCam {
+        fps,
+        segments,
+        clean_bytes,
+        applying_bytes: None,
+    };
     if let Err(err) = write_stored(clip_id, &stored) {
         log::warn!("recording camera: reccam.json: {err}");
         return None;
     }
-    log::info!("recording camera: {} segment(s) kept for {clip_id}", stored.segments.len());
+    log::info!(
+        "recording camera: {} segment(s) kept for {clip_id}",
+        stored.segments.len()
+    );
     Some(stored)
 }
 
@@ -370,12 +436,27 @@ pub struct BurnIn<'a> {
 /// segment, each letting the game through once it ends, every sound track
 /// copied as it is.
 pub fn recording_arguments(job: &BurnIn) -> Vec<String> {
-    let mut args: Vec<String> =
-        ["-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"].into_iter().map(String::from).collect();
+    let mut args: Vec<String> = [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
     if job.hwaccel {
         args.extend(["-hwaccel".into(), "d3d11va".into()]);
     }
-    args.extend(["-threads".into(), "4".into(), "-i".into(), job.clean.to_string_lossy().into_owned()]);
+    args.extend([
+        "-threads".into(),
+        "4".into(),
+        "-i".into(),
+        job.clean.to_string_lossy().into_owned(),
+    ]);
     for segment in job.segments {
         if let Some(seek) = segment.timing.seek_s {
             args.extend(["-ss".into(), format!("{seek:.6}")]);
@@ -384,7 +465,12 @@ pub fn recording_arguments(job: &BurnIn) -> Vec<String> {
     }
     let count = job.segments.len();
     if let Some(mask) = job.mask {
-        args.extend(["-loop".into(), "1".into(), "-i".into(), mask.to_string_lossy().into_owned()]);
+        args.extend([
+            "-loop".into(),
+            "1".into(),
+            "-i".into(),
+            mask.to_string_lossy().into_owned(),
+        ]);
     }
     let rect = crate::composite::cam_rect(job.frame, &job.layout);
     let mut parts = Vec::new();
@@ -417,13 +503,33 @@ pub fn recording_arguments(job: &BurnIn) -> Vec<String> {
             parts.push(format!("[cam{i}][mask{i}]alphamerge[camm{i}]"));
             overlaid = format!("camm{i}");
         }
-        let out = if i + 1 == count { "v".to_string() } else { format!("o{i}") };
-        parts.push(format!("[{base}][{overlaid}]overlay=x={}:y={}:eval=init:eof_action=pass[{out}]", rect.x, rect.y));
+        let out = if i + 1 == count {
+            "v".to_string()
+        } else {
+            format!("o{i}")
+        };
+        parts.push(format!(
+            "[{base}][{overlaid}]overlay=x={}:y={}:eval=init:eof_action=pass[{out}]",
+            rect.x, rect.y
+        ));
         base = out;
     }
-    args.extend(["-filter_complex_threads".into(), "2".into(), "-filter_complex".into(), parts.join(";")]);
-    args.extend(["-map", "[v]", "-map", "0:a?", "-c:a", "copy"].into_iter().map(String::from));
-    args.extend(crate::edit::video_args_at(job.encoder, job.quality, crate::edit::Speed::Save));
+    args.extend([
+        "-filter_complex_threads".into(),
+        "2".into(),
+        "-filter_complex".into(),
+        parts.join(";"),
+    ]);
+    args.extend(
+        ["-map", "[v]", "-map", "0:a?", "-c:a", "copy"]
+            .into_iter()
+            .map(String::from),
+    );
+    args.extend(crate::edit::video_args_at(
+        job.encoder,
+        job.quality,
+        crate::edit::Speed::Save,
+    ));
     args.extend([
         "-g".into(),
         job.gop.max(1).to_string(),
@@ -469,7 +575,8 @@ pub fn resume(stored: &StoredCam, file_bytes: Option<u64>) -> Resume {
 fn set_row(app: &tauri::AppHandle, id: &str, facecam: Option<&crate::model::ClipFacecam>) {
     use tauri::{Emitter, Manager};
     let library = &app.state::<crate::state::AppState>().library;
-    if let Some(Err(err)) = crate::clips::with_library(library, |lib| lib.set_facecam(id, facecam)) {
+    if let Some(Err(err)) = crate::clips::with_library(library, |lib| lib.set_facecam(id, facecam))
+    {
         log::error!("could not note the recording camera's state: {err}");
     }
     let _ = app.emit("clips-changed", ());
@@ -477,7 +584,12 @@ fn set_row(app: &tauri::AppHandle, id: &str, facecam: Option<&crate::model::Clip
 
 /// The composite is the recording now: the segments go, the row follows the
 /// file.
-fn finish(app: &tauri::AppHandle, id: &str, path: &std::path::Path, cam: &crate::model::ClipFacecam) {
+fn finish(
+    app: &tauri::AppHandle,
+    id: &str,
+    path: &std::path::Path,
+    cam: &crate::model::ClipFacecam,
+) {
     use tauri::Manager;
     let (state, drop) = after_burn(true);
     if drop {
@@ -487,19 +599,40 @@ fn finish(app: &tauri::AppHandle, id: &str, path: &std::path::Path, cam: &crate:
         log::warn!("thumbnail for {id}: {err}");
     }
     let library = &app.state::<crate::state::AppState>().library;
-    if let (Some(length), Some(size)) = (crate::muxer::probe_duration_ms(path), crate::composite::file_size(path)) {
+    if let (Some(length), Some(size)) = (
+        crate::muxer::probe_duration_ms(path),
+        crate::composite::file_size(path),
+    ) {
         let _ = crate::clips::with_library(library, |lib| lib.set_file_state(id, length, size));
     }
     log::info!("camera burned into recording {id}");
-    set_row(app, id, Some(&crate::model::ClipFacecam { state, ..cam.clone() }));
+    set_row(
+        app,
+        id,
+        Some(&crate::model::ClipFacecam {
+            state,
+            ..cam.clone()
+        }),
+    );
     crate::notify(app, "ok", "Camera added to the recording");
 }
 
 fn fail(app: &tauri::AppHandle, id: &str, cam: &crate::model::ClipFacecam, why: &str) {
     log::warn!("recording camera for {id}: {why}");
     let (state, _) = after_burn(false);
-    set_row(app, id, Some(&crate::model::ClipFacecam { state, ..cam.clone() }));
-    crate::notify(app, "error", "The camera couldn't be added to the recording — it was kept without it.");
+    set_row(
+        app,
+        id,
+        Some(&crate::model::ClipFacecam {
+            state,
+            ..cam.clone()
+        }),
+    );
+    crate::notify(
+        app,
+        "error",
+        "The camera couldn't be added to the recording — it was kept without it.",
+    );
 }
 
 /// Burn-ins asked to stop: their recording is being deleted.
@@ -564,7 +697,9 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
     };
     match resume(&stored, file_size(&path)) {
         Resume::GiveUp => {
-            log::info!("recording camera for {id}: the recording changed or is gone — not burned in");
+            log::info!(
+                "recording camera for {id}: the recording changed or is gone — not burned in"
+            );
             drop_stored(id);
             set_row(app, id, None);
             return None;
@@ -581,7 +716,10 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
     if !composited {
         let config = state.config_snapshot();
         let data = crate::config::data_dir();
-        let dir = path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| data.clone());
+        let dir = path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| data.clone());
         let free = crate::disk::free_bytes(&dir).unwrap_or(u64::MAX);
         if !crate::composite::room_for_composite(stored.clean_bytes, free, u64::MAX, true) {
             fail(app, id, &cam, "not enough free space");
@@ -591,19 +729,33 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
         let length_ms = crate::muxer::probe_duration_ms(&path).unwrap_or(clip.duration_ms);
         let frame = (clip.width, clip.height);
         let rect = crate::composite::cam_rect(frame, &cam.layout);
-        let mask = crate::composite::mask_gray8(cam.layout.shape, rect.w, rect.h).and_then(|pixels| {
-            let dir = data.join("temp");
-            let _ = std::fs::create_dir_all(&dir);
-            let file = dir.join(format!("{}_recmask_{}x{}.png", crate::muxer::sanitize(id), rect.w, rect.h));
-            crate::composite::write_mask_png(&file, rect.w, rect.h, &pixels).ok().map(|_| file)
-        });
+        let mask =
+            crate::composite::mask_gray8(cam.layout.shape, rect.w, rect.h).and_then(|pixels| {
+                let dir = data.join("temp");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join(format!(
+                    "{}_recmask_{}x{}.png",
+                    crate::muxer::sanitize(id),
+                    rect.w,
+                    rect.h
+                ));
+                crate::composite::write_mask_png(&file, rect.w, rect.h, &pixels)
+                    .ok()
+                    .map(|_| file)
+            });
         let segments: Vec<SegmentInput> = stored
             .segments
             .iter()
             .map(|segment| SegmentInput {
                 path: crate::edit::dir(id).join(&segment.file),
                 cam: (segment.width, segment.height),
-                timing: crate::composite::cam_timing(segment.offset_us, cam.delay_ms, video_start_us, 0, length_ms),
+                timing: crate::composite::cam_timing(
+                    segment.offset_us,
+                    cam.delay_ms,
+                    video_start_us,
+                    0,
+                    length_ms,
+                ),
             })
             .collect();
         let encoder = crate::encode::effective(config.recording.encoder);
@@ -627,7 +779,13 @@ pub fn job(app: &tauri::AppHandle, id: &str) -> Option<std::time::Instant> {
                 hwaccel,
             });
             let stop = || aborted(id);
-            match crate::edit::run_command_watched(crate::muxer::background("ffmpeg"), &args, length_ms, &|_| {}, &stop) {
+            match crate::edit::run_command_watched(
+                crate::muxer::background("ffmpeg"),
+                &args,
+                length_ms,
+                &|_| {},
+                &stop,
+            ) {
                 Ok(()) => {
                     done = true;
                     break;
@@ -703,10 +861,15 @@ pub fn retryable(recording: bool, state: Option<crate::model::FacecamState>, sto
 /// At start: every recording whose camera was on its way when the app last
 /// stopped goes back in the queue; a composite half written is cleared away.
 pub fn recover(library: &parking_lot::Mutex<Option<crate::clips::Library>>) -> usize {
-    let clips = crate::clips::with_library(library, |lib| lib.list()).and_then(Result::ok).unwrap_or_default();
+    let clips = crate::clips::with_library(library, |lib| lib.list())
+        .and_then(Result::ok)
+        .unwrap_or_default();
     let mut queued = 0;
     for clip in clips {
-        let pending = clip.facecam.as_ref().is_some_and(|cam| cam.state == crate::model::FacecamState::Pending);
+        let pending = clip
+            .facecam
+            .as_ref()
+            .is_some_and(|cam| cam.state == crate::model::FacecamState::Pending);
         if !clip.recording || !pending {
             continue;
         }
@@ -743,8 +906,14 @@ mod tests {
         assert_eq!(log.packet(0, true), Some((1, true)));
         let file = log.file();
         assert_eq!(file.segments.len(), 2);
-        assert_eq!((file.segments[0].file.as_str(), file.segments[0].frames), ("cam.0.h264", 2));
-        assert_eq!((file.segments[1].file.as_str(), file.segments[1].frames), ("cam.1.h264", 1));
+        assert_eq!(
+            (file.segments[0].file.as_str(), file.segments[0].frames),
+            ("cam.0.h264", 2)
+        );
+        assert_eq!(
+            (file.segments[1].file.as_str(), file.segments[1].frames),
+            ("cam.1.h264", 1)
+        );
         assert_eq!(file.segments[1].offset_us, 60_000_000);
     }
 
@@ -774,7 +943,11 @@ mod tests {
     fn the_first_frame_settles_the_offset_on_disk() {
         let mut log = SegmentLog::new(START);
         log.header(1, START - 10_000_000);
-        assert_eq!(log.packet(500_000, true), Some((0, true)), "describe again now");
+        assert_eq!(
+            log.packet(500_000, true),
+            Some((0, true)),
+            "describe again now"
+        );
         assert_eq!(log.file().segments[0].offset_us, -500_000);
         assert_eq!(log.packet(533_333, false), Some((0, false)));
     }
@@ -786,23 +959,40 @@ mod tests {
         let mut log = SegmentLog::new(START);
         log.header(1, START);
         assert_eq!(log.file().segments.len(), 1);
-        assert!(log.final_file().segments.is_empty(), "no frame, nothing to burn in");
+        assert!(
+            log.final_file().segments.is_empty(),
+            "no frame, nothing to burn in"
+        );
     }
 
     fn segment(file: &str, offset_us: i64) -> Segment {
-        Segment { file: file.into(), session: 1, offset_us, frames: 0 }
+        Segment {
+            file: file.into(),
+            session: 1,
+            offset_us,
+            frames: 0,
+        }
     }
 
     /// After a crash the counts may be zero; what is on disk decides.
     #[test]
     fn recovered_segments_come_from_the_folder() {
-        let file = CamFile { segments: vec![segment("cam.0.h264", 0), segment("cam.1.h264", 60_000_000), segment("cam.2.h264", 90_000_000)] };
+        let file = CamFile {
+            segments: vec![
+                segment("cam.0.h264", 0),
+                segment("cam.1.h264", 60_000_000),
+                segment("cam.2.h264", 90_000_000),
+            ],
+        };
         let sizes = |name: &str| match name {
             "cam.0.h264" => 1_000,
             "cam.2.h264" => 500,
             _ => 0,
         };
-        let kept: Vec<String> = worth_keeping(&file, sizes).into_iter().map(|s| s.file).collect();
+        let kept: Vec<String> = worth_keeping(&file, sizes)
+            .into_iter()
+            .map(|s| s.file)
+            .collect();
         assert_eq!(kept, ["cam.0.h264", "cam.2.h264"]);
     }
 
@@ -829,7 +1019,11 @@ mod tests {
         args_in(segments, mask, crate::model::CamLayout::default())
     }
 
-    fn args_in(segments: &[SegmentInput], mask: bool, layout: crate::model::CamLayout) -> Vec<String> {
+    fn args_in(
+        segments: &[SegmentInput],
+        mask: bool,
+        layout: crate::model::CamLayout,
+    ) -> Vec<String> {
         recording_arguments(&BurnIn {
             clean: std::path::Path::new("rec.mp4"),
             segments,
@@ -846,7 +1040,10 @@ mod tests {
     }
 
     fn graph(args: &[String]) -> String {
-        args.windows(2).find(|w| w[0] == "-filter_complex").map(|w| w[1].clone()).unwrap_or_default()
+        args.windows(2)
+            .find(|w| w[0] == "-filter_complex")
+            .map(|w| w[1].clone())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -860,7 +1057,10 @@ mod tests {
         assert!(g.ends_with("[v]"), "{g}");
         // The second segment starts a minute in: shifted, not seeked.
         let joined = a.join(" ");
-        assert!(joined.contains("-i cam.0.mp4") && joined.contains("-i cam.1.mp4"), "{joined}");
+        assert!(
+            joined.contains("-i cam.0.mp4") && joined.contains("-i cam.1.mp4"),
+            "{joined}"
+        );
     }
 
     /// Another camera half way — 720p, then 1080p: each segment is cut at
@@ -869,7 +1069,10 @@ mod tests {
     fn each_segment_is_cut_at_its_own_size() {
         let mut second = input("cam.1.mp4", 60_000_000);
         second.cam = (1920, 1080);
-        let layout = crate::model::CamLayout { shape: crate::model::CamShape::Circle, ..Default::default() };
+        let layout = crate::model::CamLayout {
+            shape: crate::model::CamShape::Circle,
+            ..Default::default()
+        };
         let g = graph(&args_in(&[input("cam.0.mp4", 0), second], true, layout));
         assert!(g.contains("crop=720:720:280:0"), "{g}");
         assert!(g.contains("crop=1080:1080:420:0"), "{g}");
@@ -893,7 +1096,11 @@ mod tests {
     #[test]
     fn a_failed_burn_in_keeps_the_clean_recording() {
         assert_eq!(after_burn(true), (crate::model::FacecamState::Baked, true));
-        assert_eq!(after_burn(false), (crate::model::FacecamState::Failed, false), "clean kept, segments kept for a retry");
+        assert_eq!(
+            after_burn(false),
+            (crate::model::FacecamState::Failed, false),
+            "clean kept, segments kept for a retry"
+        );
     }
 
     fn gap(at_us: i64, len_us: i64) -> crate::recorder::VideoGap {
@@ -907,24 +1114,47 @@ mod tests {
         let gaps = [gap(60_000_000, 600_000_000)];
         assert_eq!(recording_time(30_000_000, &gaps), 30_000_000);
         assert_eq!(recording_time(662_000_000, &gaps), 62_000_000);
-        assert_eq!(recording_time(300_000_000, &gaps), 60_000_000, "inside the gap: where it was cut");
+        assert_eq!(
+            recording_time(300_000_000, &gaps),
+            60_000_000,
+            "inside the gap: where it was cut"
+        );
     }
 
     fn stored(clean_bytes: u64, applying_bytes: Option<u64>) -> StoredCam {
-        StoredCam { fps: 60, segments: Vec::new(), clean_bytes, applying_bytes }
+        StoredCam {
+            fps: 60,
+            segments: Vec::new(),
+            clean_bytes,
+            applying_bytes,
+        }
     }
 
     #[test]
     fn a_changed_recording_is_not_burned_into() {
         assert_eq!(resume(&stored(1_000, None), Some(1_000)), Resume::Burn);
-        assert_eq!(resume(&stored(1_000, None), Some(400)), Resume::GiveUp, "trimmed in the editor");
-        assert_eq!(resume(&stored(1_000, None), None), Resume::GiveUp, "deleted");
+        assert_eq!(
+            resume(&stored(1_000, None), Some(400)),
+            Resume::GiveUp,
+            "trimmed in the editor"
+        );
+        assert_eq!(
+            resume(&stored(1_000, None), None),
+            Resume::GiveUp,
+            "deleted"
+        );
     }
 
     #[test]
     fn a_swap_done_before_a_crash_is_finished_not_burned_again() {
-        assert_eq!(resume(&stored(1_000, Some(1_200)), Some(1_200)), Resume::Finish);
-        assert_eq!(resume(&stored(1_000, Some(1_200)), Some(1_000)), Resume::Burn);
+        assert_eq!(
+            resume(&stored(1_000, Some(1_200)), Some(1_200)),
+            Resume::Finish
+        );
+        assert_eq!(
+            resume(&stored(1_000, Some(1_200)), Some(1_000)),
+            Resume::Burn
+        );
     }
 
     #[test]
@@ -935,7 +1165,10 @@ mod tests {
         assert!(!retryable(true, Some(Pending), true), "on its way already");
         assert!(!retryable(true, Some(Baked), true));
         assert!(!retryable(true, None, true));
-        assert!(!retryable(false, Some(Failed), true), "a clip retries from the editor");
+        assert!(
+            !retryable(false, Some(Failed), true),
+            "a clip retries from the editor"
+        );
     }
 
     /// The burn-in runs without the recording's lock: what it finds when it
@@ -943,9 +1176,21 @@ mod tests {
     #[test]
     fn a_recording_deleted_during_its_burn_in_is_left_alone() {
         assert_eq!(settle(false, true, Resume::Burn), Settle::Swap);
-        assert_eq!(settle(true, true, Resume::Burn), Settle::Leave, "deleted: stopped");
-        assert_eq!(settle(false, false, Resume::Burn), Settle::Leave, "row gone");
-        assert_eq!(settle(false, true, Resume::GiveUp), Settle::Drop, "changed meanwhile");
+        assert_eq!(
+            settle(true, true, Resume::Burn),
+            Settle::Leave,
+            "deleted: stopped"
+        );
+        assert_eq!(
+            settle(false, false, Resume::Burn),
+            Settle::Leave,
+            "row gone"
+        );
+        assert_eq!(
+            settle(false, true, Resume::GiveUp),
+            Settle::Drop,
+            "changed meanwhile"
+        );
     }
 
     #[test]

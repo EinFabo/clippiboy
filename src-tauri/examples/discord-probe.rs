@@ -69,7 +69,9 @@ mod probe {
 
     pub fn run(log: &mut Log) {
         log.line("ClippiBoy Discord probe — can the voice call be read without approval?");
-        log.line(&format!("App: {CLIENT_ID}, scope asked for: rpc.voice.read"));
+        log.line(&format!(
+            "App: {CLIENT_ID}, scope asked for: rpc.voice.read"
+        ));
         log.line("");
 
         // Discord opens the first free one of ten; with PTB or Canary running
@@ -87,22 +89,35 @@ mod probe {
         };
         log.line(&format!("Found Discord on pipe discord-ipc-{index}."));
 
-        if let Err(err) = send(&mut pipe, HANDSHAKE, &json!({ "v": 1, "client_id": CLIENT_ID })) {
-            log.line(&format!("RESULT: FAILED — handshake could not be sent: {err}"));
+        if let Err(err) = send(
+            &mut pipe,
+            HANDSHAKE,
+            &json!({ "v": 1, "client_id": CLIENT_ID }),
+        ) {
+            log.line(&format!(
+                "RESULT: FAILED — handshake could not be sent: {err}"
+            ));
             return;
         }
         match receive(&mut pipe) {
             Ok((_, ready)) if ready["evt"] == "READY" => {
                 let user = &ready["data"]["user"];
-                let name = user["global_name"].as_str().or(user["username"].as_str()).unwrap_or("?");
+                let name = user["global_name"]
+                    .as_str()
+                    .or(user["username"].as_str())
+                    .unwrap_or("?");
                 log.line(&format!("Connected. Signed in to Discord as: {name}"));
             }
             Ok((op, other)) => {
-                log.line(&format!("RESULT: FAILED — Discord refused the connection (op {op}): {other}"));
+                log.line(&format!(
+                    "RESULT: FAILED — Discord refused the connection (op {op}): {other}"
+                ));
                 return;
             }
             Err(err) => {
-                log.line(&format!("RESULT: FAILED — no answer to the handshake: {err}"));
+                log.line(&format!(
+                    "RESULT: FAILED — no answer to the handshake: {err}"
+                ));
                 return;
             }
         }
@@ -119,7 +134,9 @@ mod probe {
             log.line(&format!("Asking for: {scope}"));
             match authorize(&mut pipe, scope) {
                 Outcome::Allowed => {
-                    log.line(&format!("RESULT {scope}: ALLOWED — Discord handed out a code."));
+                    log.line(&format!(
+                        "RESULT {scope}: ALLOWED — Discord handed out a code."
+                    ));
                     return;
                 }
                 Outcome::Refused(line) => log.line(&format!("RESULT {scope}: REFUSED — {line}")),
@@ -156,7 +173,9 @@ mod probe {
                 // says which one.
                 let meaning = if message.contains("invalid_scope") {
                     "not allowed for this account"
-                } else if message.contains("access_denied") || message.to_lowercase().contains("cancel") {
+                } else if message.contains("access_denied")
+                    || message.to_lowercase().contains("cancel")
+                {
                     "the window was closed or \"Cancel\" was clicked"
                 } else {
                     "see the message"

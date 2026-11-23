@@ -35,7 +35,9 @@ pub fn folder_for(clip_path: &Path, clip_dir: &Path) -> PathBuf {
 /// The drive a path starts with (`C:`, `\\server\share`), compared without case.
 fn drive(path: &Path) -> Option<String> {
     match path.components().next() {
-        Some(Component::Prefix(prefix)) => Some(prefix.as_os_str().to_string_lossy().to_lowercase()),
+        Some(Component::Prefix(prefix)) => {
+            Some(prefix.as_os_str().to_string_lossy().to_lowercase())
+        }
         _ => None,
     }
 }
@@ -62,14 +64,24 @@ pub fn ensure_folder(dir: &Path) -> std::io::Result<()> {
 fn hide(dir: &Path) {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES, INVALID_FILE_ATTRIBUTES};
-    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES,
+        INVALID_FILE_ATTRIBUTES,
+    };
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         let now = GetFileAttributesW(PCWSTR(wide.as_ptr()));
         if now == INVALID_FILE_ATTRIBUTES || now & FILE_ATTRIBUTE_HIDDEN.0 != 0 {
             return;
         }
-        let _ = SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(now | FILE_ATTRIBUTE_HIDDEN.0));
+        let _ = SetFileAttributesW(
+            PCWSTR(wide.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(now | FILE_ATTRIBUTE_HIDDEN.0),
+        );
     }
 }
 
@@ -103,7 +115,10 @@ mod tests {
     fn the_folder_is_on_the_clips_own_drive() {
         let clip_dir = Path::new(r"C:\Users\x\Videos\ClippiBoy");
         assert_eq!(
-            folder_for(Path::new(r"C:\Users\x\Videos\ClippiBoy\Valorant\clip.mp4"), clip_dir),
+            folder_for(
+                Path::new(r"C:\Users\x\Videos\ClippiBoy\Valorant\clip.mp4"),
+                clip_dir
+            ),
             clip_dir.join(DIR)
         );
         assert_eq!(

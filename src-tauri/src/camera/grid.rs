@@ -31,13 +31,28 @@ pub fn slot_of(rel_100ns: i64, fps: u32) -> i64 {
 pub enum Out<T> {
     /// A session begins; the ring is reset to this origin. Comes with the frame
     /// that set it, the very first one too.
-    Started { origin_100ns: i64 },
-    Frame { pts_100ns: i64, frame: T, duplicate: bool },
-    Filler { pts_100ns: i64 },
-    GapOpened { from_100ns: i64 },
-    GapClosed { from_100ns: i64, to_100ns: i64 },
+    Started {
+        origin_100ns: i64,
+    },
+    Frame {
+        pts_100ns: i64,
+        frame: T,
+        duplicate: bool,
+    },
+    Filler {
+        pts_100ns: i64,
+    },
+    GapOpened {
+        from_100ns: i64,
+    },
+    GapClosed {
+        from_100ns: i64,
+        to_100ns: i64,
+    },
     /// The session ended.
-    Reset { at_100ns: i64 },
+    Reset {
+        at_100ns: i64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -137,7 +152,10 @@ impl<T: Clone> Grid<T> {
         self.pending = Some((slot, frame));
         if self.gap_open {
             self.gap_open = false;
-            out.push(Out::GapClosed { from_100ns: self.last_frame_qpc, to_100ns: qpc });
+            out.push(Out::GapClosed {
+                from_100ns: self.last_frame_qpc,
+                to_100ns: qpc,
+            });
         }
         self.last_frame_qpc = qpc;
     }
@@ -164,19 +182,29 @@ impl<T: Clone> Grid<T> {
         match self.pending.take() {
             Some((slot, frame)) if slot == k => {
                 self.last = Some(frame.clone());
-                out.push(Out::Frame { pts_100ns: pts, frame, duplicate: false });
+                out.push(Out::Frame {
+                    pts_100ns: pts,
+                    frame,
+                    duplicate: false,
+                });
             }
             other => {
                 self.pending = other;
                 match &self.last {
                     Some(last) if origin + pts - self.last_frame_qpc < HOLD_100NS => {
                         self.stats.duplicates += 1;
-                        out.push(Out::Frame { pts_100ns: pts, frame: last.clone(), duplicate: true });
+                        out.push(Out::Frame {
+                            pts_100ns: pts,
+                            frame: last.clone(),
+                            duplicate: true,
+                        });
                     }
                     _ => {
                         if !self.gap_open {
                             self.gap_open = true;
-                            out.push(Out::GapOpened { from_100ns: self.last_frame_qpc });
+                            out.push(Out::GapOpened {
+                                from_100ns: self.last_frame_qpc,
+                            });
                         }
                         self.stats.fillers += 1;
                         out.push(Out::Filler { pts_100ns: pts });
@@ -197,7 +225,11 @@ mod tests {
     fn frames(out: &[Out<u32>]) -> Vec<(i64, u32, bool)> {
         out.iter()
             .filter_map(|o| match o {
-                Out::Frame { pts_100ns, frame, duplicate } => Some((*pts_100ns, *frame, *duplicate)),
+                Out::Frame {
+                    pts_100ns,
+                    frame,
+                    duplicate,
+                } => Some((*pts_100ns, *frame, *duplicate)),
                 _ => None,
             })
             .collect()
@@ -214,7 +246,9 @@ mod tests {
     }
 
     fn consecutive_from(pts: &[i64], first_slot: i64) -> bool {
-        pts.iter().enumerate().all(|(i, p)| *p == pts_of(first_slot + i as i64, 30))
+        pts.iter()
+            .enumerate()
+            .all(|(i, p)| *p == pts_of(first_slot + i as i64, 30))
     }
 
     #[test]
@@ -222,12 +256,22 @@ mod tests {
         let mut grid = Grid::new(30);
         let mut out = Vec::new();
         grid.push(5_000, 0u32, &mut out);
-        assert_eq!(out[0], Out::Started { origin_100ns: 5_000 });
+        assert_eq!(
+            out[0],
+            Out::Started {
+                origin_100ns: 5_000
+            }
+        );
         out.clear();
         grid.tick(600_000_000, 590_000_000, &mut out);
         out.clear();
         grid.push(600_100_000, 1, &mut out);
-        assert_eq!(out[0], Out::Started { origin_100ns: 600_100_000 });
+        assert_eq!(
+            out[0],
+            Out::Started {
+                origin_100ns: 600_100_000
+            }
+        );
     }
 
     #[test]
@@ -239,7 +283,10 @@ mod tests {
         }
         let got = frames(&out);
         assert_eq!(got.len(), 29);
-        assert_eq!(&got[..4].iter().map(|f| f.0).collect::<Vec<_>>(), &[0, 333_333, 666_666, 1_000_000]);
+        assert_eq!(
+            &got[..4].iter().map(|f| f.0).collect::<Vec<_>>(),
+            &[0, 333_333, 666_666, 1_000_000]
+        );
         assert!(got.iter().all(|f| !f.2));
         assert!(got.iter().enumerate().all(|(k, f)| f.1 == k as u32));
     }
@@ -300,15 +347,35 @@ mod tests {
         // Slot 0 is the frame, slots 1–59 repeat it.
         assert_eq!(all.len(), 60);
         assert!(all[1..].iter().all(|f| f.2 && f.1 == 0));
-        let fillers: Vec<i64> =
-            out.iter().filter_map(|o| if let Out::Filler { pts_100ns } = o { Some(*pts_100ns) } else { None }).collect();
+        let fillers: Vec<i64> = out
+            .iter()
+            .filter_map(|o| {
+                if let Out::Filler { pts_100ns } = o {
+                    Some(*pts_100ns)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(fillers.len(), 30);
         assert_eq!(fillers[0], pts_of(60, 30));
         assert_eq!(*fillers.last().unwrap(), pts_of(89, 30));
-        let opened: Vec<_> = out.iter().filter(|o| matches!(o, Out::GapOpened { .. })).collect();
-        let closed: Vec<_> = out.iter().filter(|o| matches!(o, Out::GapClosed { .. })).collect();
+        let opened: Vec<_> = out
+            .iter()
+            .filter(|o| matches!(o, Out::GapOpened { .. }))
+            .collect();
+        let closed: Vec<_> = out
+            .iter()
+            .filter(|o| matches!(o, Out::GapClosed { .. }))
+            .collect();
         assert_eq!(opened, vec![&Out::GapOpened { from_100ns: 0 }]);
-        assert_eq!(closed, vec![&Out::GapClosed { from_100ns: 0, to_100ns: 30_000_000 }]);
+        assert_eq!(
+            closed,
+            vec![&Out::GapClosed {
+                from_100ns: 0,
+                to_100ns: 30_000_000
+            }]
+        );
     }
 
     #[test]
@@ -338,7 +405,12 @@ mod tests {
         let stamp = 10 * P + 6_000_000_000;
         grid.push(stamp, 1, &mut out);
         assert!(matches!(out[0], Out::Reset { .. }));
-        assert_eq!(out[1], Out::Started { origin_100ns: stamp });
+        assert_eq!(
+            out[1],
+            Out::Started {
+                origin_100ns: stamp
+            }
+        );
         grid.push(stamp + P, 2, &mut out);
         assert_eq!(frames(&out), vec![(0, 1, false)]);
         assert_eq!(grid.stats().resets, 1);

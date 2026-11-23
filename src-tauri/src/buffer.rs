@@ -224,8 +224,7 @@ impl ReplayBuffer {
             return;
         }
         let age = self.newest_pts - self.keyframes[0].1;
-        let too_big =
-            age >= self.capacity_us && self.bytes > self.capacity_bytes.saturating_mul(2);
+        let too_big = age >= self.capacity_us && self.bytes > self.capacity_bytes.saturating_mul(2);
         if !too_big && age <= long_past {
             return;
         }
@@ -443,7 +442,10 @@ mod tests {
         let start = buf.from_last_keyframe();
         assert!(start[0].keyframe);
         assert_eq!(start[0].pts_us, 4_000_000);
-        assert!(start.iter().all(|p| p.is_video()), "audio packets slipped in");
+        assert!(
+            start.iter().all(|p| p.is_video()),
+            "audio packets slipped in"
+        );
         assert_eq!(start.len(), 60, "one second at 60 fps");
     }
 
@@ -534,7 +536,10 @@ mod tests {
             "the ring grew to {} bytes with no keyframe to cut at",
             buf.bytes()
         );
-        assert!(!buf.is_empty(), "and it must not have thrown everything away");
+        assert!(
+            !buf.is_empty(),
+            "and it must not have thrown everything away"
+        );
     }
 
     #[test]
@@ -575,12 +580,18 @@ mod tests {
     fn a_ring_notices_reordered_frames() {
         let mut buf = ReplayBuffer::new(30, NO_LIMIT);
         for (pts, key) in [(0, true), (16_666, false), (33_333, false)] {
-            buf.push(EncodedPacket { pts_us: pts, ..packet(VIDEO_TRACK, 0, key, 10) });
+            buf.push(EncodedPacket {
+                pts_us: pts,
+                ..packet(VIDEO_TRACK, 0, key, 10)
+            });
         }
         assert!(!buf.reorders());
         buf.clear();
         for (pts, key) in [(0, true), (50_000, false), (16_666, false)] {
-            buf.push(EncodedPacket { pts_us: pts, ..packet(VIDEO_TRACK, 0, key, 10) });
+            buf.push(EncodedPacket {
+                pts_us: pts,
+                ..packet(VIDEO_TRACK, 0, key, 10)
+            });
         }
         assert!(buf.reorders());
         buf.clear();
@@ -597,7 +608,12 @@ mod tests {
     /// `key` says.
     fn video_from(buf: &mut ReplayBuffer, from_ms: i64, count: i64, key: impl Fn(i64) -> bool) {
         for frame in 0..count {
-            buf.push(packet(VIDEO_TRACK, from_ms + frame * 1000 / 60, key(frame), 1000));
+            buf.push(packet(
+                VIDEO_TRACK,
+                from_ms + frame * 1000 / 60,
+                key(frame),
+                1000,
+            ));
         }
     }
 
@@ -609,8 +625,14 @@ mod tests {
         fill(&mut buf, 30);
 
         let cut = buf.snapshot_range(5_000_000, 9_000_000);
-        assert!(cut[0].keyframe && cut[0].pts_us == 4_000_000, "started at {}", cut[0].pts_us);
-        assert!(cut.iter().all(|p| (4_000_000..=9_000_000).contains(&p.pts_us)));
+        assert!(
+            cut[0].keyframe && cut[0].pts_us == 4_000_000,
+            "started at {}",
+            cut[0].pts_us
+        );
+        assert!(cut
+            .iter()
+            .all(|p| (4_000_000..=9_000_000).contains(&p.pts_us)));
     }
 
     #[test]
@@ -642,8 +664,15 @@ mod tests {
     fn a_stream_with_one_keyframe_still_obeys_its_budget() {
         let mut buf = ReplayBuffer::new(2, 100_000);
         video_from(&mut buf, 0, 601, |frame| frame == 0);
-        assert!(buf.bytes() <= 200_000, "the ring grew to {} bytes", buf.bytes());
-        assert!(!buf.is_empty(), "and it must not have thrown everything away");
+        assert!(
+            buf.bytes() <= 200_000,
+            "the ring grew to {} bytes",
+            buf.bytes()
+        );
+        assert!(
+            !buf.is_empty(),
+            "and it must not have thrown everything away"
+        );
     }
 
     #[test]
@@ -665,7 +694,11 @@ mod tests {
         video_from(&mut buf, 610_000, 180, |frame| frame % 120 == 0);
 
         assert!(buf.snapshot_range(0, i64::MAX)[0].pts_us >= 610_000_000);
-        assert!(buf.buffered_seconds() < 4.0, "held {} s", buf.buffered_seconds());
+        assert!(
+            buf.buffered_seconds() < 4.0,
+            "held {} s",
+            buf.buffered_seconds()
+        );
     }
 
     #[test]
@@ -730,7 +763,11 @@ mod tests {
         video_from(&mut buf, 0, 60, |frame| frame == 0);
         video_from(&mut buf, 610_000, 60 * 30, |_| false);
 
-        assert!(buf.len() <= 130, "the ring held {} packets for a two-second buffer", buf.len());
+        assert!(
+            buf.len() <= 130,
+            "the ring held {} packets for a two-second buffer",
+            buf.len()
+        );
         assert!(buf.packets.front().unwrap().pts_us >= 610_000_000);
         assert!(buf.snapshot_range(0, i64::MAX).is_empty());
     }

@@ -157,7 +157,8 @@ pub(crate) fn my_id(app: &AppHandle) -> Option<String> {
 
 /// Whether the friends lists have been loaded at least once this session.
 pub(crate) fn lists_loaded(app: &AppHandle) -> bool {
-    app.try_state::<Friends>().is_some_and(|friends| friends.loaded.load(Ordering::SeqCst))
+    app.try_state::<Friends>()
+        .is_some_and(|friends| friends.loaded.load(Ordering::SeqCst))
 }
 
 /// At program start: signed in last time? Then connect straight away.
@@ -189,7 +190,9 @@ pub fn handle_url(app: &AppHandle, url: &str) {
         crate::tray::show_main_window(app);
         return;
     }
-    let Some(rest) = url.strip_prefix("clippiboy://auth") else { return };
+    let Some(rest) = url.strip_prefix("clippiboy://auth") else {
+        return;
+    };
     let code = rest
         .trim_start_matches('/')
         .trim_start_matches('?')
@@ -215,7 +218,9 @@ pub fn handle_url(app: &AppHandle, url: &str) {
 
 /// Every two seconds from the status tick: the game as the core holds it.
 pub fn set_game(app: &AppHandle, game: Option<&str>) {
-    let Some(friends) = app.try_state::<Friends>() else { return };
+    let Some(friends) = app.try_state::<Friends>() else {
+        return;
+    };
     {
         let mut current = friends.game.lock();
         if current.as_ref().map(|(name, _)| name.as_str()) == game {
@@ -255,7 +260,10 @@ pub fn friends_sign_in(app: AppHandle) -> Result<(), String> {
     friends.view.lock().signing_in = true;
     emit(&app);
     app.opener()
-        .open_url(format!("{SERVER}/auth/start?challenge={challenge}"), None::<&str>)
+        .open_url(
+            format!("{SERVER}/auth/start?challenge={challenge}"),
+            None::<&str>,
+        )
         .map_err(|err| format!("Could not open the browser: {err}"))
 }
 
@@ -308,26 +316,50 @@ pub async fn friends_request(app: AppHandle, query: String) -> Result<String, St
 
 #[tauri::command]
 pub async fn friends_accept(app: AppHandle, id: String) -> Result<(), String> {
-    request(&app, reqwest::Method::POST, &format!("/friends/{}/accept", checked_id(&id)?), None).await?;
+    request(
+        &app,
+        reqwest::Method::POST,
+        &format!("/friends/{}/accept", checked_id(&id)?),
+        None,
+    )
+    .await?;
     refresh(&app, false).await
 }
 
 /// Declines, withdraws, or unfriends.
 #[tauri::command]
 pub async fn friends_remove(app: AppHandle, id: String) -> Result<(), String> {
-    request(&app, reqwest::Method::DELETE, &format!("/friends/{}", checked_id(&id)?), None).await?;
+    request(
+        &app,
+        reqwest::Method::DELETE,
+        &format!("/friends/{}", checked_id(&id)?),
+        None,
+    )
+    .await?;
     refresh(&app, false).await
 }
 
 #[tauri::command]
 pub async fn friends_block(app: AppHandle, id: String) -> Result<(), String> {
-    request(&app, reqwest::Method::POST, &format!("/blocks/{}", checked_id(&id)?), None).await?;
+    request(
+        &app,
+        reqwest::Method::POST,
+        &format!("/blocks/{}", checked_id(&id)?),
+        None,
+    )
+    .await?;
     refresh(&app, false).await
 }
 
 #[tauri::command]
 pub async fn friends_unblock(app: AppHandle, id: String) -> Result<(), String> {
-    request(&app, reqwest::Method::DELETE, &format!("/blocks/{}", checked_id(&id)?), None).await?;
+    request(
+        &app,
+        reqwest::Method::DELETE,
+        &format!("/blocks/{}", checked_id(&id)?),
+        None,
+    )
+    .await?;
     refresh(&app, false).await
 }
 
@@ -370,7 +402,8 @@ async fn finish_sign_in(app: &AppHandle, code: &str) -> Result<(), String> {
         .send()
         .await
         .map_err(|err| format!("The friends server is not reachable: {err}"))?;
-    let session: Session = serde_json::from_value(read(response).await?).map_err(|err| err.to_string())?;
+    let session: Session =
+        serde_json::from_value(read(response).await?).map_err(|err| err.to_string())?;
     // Only a sign-in that worked uses the verifier up.
     *friends.verifier.lock() = None;
     save_token(Some(&session.token));
@@ -430,9 +463,17 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
     // Offers that came before the lists did can be looked at now.
     crate::share::retry_held(app);
     if announce {
-        let known: HashSet<&str> = previous.incoming.iter().map(|p| p.user.id.as_str()).collect();
+        let known: HashSet<&str> = previous
+            .incoming
+            .iter()
+            .map(|p| p.user.id.as_str())
+            .collect();
         let now = now_ms();
-        for request in lists.incoming.iter().filter(|p| !known.contains(p.user.id.as_str())) {
+        for request in lists
+            .incoming
+            .iter()
+            .filter(|p| !known.contains(p.user.id.as_str()))
+        {
             if !first_today(&mut friends.announced.lock(), &request.user.id, now) {
                 continue;
             }
@@ -444,8 +485,16 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
                 request.user.avatar.clone(),
             );
         }
-        let asked: HashSet<&str> = previous.outgoing.iter().map(|p| p.user.id.as_str()).collect();
-        for friend in lists.friends.iter().filter(|user| asked.contains(user.id.as_str())) {
+        let asked: HashSet<&str> = previous
+            .outgoing
+            .iter()
+            .map(|p| p.user.id.as_str())
+            .collect();
+        for friend in lists
+            .friends
+            .iter()
+            .filter(|user| asked.contains(user.id.as_str()))
+        {
             alert(
                 app,
                 Alert::Accepted,
@@ -480,7 +529,9 @@ fn spawn_connection(app: &AppHandle) {
             if friends.generation.load(Ordering::SeqCst) != generation {
                 return;
             }
-            let Some(token) = friends.token.lock().clone() else { return };
+            let Some(token) = friends.token.lock().clone() else {
+                return;
+            };
             let started = Instant::now();
             match serve(&app, &token).await {
                 Ok(End::SignedOut) => return,
@@ -528,7 +579,11 @@ fn spawn_connection(app: &AppHandle) {
 /// dropped all at once do not all dial back in the same instant; the step
 /// doubles up to [`BACKOFF_MAX`].
 fn next_backoff(step: Duration, unit: f64) -> (Duration, Duration) {
-    let unit = if unit.is_finite() { unit.clamp(0.0, 1.0) } else { 1.0 };
+    let unit = if unit.is_finite() {
+        unit.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let wait = step.mul_f64(0.5 + unit / 2.0).min(step);
     (wait, (step * 2).min(BACKOFF_MAX))
 }
@@ -564,7 +619,9 @@ enum End {
 
 async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
     install_crypto();
-    let mut request = SOCKET.into_client_request().map_err(|err| err.to_string())?;
+    let mut request = SOCKET
+        .into_client_request()
+        .map_err(|err| err.to_string())?;
     request.headers_mut().insert(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {token}")).map_err(|err| err.to_string())?,
@@ -597,7 +654,11 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
     if let Err(err) = refresh(app, true).await {
         log::info!("friends: refresh failed: {err}");
     }
-    send_within(&mut sink, Message::Text(presence_message(app, "hello").into())).await?;
+    send_within(
+        &mut sink,
+        Message::Text(presence_message(app, "hello").into()),
+    )
+    .await?;
 
     let mut ping = tokio::time::interval(PING_EVERY);
     let mut last_pong = Instant::now();
@@ -657,7 +718,10 @@ enum ServerMessage {
     },
     Friends,
     /// A friend's app sent this one something — the clip handshake.
-    Relay { from: String, body: serde_json::Value },
+    Relay {
+        from: String,
+        body: serde_json::Value,
+    },
     /// The server could not pass one of ours on.
     RelayFailed {
         #[serde(default, rename = "ref")]
@@ -673,11 +737,20 @@ async fn handle_message(app: &AppHandle, text: &str) {
     };
     let friends = app.state::<Friends>();
     match message {
-        ServerMessage::Snapshot { friends: all, last_seen } => {
+        ServerMessage::Snapshot {
+            friends: all,
+            last_seen,
+        } => {
             {
                 let mut view = friends.view.lock();
-                view.presence = all.into_iter().filter_map(|(id, presence)| Some((id, presence?))).collect();
-                view.last_seen = last_seen.into_iter().filter_map(|(id, at)| Some((id, at?))).collect();
+                view.presence = all
+                    .into_iter()
+                    .filter_map(|(id, presence)| Some((id, presence?)))
+                    .collect();
+                view.last_seen = last_seen
+                    .into_iter()
+                    .filter_map(|(id, at)| Some((id, at?)))
+                    .collect();
             }
             emit(app);
         }
@@ -685,7 +758,11 @@ async fn handle_message(app: &AppHandle, text: &str) {
         ServerMessage::RelayFailed { reference, reason } => {
             crate::share::relay_failed(app, reference.as_ref().and_then(|r| r.as_str()), &reason)
         }
-        ServerMessage::Presence { id, presence, last_seen } => {
+        ServerMessage::Presence {
+            id,
+            presence,
+            last_seen,
+        } => {
             let (name, before) = {
                 let mut view = friends.view.lock();
                 if let Some(at) = last_seen {
@@ -706,10 +783,28 @@ async fn handle_message(app: &AppHandle, text: &str) {
             emit(app);
             if let (Some((name, avatar)), Some(now)) = (name, presence) {
                 match (before, now.game) {
-                    (None, Some(game)) => alert(app, Alert::Game, &name, &format!("{name} is playing {game}"), avatar),
-                    (None, None) => alert(app, Alert::Online, &name, &format!("{name} is online"), avatar),
+                    (None, Some(game)) => alert(
+                        app,
+                        Alert::Game,
+                        &name,
+                        &format!("{name} is playing {game}"),
+                        avatar,
+                    ),
+                    (None, None) => alert(
+                        app,
+                        Alert::Online,
+                        &name,
+                        &format!("{name} is online"),
+                        avatar,
+                    ),
                     (Some(before), Some(game)) if before.game.as_deref() != Some(game.as_str()) => {
-                        alert(app, Alert::Game, &name, &format!("{name} started {game}"), avatar)
+                        alert(
+                            app,
+                            Alert::Game,
+                            &name,
+                            &format!("{name} started {game}"),
+                            avatar,
+                        )
                     }
                     _ => {}
                 }
@@ -745,14 +840,21 @@ fn presence_message(app: &AppHandle, kind: &str) -> String {
 
 /// A friend's presence, if they are online.
 pub fn presence_of(app: &AppHandle, id: &str) -> Option<Presence> {
-    app.try_state::<Friends>()?.view.lock().presence.get(id).cloned()
+    app.try_state::<Friends>()?
+        .view
+        .lock()
+        .presence
+        .get(id)
+        .cloned()
 }
 
 /// Friends playing this game right now, by name — for the tags on a clip saved
 /// in this moment. Whether it is the same match nobody can tell from here;
 /// the same game at the same time is what there is.
 pub fn playing(app: &AppHandle, game: &str) -> Vec<String> {
-    let Some(friends) = app.try_state::<Friends>() else { return Vec::new() };
+    let Some(friends) = app.try_state::<Friends>() else {
+        return Vec::new();
+    };
     let view = friends.view.lock();
     view.lists
         .friends
@@ -771,20 +873,32 @@ pub fn playing(app: &AppHandle, game: &str) -> Vec<String> {
 pub fn friend_avatar(app: &AppHandle, id: &str) -> Option<String> {
     let friends = app.try_state::<Friends>()?;
     let view = friends.view.lock();
-    view.lists.friends.iter().find(|user| user.id == id).and_then(|user| user.avatar.clone())
+    view.lists
+        .friends
+        .iter()
+        .find(|user| user.id == id)
+        .and_then(|user| user.avatar.clone())
 }
 
 pub fn friend_name(app: &AppHandle, id: &str) -> Option<String> {
     let friends = app.try_state::<Friends>()?;
     let view = friends.view.lock();
-    view.lists.friends.iter().find(|user| user.id == id).map(|user| user.display_name.clone())
+    view.lists
+        .friends
+        .iter()
+        .find(|user| user.id == id)
+        .map(|user| user.display_name.clone())
 }
 
 /// Hands a friend's app a message through the server. False when there is no
 /// connection to send it on.
 pub fn send_relay(app: &AppHandle, to: &str, body: &impl Serialize) -> bool {
-    let Some(friends) = app.try_state::<Friends>() else { return false };
-    let Some(outbox) = friends.outbox.lock().clone() else { return false };
+    let Some(friends) = app.try_state::<Friends>() else {
+        return false;
+    };
+    let Some(outbox) = friends.outbox.lock().clone() else {
+        return false;
+    };
     let text = serde_json::json!({ "t": "relay", "to": to, "body": body }).to_string();
     outbox.send(text).is_ok()
 }
@@ -795,8 +909,12 @@ pub fn announce_clip(app: &AppHandle, who: &str, text: &str) {
 }
 
 fn send_presence(app: &AppHandle, kind: &str) {
-    let Some(friends) = app.try_state::<Friends>() else { return };
-    let Some(outbox) = friends.outbox.lock().clone() else { return };
+    let Some(friends) = app.try_state::<Friends>() else {
+        return;
+    };
+    let Some(outbox) = friends.outbox.lock().clone() else {
+        return;
+    };
     let _ = outbox.send(presence_message(app, kind));
 }
 
@@ -827,10 +945,11 @@ fn alert(app: &AppHandle, kind: Alert, who: &str, text: &str, avatar: Option<Str
     if !wanted || config.busy {
         return;
     }
-    let in_front = app
-        .get_webview_window("main")
-        .is_some_and(|window| window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false));
-    let hushed_in_game = !config.notify_while_playing && app.state::<Friends>().game.lock().is_some();
+    let in_front = app.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+    });
+    let hushed_in_game =
+        !config.notify_while_playing && app.state::<Friends>().game.lock().is_some();
     if matches!(kind, Alert::Online) && !hushed_in_game {
         crate::sounds::play(app, crate::model::SoundKind::FriendOnline);
     }
@@ -848,21 +967,44 @@ fn alert(app: &AppHandle, kind: Alert, who: &str, text: &str, avatar: Option<Str
     if overlay.overlay.enabled {
         use crate::overlay::BannerKind;
         match kind {
-            Alert::Online => crate::overlay::show_friend(app, BannerKind::FriendOnline, who, text.to_owned(), None, None, avatar),
-            Alert::Game => crate::overlay::show_friend(app, BannerKind::FriendGame, who, text.to_owned(), None, None, avatar),
+            Alert::Online => crate::overlay::show_friend(
+                app,
+                BannerKind::FriendOnline,
+                who,
+                text.to_owned(),
+                None,
+                None,
+                avatar,
+            ),
+            Alert::Game => crate::overlay::show_friend(
+                app,
+                BannerKind::FriendGame,
+                who,
+                text.to_owned(),
+                None,
+                None,
+                avatar,
+            ),
             Alert::Request => crate::overlay::show_friend(
                 app,
                 BannerKind::Friend,
                 who,
                 text.to_owned(),
                 // Unbound, the console cannot be reached over the game either.
-                (!overlay.console_hotkey_shown().is_empty()).then(|| {
-                    format!("{} to answer", overlay.console_hotkey_spoken())
-                }),
+                (!overlay.console_hotkey_shown().is_empty())
+                    .then(|| format!("{} to answer", overlay.console_hotkey_spoken())),
                 None,
                 avatar,
             ),
-            Alert::Accepted => crate::overlay::show_friend(app, BannerKind::Friend, who, text.to_owned(), None, None, avatar),
+            Alert::Accepted => crate::overlay::show_friend(
+                app,
+                BannerKind::Friend,
+                who,
+                text.to_owned(),
+                None,
+                None,
+                avatar,
+            ),
             // `share.rs` has put its banner up already.
             Alert::Clip => {}
         }
@@ -871,8 +1013,18 @@ fn alert(app: &AppHandle, kind: Alert, who: &str, text: &str, avatar: Option<Str
     // Banners switched off altogether: then Windows' notice is the only way
     // left to hear of it.
     use tauri_plugin_notification::NotificationExt;
-    let text = if crate::streamer::active() { crate::streamer::mask_name(text, who) } else { text.to_owned() };
-    if let Err(err) = app.notification().builder().title("ClippiBoy").body(text).show() {
+    let text = if crate::streamer::active() {
+        crate::streamer::mask_name(text, who)
+    } else {
+        text.to_owned()
+    };
+    if let Err(err) = app
+        .notification()
+        .builder()
+        .title("ClippiBoy")
+        .body(text)
+        .show()
+    {
         log::info!("friends: notification failed: {err}");
     }
 }
@@ -913,7 +1065,9 @@ async fn request(
         .request(method, format!("{SERVER}{path}"))
         .header("Authorization", format!("Bearer {token}"));
     if let Some(body) = body {
-        builder = builder.header("Content-Type", "application/json").body(body.to_string());
+        builder = builder
+            .header("Content-Type", "application/json")
+            .body(body.to_string());
     }
     let response = builder
         .send()
@@ -986,7 +1140,11 @@ fn now_ms() -> i64 {
 
 /// 244 random bits, from the same source `uuid` draws on.
 fn random_token() -> String {
-    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn base64url(bytes: &[u8]) -> String {
@@ -1015,13 +1173,20 @@ struct StoredSession {
 }
 
 fn load_token() -> Option<String> {
-    crate::secret::read::<StoredSession>(&token_path(), "friends session").map(|stored| stored.token)
+    crate::secret::read::<StoredSession>(&token_path(), "friends session")
+        .map(|stored| stored.token)
 }
 
 fn save_token(token: Option<&str>) {
     let path = token_path();
     let result = match token {
-        Some(token) => crate::secret::write_sealed(&path, &StoredSession { token: token.to_owned() }, "friends session"),
+        Some(token) => crate::secret::write_sealed(
+            &path,
+            &StoredSession {
+                token: token.to_owned(),
+            },
+            "friends session",
+        ),
         None => std::fs::remove_file(&path).or_else(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 Ok(())
@@ -1050,7 +1215,10 @@ mod tests {
         assert_eq!(add_code_from_url("clippiboy://add?code=K7QXM2P0"), None);
         assert_eq!(add_code_from_url("clippiboy://add?code=<script>"), None);
         assert_eq!(add_code_from_url("clippiboy://add"), None);
-        assert_eq!(add_code_from_url("clippiboy://addfriend?code=K7QXM2PD"), None);
+        assert_eq!(
+            add_code_from_url("clippiboy://addfriend?code=K7QXM2PD"),
+            None
+        );
         assert_eq!(add_code_from_url("clippiboy://auth?code=K7QXM2PD"), None);
     }
 
@@ -1064,13 +1232,22 @@ mod tests {
             assert_eq!(step, Duration::from_secs(want));
         }
         // The wait spans half the step to the full step, never more.
-        assert_eq!(next_backoff(Duration::from_secs(8), 0.0).0, Duration::from_secs(4));
-        assert_eq!(next_backoff(Duration::from_secs(8), 0.5).0, Duration::from_secs(6));
+        assert_eq!(
+            next_backoff(Duration::from_secs(8), 0.0).0,
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(8), 0.5).0,
+            Duration::from_secs(6)
+        );
         assert!(next_backoff(Duration::from_secs(8), 0.999).0 < Duration::from_secs(8));
         // Out of range clamps instead of waiting past the step or not at all.
         assert_eq!(next_backoff(BACKOFF_MAX, 7.0).0, BACKOFF_MAX);
         assert_eq!(next_backoff(BACKOFF_MAX, -1.0).0, BACKOFF_MAX / 2);
-        assert_eq!(next_backoff(BACKOFF_MAX, f64::NAN), (BACKOFF_MAX, BACKOFF_MAX));
+        assert_eq!(
+            next_backoff(BACKOFF_MAX, f64::NAN),
+            (BACKOFF_MAX, BACKOFF_MAX)
+        );
     }
 
     #[test]

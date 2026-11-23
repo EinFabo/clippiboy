@@ -23,14 +23,14 @@ use parking_lot::Mutex;
 use windows::core::Interface;
 use windows::Win32::Foundation::TRUE;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
-    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
-    ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
     D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL};
@@ -90,7 +90,10 @@ const _: () = assert!(
 /// Colour space bitfield from `d3d11.h`:
 /// bit 0 `Usage`, bit 1 `RGB_Range`, bit 2 `YCbCr_Matrix`, bit 3 `YCbCr_Xvycc`,
 /// bits 4–5 `Nominal_Range`.
-pub(crate) const fn color_space(ycbcr_709: bool, nominal_range: u32) -> D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+pub(crate) const fn color_space(
+    ycbcr_709: bool,
+    nominal_range: u32,
+) -> D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
     let bits = ((ycbcr_709 as u32) << 2) | ((nominal_range & 0x3) << 4);
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: bits }
 }
@@ -134,7 +137,11 @@ pub struct Converter {
 }
 
 impl Converter {
-    pub fn new(gpu: &GpuDevice, width: u32, height: u32, fps: u32,
+    pub fn new(
+        gpu: &GpuDevice,
+        width: u32,
+        height: u32,
+        fps: u32,
         slots: usize,
     ) -> Result<Self, String> {
         let video_device: ID3D11VideoDevice = gpu
@@ -264,7 +271,8 @@ impl Converter {
             )
         }
         .map_err(|err| format!("video processor output view: {err}"))?;
-        let output_view = output_view.ok_or_else(|| "video processor output view: none was created".to_string())?;
+        let output_view = output_view
+            .ok_or_else(|| "video processor output view: none was created".to_string())?;
 
         Ok(Slot {
             texture,
@@ -301,7 +309,8 @@ impl Converter {
             )
         }
         .map_err(|err| format!("video processor input view: {err}"))?;
-        let view = view.ok_or_else(|| "video processor input view: none was created".to_string())?;
+        let view =
+            view.ok_or_else(|| "video processor input view: none was created".to_string())?;
 
         // If the frame pool grows again after a `Recreate`, views onto long-freed
         // textures would otherwise pile up.
@@ -512,7 +521,10 @@ impl Stamp {
     /// A canvas the size and format of the frame, made anew when either changes.
     fn canvas(&mut self, desc: &D3D11_TEXTURE2D_DESC) -> Result<&Canvas, String> {
         let shape = (desc.Width, desc.Height, desc.Format.0);
-        let fits = self.canvas.as_ref().is_some_and(|canvas| canvas.shape == shape);
+        let fits = self
+            .canvas
+            .as_ref()
+            .is_some_and(|canvas| canvas.shape == shape);
         if !fits {
             // Drop the old one first: the target bitmap points into the context.
             unsafe { self.context.SetTarget(None) };
@@ -533,8 +545,11 @@ impl Stamp {
                 MiscFlags: 0,
             };
             let mut texture = None;
-            unsafe { self.device.CreateTexture2D(&canvas_desc, None, Some(&mut texture)) }
-                .map_err(|err| format!("watermark canvas: {err}"))?;
+            unsafe {
+                self.device
+                    .CreateTexture2D(&canvas_desc, None, Some(&mut texture))
+            }
+            .map_err(|err| format!("watermark canvas: {err}"))?;
             let texture = texture.ok_or_else(|| "watermark canvas missing".to_string())?;
             let surface: IDXGISurface = texture
                 .cast()
@@ -550,8 +565,11 @@ impl Stamp {
                 bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
                 colorContext: std::mem::ManuallyDrop::new(None),
             };
-            let target = unsafe { self.context.CreateBitmapFromDxgiSurface(&surface, Some(&properties)) }
-                .map_err(|err| format!("watermark target: {err}"))?;
+            let target = unsafe {
+                self.context
+                    .CreateBitmapFromDxgiSurface(&surface, Some(&properties))
+            }
+            .map_err(|err| format!("watermark target: {err}"))?;
             unsafe { self.context.SetTarget(&target) };
             self.canvas = Some(Canvas {
                 texture,
@@ -847,7 +865,11 @@ mod tests {
     /// CAP-6: the slots follow the queue the encoder really has.
     #[test]
     fn a_deeper_queue_gets_the_slots_to_match() {
-        assert_eq!(slots_for(crate::mft::QUEUE_DEPTH), 22, "the default is what was measured");
+        assert_eq!(
+            slots_for(crate::mft::QUEUE_DEPTH),
+            22,
+            "the default is what was measured"
+        );
         let depth = 30;
         assert!(
             slots_for(depth) > depth + crate::mft::ENCODER_HOLD_MAX,

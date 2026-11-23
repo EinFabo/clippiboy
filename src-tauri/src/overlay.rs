@@ -11,9 +11,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use tauri::{
-    Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
-};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
 
 use crate::model::{OverlayConfig, OverlayCorner};
 use crate::state::AppState;
@@ -351,7 +349,12 @@ fn announce(window: &tauri::WebviewWindow, config: &OverlayConfig) {
 }
 
 /// Show the banner, provided it is not switched off in the settings.
-pub fn show(app: &tauri::AppHandle, kind: BannerKind, title: impl Into<String>, detail: Option<String>) {
+pub fn show(
+    app: &tauri::AppHandle,
+    kind: BannerKind,
+    title: impl Into<String>,
+    detail: Option<String>,
+) {
     show_with_thumb(app, kind, title, detail, None);
 }
 
@@ -409,7 +412,10 @@ fn show_banner(
         BannerKind::Error => config.on_error,
         BannerKind::Screenshot => config.on_screenshot,
         BannerKind::Recording => config.on_recording,
-        BannerKind::Info | BannerKind::Friend | BannerKind::FriendOnline | BannerKind::FriendGame => true,
+        BannerKind::Info
+        | BannerKind::Friend
+        | BannerKind::FriendOnline
+        | BannerKind::FriendGame => true,
     };
     if !wanted {
         return;

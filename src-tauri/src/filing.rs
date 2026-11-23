@@ -46,7 +46,13 @@ pub fn folder_name(game: &str) -> Option<String> {
     // typed by hand — so the guard belongs here as well.
     let cleaned: String = crate::game::strip_invisibles(game)
         .chars()
-        .map(|c| if FORBIDDEN.contains(&c) || (c as u32) < 0x20 { ' ' } else { c })
+        .map(|c| {
+            if FORBIDDEN.contains(&c) || (c as u32) < 0x20 {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let mut name: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     name.truncate(
@@ -73,7 +79,11 @@ pub(crate) fn unreserved(name: &str) -> String {
                 && stem.starts_with(word)
                 && stem.ends_with(|c: char| c.is_ascii_digit()))
     });
-    if reserved { format!("_{name}") } else { name.to_owned() }
+    if reserved {
+        format!("_{name}")
+    } else {
+        name.to_owned()
+    }
 }
 
 /// The folder a clip with this game, this heart and this kind belongs in.
@@ -132,9 +142,8 @@ pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
         .file_name()
         .ok_or_else(|| "The clip has no file name.".to_string())?;
 
-    std::fs::create_dir_all(&dir).map_err(|err| {
-        format!("could not create folder '{}': {err}", dir.display())
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("could not create folder '{}': {err}", dir.display()))?;
     let target = free_name(&dir, name.to_string_lossy().as_ref());
     move_file(&file, &target)?;
     // If that was the last clip of its game, the folder should not be left
@@ -282,7 +291,11 @@ pub(crate) fn free_name(dir: &Path, name: &str) -> PathBuf {
         return target;
     }
     let path = Path::new(name);
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let ext = path.extension().map(|e| e.to_string_lossy().to_string());
     for n in 2..1000 {
         let candidate = match &ext {
@@ -322,9 +335,15 @@ mod tests {
 
     #[test]
     fn a_game_becomes_a_readable_folder() {
-        assert_eq!(folder_name("Counter-Strike 2").as_deref(), Some("Counter-Strike 2"));
+        assert_eq!(
+            folder_name("Counter-Strike 2").as_deref(),
+            Some("Counter-Strike 2")
+        );
         // Forbidden characters turn into whitespace, and that collapses.
-        assert_eq!(folder_name("Tom: The / Movie").as_deref(), Some("Tom The Movie"));
+        assert_eq!(
+            folder_name("Tom: The / Movie").as_deref(),
+            Some("Tom The Movie")
+        );
         assert_eq!(folder_name("  Bodycam  ").as_deref(), Some("Bodycam"));
     }
 
@@ -340,7 +359,11 @@ mod tests {
     #[test]
     fn invisible_characters_do_not_make_a_second_folder() {
         for game in ARC_RAIDERS {
-            assert_eq!(folder_name(game).as_deref(), Some("ARC Raiders"), "from {game:?}");
+            assert_eq!(
+                folder_name(game).as_deref(),
+                Some("ARC Raiders"),
+                "from {game:?}"
+            );
         }
     }
 
@@ -404,15 +427,23 @@ mod tests {
     fn the_four_categories_become_one() {
         let lib = shared();
         for (n, game) in ARC_RAIDERS.iter().enumerate() {
-            db(&lib).insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
+            db(&lib)
+                .insert(&clip_with_game(&format!("c{n}"), Some(game)))
+                .unwrap();
         }
         // One that was never broken must not be touched.
-        db(&lib).insert(&clip_with_game("plain", Some("Bodycam"))).unwrap();
+        db(&lib)
+            .insert(&clip_with_game("plain", Some("Bodycam")))
+            .unwrap();
 
         assert_eq!(normalize_games(&lib), 4);
 
-        let names: std::collections::HashSet<Option<String>> =
-            db(&lib).list().unwrap().into_iter().map(|c| c.game).collect();
+        let names: std::collections::HashSet<Option<String>> = db(&lib)
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.game)
+            .collect();
         assert_eq!(
             names,
             ["ARC Raiders", "Bodycam"]
@@ -426,7 +457,9 @@ mod tests {
     fn a_second_run_changes_nothing() {
         let lib = shared();
         for (n, game) in ARC_RAIDERS.iter().enumerate() {
-            db(&lib).insert(&clip_with_game(&format!("c{n}"), Some(game))).unwrap();
+            db(&lib)
+                .insert(&clip_with_game(&format!("c{n}"), Some(game)))
+                .unwrap();
         }
         assert_eq!(normalize_games(&lib), 4);
         assert_eq!(normalize_games(&lib), 0, "the pass is not idempotent");
@@ -435,7 +468,9 @@ mod tests {
     #[test]
     fn a_game_of_nothing_but_invisibles_becomes_no_game() {
         let lib = shared();
-        db(&lib).insert(&clip_with_game("ghost", Some("\u{200b}\u{feff}"))).unwrap();
+        db(&lib)
+            .insert(&clip_with_game("ghost", Some("\u{200b}\u{feff}")))
+            .unwrap();
         assert_eq!(normalize_games(&lib), 1);
         assert_eq!(db(&lib).list().unwrap()[0].game, None);
     }
@@ -471,7 +506,10 @@ mod tests {
             root.join(FAVORITES).join(VIDEOS),
         );
         // With no game only the kind is left.
-        assert_eq!(dir_for(root, None, false, ClipKind::Clip), root.join(VIDEOS));
+        assert_eq!(
+            dir_for(root, None, false, ClipKind::Clip),
+            root.join(VIDEOS)
+        );
     }
 
     /// A clip, a still and a recording of the same game are never in the
@@ -514,7 +552,10 @@ mod tests {
         assert!(inside(root, Path::new("C:/clips/a.mp4")));
         assert!(inside(root, Path::new("C:/clips/Videos/a.mp4")));
         assert!(inside(root, Path::new("C:/clips/Bodycam/Videos/a.mp4")));
-        assert!(!inside(root, Path::new("C:/clips/Bodycam/Videos/old/a.mp4")));
+        assert!(!inside(
+            root,
+            Path::new("C:/clips/Bodycam/Videos/old/a.mp4")
+        ));
         assert!(!inside(root, Path::new("D:/elsewhere/a.mp4")));
     }
 

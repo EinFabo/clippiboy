@@ -87,12 +87,14 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
-    let base_icon = Image::from_bytes(TRAY_PNG).map(|icon| owned(&icon)).unwrap_or_else(|err| {
-        log::warn!("could not read the tray icon: {err}");
-        app.default_window_icon()
-            .map(owned)
-            .unwrap_or_else(|| Image::new_owned(vec![0; 4], 1, 1))
-    });
+    let base_icon = Image::from_bytes(TRAY_PNG)
+        .map(|icon| owned(&icon))
+        .unwrap_or_else(|err| {
+            log::warn!("could not read the tray icon: {err}");
+            app.default_window_icon()
+                .map(owned)
+                .unwrap_or_else(|| Image::new_owned(vec![0; 4], 1, 1))
+        });
     // Recoloured here only until the main window sends the logo it draws
     // (`set_logo`) — a moment after start.
     let accent = app.state::<AppState>().config_snapshot().accent();
@@ -182,7 +184,10 @@ pub fn set_logo(app: &tauri::AppHandle, logo: Image<'static>) {
     };
     let active = logo;
     let idle = dimmed(&active);
-    let showing = if handles.last_active.load(std::sync::atomic::Ordering::SeqCst) {
+    let showing = if handles
+        .last_active
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
         active.clone()
     } else {
         idle.clone()
@@ -396,7 +401,10 @@ mod tests {
         assert!(take_if_changed(&mut last, "ClippiBoy · buffer off"));
         assert_eq!(last, "ClippiBoy · buffer off");
         assert!(!take_if_changed(&mut last, "ClippiBoy · buffer off"));
-        assert!(take_if_changed(&mut last, "ClippiBoy · buffer running — 30 s"));
+        assert!(take_if_changed(
+            &mut last,
+            "ClippiBoy · buffer running — 30 s"
+        ));
         assert_eq!(last, "ClippiBoy · buffer running — 30 s");
     }
 }

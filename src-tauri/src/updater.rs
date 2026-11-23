@@ -88,7 +88,11 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
         .updater_builder()
         // No overall limit here: it would carry over to a download of tens
         // of megabytes on a slow line. The check gets its own below.
-        .configure_client(|client| client.connect_timeout(CONNECT_TIMEOUT).read_timeout(STALL_TIMEOUT))
+        .configure_client(|client| {
+            client
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(STALL_TIMEOUT)
+        })
         // End the recording cleanly before the restart, otherwise half-finished
         // segment files are left behind.
         .on_before_exit({
@@ -99,7 +103,10 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
                 let state = app.state::<AppState>();
                 // Only a flag set here is the update's to take back (`install`);
                 // one from "Quit" stays.
-                if !state.quitting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                if !state
+                    .quitting
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
                     QUIT_FOR_UPDATE.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 crate::wait_for_saves(&app);
@@ -269,13 +276,23 @@ fn vet(running: &str, offered: &str, signature: &str) -> Result<Signed, String> 
 /// trusted comment of the minisign signature (`timestamp:…\tfile:ClippiBoy_1.0.1_x64-setup.exe`).
 /// The signature comes as `latest.json` carries it: the `.sig` file in base64.
 fn signed_version(signature: &str) -> Option<String> {
-    let url_safe = signature.trim_end_matches('=').replace('+', "-").replace('/', "_");
+    let url_safe = signature
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_");
     let text = String::from_utf8(crate::webhook::from_base64url(&url_safe)?).ok()?;
-    let comment = text.lines().find_map(|line| line.strip_prefix("trusted comment: "))?;
-    let file = comment.split('\t').find_map(|field| field.strip_prefix("file:"))?;
+    let comment = text
+        .lines()
+        .find_map(|line| line.strip_prefix("trusted comment: "))?;
+    let file = comment
+        .split('\t')
+        .find_map(|field| field.strip_prefix("file:"))?;
     // `<product>_<version>_<arch>-setup.exe`, or `…_<arch>_<lang>.msi`; the
     // first part that is a version, so a product name with `_` in it works.
-    file.split('_').skip(1).find(|part| Version::parse(part).is_some()).map(str::to_owned)
+    file.split('_')
+        .skip(1)
+        .find(|part| Version::parse(part).is_some())
+        .map(str::to_owned)
 }
 
 /// A semantic version, as far as ordering goes: build metadata is dropped.
@@ -294,7 +311,9 @@ impl<'a> Version<'a> {
         let mut parts = core.split('.');
         let mut numbers = [0u64; 3];
         for number in &mut numbers {
-            let part = parts.next().filter(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))?;
+            let part = parts
+                .next()
+                .filter(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))?;
             *number = part.parse().ok()?;
         }
         if parts.next().is_some() {
@@ -310,26 +329,33 @@ impl<'a> Version<'a> {
     /// Semver precedence: a pre-release ranks below its release, and its
     /// identifiers compare as numbers where both are numbers.
     fn precedence(&self, other: &Self) -> Ordering {
-        self.core.cmp(&other.core).then_with(|| match (self.pre.is_empty(), other.pre.is_empty()) {
-            (true, true) => Ordering::Equal,
-            (true, false) => Ordering::Greater,
-            (false, true) => Ordering::Less,
-            (false, false) => {
-                for (a, b) in self.pre.iter().zip(&other.pre) {
-                    let numeric = |id: &str| id.bytes().all(|b| b.is_ascii_digit()).then(|| id.parse::<u64>().ok()).flatten();
-                    let order = match (numeric(a), numeric(b)) {
-                        (Some(a), Some(b)) => a.cmp(&b),
-                        (Some(_), None) => Ordering::Less,
-                        (None, Some(_)) => Ordering::Greater,
-                        (None, None) => a.cmp(b),
-                    };
-                    if order != Ordering::Equal {
-                        return order;
+        self.core
+            .cmp(&other.core)
+            .then_with(|| match (self.pre.is_empty(), other.pre.is_empty()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => {
+                    for (a, b) in self.pre.iter().zip(&other.pre) {
+                        let numeric = |id: &str| {
+                            id.bytes()
+                                .all(|b| b.is_ascii_digit())
+                                .then(|| id.parse::<u64>().ok())
+                                .flatten()
+                        };
+                        let order = match (numeric(a), numeric(b)) {
+                            (Some(a), Some(b)) => a.cmp(&b),
+                            (Some(_), None) => Ordering::Less,
+                            (None, Some(_)) => Ordering::Greater,
+                            (None, None) => a.cmp(b),
+                        };
+                        if order != Ordering::Equal {
+                            return order;
+                        }
                     }
+                    self.pre.len().cmp(&other.pre.len())
                 }
-                self.pre.len().cmp(&other.pre.len())
-            }
-        })
+            })
     }
 }
 
@@ -404,7 +430,18 @@ mod tests {
         assert_eq!(newer("1.0.0-alpha.1", "1.0.0-alpha"), Some(true));
         assert_eq!(newer("1.0.0-alpha", "1.0.0-1"), Some(true));
         // Not a version.
-        for junk in ["", "1", "1.0", "1.0.0.0", "v1.0.0", "1.x.0", "1.0.0-", "1.0.0-a..b", "+1.0.0", "1.-1.0"] {
+        for junk in [
+            "",
+            "1",
+            "1.0",
+            "1.0.0.0",
+            "v1.0.0",
+            "1.x.0",
+            "1.0.0-",
+            "1.0.0-a..b",
+            "+1.0.0",
+            "1.-1.0",
+        ] {
             assert_eq!(Version::parse(junk).map(|_| ()), None, "{junk}");
         }
     }
@@ -413,15 +450,29 @@ mod tests {
     fn the_signature_names_its_version() {
         assert_eq!(signed_version(SIGNED_1_0_0).as_deref(), Some("1.0.0"));
         assert_eq!(
-            signed_version(&signature("timestamp:1\tfile:ClippiBoy_1.2.3-rc.1_x64_en-US.msi")).as_deref(),
+            signed_version(&signature(
+                "timestamp:1\tfile:ClippiBoy_1.2.3-rc.1_x64_en-US.msi"
+            ))
+            .as_deref(),
             Some("1.2.3-rc.1")
         );
         assert_eq!(signed_version(&signature("timestamp:1")), None);
-        assert_eq!(signed_version(&signature("timestamp:1\tfile:ClippiBoy-setup.exe")), None);
-        assert_eq!(signed_version(&signature("timestamp:1\tfile:ClippiBoy_latest_x64-setup.exe")), None);
+        assert_eq!(
+            signed_version(&signature("timestamp:1\tfile:ClippiBoy-setup.exe")),
+            None
+        );
+        assert_eq!(
+            signed_version(&signature(
+                "timestamp:1\tfile:ClippiBoy_latest_x64-setup.exe"
+            )),
+            None
+        );
         // An underscore in the product name.
         assert_eq!(
-            signed_version(&signature("timestamp:1\tfile:Clippi_Boy_1.0.2_x64-setup.exe")).as_deref(),
+            signed_version(&signature(
+                "timestamp:1\tfile:Clippi_Boy_1.0.2_x64-setup.exe"
+            ))
+            .as_deref(),
             Some("1.0.2")
         );
         assert_eq!(signed_version("not base64 at all!"), None);
@@ -438,20 +489,35 @@ mod tests {
         assert!(vet("1.0.0", "1.0.1", SIGNED_1_0_0).is_err());
         assert!(vet("1.0.0", "9.9.9", SIGNED_1_0_0).is_err());
         assert!(vet("0.9.6", "1.0.2", SIGNED_1_0_0).is_err());
-        assert!(vet("1.0.0", "1.0.1", &signature("timestamp:1\tfile:ClippiBoy_1.0.0_x64-setup.exe")).is_err());
+        assert!(vet(
+            "1.0.0",
+            "1.0.1",
+            &signature("timestamp:1\tfile:ClippiBoy_1.0.0_x64-setup.exe")
+        )
+        .is_err());
         assert_eq!(
-            vet("1.0.0", "1.0.2", &signature("timestamp:1\tfile:Clippi_Boy_1.0.2_x64-setup.exe")),
+            vet(
+                "1.0.0",
+                "1.0.2",
+                &signature("timestamp:1\tfile:Clippi_Boy_1.0.2_x64-setup.exe")
+            ),
             Ok(Signed::AsOffered)
         );
         // A signature that names no version is taken on the floor alone.
-        assert_eq!(vet("1.0.0", "1.0.1", &signature("timestamp:1")), Ok(Signed::Unnamed));
+        assert_eq!(
+            vet("1.0.0", "1.0.1", &signature("timestamp:1")),
+            Ok(Signed::Unnamed)
+        );
         assert_eq!(vet("1.0.0", "1.0.1", ""), Ok(Signed::Unnamed));
         assert!(vet("1.0.1", "1.0.1", &signature("timestamp:1")).is_err());
         // No versions to compare.
         assert!(vet("1.0.0", "latest", SIGNED_1_0_0).is_err());
         assert!(vet("dev", "1.0.0", SIGNED_1_0_0).is_err());
         // Build metadata does not make a version another one.
-        assert_eq!(vet("0.9.6", "1.0.0+ci.4", SIGNED_1_0_0), Ok(Signed::AsOffered));
+        assert_eq!(
+            vet("0.9.6", "1.0.0+ci.4", SIGNED_1_0_0),
+            Ok(Signed::AsOffered)
+        );
     }
 
     #[test]

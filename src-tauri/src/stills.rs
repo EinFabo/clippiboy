@@ -44,7 +44,9 @@ pub fn thumb_size(width: u32, height: u32) -> Option<(u32, u32)> {
     if long <= LONG_SIDE {
         return Some((width, height));
     }
-    let scale = |side: u32| ((side as u64 * LONG_SIDE as u64 + long as u64 / 2) / long as u64).max(1) as u32;
+    let scale = |side: u32| {
+        ((side as u64 * LONG_SIDE as u64 + long as u64 / 2) / long as u64).max(1) as u32
+    };
     Some((scale(width), scale(height)))
 }
 
@@ -64,7 +66,10 @@ pub fn jpeg_data_url(width: u32, height: u32, rgb: &[u8]) -> Option<String> {
     jpeg_encoder::Encoder::new(&mut out, QUALITY)
         .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
         .ok()?;
-    Some(format!("data:image/jpeg;base64,{}", crate::appicon::base64(&out)))
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        crate::appicon::base64(&out)
+    ))
 }
 
 /// The answer for `ids`, in their order: a still from `grab` for each screen
@@ -85,9 +90,19 @@ pub fn thumbs_for(
                 monitors
                     .iter()
                     .find(|m| m.kind == TargetKind::Monitor && &m.id == id)
-                    .and_then(|m| grab(TargetRect { x: m.x, y: m.y, width: m.width, height: m.height }))
+                    .and_then(|m| {
+                        grab(TargetRect {
+                            x: m.x,
+                            y: m.y,
+                            width: m.width,
+                            height: m.height,
+                        })
+                    })
             };
-            Thumb { id: id.clone(), jpeg }
+            Thumb {
+                id: id.clone(),
+                jpeg,
+            }
         })
         .collect()
 }
@@ -113,7 +128,9 @@ pub fn may_grab(at: Moment) -> bool {
     !at.unrecordable
         && !at.streamer
         && !at.minimised
-        && at.main.is_some_and(|main| main != 0 && main == at.foreground)
+        && at
+            .main
+            .is_some_and(|main| main != 0 && main == at.foreground)
 }
 
 /// Stills of the screens named in `ids` (device names, `\\.\DISPLAY1`).
@@ -128,7 +145,11 @@ pub fn capture(ids: &[String], main: Option<isize>) -> Vec<Thumb> {
         minimised: main.is_some_and(minimised),
     };
     let blocked = !may_grab(moment);
-    let monitors = if blocked || ids.is_empty() { Vec::new() } else { crate::capture::list_monitors() };
+    let monitors = if blocked || ids.is_empty() {
+        Vec::new()
+    } else {
+        crate::capture::list_monitors()
+    };
     let thumbs = thumbs_for(ids, &monitors, blocked, grab);
     log::debug!(
         "stills: {} of {} screens in {} ms{}",
@@ -207,7 +228,11 @@ mod win {
             return None;
         }
         let memory = CreateCompatibleDC(screen);
-        let pixels = if memory.is_invalid() { None } else { into_dib(screen, memory, rect, width, height) };
+        let pixels = if memory.is_invalid() {
+            None
+        } else {
+            into_dib(screen, memory, rect, width, height)
+        };
         if !memory.is_invalid() {
             let _ = DeleteDC(memory);
         }
@@ -236,7 +261,15 @@ mod win {
             ..Default::default()
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &mut bits, HANDLE::default(), 0).ok()?;
+        let bitmap = CreateDIBSection(
+            screen,
+            &info,
+            DIB_RGB_COLORS,
+            &mut bits,
+            HANDLE::default(),
+            0,
+        )
+        .ok()?;
         if bits.is_null() {
             let _ = DeleteObject(bitmap);
             return None;
@@ -266,7 +299,8 @@ mod win {
         .as_bool();
         let _ = GdiFlush();
         let pixels = drawn.then(|| {
-            std::slice::from_raw_parts(bits as *const u8, width as usize * height as usize * 4).to_vec()
+            std::slice::from_raw_parts(bits as *const u8, width as usize * height as usize * 4)
+                .to_vec()
         });
         SelectObject(memory, previous);
         let _ = DeleteObject(bitmap);
@@ -332,8 +366,16 @@ mod tests {
 
     #[test]
     fn each_screen_gets_its_own_still_in_the_order_asked() {
-        let monitors = vec![screen("\\\\.\\DISPLAY1", 0, 2560, 1440), screen("\\\\.\\DISPLAY2", -1920, 1920, 1080)];
-        let ids = vec!["\\\\.\\DISPLAY2".to_string(), "0x1A2B".into(), "\\\\.\\DISPLAY1".into(), "\\\\.\\DISPLAY9".into()];
+        let monitors = vec![
+            screen("\\\\.\\DISPLAY1", 0, 2560, 1440),
+            screen("\\\\.\\DISPLAY2", -1920, 1920, 1080),
+        ];
+        let ids = vec![
+            "\\\\.\\DISPLAY2".to_string(),
+            "0x1A2B".into(),
+            "\\\\.\\DISPLAY1".into(),
+            "\\\\.\\DISPLAY9".into(),
+        ];
         let mut seen = Vec::new();
         let thumbs = thumbs_for(&ids, &monitors, false, |rect| {
             seen.push(rect);
@@ -342,25 +384,58 @@ mod tests {
         assert_eq!(
             thumbs,
             vec![
-                Thumb { id: ids[0].clone(), jpeg: Some("still at -1920".into()) },
+                Thumb {
+                    id: ids[0].clone(),
+                    jpeg: Some("still at -1920".into())
+                },
                 // A window and a screen nobody knows: nothing, and no grab.
-                Thumb { id: ids[1].clone(), jpeg: None },
-                Thumb { id: ids[2].clone(), jpeg: Some("still at 0".into()) },
-                Thumb { id: ids[3].clone(), jpeg: None },
+                Thumb {
+                    id: ids[1].clone(),
+                    jpeg: None
+                },
+                Thumb {
+                    id: ids[2].clone(),
+                    jpeg: Some("still at 0".into())
+                },
+                Thumb {
+                    id: ids[3].clone(),
+                    jpeg: None
+                },
             ]
         );
-        assert_eq!(seen, vec![
-            TargetRect { x: -1920, y: 0, width: 1920, height: 1080 },
-            TargetRect { x: 0, y: 0, width: 2560, height: 1440 },
-        ]);
+        assert_eq!(
+            seen,
+            vec![
+                TargetRect {
+                    x: -1920,
+                    y: 0,
+                    width: 1920,
+                    height: 1080
+                },
+                TargetRect {
+                    x: 0,
+                    y: 0,
+                    width: 2560,
+                    height: 1440
+                },
+            ]
+        );
     }
 
     #[test]
     fn nothing_is_taken_while_blocked() {
         let monitors = vec![screen("\\\\.\\DISPLAY1", 0, 2560, 1440)];
         let ids = vec!["\\\\.\\DISPLAY1".to_string()];
-        let thumbs = thumbs_for(&ids, &monitors, true, |_| panic!("no grab on the lock screen"));
-        assert_eq!(thumbs, vec![Thumb { id: ids[0].clone(), jpeg: None }]);
+        let thumbs = thumbs_for(&ids, &monitors, true, |_| {
+            panic!("no grab on the lock screen")
+        });
+        assert_eq!(
+            thumbs,
+            vec![Thumb {
+                id: ids[0].clone(),
+                jpeg: None
+            }]
+        );
     }
 
     const IN_FRONT: Moment = Moment {
@@ -378,17 +453,39 @@ mod tests {
 
     #[test]
     fn a_game_in_front_gets_no_stills_taken() {
-        assert!(!may_grab(Moment { foreground: 0x9999, ..IN_FRONT }));
-        assert!(!may_grab(Moment { foreground: 0, ..IN_FRONT }));
+        assert!(!may_grab(Moment {
+            foreground: 0x9999,
+            ..IN_FRONT
+        }));
+        assert!(!may_grab(Moment {
+            foreground: 0,
+            ..IN_FRONT
+        }));
     }
 
     #[test]
     fn no_stills_minimised_without_a_window_locked_or_streaming() {
-        assert!(!may_grab(Moment { minimised: true, ..IN_FRONT }));
-        assert!(!may_grab(Moment { main: None, ..IN_FRONT }));
-        assert!(!may_grab(Moment { main: Some(0), foreground: 0, ..IN_FRONT }));
-        assert!(!may_grab(Moment { unrecordable: true, ..IN_FRONT }));
-        assert!(!may_grab(Moment { streamer: true, ..IN_FRONT }));
+        assert!(!may_grab(Moment {
+            minimised: true,
+            ..IN_FRONT
+        }));
+        assert!(!may_grab(Moment {
+            main: None,
+            ..IN_FRONT
+        }));
+        assert!(!may_grab(Moment {
+            main: Some(0),
+            foreground: 0,
+            ..IN_FRONT
+        }));
+        assert!(!may_grab(Moment {
+            unrecordable: true,
+            ..IN_FRONT
+        }));
+        assert!(!may_grab(Moment {
+            streamer: true,
+            ..IN_FRONT
+        }));
     }
 
     #[test]

@@ -324,7 +324,11 @@ mod tests {
         let expected_position = ring.start_100ns().unwrap() + 100 * 10_000;
         let mut out = vec![0.0; 1];
         ring.read_window(expected_position, &mut out);
-        assert_eq!(out, vec![2.0], "the block after the gap is in the wrong place");
+        assert_eq!(
+            out,
+            vec![2.0],
+            "the block after the gap is in the wrong place"
+        );
     }
 
     /// A source that was gone for minutes must not bury the ring in silence.
@@ -447,7 +451,10 @@ mod tests {
     #[test]
     fn a_matching_clock_is_left_alone() {
         let error = timeline_error_ms(0.0, 300.0);
-        assert!(error.abs() < 0.1, "an exact clock was moved by {error:.3} ms");
+        assert!(
+            error.abs() < 0.1,
+            "an exact clock was moved by {error:.3} ms"
+        );
     }
 
     /// The point of rate-limiting: one stamp read late by a busy thread says
@@ -485,13 +492,15 @@ mod tests {
         for frames in [48usize, 240, 480, 960, 4800] {
             let span = ring.frames_to_100ns(frames);
             let ppm = ring.max_slew_100ns(frames) * 1_000_000 / span;
-            assert_eq!(ppm, MAX_SLEW_PPM, "a block of {frames} frames is capped at {ppm} ppm");
+            assert_eq!(
+                ppm, MAX_SLEW_PPM,
+                "a block of {frames} frames is capped at {ppm} ppm"
+            );
         }
 
         // At the usual packet that comes to a single frame — the figure the
         // module doc quotes, and the reason the correction cannot be heard.
         assert!(ring.max_slew_100ns(BLOCK) <= ring.frames_to_100ns(1));
-
     }
 
     /// The audible side of it. Whatever the correction does to the timeline, the

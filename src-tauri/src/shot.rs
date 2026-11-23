@@ -53,7 +53,12 @@ impl Shot {
         if width == 0 || height == 0 {
             return Err("The selection is empty.".into());
         }
-        Ok(Rect { x, y, width, height })
+        Ok(Rect {
+            x,
+            y,
+            width,
+            height,
+        })
     }
 
     pub fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Result<Shot, String> {
@@ -136,15 +141,7 @@ impl Shot {
     /// `ellipse` blurs the same rectangle but only writes back what lies inside
     /// the oval — a face wants a round patch, and a rectangle around it points
     /// at what it is hiding.
-    pub fn blur(
-        &mut self,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        radius: u32,
-        ellipse: bool,
-    ) {
+    pub fn blur(&mut self, x: u32, y: u32, width: u32, height: u32, radius: u32, ellipse: bool) {
         let left = x.min(self.width.saturating_sub(1)) as usize;
         let top = y.min(self.height.saturating_sub(1)) as usize;
         let w = (width as usize).min(self.width as usize - left);
@@ -172,8 +169,7 @@ impl Shot {
         let mut patch = vec![0u8; pw * ph * 3];
         for row in 0..ph {
             let from = (from_y + row) * stride + from_x * 3;
-            patch[row * pw * 3..(row + 1) * pw * 3]
-                .copy_from_slice(&self.rgb[from..from + pw * 3]);
+            patch[row * pw * 3..(row + 1) * pw * 3].copy_from_slice(&self.rgb[from..from + pw * 3]);
         }
 
         let mut spare = vec![0u8; patch.len()];
@@ -272,15 +268,13 @@ impl Shot {
 
     fn write_png_to(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                format!("could not create folder '{}': {err}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("could not create folder '{}': {err}", parent.display()))?;
         }
         let file = std::fs::File::create(path)
             .map_err(|err| format!("could not create '{}': {err}", path.display()))?;
 
-        let mut encoder =
-            png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         // A 4K picture is eight million pixels. Squeezing the last few percent
@@ -364,8 +358,7 @@ pub fn read_edit(clip_id: &str) -> Edit {
 pub fn write_edit(clip_id: &str, edit: &Edit) -> Result<(), String> {
     let path = edit_path(clip_id);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("could not create folder: {err}"))?;
+        std::fs::create_dir_all(parent).map_err(|err| format!("could not create folder: {err}"))?;
     }
     let text = serde_json::to_string(edit).map_err(|err| err.to_string())?;
     // Beside it first, then renamed over. `fs::write` truncates before it
@@ -527,9 +520,7 @@ fn decode_rgb<R: std::io::Read>(source: R) -> Result<Shot, String> {
     let mut decoder = png::Decoder::new(source);
     // Palettes and 16-bit channels turn into plain 8-bit ones, so only a
     // handful of shapes are left below.
-    decoder.set_transformations(
-        png::Transformations::EXPAND | png::Transformations::STRIP_16,
-    );
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder
         .read_info()
         .map_err(|err| format!("could not read the picture: {err}"))?;
@@ -676,10 +667,8 @@ fn read_back(
         for y in 0..height {
             // `RowPitch` is not `width * 4`: the driver pads every row to its own
             // alignment. Copying the block in one go would shear the picture.
-            let row = std::slice::from_raw_parts(
-                (mapped.pData as *const u8).add(y * pitch),
-                width * 4,
-            );
+            let row =
+                std::slice::from_raw_parts((mapped.pData as *const u8).add(y * pitch), width * 4);
             let out = &mut rgb[y * width * 3..(y + 1) * width * 3];
             for (from, to) in row.chunks_exact(4).zip(out.chunks_exact_mut(3)) {
                 // WGC delivers BGRA, PNG wants RGB.
@@ -767,11 +756,12 @@ fn transpose(from: &[u8], to: &mut [u8], width: usize, height: usize) {
 ///
 /// With `expect`, a layer of any other size is turned away before its pixels
 /// take any memory.
-pub(crate) fn read_rgba(bytes: &[u8], expect: Option<(u32, u32)>) -> Result<(u32, u32, Vec<u8>), String> {
+pub(crate) fn read_rgba(
+    bytes: &[u8],
+    expect: Option<(u32, u32)>,
+) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(
-        png::Transformations::EXPAND | png::Transformations::STRIP_16,
-    );
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder
         .read_info()
         .map_err(|err| format!("could not read the layer: {err}"))?;
@@ -829,7 +819,9 @@ mod tests {
 
     fn noise(len: usize) -> Vec<u8> {
         // A fixed pattern beats a random one: a failure is reproducible.
-        (0..len).map(|i| ((i * 37 + i / 5 * 11) % 251) as u8).collect()
+        (0..len)
+            .map(|i| ((i * 37 + i / 5 * 11) % 251) as u8)
+            .collect()
     }
 
     #[test]
@@ -854,7 +846,10 @@ mod tests {
             let three = p * (p + 1.0);
             assert!(three >= one, "radius {radius}: {three} < {one}");
             // Rounded up by one step at most, not doubled.
-            assert!((p - 1.0) * p < one.max(2.0), "radius {radius}: pass {p} is too wide");
+            assert!(
+                (p - 1.0) * p < one.max(2.0),
+                "radius {radius}: pass {p} is too wide"
+            );
         }
     }
 
@@ -869,7 +864,11 @@ mod tests {
                 rgb[at..at + 3].copy_from_slice(&[value; 3]);
             }
         }
-        Shot { width: width as u32, height: height as u32, rgb }
+        Shot {
+            width: width as u32,
+            height: height as u32,
+            rgb,
+        }
     }
 
     /// Highest minus lowest red value along the middle row, columns `from..to`.
@@ -910,7 +909,11 @@ mod tests {
         let shot = stripes(400, 1, 11.9);
         let mut one = vec![0u8; shot.rgb.len()];
         blur_rows(&shot.rgb, &mut one, 400, 1, 8);
-        let one = Shot { width: 400, height: 1, rgb: one };
+        let one = Shot {
+            width: 400,
+            height: 1,
+            rgb: one,
+        };
         assert!(swing(&one, 150, 250) > 30);
     }
 
@@ -924,7 +927,11 @@ mod tests {
                 rgb[at..at + 3].copy_from_slice(&[255, 255, 255]);
             }
         }
-        Shot { width: width as u32, height: height as u32, rgb }
+        Shot {
+            width: width as u32,
+            height: height as u32,
+            rgb,
+        }
     }
 
     #[test]
@@ -964,19 +971,37 @@ mod tests {
     #[test]
     fn the_clamped_rectangle_is_the_one_that_is_really_cut() {
         let shot = split_picture(); // 100 x 20
-        // Rounded component by component, x + width lands one past the edge.
-        let asked = Rect { x: 1, y: 0, width: 100, height: 20 };
+                                    // Rounded component by component, x + width lands one past the edge.
+        let asked = Rect {
+            x: 1,
+            y: 0,
+            width: 100,
+            height: 20,
+        };
         let real = shot.clamped(asked).expect("still has room");
-        assert_eq!((real.x, real.width), (1, 99), "the note has to hold what was cut");
+        assert_eq!(
+            (real.x, real.width),
+            (1, 99),
+            "the note has to hold what was cut"
+        );
 
-        let cut = shot.crop(real.x, real.y, real.width, real.height).expect("cuts");
+        let cut = shot
+            .crop(real.x, real.y, real.width, real.height)
+            .expect("cuts");
         assert_eq!((cut.width, cut.height), (real.width, real.height));
     }
 
     #[test]
     fn a_rectangle_beside_the_picture_is_no_rectangle() {
         let shot = split_picture();
-        assert!(shot.clamped(Rect { x: 5, y: 5, width: 0, height: 10 }).is_err());
+        assert!(shot
+            .clamped(Rect {
+                x: 5,
+                y: 5,
+                width: 0,
+                height: 10
+            })
+            .is_err());
     }
 
     #[test]
@@ -991,11 +1016,17 @@ mod tests {
     fn png_bytes(width: u32, height: u32, alpha: bool) -> Vec<u8> {
         let mut out = Vec::new();
         let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(if alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
+        encoder.set_color(if alpha {
+            png::ColorType::Rgba
+        } else {
+            png::ColorType::Rgb
+        });
         encoder.set_depth(png::BitDepth::Eight);
         let channels = if alpha { 4 } else { 3 };
         let mut writer = encoder.write_header().unwrap();
-        writer.write_image_data(&vec![200u8; (width * height) as usize * channels]).unwrap();
+        writer
+            .write_image_data(&vec![200u8; (width * height) as usize * channels])
+            .unwrap();
         writer.finish().unwrap();
         out
     }
@@ -1005,7 +1036,11 @@ mod tests {
         for byte in bytes {
             crc ^= *byte as u32;
             for _ in 0..8 {
-                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
             }
         }
         !crc
@@ -1044,11 +1079,20 @@ mod tests {
 
     #[test]
     fn the_size_limits_leave_every_real_screen_alone() {
-        assert!(decodable(3 * 3840, 2160).is_ok(), "three 4K screens side by side");
+        assert!(
+            decodable(3 * 3840, 2160).is_ok(),
+            "three 4K screens side by side"
+        );
         assert!(decodable(7680, 4320).is_ok(), "8K");
         assert!(decodable(10240, 4320).is_ok(), "the widest ultrawide");
-        assert!(decodable(MAX_EDGE, 4096).is_ok(), "the longest edge, at the pixel limit");
-        assert!(decodable(MAX_EDGE, MAX_EDGE).is_err(), "a gigabyte of pixels");
+        assert!(
+            decodable(MAX_EDGE, 4096).is_ok(),
+            "the longest edge, at the pixel limit"
+        );
+        assert!(
+            decodable(MAX_EDGE, MAX_EDGE).is_err(),
+            "a gigabyte of pixels"
+        );
         assert!(decodable(MAX_EDGE + 1, 1).is_err());
         assert!(decodable(1, MAX_EDGE + 1).is_err());
         assert!(decodable(u32::MAX, u32::MAX).is_err());
@@ -1068,7 +1112,10 @@ mod tests {
         let err = read_rgba(&lying_png(5000, 5000), Some((100, 20))).unwrap_err();
         assert!(err.contains("does not fit"), "{err}");
         let mut shot = split_picture(); // 100 x 20
-        assert!(shot.blend(&png_bytes(20, 100, true)).unwrap_err().contains("does not fit"));
+        assert!(shot
+            .blend(&png_bytes(20, 100, true))
+            .unwrap_err()
+            .contains("does not fit"));
         assert!(shot.blend(&png_bytes(100, 20, true)).is_ok());
     }
 }

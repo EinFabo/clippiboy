@@ -7,8 +7,8 @@ use parking_lot::Mutex;
 use crate::audio::engine::AudioEngine;
 use crate::clips::Library;
 use crate::config;
-use crate::pipeline::{Pipeline, Shared};
 use crate::model::{AppConfig, AudioSource, Clip, ClipKind, EngineStatus, RecordingConfig};
+use crate::pipeline::{Pipeline, Shared};
 use crate::recorder::{self, Recorder};
 
 /// How much the ring keeps while only a recording holds the pipeline. Enough
@@ -442,11 +442,17 @@ pub struct LockSignals {
 
 impl LockSignals {
     pub fn desktop(secure_desktop: bool) -> Self {
-        Self { secure_desktop, ..Self::default() }
+        Self {
+            secure_desktop,
+            ..Self::default()
+        }
     }
 
     pub fn session(session: bool) -> Self {
-        Self { session, ..Self::default() }
+        Self {
+            session,
+            ..Self::default()
+        }
     }
 
     /// Is anything in front that cannot be recorded?
@@ -611,7 +617,8 @@ impl AutoBuffer {
     /// Is a restart for the display coming back still owed? Then that restart
     /// takes the capture onto the new topology, and nothing else has to.
     pub fn display_pending(&self) -> bool {
-        self.display_pending.load(std::sync::atomic::Ordering::SeqCst)
+        self.display_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// One round for running without "only in game": the buffer should run as
@@ -691,7 +698,8 @@ impl AutoBuffer {
     /// the user, or by the unlock. Not the automation's, so the end of the
     /// game does not stop it.
     pub fn not_started(&self) {
-        self.started.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.started
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Where the user's choices stand — noted by the automation before it
@@ -999,7 +1007,9 @@ impl AppState {
             keyframe_seconds: config.recording.keyframe_seconds,
             encoder: crate::encode::for_recording(config.recording.encoder),
             buffer_wanted: self.buffer_wanted(),
-            preview_open: self.cam_preview_until.load(std::sync::atomic::Ordering::SeqCst)
+            preview_open: self
+                .cam_preview_until
+                .load(std::sync::atomic::Ordering::SeqCst)
                 > crate::audio::capture::now_100ns(),
             locked: self.auto.screen_locked(),
             vcam_consumer: self.vcam.watching(),
@@ -1022,7 +1032,10 @@ impl AppState {
     /// ClippiBoy Camera in line with its switch.
     pub fn reconcile_vcam(&self) {
         let cam = self.config_snapshot().facecam;
-        self.vcam.apply(crate::vcam::feeds(cam.enabled, cam.virtual_camera), self.camera.shared());
+        self.vcam.apply(
+            crate::vcam::feeds(cam.enabled, cam.virtual_camera),
+            self.camera.shared(),
+        );
     }
 
     /// The settings, the start-up trouble with them and the clip database, as
@@ -1145,8 +1158,7 @@ impl AppState {
         {
             if let Some(shared) = self.shared.lock().as_ref() {
                 shared.set_buffer_seconds(next.buffer.seconds);
-                let (seconds, bytes) =
-                    ring_size(self.buffer_wanted(), next.buffer.seconds, memory);
+                let (seconds, bytes) = ring_size(self.buffer_wanted(), next.buffer.seconds, memory);
                 shared.packets.lock().set_capacity(seconds, bytes);
             }
         }
@@ -1233,7 +1245,11 @@ impl AppState {
     /// never adds one: the console may turn a source up or mute it, but an
     /// id the config does not hold — a row the main window removed meanwhile,
     /// or one made up — is refused.
-    pub fn update_source(&self, source: AudioSource, base: Option<u64>) -> Result<AppConfig, String> {
+    pub fn update_source(
+        &self,
+        source: AudioSource,
+        base: Option<u64>,
+    ) -> Result<AppConfig, String> {
         let incoming = {
             let current = self.config.lock();
             if !current.sources.iter().any(|s| s.id == source.id) {
@@ -1241,8 +1257,9 @@ impl AppState {
             }
             let history = self.config_history.lock();
             let mut known = false;
-            let onto_base =
-                config::with_sources(&current, &history, base, |sources| known = replace_known(sources, source.clone()));
+            let onto_base = config::with_sources(&current, &history, base, |sources| {
+                known = replace_known(sources, source.clone())
+            });
             // A window that never read the settings changes nothing.
             if known || base.is_some_and(|revision| config::unread(revision, &current)) {
                 onto_base
@@ -1261,7 +1278,11 @@ impl AppState {
         self.replace_config(incoming)
     }
 
-    fn source_write(&self, base: Option<u64>, change: impl FnOnce(&mut Vec<AudioSource>)) -> AppConfig {
+    fn source_write(
+        &self,
+        base: Option<u64>,
+        change: impl FnOnce(&mut Vec<AudioSource>),
+    ) -> AppConfig {
         let current = self.config.lock();
         let history = self.config_history.lock();
         config::with_sources(&current, &history, base, change)
@@ -1400,10 +1421,7 @@ impl AppState {
         // it is only needed once a clip is written.
         // The cheap check first: `available` starts two processes.
         if crate::tools::is_ready() && !crate::muxer::available() {
-            return Err(
-                "ffmpeg was not found. Without ffmpeg no clips can be written."
-                    .into(),
-            );
+            return Err("ffmpeg was not found. Without ffmpeg no clips can be written.".into());
         }
 
         let mut config = self.config_snapshot();
@@ -1682,9 +1700,14 @@ impl AppState {
             // Spielbild liegen kann — danach stand er auf Clips vom Desktop.
             // Eine laufende Aufnahme hält ihn bis zum Stopp: sie enthält das
             // Spiel, egal wie lange es schon zu ist.
-            let ended = *self.game_ended.lock().get_or_insert_with(std::time::Instant::now);
+            let ended = *self
+                .game_ended
+                .lock()
+                .get_or_insert_with(std::time::Instant::now);
             let longest = self.config_snapshot().buffer.seconds;
-            if !self.is_recording() && ended.elapsed() >= std::time::Duration::from_secs(longest.into()) {
+            if !self.is_recording()
+                && ended.elapsed() >= std::time::Duration::from_secs(longest.into())
+            {
                 *self.buffering_game.lock() = None;
                 *self.game_ended.lock() = None;
             }
@@ -1707,7 +1730,13 @@ impl AppState {
     pub fn recording_room_needed(&self) -> Option<u64> {
         // The lock is dropped before the config is read.
         let recorder = self.recorder.lock().clone()?;
-        let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);
+        let fps = self
+            .shared
+            .lock()
+            .as_ref()
+            .map(|s| s.fps)
+            .unwrap_or(1)
+            .max(1);
         let separate = separate_tracks(&self.config_snapshot().sources);
         let seconds = recorder.frames() / fps as u64;
         Some(
@@ -1722,11 +1751,20 @@ impl AppState {
         let mut status = self.status.lock().clone();
         status.cam = self.camera.status();
         let cam = self.config_snapshot().facecam;
-        status.vcam = Some(self.vcam.status(crate::vcam::feeds(cam.enabled, cam.virtual_camera)));
+        status.vcam = Some(
+            self.vcam
+                .status(crate::vcam::feeds(cam.enabled, cam.virtual_camera)),
+        );
         status.streamer = crate::streamer::active();
         if let Some(recorder) = self.recorder.lock().as_ref() {
             status.recording = true;
-            let fps = self.shared.lock().as_ref().map(|s| s.fps).unwrap_or(1).max(1);
+            let fps = self
+                .shared
+                .lock()
+                .as_ref()
+                .map(|s| s.fps)
+                .unwrap_or(1)
+                .max(1);
             status.recording_bytes = recorder.estimated_size(fps);
             status.recording_seconds = recorder.frames() as f32 / fps as f32;
         }
@@ -1786,8 +1824,8 @@ impl AppState {
     /// same reason the source cannot be switched then; the check picks it up
     /// again once the recording has stopped.
     pub fn screen_drift(&self) -> Option<crate::capture::Drift> {
-        use std::sync::atomic::Ordering;
         use crate::model::TargetKind;
+        use std::sync::atomic::Ordering;
 
         let config = self.config_snapshot().recording;
         let observed = if !self.is_buffering()
@@ -1877,7 +1915,11 @@ impl AppState {
         let (width, height) = (snapshot.width, snapshot.height);
         // Copied out before the snapshot moves into the request.
         let cam = (config.facecam.enabled && config.facecam.in_clips).then(|| {
-            let fitted = self.active_recording.lock().clone().unwrap_or_else(|| config.recording.clone());
+            let fitted = self
+                .active_recording
+                .lock()
+                .clone()
+                .unwrap_or_else(|| config.recording.clone());
             CamSave {
                 window: crate::facecam::CamWindow {
                     g0_100ns: snapshot.start_100ns,
@@ -1892,30 +1934,33 @@ impl AppState {
             output,
         })?;
 
-        Ok((Clip {
-            id,
-            path: result.path.to_string_lossy().to_string(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
-            duration_ms: result.duration_ms,
-            game,
-            width,
-            height,
-            size_bytes: result.size_bytes,
-            thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
-            title: None,
-            description: None,
-            favorite: false,
-            edit: None,
-            original: None,
-            original_available: false,
-            facecam: None,
-            screenshot: false,
-            recording: false,
-            tags: Vec::new(),
-        }, cam))
+        Ok((
+            Clip {
+                id,
+                path: result.path.to_string_lossy().to_string(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                duration_ms: result.duration_ms,
+                game,
+                width,
+                height,
+                size_bytes: result.size_bytes,
+                thumb_path: result.thumb_path.map(|p| p.to_string_lossy().to_string()),
+                title: None,
+                description: None,
+                favorite: false,
+                edit: None,
+                original: None,
+                original_available: false,
+                facecam: None,
+                screenshot: false,
+                recording: false,
+                tags: Vec::new(),
+            },
+            cam,
+        ))
     }
 
     /// One picture from the recording source.
@@ -1948,7 +1993,10 @@ impl AppState {
         let cam = &config.facecam;
         if cam.enabled && cam.in_screenshots && cam.layout.visible {
             if let Some(frame) = self.camera.latest_frame() {
-                if crate::composite::fresh_for_shot(frame.probe.qpc_100ns, crate::audio::capture::now_100ns()) {
+                if crate::composite::fresh_for_shot(
+                    frame.probe.qpc_100ns,
+                    crate::audio::capture::now_100ns(),
+                ) {
                     crate::composite::lay_cam_still(&mut shot, &frame, &cam.layout);
                 }
             }
@@ -1956,8 +2004,12 @@ impl AppState {
 
         // Ein Bild ist ein Augenblick: es gehört zu dem Spiel, das jetzt läuft.
         let game = self.current_game.lock().clone();
-        let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot)
-            .and_then(|path| claim_file(&path).map_err(|err| format!("could not create '{}': {err}", path.display())))?;
+        let path = destination(&config.clip_dir, game.as_deref(), ClipKind::Screenshot).and_then(
+            |path| {
+                claim_file(&path)
+                    .map_err(|err| format!("could not create '{}': {err}", path.display()))
+            },
+        )?;
         // Into the file itself. What lay under it goes into the editor's store:
         // an edit lays it back and stamps the result anew, so the mark can be
         // neither painted over nor cropped away.
@@ -2065,7 +2117,10 @@ impl AppState {
         Ok(())
     }
 
-    fn attach_recorder(&self, friends_in: &dyn Fn(&str) -> Vec<String>) -> Result<Arc<Recorder>, String> {
+    fn attach_recorder(
+        &self,
+        friends_in: &dyn Fn(&str) -> Vec<String>,
+    ) -> Result<Arc<Recorder>, String> {
         let config = self.config_snapshot();
         let shared = self
             .shared
@@ -2146,7 +2201,10 @@ impl AppState {
         if let Some(cam) = self.recording_cam.lock().take() {
             self.camera.detach_tap();
             let file = cam.close();
-            log::info!("recording camera: {} segment(s) written", file.segments.len());
+            log::info!(
+                "recording camera: {} segment(s) written",
+                file.segments.len()
+            );
         }
         if let Some(pipeline) = self.pipeline.lock().as_ref() {
             pipeline.take_recording();
@@ -2208,9 +2266,8 @@ impl AppState {
         let finalizing = CountGuard::raise(&self.finalizing);
         // Taken under `lifecycle` too, where the recovery picks its folders:
         // from the close on, this one is never on its list.
-        let folder = Finalizing::claim(&recorder.dir).ok_or_else(|| {
-            "The recording is already being written out.".to_string()
-        })?;
+        let folder = Finalizing::claim(&recorder.dir)
+            .ok_or_else(|| "The recording is already being written out.".to_string())?;
         let restarted = self
             .settings_waiting
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -2225,8 +2282,17 @@ impl AppState {
     }
 
     /// The slow half of a stop: write the closed recording out.
-    pub fn finish_stop(&self, ticket: StopTicket<'_>, on_progress: &dyn Fn(f32)) -> Result<Clip, String> {
-        self.finish_recording(&ticket.folder, &ticket.recorder.dir, &ticket.meta, on_progress)
+    pub fn finish_stop(
+        &self,
+        ticket: StopTicket<'_>,
+        on_progress: &dyn Fn(f32),
+    ) -> Result<Clip, String> {
+        self.finish_recording(
+            &ticket.folder,
+            &ticket.recorder.dir,
+            &ticket.meta,
+            on_progress,
+        )
     }
 
     /// Quitting or updating: close the files, leave the muxing to the next
@@ -2245,7 +2311,10 @@ impl AppState {
 
     /// Why the running encoder stopped working, if it has.
     pub fn encoder_failure(&self) -> Option<String> {
-        self.shared.lock().as_ref().and_then(|shared| shared.encoder_failure())
+        self.shared
+            .lock()
+            .as_ref()
+            .and_then(|shared| shared.encoder_failure())
     }
 
     /// Write a recording folder out. Only with the folder claimed: `_claim`
@@ -2286,7 +2355,11 @@ impl AppState {
             screenshot: false,
             recording: true,
             // Not in the library yet — the caller stores them with the clip.
-            tags: meta.friends.iter().map(|name| crate::clips::friend_tag(name)).collect(),
+            tags: meta
+                .friends
+                .iter()
+                .map(|name| crate::clips::friend_tag(name))
+                .collect(),
         })
     }
 
@@ -2310,7 +2383,10 @@ impl AppState {
                     continue;
                 }
                 let Some(claim) = Finalizing::claim(&dir) else {
-                    log::info!("recording in '{}' is being written out already", dir.display());
+                    log::info!(
+                        "recording in '{}' is being written out already",
+                        dir.display()
+                    );
                     continue;
                 };
                 let meta = match recorder::read_meta(&dir) {
@@ -2408,7 +2484,11 @@ fn destination(
         now.strftime("%Y-%m-%d_%H-%M-%S"),
         now.subsec_nanosecond() / 1_000_000
     );
-    let extension = if kind == ClipKind::Screenshot { "png" } else { "mp4" };
+    let extension = if kind == ClipKind::Screenshot {
+        "png"
+    } else {
+        "mp4"
+    };
     let name = match (game, kind) {
         (Some(app), ClipKind::Recording) => {
             format!("{}_rec_{stamp}.{extension}", sanitize_name(app))
@@ -2429,21 +2509,34 @@ fn destination(
 /// `(3)` … when it exists. Two screenshots in the same millisecond (hotkey plus
 /// Stream Deck) would otherwise write into one file.
 pub fn claim_file(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
     for n in 1..=1000 {
         let candidate = if n == 1 {
             path.to_path_buf()
         } else {
             path.with_file_name(format!("{stem} ({n}){ext}"))
         };
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
             Ok(_) => return Ok(candidate),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
         }
     }
-    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free file name"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no free file name",
+    ))
 }
 
 /// A game name as the front of a file name: at most [`crate::filing::MAX_LEN`]
@@ -2467,7 +2560,11 @@ fn sanitize_name(text: &str) -> String {
 ///
 /// What Quit and the update restart wait on: a save or an edit cut off half
 /// way loses the clip the user asked for.
-pub fn wait_until_idle(busy: impl Fn() -> bool, limit: std::time::Duration, step: std::time::Duration) -> bool {
+pub fn wait_until_idle(
+    busy: impl Fn() -> bool,
+    limit: std::time::Duration,
+    step: std::time::Duration,
+) -> bool {
     let until = std::time::Instant::now() + limit;
     while busy() {
         if std::time::Instant::now() >= until {
@@ -2492,7 +2589,9 @@ mod tests {
         AudioSource {
             id: id.into(),
             label: "Mic".into(),
-            kind: crate::model::SourceKind::InputDevice { device_id: "dev-1".into() },
+            kind: crate::model::SourceKind::InputDevice {
+                device_id: "dev-1".into(),
+            },
             enabled: true,
             gain_db: 0.0,
             muted: false,
@@ -2523,9 +2622,18 @@ mod tests {
     fn an_update_of_a_source_that_is_gone_is_refused_and_changes_nothing() {
         let state = AppState::new(false);
         let before = state.config_snapshot();
-        assert_eq!(state.update_source(mic("not-a-source"), None).err().as_deref(), Some(SOURCE_GONE));
+        assert_eq!(
+            state
+                .update_source(mic("not-a-source"), None)
+                .err()
+                .as_deref(),
+            Some(SOURCE_GONE)
+        );
         let after = state.config_snapshot();
-        assert_eq!((after.revision, after.sources), (before.revision, before.sources));
+        assert_eq!(
+            (after.revision, after.sources),
+            (before.revision, before.sources)
+        );
     }
 
     /// REC-9: two pictures in one millisecond get two files.
@@ -2537,7 +2645,9 @@ mod tests {
         let a = claim_file(&path).unwrap();
         let b = claim_file(&path).unwrap();
         assert_ne!(a, b);
-        assert!(b.to_string_lossy().ends_with("shot_2026-10-24_12-00-00-123 (2).png"));
+        assert!(b
+            .to_string_lossy()
+            .ends_with("shot_2026-10-24_12-00-00-123 (2).png"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2547,9 +2657,15 @@ mod tests {
     fn a_folder_being_finalized_is_not_taken_twice() {
         let dir = std::path::PathBuf::from("C:/clips/.recording/abc");
         let first = Finalizing::claim(&dir).expect("free");
-        assert!(Finalizing::claim(&dir).is_none(), "a second finalize of the same folder waits its turn");
+        assert!(
+            Finalizing::claim(&dir).is_none(),
+            "a second finalize of the same folder waits its turn"
+        );
         drop(first);
-        assert!(Finalizing::claim(&dir).is_some(), "free again once the first is done");
+        assert!(
+            Finalizing::claim(&dir).is_some(),
+            "free again once the first is done"
+        );
     }
 
     /// REC-8: a stop with nothing to stop leaves no mark behind; a press
@@ -2561,7 +2677,10 @@ mod tests {
         assert!(!state.is_finalizing());
         assert!(!state.recording_or_closing());
         let closing = FlagGuard::raise(&state.closing);
-        assert!(state.recording_or_closing(), "a press during the close is a stop");
+        assert!(
+            state.recording_or_closing(),
+            "a press during the close is a stop"
+        );
         drop(closing);
         assert!(!state.recording_or_closing());
     }
@@ -2571,10 +2690,18 @@ mod tests {
     #[test]
     fn no_recording_starts_while_quitting() {
         let state = AppState::new(false);
-        state.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(state.start_recording(&|_| Vec::new()).err().as_deref(), Some("ClippiBoy is quitting."));
+        state
+            .quitting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            state.start_recording(&|_| Vec::new()).err().as_deref(),
+            Some("ClippiBoy is quitting.")
+        );
         assert!(!state.is_recording());
-        assert!(state.pipeline.lock().is_none(), "nothing was brought up for it");
+        assert!(
+            state.pipeline.lock().is_none(),
+            "nothing was brought up for it"
+        );
     }
 
     /// REC-12: the recovery leaves a folder alone while a stop holds it. An
@@ -2585,7 +2712,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&clip_dir);
         std::fs::create_dir_all(&clip_dir).unwrap();
         let folder = |id: &str| {
-            let meta = recorder::Meta { id: id.into(), fps: 60, ..recorder::Meta::default() };
+            let meta = recorder::Meta {
+                id: id.into(),
+                fps: 60,
+                ..recorder::Meta::default()
+            };
             let recorder = Recorder::start(&clip_dir, meta, &[], Vec::new(), 0, true).unwrap();
             recorder.finish(Vec::new(), None);
             recorder.dir.clone()
@@ -2595,8 +2726,15 @@ mod tests {
         state.config.lock().clip_dir = clip_dir.to_string_lossy().to_string();
 
         let claim = Finalizing::claim(&held).expect("free");
-        assert!(state.recover_recordings(&|_| {}).is_empty(), "nothing finished");
-        assert_eq!(recorder::leftovers(&clip_dir), vec![held.clone()], "the stop's folder is untouched");
+        assert!(
+            state.recover_recordings(&|_| {}).is_empty(),
+            "nothing finished"
+        );
+        assert_eq!(
+            recorder::leftovers(&clip_dir),
+            vec![held.clone()],
+            "the stop's folder is untouched"
+        );
         assert!(!free.exists(), "an unclaimed empty folder is cleared");
         drop(claim);
         let _ = std::fs::remove_dir_all(&clip_dir);
@@ -2667,7 +2805,10 @@ mod tests {
         let queue = RestartQueue::default();
         assert!(queue.request(), "the first request starts a worker");
         assert!(queue.next(), "and the worker runs once");
-        assert!(!queue.request(), "a request while it runs starts no second worker");
+        assert!(
+            !queue.request(),
+            "a request while it runs starts no second worker"
+        );
         assert!(!queue.request());
         assert!(queue.next(), "both coalesce into one more pass");
         assert!(!queue.next(), "then the worker ends");
@@ -2710,7 +2851,10 @@ mod tests {
 
     #[test]
     fn a_ring_kept_only_for_a_recording_stays_small() {
-        assert_eq!(ring_size(false, 300, 1 << 30), (IDLE_RING_SECONDS, u64::MAX));
+        assert_eq!(
+            ring_size(false, 300, 1 << 30),
+            (IDLE_RING_SECONDS, u64::MAX)
+        );
         assert_eq!(ring_size(true, 300, 1 << 30), (300, 1 << 30));
     }
 
@@ -2720,7 +2864,12 @@ mod tests {
 
     #[test]
     fn a_running_game_names_the_clip() {
-        let game = assigned_game(Some("Valorant".into()), Some("Valorant".into()), None, secs(90));
+        let game = assigned_game(
+            Some("Valorant".into()),
+            Some("Valorant".into()),
+            None,
+            secs(90),
+        );
         assert_eq!(game.as_deref(), Some("Valorant"));
     }
 
@@ -2732,7 +2881,10 @@ mod tests {
 
     #[test]
     fn a_game_closed_before_the_clip_does_not() {
-        assert_eq!(assigned_game(Some("Valorant".into()), None, Some(secs(120)), secs(90)), None);
+        assert_eq!(
+            assigned_game(Some("Valorant".into()), None, Some(secs(120)), secs(90)),
+            None
+        );
     }
 
     #[test]
@@ -2744,13 +2896,21 @@ mod tests {
 
     #[test]
     fn a_new_game_wins_over_the_closed_one() {
-        let game = assigned_game(Some("Valorant".into()), Some("CS2".into()), Some(secs(5)), secs(90));
+        let game = assigned_game(
+            Some("Valorant".into()),
+            Some("CS2".into()),
+            Some(secs(5)),
+            secs(90),
+        );
         assert_eq!(game.as_deref(), Some("CS2"));
     }
 
     #[test]
     fn a_recording_starts_clean() {
-        assert_eq!(assigned_game(Some("Valorant".into()), None, Some(secs(1)), secs(0)), None);
+        assert_eq!(
+            assigned_game(Some("Valorant".into()), None, Some(secs(1)), secs(0)),
+            None
+        );
     }
 
     /// What Windows says about the session is no guess: a locked session is
@@ -2758,7 +2918,10 @@ mod tests {
     #[test]
     fn a_locked_session_stops_the_buffer_at_once() {
         let auto = AutoBuffer::default();
-        assert_eq!(auto.poll_lock(LockSignals::session(true), true), AutoAction::Stop);
+        assert_eq!(
+            auto.poll_lock(LockSignals::session(true), true),
+            AutoAction::Stop
+        );
         assert!(auto.screen_locked(), "the cam stops too");
     }
 
@@ -2768,8 +2931,14 @@ mod tests {
     #[test]
     fn a_short_session_lock_still_brings_a_fresh_buffer() {
         let auto = AutoBuffer::default();
-        assert_eq!(auto.poll_lock(LockSignals::session(true), true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(LockSignals::default(), false), AutoAction::Start);
+        assert_eq!(
+            auto.poll_lock(LockSignals::session(true), true),
+            AutoAction::Stop
+        );
+        assert_eq!(
+            auto.poll_lock(LockSignals::default(), false),
+            AutoAction::Start
+        );
         assert!(!auto.screen_locked());
     }
 
@@ -2778,22 +2947,40 @@ mod tests {
     #[test]
     fn waking_up_restarts_a_running_buffer() {
         let auto = AutoBuffer::default();
-        let woke = LockSignals { woke: true, ..LockSignals::default() };
+        let woke = LockSignals {
+            woke: true,
+            ..LockSignals::default()
+        };
         assert_eq!(auto.poll_lock(woke, true), AutoAction::Restart);
-        assert_eq!(auto.poll_lock(woke, false), AutoAction::Nothing, "nothing to restart");
+        assert_eq!(
+            auto.poll_lock(woke, false),
+            AutoAction::Nothing,
+            "nothing to restart"
+        );
     }
 
     /// Waking onto the lock screen: the lock decides, the unlock brings it back.
     #[test]
     fn waking_onto_the_lock_screen_waits_for_the_unlock() {
         let auto = AutoBuffer::default();
-        let woke_locked = LockSignals { session: true, woke: true, ..LockSignals::default() };
+        let woke_locked = LockSignals {
+            session: true,
+            woke: true,
+            ..LockSignals::default()
+        };
         assert_eq!(auto.poll_lock(woke_locked, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(LockSignals::default(), false), AutoAction::Start);
+        assert_eq!(
+            auto.poll_lock(LockSignals::default(), false),
+            AutoAction::Start
+        );
     }
 
     fn display(off: bool, back: bool) -> LockSignals {
-        LockSignals { display_off: off, display_back: back, ..LockSignals::default() }
+        LockSignals {
+            display_off: off,
+            display_back: back,
+            ..LockSignals::default()
+        }
     }
 
     /// 2026-11-15: the display went off on the idle timeout, no lock, no
@@ -2804,16 +2991,29 @@ mod tests {
     fn the_display_coming_back_restarts_a_running_buffer() {
         let auto = AutoBuffer::default();
         for _ in 0..30 {
-            assert_eq!(auto.poll_lock(display(true, false), true), AutoAction::Nothing, "dark: no stop");
+            assert_eq!(
+                auto.poll_lock(display(true, false), true),
+                AutoAction::Nothing,
+                "dark: no stop"
+            );
         }
         let mut actions = vec![auto.poll_lock(display(false, true), true)];
         for _ in 1..DISPLAY_SETTLE_POLLS {
             actions.push(auto.poll_lock(display(false, false), true));
         }
         assert_eq!(actions.last(), Some(&AutoAction::Restart));
-        assert!(actions[..actions.len() - 1].iter().all(|a| *a == AutoAction::Nothing), "{actions:?}");
+        assert!(
+            actions[..actions.len() - 1]
+                .iter()
+                .all(|a| *a == AutoAction::Nothing),
+            "{actions:?}"
+        );
         for _ in 0..10 {
-            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing, "only once");
+            assert_eq!(
+                auto.poll_lock(LockSignals::default(), true),
+                AutoAction::Nothing,
+                "only once"
+            );
         }
     }
 
@@ -2821,8 +3021,14 @@ mod tests {
     #[test]
     fn a_display_off_between_two_checks_still_restarts() {
         let auto = AutoBuffer::default();
-        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(display(false, false), true), AutoAction::Restart);
+        assert_eq!(
+            auto.poll_lock(display(false, true), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(display(false, false), true),
+            AutoAction::Restart
+        );
     }
 
     /// Off again during the settle checks: the wait starts over once it is
@@ -2830,10 +3036,22 @@ mod tests {
     #[test]
     fn a_flickering_display_waits_for_it_to_stay_on() {
         let auto = AutoBuffer::default();
-        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(display(true, false), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(display(false, false), true), AutoAction::Restart);
+        assert_eq!(
+            auto.poll_lock(display(false, true), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(display(true, false), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(display(false, true), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(display(false, false), true),
+            AutoAction::Restart
+        );
     }
 
     /// No buffer, nothing to restart — and a buffer started after the display
@@ -2841,10 +3059,19 @@ mod tests {
     #[test]
     fn the_display_coming_back_leaves_a_stopped_buffer_alone() {
         let auto = AutoBuffer::default();
-        assert_eq!(auto.poll_lock(display(true, false), false), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(display(false, true), false), AutoAction::Nothing);
+        assert_eq!(
+            auto.poll_lock(display(true, false), false),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(display(false, true), false),
+            AutoAction::Nothing
+        );
         for _ in 0..5 {
-            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+            assert_eq!(
+                auto.poll_lock(LockSignals::default(), true),
+                AutoAction::Nothing
+            );
         }
     }
 
@@ -2853,13 +3080,27 @@ mod tests {
     #[test]
     fn a_lock_with_the_display_off_starts_once_at_the_unlock() {
         let auto = AutoBuffer::default();
-        let dark_locked = LockSignals { session: true, display_off: true, ..LockSignals::default() };
+        let dark_locked = LockSignals {
+            session: true,
+            display_off: true,
+            ..LockSignals::default()
+        };
         assert_eq!(auto.poll_lock(dark_locked, true), AutoAction::Stop);
-        let back_locked = LockSignals { session: true, display_back: true, ..LockSignals::default() };
+        let back_locked = LockSignals {
+            session: true,
+            display_back: true,
+            ..LockSignals::default()
+        };
         assert_eq!(auto.poll_lock(back_locked, false), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(LockSignals::default(), false), AutoAction::Start);
+        assert_eq!(
+            auto.poll_lock(LockSignals::default(), false),
+            AutoAction::Start
+        );
         for _ in 0..5 {
-            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+            assert_eq!(
+                auto.poll_lock(LockSignals::default(), true),
+                AutoAction::Nothing
+            );
         }
     }
 
@@ -2868,10 +3109,19 @@ mod tests {
     #[test]
     fn an_unlock_together_with_the_display_starts_once() {
         let auto = AutoBuffer::default();
-        assert_eq!(auto.poll_lock(LockSignals::session(true), true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(display(false, true), false), AutoAction::Start);
+        assert_eq!(
+            auto.poll_lock(LockSignals::session(true), true),
+            AutoAction::Stop
+        );
+        assert_eq!(
+            auto.poll_lock(display(false, true), false),
+            AutoAction::Start
+        );
         for _ in 0..5 {
-            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+            assert_eq!(
+                auto.poll_lock(LockSignals::default(), true),
+                AutoAction::Nothing
+            );
         }
     }
 
@@ -2879,10 +3129,17 @@ mod tests {
     #[test]
     fn waking_with_the_display_back_restarts_once() {
         let auto = AutoBuffer::default();
-        let woke = LockSignals { woke: true, display_back: true, ..LockSignals::default() };
+        let woke = LockSignals {
+            woke: true,
+            display_back: true,
+            ..LockSignals::default()
+        };
         assert_eq!(auto.poll_lock(woke, true), AutoAction::Restart);
         for _ in 0..5 {
-            assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Nothing);
+            assert_eq!(
+                auto.poll_lock(LockSignals::default(), true),
+                AutoAction::Nothing
+            );
         }
     }
 
@@ -2891,20 +3148,42 @@ mod tests {
     #[test]
     fn waking_in_the_dark_restarts_again_when_the_display_is_back() {
         let auto = AutoBuffer::default();
-        let woke_dark = LockSignals { woke: true, display_off: true, ..LockSignals::default() };
+        let woke_dark = LockSignals {
+            woke: true,
+            display_off: true,
+            ..LockSignals::default()
+        };
         assert_eq!(auto.poll_lock(woke_dark, true), AutoAction::Restart);
-        assert_eq!(auto.poll_lock(display(true, false), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(display(false, false), true), AutoAction::Restart);
+        assert_eq!(
+            auto.poll_lock(display(true, false), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(display(false, true), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(display(false, false), true),
+            AutoAction::Restart
+        );
     }
 
     /// A UAC prompt during the settle checks does not cost the restart.
     #[test]
     fn a_brief_secure_desktop_keeps_the_display_restart() {
         let auto = AutoBuffer::default();
-        assert_eq!(auto.poll_lock(display(false, true), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(LockSignals::desktop(true), true), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(LockSignals::default(), true), AutoAction::Restart);
+        assert_eq!(
+            auto.poll_lock(display(false, true), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(true), true),
+            AutoAction::Nothing
+        );
+        assert_eq!(
+            auto.poll_lock(LockSignals::default(), true),
+            AutoAction::Restart
+        );
     }
 
     /// Hold the secure desktop up for a whole lock's worth of checks.
@@ -2946,13 +3225,22 @@ mod tests {
     fn a_brief_secure_desktop_leaves_the_buffer_alone() {
         let auto = AutoBuffer::default();
         for _ in 0..LOCK_POLLS - 1 {
-            assert_eq!(auto.poll_lock(LockSignals::desktop(true), true), AutoAction::Nothing);
+            assert_eq!(
+                auto.poll_lock(LockSignals::desktop(true), true),
+                AutoAction::Nothing
+            );
         }
         // Prompt answered: the count starts over, so the next one gets the full
         // grace again rather than tipping over on its first check.
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), true), AutoAction::Nothing);
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), true),
+            AutoAction::Nothing
+        );
         for _ in 0..LOCK_POLLS - 1 {
-            assert_eq!(auto.poll_lock(LockSignals::desktop(true), true), AutoAction::Nothing);
+            assert_eq!(
+                auto.poll_lock(LockSignals::desktop(true), true),
+                AutoAction::Nothing
+            );
         }
     }
 
@@ -2964,7 +3252,10 @@ mod tests {
         auto.manual_stop(); // even a buffer the user had switched off before
         auto.manual_start(); // …and started again by hand
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), false),
+            AutoAction::Start
+        );
     }
 
     /// Only what the lock stopped comes back. A buffer that was off before the
@@ -2973,7 +3264,10 @@ mod tests {
     fn an_unlock_starts_nothing_it_did_not_stop() {
         let auto = AutoBuffer::default();
         assert_eq!(hold_locked(&auto, false), AutoAction::Nothing);
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Nothing);
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), false),
+            AutoAction::Nothing
+        );
     }
 
     /// A "stop" by hand while the screen is locked holds after the unlock:
@@ -2983,7 +3277,10 @@ mod tests {
         let auto = AutoBuffer::default();
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
         assert!(auto.admit(BufferWant::Off, BufferOrigin::User));
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Nothing);
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), false),
+            AutoAction::Nothing
+        );
         assert_eq!(auto.poll_always(false), AutoAction::Nothing);
     }
 
@@ -2993,8 +3290,14 @@ mod tests {
     fn the_buffer_comes_back_only_once() {
         let auto = AutoBuffer::default();
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Nothing);
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), false),
+            AutoAction::Start
+        );
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), false),
+            AutoAction::Nothing
+        );
     }
 
     #[test]
@@ -3035,7 +3338,11 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(auto.poll(false, true, false), AutoAction::Nothing);
         }
-        assert_eq!(auto.poll(true, true, false), AutoAction::Nothing, "back at the game");
+        assert_eq!(
+            auto.poll(true, true, false),
+            AutoAction::Nothing,
+            "back at the game"
+        );
     }
 
     /// Once the game's process is gone, the next game starts the buffer again.
@@ -3046,7 +3353,11 @@ mod tests {
         for _ in 0..GRACE_POLLS - 1 {
             auto.poll(false, false, false);
         }
-        assert_eq!(auto.poll(true, true, false), AutoAction::Nothing, "not before the grace is up");
+        assert_eq!(
+            auto.poll(true, true, false),
+            AutoAction::Nothing,
+            "not before the grace is up"
+        );
         for _ in 0..GRACE_POLLS {
             auto.poll(false, false, false);
         }
@@ -3112,7 +3423,11 @@ mod tests {
         assert!(!auto.admit(BufferWant::Off, BufferOrigin::Auto(seen)));
         assert!(auto.admit(BufferWant::Off, BufferOrigin::Lock));
         assert_eq!(auto.decisions(), seen + 1, "not counted as a choice");
-        assert_eq!(auto.poll_always(false), AutoAction::Start, "nothing suppressed");
+        assert_eq!(
+            auto.poll_always(false),
+            AutoAction::Start,
+            "nothing suppressed"
+        );
     }
 
     /// The automation decided to start, but the buffer was running already
@@ -3157,14 +3472,19 @@ mod tests {
     fn set_buffer_records_the_users_stop_and_drops_a_stale_start() {
         let state = AppState::new(false);
         let seen = state.auto.decisions();
-        assert_eq!(state.set_buffer(BufferWant::Off, BufferOrigin::User), Ok(BufferStep::Nothing));
+        assert_eq!(
+            state.set_buffer(BufferWant::Off, BufferOrigin::User),
+            Ok(BufferStep::Nothing)
+        );
         assert_eq!(state.auto.poll(true, true, false), AutoAction::Nothing);
         assert_eq!(
             state.set_buffer(BufferWant::On, BufferOrigin::Auto(seen)),
             Ok(BufferStep::Nothing)
         );
         assert!(!state.is_buffering());
-        state.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+        state
+            .quitting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let now = state.auto.decisions();
         assert_eq!(
             state.set_buffer(BufferWant::On, BufferOrigin::Auto(now)),
@@ -3192,9 +3512,15 @@ mod tests {
     fn two_locks_in_a_row_each_stand_on_their_own() {
         let auto = AutoBuffer::default();
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), false),
+            AutoAction::Start
+        );
         assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
-        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Start);
+        assert_eq!(
+            auto.poll_lock(LockSignals::desktop(false), false),
+            AutoAction::Start
+        );
     }
 
     #[test]
@@ -3214,13 +3540,22 @@ mod tests {
     fn stall_at(armed: bool, last_new: u64, game_on_screen: bool, now: u64) -> bool {
         let start = std::time::Instant::now();
         let at = |s: u64| start + std::time::Duration::from_secs(s);
-        stalled(armed.then(|| at(10)), Some(at(last_new)), at(0), game_on_screen, at(now))
+        stalled(
+            armed.then(|| at(10)),
+            Some(at(last_new)),
+            at(0),
+            game_on_screen,
+            at(now),
+        )
     }
 
     #[test]
     fn a_capture_silent_after_the_event_with_the_game_on_its_screen_is_dead() {
         assert!(!stall_at(true, 9, true, 14), "four seconds are not five");
-        assert!(stall_at(true, 9, true, 15), "the stillness before the event does not count");
+        assert!(
+            stall_at(true, 9, true, 15),
+            "the stillness before the event does not count"
+        );
     }
 
     /// The logs: a few dozen pictures after the change, then none. The first
@@ -3231,12 +3566,20 @@ mod tests {
         let at = |s: u64| start + std::time::Duration::from_secs(s);
         let mut watch = StallWatch::new();
         watch.arm(at(10), "the screens changed");
-        assert_eq!(watch.check(Some(at(12)), at(0), || true, at(16)), None, "4 s quiet");
+        assert_eq!(
+            watch.check(Some(at(12)), at(0), || true, at(16)),
+            None,
+            "4 s quiet"
+        );
         assert_eq!(
             watch.check(Some(at(12)), at(0), || true, at(17)),
             Some((at(10), "the screens changed"))
         );
-        assert_eq!(watch.check(Some(at(12)), at(0), || true, at(30)), None, "once per event");
+        assert_eq!(
+            watch.check(Some(at(12)), at(0), || true, at(30)),
+            None,
+            "once per event"
+        );
     }
 
     /// A game on another screen leaves the recorded one still — a paused game
@@ -3273,7 +3616,10 @@ mod tests {
         assert!(!stall_at(false, 9, true, 30));
         let mut watch = StallWatch::new();
         let now = std::time::Instant::now();
-        assert_eq!(watch.check(None, now, || true, now + std::time::Duration::from_secs(30)), None);
+        assert_eq!(
+            watch.check(None, now, || true, now + std::time::Duration::from_secs(30)),
+            None
+        );
     }
 
     /// A minute after the event the capture is trusted again — and the game
@@ -3286,9 +3632,24 @@ mod tests {
         let mut watch = StallWatch::new();
         watch.arm(at(10), "the wake from sleep");
         let asked = std::cell::Cell::new(false);
-        assert_eq!(watch.check(Some(at(9)), at(0), || { asked.set(true); true }, at(70)), None);
+        assert_eq!(
+            watch.check(
+                Some(at(9)),
+                at(0),
+                || {
+                    asked.set(true);
+                    true
+                },
+                at(70)
+            ),
+            None
+        );
         assert!(!asked.get());
-        assert_eq!(watch.check(Some(at(9)), at(0), || true, at(71)), None, "disarmed");
+        assert_eq!(
+            watch.check(Some(at(9)), at(0), || true, at(71)),
+            None,
+            "disarmed"
+        );
     }
 
     /// New pictures keep coming: the capture lives.
@@ -3313,7 +3674,11 @@ mod tests {
     fn a_long_window_title_makes_a_short_file_name() {
         assert_eq!(sanitize_name(&"Ы".repeat(300)).chars().count(), 60);
         assert_eq!(sanitize_name("Counter-Strike 2"), "Counter_Strike_2");
-        assert_eq!(sanitize_name(&format!("{}!", "a".repeat(59))), "a".repeat(59), "no underscore left after the cut");
+        assert_eq!(
+            sanitize_name(&format!("{}!", "a".repeat(59))),
+            "a".repeat(59),
+            "no underscore left after the cut"
+        );
     }
 
     #[test]

@@ -54,7 +54,10 @@ fn main() {
             let clip = clip.clone();
             std::thread::spawn(move || {
                 let source = edit::source_path(&clip);
-                (n, stems::tracks(&clip.id, &source, edit::audio_untouched(&clip)))
+                (
+                    n,
+                    stems::tracks(&clip.id, &source, edit::audio_untouched(&clip)),
+                )
             })
         })
         .collect();
@@ -77,7 +80,10 @@ fn main() {
     let mut broken = 0;
     for track in &listed {
         let Some(file) = track.preview_path.as_deref() else {
-            println!("  {:>2}  {:<40} (only in the clip file)", track.index, track.label);
+            println!(
+                "  {:>2}  {:<40} (only in the clip file)",
+                track.index, track.label
+            );
             continue;
         };
         let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
@@ -116,7 +122,16 @@ fn main() {
     println!("\nSaving with mixed levels:");
     let whole = edit::Trim::whole(clip.duration_ms);
     let snapshot = Clip::clone(&clip);
-    match edit::apply(&clip.id, move || Ok(snapshot), whole, &mix, None, EncoderId::X264, 40_000, |_| {}) {
+    match edit::apply(
+        &clip.id,
+        move || Ok(snapshot),
+        whole,
+        &mix,
+        None,
+        EncoderId::X264,
+        40_000,
+        |_| {},
+    ) {
         Ok((_, applied)) => println!(
             "  written, {:.1} MB",
             applied.size_bytes as f64 / 1_048_576.0

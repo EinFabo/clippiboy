@@ -64,7 +64,9 @@ pub fn active() -> bool {
 
 /// Is `exe` one of [`STREAMING_APPS`]?
 pub fn is_streaming_app(exe: &str) -> bool {
-    STREAMING_APPS.iter().any(|app| app.eq_ignore_ascii_case(exe))
+    STREAMING_APPS
+        .iter()
+        .any(|app| app.eq_ignore_ascii_case(exe))
 }
 
 /// Whether streamer mode is in effect under `mode`, with a streaming program
@@ -153,11 +155,12 @@ fn set_affinity(app: &AppHandle, window: &tauri::WebviewWindow) {
     let console_in_capture = app.state::<AppState>().config_snapshot().console_in_capture;
     let excluded = affinity(window.label(), active(), console_in_capture) == Affinity::Excluded;
     if let Err(err) = window.set_content_protected(excluded) {
-        log::warn!("could not set the capture protection of {}: {err}", window.label());
+        log::warn!(
+            "could not set the capture protection of {}: {err}",
+            window.label()
+        );
     }
 }
-
-
 
 /// What a friend banner says in streamer mode: `name` becomes "A friend" at
 /// the start of `text`, "a friend" anywhere else. Only whole words count, so a
@@ -197,8 +200,8 @@ pub fn mask_name(text: &str, name: &str) -> String {
 
 /// Words a name can collide with in the banner sentences.
 const STOPWORDS: &[&str] = &[
-    "a", "an", "and", "the", "is", "from", "you", "your", "has", "to", "send", "sent", "wants", "playing",
-    "started", "online", "clip", "friend", "request", "accepted",
+    "a", "an", "and", "the", "is", "from", "you", "your", "has", "to", "send", "sent", "wants",
+    "playing", "started", "online", "clip", "friend", "request", "accepted",
 ];
 
 /// Starts the thread that follows the setting and, for Automatic, the
@@ -319,8 +322,14 @@ mod tests {
     #[test]
     fn an_empty_process_list_is_unknown() {
         assert_eq!(streaming_app_among(std::iter::empty()), None);
-        assert_eq!(streaming_app_among(["explorer.exe", "OBS64.exe"].into_iter()), Some(true));
-        assert_eq!(streaming_app_among(["explorer.exe"].into_iter()), Some(false));
+        assert_eq!(
+            streaming_app_among(["explorer.exe", "OBS64.exe"].into_iter()),
+            Some(true)
+        );
+        assert_eq!(
+            streaming_app_among(["explorer.exe"].into_iter()),
+            Some(false)
+        );
     }
 
     #[test]
@@ -349,34 +358,55 @@ mod tests {
             mask_name("Luca wants to send you a clip", "Luca"),
             "A friend wants to send you a clip"
         );
-        assert_eq!(mask_name("Luca started Valorant", "Luca"), "A friend started Valorant");
+        assert_eq!(
+            mask_name("Luca started Valorant", "Luca"),
+            "A friend started Valorant"
+        );
     }
 
     #[test]
     fn only_whole_names_are_masked() {
-        assert_eq!(mask_name("Al is playing Valorant", "Al"), "A friend is playing Valorant");
+        assert_eq!(
+            mask_name("Al is playing Valorant", "Al"),
+            "A friend is playing Valorant"
+        );
         assert_eq!(mask_name("Alan is online", "Al"), "Alan is online");
-        assert_eq!(mask_name("Al, Al and Al", "Al"), "A friend, a friend and a friend");
+        assert_eq!(
+            mask_name("Al, Al and Al", "Al"),
+            "A friend, a friend and a friend"
+        );
     }
 
     #[test]
     fn short_names_and_common_words_count_only_where_a_name_stands() {
         assert_eq!(mask_name("A is online", "A"), "A friend is online");
         assert_eq!(mask_name("Clip from A", "A"), "Clip from a friend");
-        assert_eq!(mask_name("Is wants to send you a clip", "Is"), "A friend wants to send you a clip");
+        assert_eq!(
+            mask_name("Is wants to send you a clip", "Is"),
+            "A friend wants to send you a clip"
+        );
         assert_eq!(mask_name("Is is online", "is"), "Is is online");
         assert_eq!(mask_name("Clip from a", "a"), "Clip from a friend");
-        assert_eq!(mask_name("Luca wants to send you a clip", "a"), "Luca wants to send you a clip");
+        assert_eq!(
+            mask_name("Luca wants to send you a clip", "a"),
+            "Luca wants to send you a clip"
+        );
     }
 
     #[test]
     fn leading_space_still_counts_as_the_start() {
-        assert_eq!(mask_name("  Luca is online", "Luca"), "  A friend is online");
+        assert_eq!(
+            mask_name("  Luca is online", "Luca"),
+            "  A friend is online"
+        );
     }
 
     #[test]
     fn names_with_odd_characters_and_no_name_at_all() {
-        assert_eq!(mask_name("✨Mia✨ has your clip", "✨Mia✨"), "A friend has your clip");
+        assert_eq!(
+            mask_name("✨Mia✨ has your clip", "✨Mia✨"),
+            "A friend has your clip"
+        );
         assert_eq!(mask_name("Jörg is online", "Jörg"), "A friend is online");
         assert_eq!(mask_name("Someone is online", ""), "Someone is online");
         assert_eq!(mask_name("Someone is online", "Luca"), "Someone is online");

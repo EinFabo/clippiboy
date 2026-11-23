@@ -38,11 +38,10 @@ mod probe {
         IPropertyStore, SHGetPropertyStoreForWindow, PROPERTYKEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassLongPtrW, GetClassNameW, GetIconInfo, GetWindow,
-        GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-        SendMessageTimeoutW, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GW_OWNER, HICON,
-        ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, SMTO_ABORTIFHUNG, WM_GETICON,
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        EnumWindows, GetClassLongPtrW, GetClassNameW, GetIconInfo, GetWindow, GetWindowLongPtrW,
+        GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SendMessageTimeoutW, GCLP_HICON,
+        GCLP_HICONSM, GWL_EXSTYLE, GW_OWNER, HICON, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2,
+        SMTO_ABORTIFHUNG, WM_GETICON, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     /// `PKEY_AppUserModel_ID` — written out, the constant sits behind a feature
@@ -112,7 +111,9 @@ mod probe {
                 String::from_utf16_lossy(&class[..c]),
                 IsWindowVisible(hwnd).as_bool(),
                 GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32,
-                GetWindow(hwnd, GW_OWNER).map(|h| !h.0.is_null()).unwrap_or(false),
+                GetWindow(hwnd, GW_OWNER)
+                    .map(|h| !h.0.is_null())
+                    .unwrap_or(false),
             )
         };
         let tool = ex & WS_EX_TOOLWINDOW.0 != 0;
@@ -131,7 +132,11 @@ mod probe {
             println!();
             return;
         }
-        for (name, kind) in [("ICON_BIG", ICON_BIG), ("ICON_SMALL", ICON_SMALL), ("ICON_SMALL2", ICON_SMALL2)] {
+        for (name, kind) in [
+            ("ICON_BIG", ICON_BIG),
+            ("ICON_SMALL", ICON_SMALL),
+            ("ICON_SMALL2", ICON_SMALL2),
+        ] {
             let mut result = 0usize;
             unsafe {
                 SendMessageTimeoutW(

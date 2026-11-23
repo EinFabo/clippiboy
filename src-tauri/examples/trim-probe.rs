@@ -78,18 +78,42 @@ fn main() {
     //    video has to stay identical frame for frame.
     let want = full - 3_000;
     println!("\n1. Shorten at the back to {want} ms (copy, no re-encode)");
-    let plan = edit::plan(None, true, full, edit::Trim { start_ms: 0, end_ms: want }, edit::CamPart::None);
+    let plan = edit::plan(
+        None,
+        true,
+        full,
+        edit::Trim {
+            start_ms: 0,
+            end_ms: want,
+        },
+        edit::CamPart::None,
+    );
     assert!(!plan.reencode, "shortening at the end must not encode");
-    failures += step(&mut clip, edit::Trim { start_ms: 0, end_ms: want }, &mix, want);
+    failures += step(
+        &mut clip,
+        edit::Trim {
+            start_ms: 0,
+            end_ms: want,
+        },
+        &mix,
+        want,
+    );
 
     // 2. Cut at the front. Has to be frame-accurate — when copying, the start
     //    slid to the keyframe before it, so up to two seconds too early.
     println!("\n2. Cut 2000 ms off the front (frame-accurate, gets re-encoded)");
     let before = clip.duration_ms;
-    let trim = edit::Trim { start_ms: 2_000, end_ms: before };
+    let trim = edit::Trim {
+        start_ms: 2_000,
+        end_ms: before,
+    };
     failures += step(&mut clip, trim, &mix, before - 2_000);
     match clip.original {
-        Some(ClipOriginal { start_ms, duration_ms, .. }) => {
+        Some(ClipOriginal {
+            start_ms,
+            duration_ms,
+            ..
+        }) => {
             println!("  excerpt sits at {start_ms} ms of {duration_ms} ms");
             if start_ms != 2_000 {
                 eprintln!("  ERROR: expected 2000 ms");
@@ -105,7 +129,14 @@ fn main() {
     // 3. Undo. Has to bring the full length back, losslessly.
     println!("\n3. Undo trim");
     let snapshot = clip.clone();
-    match edit::restore(id, move || Ok(snapshot), Some(&mix), EncoderId::X264, 40_000, |_| {}) {
+    match edit::restore(
+        id,
+        move || Ok(snapshot),
+        Some(&mix),
+        EncoderId::X264,
+        40_000,
+        |_| {},
+    ) {
         Ok((_, applied)) => {
             report(applied.duration_ms, full);
             if (applied.duration_ms as i64 - full as i64).abs() > TOLERANCE_MS {
@@ -138,26 +169,39 @@ fn main() {
 
 /// Every track at full — the mix should not distort anything here.
 fn mix_for(clip: &Clip) -> Vec<TrackMix> {
-    stems::tracks(&clip.id, &edit::source_path(clip), edit::audio_untouched(clip))
-        .unwrap_or_default()
-        .iter()
-        .map(|track| TrackMix {
-            index: track.index,
-            gain_db: 0.0,
-            muted: false,
-        })
-        .collect()
+    stems::tracks(
+        &clip.id,
+        &edit::source_path(clip),
+        edit::audio_untouched(clip),
+    )
+    .unwrap_or_default()
+    .iter()
+    .map(|track| TrackMix {
+        index: track.index,
+        gain_db: 0.0,
+        muted: false,
+    })
+    .collect()
 }
 
 /// Carry out one cut, measure afterwards and bring the clip to the new state.
 fn step(clip: &mut Clip, trim: edit::Trim, mix: &[TrackMix], want_ms: u64) -> u32 {
     let id = clip.id.clone();
     let snapshot = clip.clone();
-    match edit::apply(&id, move || Ok(snapshot), trim, mix, None, EncoderId::X264, 40_000, |value| {
-        if value >= 1.0 {
-            println!("  done");
-        }
-    }) {
+    match edit::apply(
+        &id,
+        move || Ok(snapshot),
+        trim,
+        mix,
+        None,
+        EncoderId::X264,
+        40_000,
+        |value| {
+            if value >= 1.0 {
+                println!("  done");
+            }
+        },
+    ) {
         Ok((_, applied)) => {
             report(applied.duration_ms, want_ms);
             let off = (applied.duration_ms as i64 - want_ms as i64).abs() > TOLERANCE_MS;
@@ -174,6 +218,10 @@ fn step(clip: &mut Clip, trim: edit::Trim, mix: &[TrackMix], want_ms: u64) -> u3
 
 fn report(got: u64, want: u64) {
     let delta = got as i64 - want as i64;
-    let mark = if delta.abs() <= TOLERANCE_MS { "ok" } else { "OFF" };
+    let mark = if delta.abs() <= TOLERANCE_MS {
+        "ok"
+    } else {
+        "OFF"
+    };
     println!("  measured {got} ms, expected {want} ms ({delta:+} ms) — {mark}");
 }

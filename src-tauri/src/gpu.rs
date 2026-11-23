@@ -270,11 +270,11 @@ impl GpuDevice {
         let multithread: ID3D11Multithread = context
             .cast()
             .map_err(|err| format!("ID3D11Multithread: {err}"))?;
-        unsafe { let _ = multithread.SetMultithreadProtected(true); }
+        unsafe {
+            let _ = multithread.SetMultithreadProtected(true);
+        }
 
-        let dxgi: IDXGIDevice = device
-            .cast()
-            .map_err(|err| format!("IDXGIDevice: {err}"))?;
+        let dxgi: IDXGIDevice = device.cast().map_err(|err| format!("IDXGIDevice: {err}"))?;
         let winrt = unsafe {
             CreateDirect3D11DeviceFromDXGIDevice(&dxgi)
                 .map_err(|err| format!("WinRT device: {err}"))?

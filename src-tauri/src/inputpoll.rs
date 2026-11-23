@@ -332,7 +332,8 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
             && CONSOLE_NAV_READS_PADS
             && (controllers || pads.up || pads.seen)
             && pads.possible(now);
-        let want_pads = (controllers && pads.possible(now)) || capturing || watching || console_pads;
+        let want_pads =
+            (controllers && pads.possible(now)) || capturing || watching || console_pads;
         // A console standing without the focus watches where the foreground
         // goes, pads read or not.
         let passive = console && crate::console::is_passive();
@@ -433,7 +434,8 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
                         console && *action != Action::Console
                     }));
                     for (chord, ty) in console_chord.iter_mut().zip(read.types) {
-                        *chord = table.pad_combo_buttons_for(ty, |action| *action == Action::Console);
+                        *chord =
+                            table.pad_combo_buttons_for(ty, |action| *action == Action::Console);
                     }
                     fired
                 })

@@ -13,14 +13,20 @@ pub fn video_devices(stderr: &str) -> Vec<String> {
         .filter_map(|line| {
             let rest = line.split_once("] \"").map(|(_, rest)| rest)?;
             let (name, kinds) = rest.rsplit_once("\" (")?;
-            kinds.trim_end_matches(')').split(", ").any(|k| k == "video").then(|| name.to_string())
+            kinds
+                .trim_end_matches(')')
+                .split(", ")
+                .any(|k| k == "video")
+                .then(|| name.to_string())
         })
         .collect()
 }
 
 /// Our own virtual camera is never a source: it would show itself.
 pub fn without_our_camera(list: Vec<CameraDevice>) -> Vec<CameraDevice> {
-    list.into_iter().filter(|c| !c.name.starts_with(vcam_protocol::FRIENDLY_NAME)).collect()
+    list.into_iter()
+        .filter(|c| !c.name.starts_with(vcam_protocol::FRIENDLY_NAME))
+        .collect()
 }
 
 /// The DirectShow cameras Media Foundation does not list, as devices with a
@@ -29,7 +35,10 @@ pub fn extras(mf: &[CameraDevice], names: Vec<String>) -> Vec<CameraDevice> {
     let devices = names
         .into_iter()
         .filter(|name| !mf.iter().any(|c| c.name.eq_ignore_ascii_case(name)))
-        .map(|name| CameraDevice { id: format!("{PREFIX}{name}"), name })
+        .map(|name| CameraDevice {
+            id: format!("{PREFIX}{name}"),
+            name,
+        })
         .filter(|c| name_of(&c.id).is_some());
     without_our_camera(devices.collect())
 }
@@ -37,7 +46,8 @@ pub fn extras(mf: &[CameraDevice], names: Vec<String>) -> Vec<CameraDevice> {
 /// The device name in a `dshow:` id. `"` and `:` are refused: ffmpeg's
 /// `video=…:audio=…` syntax splits on the colon.
 pub fn name_of(id: &str) -> Option<&str> {
-    id.strip_prefix(PREFIX).filter(|name| !name.is_empty() && !name.contains(['"', ':']))
+    id.strip_prefix(PREFIX)
+        .filter(|name| !name.is_empty() && !name.contains(['"', ':']))
 }
 
 /// Watches ffmpeg's log for the size of what it writes to stdout.
@@ -59,7 +69,8 @@ impl SizeWatch {
             let word = part.split_whitespace().next()?;
             let (w, h) = word.split_once('x')?;
             let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
-            let usable = (2..=4096).contains(&w) && (2..=4096).contains(&h) && w % 2 == 0 && h % 2 == 0;
+            let usable =
+                (2..=4096).contains(&w) && (2..=4096).contains(&h) && w % 2 == 0 && h % 2 == 0;
             usable.then_some((w, h))
         })
     }
@@ -169,7 +180,15 @@ mod win {
             return Vec::new();
         }
         let out = crate::child::output(
-            crate::muxer::ffmpeg().args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]),
+            crate::muxer::ffmpeg().args([
+                "-hide_banner",
+                "-list_devices",
+                "true",
+                "-f",
+                "dshow",
+                "-i",
+                "dummy",
+            ]),
             crate::child::PROBE,
         );
         match out {
@@ -208,8 +227,13 @@ mod win {
 
     /// ffmpeg reads the camera above normal priority (`muxer::live`); its log
     /// is drained on a thread of its own, frames are read on another.
-    pub fn open(device: &CameraDevice, sink: Sink, cancelled: &dyn Fn() -> bool) -> Result<Box<dyn Source>, Error> {
-        let name = name_of(&device.id).ok_or_else(|| Error::Unsupported(format!("the camera name {}", device.name)))?;
+    pub fn open(
+        device: &CameraDevice,
+        sink: Sink,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Box<dyn Source>, Error> {
+        let name = name_of(&device.id)
+            .ok_or_else(|| Error::Unsupported(format!("the camera name {}", device.name)))?;
         // Verbose: when an open fails, its last lines say how far DirectShow got.
         let mut child = crate::child::spawn(
             crate::muxer::live("ffmpeg")
@@ -246,7 +270,9 @@ mod win {
                 })
                 .map_err(|err| Error::Other(err.to_string()))?;
         }
-        let last_words = |tail: &Mutex<VecDeque<String>>| tail.lock().iter().cloned().collect::<Vec<_>>().join(" / ");
+        let last_words = |tail: &Mutex<VecDeque<String>>| {
+            tail.lock().iter().cloned().collect::<Vec<_>>().join(" / ")
+        };
         let size = match wait_for_size(&size_rx, OPEN_LIMIT, cancelled) {
             SizeWait::Size(size) => size,
             outcome => {
@@ -255,10 +281,15 @@ mod win {
                 // The log thread ends with the process; its last lines are in.
                 std::thread::sleep(Duration::from_millis(50));
                 let words = last_words(&tail);
-                log::info!("cam: ffmpeg did not open {} ({outcome:?}): {words}", device.name);
+                log::info!(
+                    "cam: ffmpeg did not open {} ({outcome:?}): {words}",
+                    device.name
+                );
                 return Err(match outcome {
                     SizeWait::Cancelled => Error::Other("cancelled".into()),
-                    SizeWait::TimedOut if words.is_empty() => Error::Other("DirectShow did not answer".into()),
+                    SizeWait::TimedOut if words.is_empty() => {
+                        Error::Other("DirectShow did not answer".into())
+                    }
                     _ => error_from(&words),
                 });
             }
@@ -300,8 +331,18 @@ mod win {
                 })
                 .map_err(|err| Error::Other(err.to_string()))?
         };
-        log::info!("cam: reading {} through ffmpeg at {}x{}", device.name, size.0, size.1);
-        Ok(Box::new(DshowSource { child, size, closing, reader: Some(reader) }))
+        log::info!(
+            "cam: reading {} through ffmpeg at {}x{}",
+            device.name,
+            size.0,
+            size.1
+        );
+        Ok(Box::new(DshowSource {
+            child,
+            size,
+            closing,
+            reader: Some(reader),
+        }))
     }
 }
 
@@ -320,26 +361,44 @@ mod tests {
 Error opening input file dummy."#;
 
     fn mf(name: &str) -> CameraDevice {
-        CameraDevice { id: format!("\\\\?\\usb#{name}"), name: name.into() }
+        CameraDevice {
+            id: format!("\\\\?\\usb#{name}"),
+            name: name.into(),
+        }
     }
 
     #[test]
     fn the_list_has_the_video_devices_only() {
         assert_eq!(
             video_devices(LIST),
-            vec!["HD Pro Webcam C920", "OBS Virtual Camera", "ClippiBoy Camera (Windows Virtual Camera)", "Capture: Card", r#"Both \"kinds\""#]
+            vec![
+                "HD Pro Webcam C920",
+                "OBS Virtual Camera",
+                "ClippiBoy Camera (Windows Virtual Camera)",
+                "Capture: Card",
+                r#"Both \"kinds\""#
+            ]
         );
     }
 
     #[test]
     fn only_what_media_foundation_misses_is_added() {
         let extra = extras(&[mf("HD Pro Webcam C920")], video_devices(LIST));
-        assert_eq!(extra, vec![CameraDevice { id: "dshow:OBS Virtual Camera".into(), name: "OBS Virtual Camera".into() }]);
+        assert_eq!(
+            extra,
+            vec![CameraDevice {
+                id: "dshow:OBS Virtual Camera".into(),
+                name: "OBS Virtual Camera".into()
+            }]
+        );
     }
 
     #[test]
     fn a_name_ffmpeg_would_misread_is_refused() {
-        assert_eq!(name_of("dshow:OBS Virtual Camera"), Some("OBS Virtual Camera"));
+        assert_eq!(
+            name_of("dshow:OBS Virtual Camera"),
+            Some("OBS Virtual Camera")
+        );
         assert_eq!(name_of("dshow:Capture: Card"), None);
         assert_eq!(name_of(r#"dshow:a"b"#), None);
         assert_eq!(name_of("dshow:"), None);
@@ -363,20 +422,32 @@ Error opening input file dummy."#;
     fn odd_or_absurd_sizes_are_not_taken() {
         let mut watch = SizeWatch::default();
         watch.feed("Output #0, rawvideo, to 'pipe:':");
-        assert_eq!(watch.feed("  Stream #0:0: Video: rawvideo, nv12, 0x0, 30 fps"), None);
-        assert_eq!(watch.feed("  Stream #0:0: Video: rawvideo, nv12, 99999x99999, 30 fps"), None);
+        assert_eq!(
+            watch.feed("  Stream #0:0: Video: rawvideo, nv12, 0x0, 30 fps"),
+            None
+        );
+        assert_eq!(
+            watch.feed("  Stream #0:0: Video: rawvideo, nv12, 99999x99999, 30 fps"),
+            None
+        );
     }
 
     #[test]
     fn an_odd_size_is_not_taken() {
         let mut watch = SizeWatch::default();
         watch.feed("Output #0, rawvideo, to 'pipe:':");
-        assert_eq!(watch.feed("  Stream #0:0: Video: rawvideo, nv12, 1281x721, 30 fps"), None);
+        assert_eq!(
+            watch.feed("  Stream #0:0: Video: rawvideo, nv12, 1281x721, 30 fps"),
+            None
+        );
     }
 
     #[test]
     fn clippiboy_camera_never_reads_itself() {
-        let list = vec![mf("ClippiBoy Camera (Windows Virtual Camera)"), mf("HD Pro Webcam C920")];
+        let list = vec![
+            mf("ClippiBoy Camera (Windows Virtual Camera)"),
+            mf("HD Pro Webcam C920"),
+        ];
         assert_eq!(without_our_camera(list), vec![mf("HD Pro Webcam C920")]);
     }
 
@@ -387,16 +458,32 @@ Error opening input file dummy."#;
             Error::Busy { by: None }
         );
         assert_eq!(error_from("[in#0 @ 01] Could not find video device with name [OBS Virtual Camera] among source devices of type video."), Error::Gone);
-        assert_eq!(error_from("something else"), Error::Other("something else".into()));
+        assert_eq!(
+            error_from("something else"),
+            Error::Other("something else".into())
+        );
     }
 
     #[test]
     fn a_picture_larger_than_clippiboy_cameras_slots_is_scaled_down() {
         let args = arguments("OBS Virtual Camera");
-        let filter = args.windows(2).find(|w| w[0] == "-vf").map(|w| w[1].clone()).unwrap_or_default();
-        assert!(filter.contains(&format!("min(iw,{})", vcam_protocol::MAX_WIDTH)), "{filter}");
-        assert!(filter.contains(&format!("min(ih,{})", vcam_protocol::MAX_HEIGHT)), "{filter}");
-        assert!(filter.contains("force_original_aspect_ratio=decrease"), "{filter}");
+        let filter = args
+            .windows(2)
+            .find(|w| w[0] == "-vf")
+            .map(|w| w[1].clone())
+            .unwrap_or_default();
+        assert!(
+            filter.contains(&format!("min(iw,{})", vcam_protocol::MAX_WIDTH)),
+            "{filter}"
+        );
+        assert!(
+            filter.contains(&format!("min(ih,{})", vcam_protocol::MAX_HEIGHT)),
+            "{filter}"
+        );
+        assert!(
+            filter.contains("force_original_aspect_ratio=decrease"),
+            "{filter}"
+        );
         assert!(filter.contains("force_divisible_by=2"), "{filter}");
     }
 
@@ -406,9 +493,15 @@ Error opening input file dummy."#;
         use std::time::{Duration, Instant};
         let (_tx, rx) = mpsc::channel::<(u32, u32)>();
         let started = Instant::now();
-        let got = wait_for_size(&rx, Duration::from_secs(5), &|| started.elapsed() > Duration::from_millis(150));
+        let got = wait_for_size(&rx, Duration::from_secs(5), &|| {
+            started.elapsed() > Duration::from_millis(150)
+        });
         assert_eq!(got, SizeWait::Cancelled);
-        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -417,19 +510,33 @@ Error opening input file dummy."#;
         use std::time::Duration;
         let (tx, rx) = mpsc::channel();
         tx.send((1280, 720)).unwrap();
-        assert_eq!(wait_for_size(&rx, Duration::from_secs(1), &|| false), SizeWait::Size((1280, 720)));
+        assert_eq!(
+            wait_for_size(&rx, Duration::from_secs(1), &|| false),
+            SizeWait::Size((1280, 720))
+        );
         drop(tx);
-        assert_eq!(wait_for_size(&rx, Duration::from_secs(1), &|| false), SizeWait::Ended);
+        assert_eq!(
+            wait_for_size(&rx, Duration::from_secs(1), &|| false),
+            SizeWait::Ended
+        );
         let (_tx, rx) = mpsc::channel::<(u32, u32)>();
-        assert_eq!(wait_for_size(&rx, Duration::from_millis(150), &|| false), SizeWait::TimedOut);
+        assert_eq!(
+            wait_for_size(&rx, Duration::from_millis(150), &|| false),
+            SizeWait::TimedOut
+        );
     }
 
     #[test]
     fn the_device_is_one_argument_and_nothing_else_reads_input() {
         let args = arguments("OBS Virtual Camera");
-        assert!(args.windows(2).any(|w| w[0] == "-i" && w[1] == "video=OBS Virtual Camera"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-i" && w[1] == "video=OBS Virtual Camera"));
         assert!(args.contains(&"-nostdin".to_string()));
-        assert!(args.windows(2).any(|w| w == ["-rtbufsize", "16M"]), "a short live buffer: {args:?}");
+        assert!(
+            args.windows(2).any(|w| w == ["-rtbufsize", "16M"]),
+            "a short live buffer: {args:?}"
+        );
         assert_eq!(args.last().map(String::as_str), Some("-"));
     }
 }

@@ -21,9 +21,7 @@ fn main() {
         let sessions = devices::session_states(&device.id);
         let listed: Vec<String> = sessions
             .iter()
-            .map(|(pid, active)| {
-                format!("{} {}", if *active { "●" } else { "○" }, name_of(*pid))
-            })
+            .map(|(pid, active)| format!("{} {}", if *active { "●" } else { "○" }, name_of(*pid)))
             .collect();
         println!(
             "  {}{}\n      {}",

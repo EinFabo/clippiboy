@@ -200,7 +200,12 @@ impl AudioEngine {
     }
 
     /// `false` when dropped because another refresh is running.
-    fn refresh(self: &Arc<Self>, sources: Vec<AudioSource>, game_pid: Option<u32>, force: bool) -> bool {
+    fn refresh(
+        self: &Arc<Self>,
+        sources: Vec<AudioSource>,
+        game_pid: Option<u32>,
+        force: bool,
+    ) -> bool {
         *self.last_request.lock() = Some((sources.clone(), game_pid));
         // A second call while one is running is dropped: every caller repeats
         // within two seconds, and two `apply`s in parallel would fight over the
@@ -262,12 +267,16 @@ impl AudioEngine {
         let watcher = watcher.get_or_insert_with(|| {
             let engine = Arc::downgrade(self);
             crate::audio::watch::Watcher::start(move || {
-                let Some(engine) = engine.upgrade() else { return };
+                let Some(engine) = engine.upgrade() else {
+                    return;
+                };
                 // A refresh that is still running would drop this one — and
                 // what it enumerated may predate the new session.
                 for _ in 0..8 {
                     let request = engine.last_request.lock().clone();
-                    let Some((sources, game_pid)) = request else { return };
+                    let Some((sources, game_pid)) = request else {
+                        return;
+                    };
                     if engine.refresh(sources, game_pid, false) {
                         return;
                     }
@@ -566,9 +575,18 @@ mod tests {
                 mode: ProcessMode::Include,
             },
         };
-        assert_ne!(stream_key(&stream("rest", 1)), stream_key(&stream("rest", 2)));
-        assert_ne!(stream_key(&stream("rest", 1)), stream_key(&stream("game", 1)));
-        assert_eq!(stream_key(&stream("rest", 1)), stream_key(&stream("rest", 1)));
+        assert_ne!(
+            stream_key(&stream("rest", 1)),
+            stream_key(&stream("rest", 2))
+        );
+        assert_ne!(
+            stream_key(&stream("rest", 1)),
+            stream_key(&stream("game", 1))
+        );
+        assert_eq!(
+            stream_key(&stream("rest", 1)),
+            stream_key(&stream("rest", 1))
+        );
     }
 
     fn mixer_source(id: &str, gain_db: f32, separate_track: bool) -> AudioSource {
@@ -610,10 +628,7 @@ mod tests {
         let mut off = mixer_source("off", 0.0, false);
         off.enabled = false;
         let sources = vec![muted, off, mixer_source("silent", 0.0, false)];
-        let peaks = HashMap::from([
-            ("mic", (0.9, 0.9)),
-            ("off", (0.9, 0.9)),
-        ]);
+        let peaks = HashMap::from([("mic", (0.9, 0.9)), ("off", (0.9, 0.9))]);
         assert_eq!(clip_level(&sources, &peaks), MixLevel::default());
 
         let mut solo = mixer_source("solo", 0.0, false);

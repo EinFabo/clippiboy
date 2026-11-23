@@ -44,7 +44,13 @@ fn main() {
 
     let options = Options::parse();
     match &options.encoder {
-        Some(name) => one(name, &options.variant, options.seconds, options.full, options.hole),
+        Some(name) => one(
+            name,
+            &options.variant,
+            options.seconds,
+            options.full,
+            options.hole,
+        ),
         None => sweep(options.seconds, options.full),
     }
 }
@@ -642,7 +648,11 @@ fn summary(encoder: &str, outcomes: &[Outcome], seconds: u64) -> String {
         let (quiet_work, busy_work) = {
             let a = first.moving();
             let b = second.moving();
-            if a <= b { (a, b) } else { (b, a) }
+            if a <= b {
+                (a, b)
+            } else {
+                (b, a)
+            }
         };
         let same_work = quiet_work > 0.0 && busy_work <= quiet_work * 1.5;
 
@@ -793,14 +803,14 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool, hole: bool) {
         .collect();
 
     let audio = Arc::new(AudioEngine::new());
-    let mut pipeline = match Pipeline::start(&recording, buffer.seconds, buffer_bytes, sources, audio)
-    {
-        Ok(pipeline) => pipeline,
-        Err(err) => {
-            println!("pipeline will not start: {err}");
-            std::process::exit(1);
-        }
-    };
+    let mut pipeline =
+        match Pipeline::start(&recording, buffer.seconds, buffer_bytes, sources, audio) {
+            Ok(pipeline) => pipeline,
+            Err(err) => {
+                println!("pipeline will not start: {err}");
+                std::process::exit(1);
+            }
+        };
     let running = *pipeline.shared.encoder.lock();
     println!("running encoder:   {running:?}");
 
@@ -890,8 +900,10 @@ fn one(name: &str, variant: &str, seconds: u64, full: bool, hole: bool) {
             Err(err) => println!("clip not written: {err}"),
         }
     } else {
-        println!("\n(no ffmpeg beside the probe, so no test clip — the measurements above \
-                  do not need one)");
+        println!(
+            "\n(no ffmpeg beside the probe, so no test clip — the measurements above \
+                  do not need one)"
+        );
     }
 
     pipeline.stop();
@@ -937,7 +949,11 @@ fn weigh(
     outcome.fps = steady.iter().map(|h| h.fps).sum::<f32>() / steady.len() as f32;
 
     let mean = |window: &[&clippiboy_lib::pipeline::Health]| -> u64 {
-        let counted: Vec<u64> = window.iter().map(|h| h.encode_us).filter(|us| *us > 0).collect();
+        let counted: Vec<u64> = window
+            .iter()
+            .map(|h| h.encode_us)
+            .filter(|us| *us > 0)
+            .collect();
         match counted.len() {
             0 => 0,
             len => counted.iter().sum::<u64>() / len as u64,
@@ -1024,10 +1040,12 @@ fn verdict(outcome: &Outcome, budget_us: u64) {
 fn probe(path: &std::path::Path) {
     let output = muxer::command("ffprobe")
         .args([
-            "-v", "error",
+            "-v",
+            "error",
             "-show_entries",
             "stream=index,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_frames,channels",
-            "-of", "default=noprint_wrappers=1",
+            "-of",
+            "default=noprint_wrappers=1",
         ])
         .arg(path)
         .output();
@@ -1064,7 +1082,11 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
         tags: Vec::new(),
     };
 
-    let tracks = match stems::tracks(&clip.id, &edit::source_path(&clip), edit::audio_untouched(&clip)) {
+    let tracks = match stems::tracks(
+        &clip.id,
+        &edit::source_path(&clip),
+        edit::audio_untouched(&clip),
+    ) {
         Ok(tracks) => tracks,
         Err(err) => {
             println!("tracks not readable: {err}");
@@ -1123,11 +1145,15 @@ fn check_save(path: &std::path::Path, duration_ms: u64, name: &str) {
 fn video_frames(path: &std::path::Path) -> Option<String> {
     let out = muxer::command("ffprobe")
         .args([
-            "-v", "error",
-            "-select_streams", "v",
+            "-v",
+            "error",
+            "-select_streams",
+            "v",
             "-count_frames",
-            "-show_entries", "stream=nb_read_frames",
-            "-of", "csv=p=0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
         ])
         .arg(path)
         .output()

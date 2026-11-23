@@ -15,7 +15,10 @@ fn main() {
     let mode = if args.iter().any(|a| a == "shared") {
         OpenMode::MfSensorShared
     } else {
-        OpenMode::Controlling { width: 1280, height: 720 }
+        OpenMode::Controlling {
+            width: 1280,
+            height: 720,
+        }
     };
     let list = camera::list();
     for (i, device) in list.iter().enumerate() {
@@ -54,12 +57,17 @@ fn main() {
                 clock = Some(frame.probe.clock);
                 size = (frame.probe.width, frame.probe.height);
             }
-            Ok(Event::FormatChanged { width, height }) => println!("format changed: {width}x{height}"),
+            Ok(Event::FormatChanged { width, height }) => {
+                println!("format changed: {width}x{height}")
+            }
             Ok(Event::Lost(err)) => println!("lost: {err} ({err:?})"),
             Err(_) => {}
         }
         if start.elapsed() >= Duration::from_secs(second) {
-            println!("t={second:>2}s {frames:>2} fps {}x{} clock {clock:?}", size.0, size.1);
+            println!(
+                "t={second:>2}s {frames:>2} fps {}x{} clock {clock:?}",
+                size.0, size.1
+            );
             frames = 0;
             second += 1;
         }

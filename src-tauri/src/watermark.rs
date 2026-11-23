@@ -51,7 +51,12 @@ pub struct Rect {
 
 /// Where the mark goes in a frame of this size. `None` when the frame is too
 /// small to hold it legibly.
-pub fn rect(frame_width: u32, frame_height: u32, picture_width: u32, picture_height: u32) -> Option<Rect> {
+pub fn rect(
+    frame_width: u32,
+    frame_height: u32,
+    picture_width: u32,
+    picture_height: u32,
+) -> Option<Rect> {
     if picture_width == 0 || picture_height == 0 {
         return None;
     }
@@ -96,7 +101,12 @@ pub fn picture() -> &'static (u32, u32, Vec<u8>) {
 /// not allow. Below the legible size it stays at the smallest one, and a
 /// picture too small even for that gets it shrunk to fit. `None` only for a
 /// picture of a few pixels.
-pub fn rect_kept(frame_width: u32, frame_height: u32, picture_width: u32, picture_height: u32) -> Option<Rect> {
+pub fn rect_kept(
+    frame_width: u32,
+    frame_height: u32,
+    picture_width: u32,
+    picture_height: u32,
+) -> Option<Rect> {
     if let Some(at) = rect(frame_width, frame_height, picture_width, picture_height) {
         return Some(at);
     }
@@ -203,7 +213,12 @@ fn scale(rgba: &[u8], width: u32, height: u32, to_width: u32, to_height: u32) ->
                 }
             }
             let count = ((bottom - top) * (right - left)) as f32;
-            out.push([sum[0] / count, sum[1] / count, sum[2] / count, sum[3] / count]);
+            out.push([
+                sum[0] / count,
+                sum[1] / count,
+                sum[2] / count,
+                sum[3] / count,
+            ]);
         }
     }
     out
@@ -277,9 +292,8 @@ mod tests {
         // Top-right corner: nothing.
         assert_eq!(shot.rgb[(1919) * 3], 10);
         // Somewhere in the mark the picture got lighter.
-        let changed = (at.y..at.y + at.height).any(|y| {
-            (at.x..at.x + at.width).any(|x| shot.rgb[((y * 1920 + x) * 3) as usize] > 40)
-        });
+        let changed = (at.y..at.y + at.height)
+            .any(|y| (at.x..at.x + at.width).any(|x| shot.rgb[((y * 1920 + x) * 3) as usize] > 40));
         assert!(changed);
     }
 

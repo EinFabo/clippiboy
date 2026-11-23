@@ -275,7 +275,11 @@ mod tests {
         assert_eq!(resolve_among(Amf, &[Amf]), Amf);
         assert_eq!(resolve_among(Nvenc, &[Amf]), Amf);
         assert_eq!(resolve_among(Nvenc, &[]), X264);
-        assert_eq!(resolve_among(X264, &[Amf]), X264, "software is always there");
+        assert_eq!(
+            resolve_among(X264, &[Amf]),
+            X264,
+            "software is always there"
+        );
         assert_eq!(resolve_among(X264, &[]), X264);
         assert_eq!(resolve_among(Qsv, &[Qsv, Amf]), Qsv);
         assert_eq!(preferred_among(&[Qsv, Amf]), Amf, "list order decides");
@@ -287,9 +291,17 @@ mod tests {
     #[test]
     fn an_empty_enumeration_never_replaces_the_encoder_list() {
         use EncoderId::*;
-        assert_eq!(cached_after(None, vec![]), None, "an empty first look is not kept");
+        assert_eq!(
+            cached_after(None, vec![]),
+            None,
+            "an empty first look is not kept"
+        );
         assert_eq!(cached_after(Some(vec![Nvenc]), vec![]), Some(vec![Nvenc]));
-        assert_eq!(cached_after(Some(vec![Nvenc]), vec![Amf]), Some(vec![Amf]), "a real answer replaces");
+        assert_eq!(
+            cached_after(Some(vec![Nvenc]), vec![Amf]),
+            Some(vec![Amf]),
+            "a real answer replaces"
+        );
         assert_eq!(cached_after(None, vec![Qsv]), Some(vec![Qsv]));
     }
 
@@ -297,7 +309,11 @@ mod tests {
     fn an_empty_hardware_list_keeps_the_stored_encoder() {
         use EncoderId::*;
         assert_eq!(stored_among(Nvenc, &[]), Nvenc);
-        assert_eq!(stored_among(Nvenc, &[Amf]), Amf, "a list that lacks it still falls back");
+        assert_eq!(
+            stored_among(Nvenc, &[Amf]),
+            Amf,
+            "a list that lacks it still falls back"
+        );
         assert_eq!(stored_among(X264, &[]), X264);
     }
 

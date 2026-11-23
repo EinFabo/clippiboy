@@ -146,7 +146,14 @@ pub fn burst_times(
     for packet in burst {
         let trusted = *trust;
         let queued = u32::try_from(to_end).unwrap_or(u32::MAX);
-        times.push(capture_time(packet.stamped, packet.flags, now, queued, device_rate, trust));
+        times.push(capture_time(
+            packet.stamped,
+            packet.flags,
+            now,
+            queued,
+            device_rate,
+            trust,
+        ));
         if trusted && !*trust {
             distrusted = Some(packet.stamped);
         }
@@ -240,7 +247,11 @@ pub(crate) enum Waited {
 /// process tap's activation is waited on like this: one long wait kept a
 /// source that was switched away from busy until it ran out.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn wait_in_slices(total_ms: u32, stop: &AtomicBool, mut signalled: impl FnMut(u32) -> bool) -> Waited {
+pub(crate) fn wait_in_slices(
+    total_ms: u32,
+    stop: &AtomicBool,
+    mut signalled: impl FnMut(u32) -> bool,
+) -> Waited {
     let slice = REST_SLICE.as_millis() as u32;
     let mut left = total_ms;
     loop {
@@ -275,7 +286,13 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
         let thread = std::thread::Builder::new()
             .name("clippiboy-audio".into())
             .spawn(move || {
-                win::run(&kind, stop_flag, ring_for_thread, ready_tx, fallback_for_thread);
+                win::run(
+                    &kind,
+                    stop_flag,
+                    ring_for_thread,
+                    ready_tx,
+                    fallback_for_thread,
+                );
             })
             .map_err(|e| e.to_string())?;
 
@@ -317,13 +334,24 @@ pub fn start(kind: &SourceKind, ring: Arc<SampleRing>) -> Result<StreamHandle, S
 /// top is bent back by [`soft_clip`] instead. Stereo and mono stay as they are.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn stereo_shares(channels: usize) -> Vec<(f32, f32)> {
-    let shares: Vec<(f32, f32)> = (0..channels).map(|channel| stereo_share(channels, channel)).collect();
+    let shares: Vec<(f32, f32)> = (0..channels)
+        .map(|channel| stereo_share(channels, channel))
+        .collect();
     let front = |channel: usize| channel < 2 || (channels >= 6 && channel == 2);
     let side = |pick: fn(&(f32, f32)) -> f32| {
-        shares.iter().enumerate().filter(|(channel, _)| front(*channel)).map(|(_, share)| pick(share)).sum::<f32>().max(1.0)
+        shares
+            .iter()
+            .enumerate()
+            .filter(|(channel, _)| front(*channel))
+            .map(|(_, share)| pick(share))
+            .sum::<f32>()
+            .max(1.0)
     };
     let (left, right) = (side(|share| share.0), side(|share| share.1));
-    shares.into_iter().map(|(l, r)| (l / left, r / right)).collect()
+    shares
+        .into_iter()
+        .map(|(l, r)| (l / left, r / right))
+        .collect()
 }
 
 /// Peaks above the knee are bent towards full scale instead of being cut off
@@ -369,14 +397,14 @@ mod win {
     use std::sync::mpsc::Sender;
     use windows::core::{implement, IUnknown, Interface, PCWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, E_ABORT, E_INVALIDARG, ERROR_TIMEOUT, HANDLE, S_OK, WAIT_OBJECT_0,
+        CloseHandle, ERROR_TIMEOUT, E_ABORT, E_INVALIDARG, HANDLE, S_OK, WAIT_OBJECT_0,
     };
     use windows::Win32::Media::Audio::{
         eCapture, eMultimedia, eRender, ActivateAudioInterfaceAsync,
-        IActivateAudioInterfaceAsyncOperation,
-        IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
-        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-        AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
+        IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+        IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
         AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
         AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
         PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
@@ -557,7 +585,10 @@ mod win {
         resampler.process(&stereo, out);
     }
 
-    fn device_client(device_id: &str, loopback: bool) -> windows::core::Result<(IAudioClient, Format)> {
+    fn device_client(
+        device_id: &str,
+        loopback: bool,
+    ) -> windows::core::Result<(IAudioClient, Format)> {
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -602,8 +633,10 @@ mod win {
     ) -> windows::core::Result<(IAudioClient, Format)> {
         unsafe {
             let event = Arc::new(OwnedEvent::new()?);
-            let handler: IActivateAudioInterfaceCompletionHandler =
-                ActivationHandler { event: event.clone() }.into();
+            let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler {
+                event: event.clone(),
+            }
+            .into();
 
             let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
                 ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -648,7 +681,10 @@ mod win {
                     ));
                 }
                 super::Waited::Stopped => {
-                    return Err(windows::core::Error::new(E_ABORT, "the audio source was stopped"));
+                    return Err(windows::core::Error::new(
+                        E_ABORT,
+                        "the audio source was stopped",
+                    ));
                 }
             }
 
@@ -925,12 +961,22 @@ mod win {
                         let raw = unsafe {
                             std::slice::from_raw_parts(data, frames as usize * frame_bytes)
                         };
-                        convert(raw, frames as usize, &format, &mut resampler, &mut converted);
+                        convert(
+                            raw,
+                            frames as usize,
+                            &format,
+                            &mut resampler,
+                            &mut converted,
+                        );
                     }
                     burst_samples.extend_from_slice(&converted);
                 }
                 burst_ends.push(burst_samples.len());
-                burst.push(Drained { stamped: qpc_100ns as i64, flags, frames });
+                burst.push(Drained {
+                    stamped: qpc_100ns as i64,
+                    flags,
+                    frames,
+                });
 
                 let _ = unsafe { capture.ReleaseBuffer(frames) };
             }
@@ -975,7 +1021,10 @@ mod tests {
         let (_ready, waiting) = std::sync::mpsc::channel::<Result<(), String>>();
         let stop = AtomicBool::new(false);
         assert!(await_ready(&waiting, std::time::Duration::from_millis(20), &stop).is_err());
-        assert!(stop.load(Ordering::Relaxed), "left unset, the thread pumps on with the device open");
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "left unset, the thread pumps on with the device open"
+        );
     }
 
     #[test]
@@ -1017,11 +1066,23 @@ mod tests {
     fn a_sliced_wait_ends_on_a_signal_a_stop_or_its_length() {
         let stop = AtomicBool::new(false);
         let mut asked = Vec::new();
-        assert_eq!(wait_in_slices(120, &stop, |ms| { asked.push(ms); false }), Waited::TimedOut);
+        assert_eq!(
+            wait_in_slices(120, &stop, |ms| {
+                asked.push(ms);
+                false
+            }),
+            Waited::TimedOut
+        );
         assert_eq!(asked, vec![50, 50, 20], "the whole length, slice by slice");
 
         let mut calls = 0;
-        assert_eq!(wait_in_slices(4_000, &stop, |_| { calls += 1; calls == 3 }), Waited::Signalled);
+        assert_eq!(
+            wait_in_slices(4_000, &stop, |_| {
+                calls += 1;
+                calls == 3
+            }),
+            Waited::Signalled
+        );
 
         let mut calls = 0;
         let stopped = wait_in_slices(4_000, &stop, |_| {
@@ -1070,8 +1131,14 @@ mod tests {
         for channels in [6, 8] {
             let shares = stereo_shares(channels);
             // Front and centre add up to exactly full scale on each side …
-            assert!((shares[0].0 + shares[2].0 - 1.0).abs() < 1e-6, "{channels}: {shares:?}");
-            assert!((shares[1].1 + shares[2].1 - 1.0).abs() < 1e-6, "{channels}: {shares:?}");
+            assert!(
+                (shares[0].0 + shares[2].0 - 1.0).abs() < 1e-6,
+                "{channels}: {shares:?}"
+            );
+            assert!(
+                (shares[1].1 + shares[2].1 - 1.0).abs() < 1e-6,
+                "{channels}: {shares:?}"
+            );
             // … so plain stereo content loses only 4.6 dB, not 10.
             let db = 20.0 * shares[0].0.log10();
             assert!((-4.7..-4.5).contains(&db), "{channels} channels: {db} dB");
@@ -1141,7 +1208,10 @@ mod tests {
     #[test]
     fn a_missing_stamp_is_estimated_from_what_is_still_queued() {
         let mut trust = true;
-        assert_eq!(capture_time(0, 0, NOW, 4_800, 48_000, &mut trust), NOW - 1_000_000);
+        assert_eq!(
+            capture_time(0, 0, NOW, 4_800, 48_000, &mut trust),
+            NOW - 1_000_000
+        );
         assert!(trust);
     }
 
@@ -1149,8 +1219,14 @@ mod tests {
     #[test]
     fn a_stamp_flagged_as_wrong_is_not_used() {
         let mut trust = true;
-        let flagged =
-            capture_time(NOW + 3_000_000, BUFFER_FLAG_TIMESTAMP_ERROR, NOW, 480, 48_000, &mut trust);
+        let flagged = capture_time(
+            NOW + 3_000_000,
+            BUFFER_FLAG_TIMESTAMP_ERROR,
+            NOW,
+            480,
+            48_000,
+            &mut trust,
+        );
         assert_eq!(flagged, NOW - 100_000);
         assert!(trust);
     }
@@ -1159,14 +1235,20 @@ mod tests {
     #[test]
     fn a_good_stamp_is_still_taken_as_it_is() {
         let mut trust = true;
-        assert_eq!(capture_time(NOW - 50_000, 0, NOW, 480, 48_000, &mut trust), NOW - 50_000);
+        assert_eq!(
+            capture_time(NOW - 50_000, 0, NOW, 480, 48_000, &mut trust),
+            NOW - 50_000
+        );
     }
 
     /// AUD-2: on the fallback clock the stamp is ignored and the queue decides.
     #[test]
     fn a_distrusted_device_is_placed_by_its_queue() {
         let mut trust = false;
-        assert_eq!(capture_time(NOW - 50_000, 0, NOW, 441, 44_100, &mut trust), NOW - 100_000);
+        assert_eq!(
+            capture_time(NOW - 50_000, 0, NOW, 441, 44_100, &mut trust),
+            NOW - 100_000
+        );
     }
 
     /// AUD-2: on the fallback clock, a stalled reader stamped the first queued
@@ -1185,7 +1267,14 @@ mod tests {
             // then drains the 16 packets that piled up.
             let burst: i64 = if k == 520 { 16 } else { 1 };
             let now = (k + burst) * 100_000 + 20_000;
-            let drained = vec![Drained { stamped: 0, flags: 0, frames: 480 }; burst as usize];
+            let drained = vec![
+                Drained {
+                    stamped: 0,
+                    flags: 0,
+                    frames: 480
+                };
+                burst as usize
+            ];
             burst_times(&drained, now, 48_000, &mut trust, &mut times);
             for time in &times {
                 ring.write(&block, *time);
@@ -1193,10 +1282,17 @@ mod tests {
             }
         }
         let end = ring.end_100ns().unwrap();
-        assert!((end - 60_020_000).abs() < 10_000, "the source ends {} ms off", (end - 60_020_000) / 10_000);
+        assert!(
+            (end - 60_020_000).abs() < 10_000,
+            "the source ends {} ms off",
+            (end - 60_020_000) / 10_000
+        );
         let mut out = vec![0.0f32; 480 * CHANNELS];
         ring.read_window(52_500_000, &mut out);
-        assert!(out.iter().all(|s| *s == 0.5), "a fake dropout was filled in after the stall");
+        assert!(
+            out.iter().all(|s| *s == 0.5),
+            "a fake dropout was filled in after the stall"
+        );
     }
 
     /// AUD-2, final review: a drained burst is placed backwards from `now` by the
@@ -1207,14 +1303,39 @@ mod tests {
         let mut trust = true;
         let mut times = Vec::new();
         let burst = [
-            Drained { stamped: 0, flags: 0, frames: 441 },
-            Drained { stamped: NOW - 150_000, flags: 0, frames: 441 },
-            Drained { stamped: NOW + 3_000_000, flags: BUFFER_FLAG_TIMESTAMP_ERROR, frames: 882 },
-            Drained { stamped: 0, flags: BUFFER_FLAG_SILENT, frames: 441 },
+            Drained {
+                stamped: 0,
+                flags: 0,
+                frames: 441,
+            },
+            Drained {
+                stamped: NOW - 150_000,
+                flags: 0,
+                frames: 441,
+            },
+            Drained {
+                stamped: NOW + 3_000_000,
+                flags: BUFFER_FLAG_TIMESTAMP_ERROR,
+                frames: 882,
+            },
+            Drained {
+                stamped: 0,
+                flags: BUFFER_FLAG_SILENT,
+                frames: 441,
+            },
         ];
-        assert_eq!(burst_times(&burst, NOW, 44_100, &mut trust, &mut times), None);
-        assert_eq!(times, vec![NOW - 500_000, NOW - 150_000, NOW - 300_000, NOW - 100_000]);
-        assert!(trust, "a flagged or empty stamp says nothing about the device");
+        assert_eq!(
+            burst_times(&burst, NOW, 44_100, &mut trust, &mut times),
+            None
+        );
+        assert_eq!(
+            times,
+            vec![NOW - 500_000, NOW - 150_000, NOW - 300_000, NOW - 100_000]
+        );
+        assert!(
+            trust,
+            "a flagged or empty stamp says nothing about the device"
+        );
     }
 
     /// A stamp from another timeline turns the trust off for the rest of the
@@ -1224,11 +1345,26 @@ mod tests {
         let mut trust = true;
         let mut times = Vec::new();
         let burst = [
-            Drained { stamped: NOW - 200_000, flags: 0, frames: 480 },
-            Drained { stamped: 5_000, flags: 0, frames: 480 },
-            Drained { stamped: NOW - 100_000, flags: 0, frames: 480 },
+            Drained {
+                stamped: NOW - 200_000,
+                flags: 0,
+                frames: 480,
+            },
+            Drained {
+                stamped: 5_000,
+                flags: 0,
+                frames: 480,
+            },
+            Drained {
+                stamped: NOW - 100_000,
+                flags: 0,
+                frames: 480,
+            },
         ];
-        assert_eq!(burst_times(&burst, NOW, 48_000, &mut trust, &mut times), Some(5_000));
+        assert_eq!(
+            burst_times(&burst, NOW, 48_000, &mut trust, &mut times),
+            Some(5_000)
+        );
         assert!(!trust);
         assert_eq!(times, vec![NOW - 200_000, NOW - 200_000, NOW - 100_000]);
     }

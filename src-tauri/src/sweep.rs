@@ -54,7 +54,9 @@ const CLOCK_MARGIN: Duration = Duration::from_secs(2 * 60);
 
 /// What counts as "before the start" for a file written at `started`.
 fn cutoff(started: SystemTime) -> SystemTime {
-    started.checked_sub(CLOCK_MARGIN).unwrap_or(SystemTime::UNIX_EPOCH)
+    started
+        .checked_sub(CLOCK_MARGIN)
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// Clear away the leftovers, on a thread of its own: a clip folder on a share
@@ -75,7 +77,9 @@ pub fn run(app: &tauri::AppHandle) {
         for path in leftovers_in(&discord, before_start) {
             remove_file(&path, before_start);
         }
-        let before = started.checked_sub(COPY_AGE).unwrap_or(SystemTime::UNIX_EPOCH);
+        let before = started
+            .checked_sub(COPY_AGE)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
         for path in aged_copies(&discord, before) {
             let removed = if path.is_dir() {
                 std::fs::remove_dir_all(&path)
@@ -91,10 +95,14 @@ pub fn run(app: &tauri::AppHandle) {
             // A recording that is finished after the fact writes its stems
             // under its own id before it has a row.
             known.extend(recording_ids(&clip_dir));
-            let before = started.checked_sub(STORE_GRACE).unwrap_or(SystemTime::UNIX_EPOCH);
+            let before = started
+                .checked_sub(STORE_GRACE)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
             for dir in orphan_stores(&crate::stems::root(), &known, before) {
                 match std::fs::remove_dir_all(&dir) {
-                    Ok(()) => log::info!("removed the tracks '{}' of a save cut short", dir.display()),
+                    Ok(()) => {
+                        log::info!("removed the tracks '{}' of a save cut short", dir.display())
+                    }
                     Err(err) => log::warn!("could not remove '{}': {err}", dir.display()),
                 }
             }
@@ -115,7 +123,10 @@ pub fn run(app: &tauri::AppHandle) {
 /// listed, and a newer or no longer empty file is theirs.
 fn remove_file(path: &Path, before: SystemTime) {
     if !still_left_over(path, before) {
-        log::info!("'{}' was written to since the start; left alone", path.display());
+        log::info!(
+            "'{}' was written to since the start; left alone",
+            path.display()
+        );
         return;
     }
     match std::fs::remove_file(path) {
@@ -177,7 +188,10 @@ pub fn is_screenshot_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".png") else {
         return false;
     };
-    let stem = match stem.strip_suffix(')').and_then(|rest| rest.rsplit_once(" (")) {
+    let stem = match stem
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+    {
         Some((rest, n)) if is_pid(n) => rest,
         Some(_) => return false,
         None => stem,
@@ -206,7 +220,9 @@ fn modified_before(path: &Path, before: SystemTime) -> bool {
 pub fn is_scratch_name(name: &str) -> bool {
     if let Some((head, tail)) = name.split_once(".part.") {
         let kind = match tail.strip_suffix(".wav") {
-            Some(track) => !track.is_empty() && track.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            Some(track) => {
+                !track.is_empty() && track.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
             None => tail == "ts" || tail == "h264" || tail == "mp4" || tail == "png",
         };
         return kind && ends_in_clip_id(head);
@@ -528,7 +544,10 @@ mod tests {
         let mut expected = vec![claim, second];
         expected.sort();
         assert_eq!(found, expected);
-        assert!(leftovers_in(&dir, SystemTime::UNIX_EPOCH).is_empty(), "a screenshot being taken right now");
+        assert!(
+            leftovers_in(&dir, SystemTime::UNIX_EPOCH).is_empty(),
+            "a screenshot being taken right now"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -565,7 +584,10 @@ mod tests {
         age(&part, Duration::from_secs(60));
         assert!(leftovers_in(&dir, cutoff(SystemTime::now())).is_empty());
         age(&part, Duration::from_secs(10 * 60));
-        assert_eq!(leftovers_in(&dir, cutoff(SystemTime::now())), vec![part.clone()]);
+        assert_eq!(
+            leftovers_in(&dir, cutoff(SystemTime::now())),
+            vec![part.clone()]
+        );
 
         // Written to again between the listing and the removal.
         std::fs::write(&part, b"y").unwrap();
@@ -586,7 +608,9 @@ mod tests {
 
     #[test]
     fn a_clip_folder_that_is_not_there_has_no_leftovers() {
-        let missing = std::env::temp_dir().join("clippiboy-not-there").join("at-all");
+        let missing = std::env::temp_dir()
+            .join("clippiboy-not-there")
+            .join("at-all");
         assert!(leftovers_in(&missing, SystemTime::now()).is_empty());
     }
 
@@ -596,15 +620,30 @@ mod tests {
         let store = root.join(ID);
         std::fs::create_dir_all(&store).unwrap();
         let picture = format!("{ID}.part.png");
-        for name in ["cam.part.h264", "cam.part.mp4", "cam.mp4", "video.mp4", "facecam.json", "base.png", &picture] {
+        for name in [
+            "cam.part.h264",
+            "cam.part.mp4",
+            "cam.mp4",
+            "video.mp4",
+            "facecam.json",
+            "base.png",
+            &picture,
+        ] {
             std::fs::write(store.join(name), b"x").unwrap();
         }
         let mut found = cam_partials(&root, SystemTime::now() + Duration::from_secs(60));
         found.sort();
-        let mut expected = vec![store.join("cam.part.h264"), store.join("cam.part.mp4"), store.join(&picture)];
+        let mut expected = vec![
+            store.join("cam.part.h264"),
+            store.join("cam.part.mp4"),
+            store.join(&picture),
+        ];
         expected.sort();
         assert_eq!(found, expected);
-        assert!(cam_partials(&root, SystemTime::UNIX_EPOCH).is_empty(), "a save writing its cam right now");
+        assert!(
+            cam_partials(&root, SystemTime::UNIX_EPOCH).is_empty(),
+            "a save writing its cam right now"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -642,7 +681,11 @@ mod tests {
         for name in [
             "Valorant_2026-10-22_12-00-00-123.mp4.4711.clippiboy-move.part".to_owned(),
             "video.mp4.4294967295.clippiboy-move.part".to_owned(),
-            crate::edit::move_part(Path::new("video.mp4")).file_name().unwrap().to_string_lossy().into_owned(),
+            crate::edit::move_part(Path::new("video.mp4"))
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
         ] {
             assert!(is_scratch_name(&name), "{name}");
         }
@@ -675,11 +718,17 @@ mod tests {
     /// old the timestamp it took over from its source.
     #[test]
     fn a_move_cut_short_is_swept_unless_it_is_still_being_copied() {
-        let foreign_pid = if std::process::id() == 4711 { 4712 } else { 4711 };
+        let foreign_pid = if std::process::id() == 4711 {
+            4712
+        } else {
+            4711
+        };
         let dir = scratch_dir();
         let videos = dir.join("Valorant");
         std::fs::create_dir_all(&videos).unwrap();
-        let left = videos.join(format!("Valorant_2026-10-22_12-00-00-123.mp4.{foreign_pid}.clippiboy-move.part"));
+        let left = videos.join(format!(
+            "Valorant_2026-10-22_12-00-00-123.mp4.{foreign_pid}.clippiboy-move.part"
+        ));
         let copying = crate::edit::move_part(&videos.join("Valorant_2026-10-22_12-00-00-124.mp4"));
         for path in [&left, &copying] {
             std::fs::write(path, b"half a clip").unwrap();
@@ -740,7 +789,10 @@ mod tests {
         found.sort();
         let mut expected = vec![root.join("old"), stale];
         expected.sort();
-        assert_eq!(found, expected, "the old folder whole, an old copy beside a fresh one alone");
+        assert_eq!(
+            found, expected,
+            "the old folder whole, an old copy beside a fresh one alone"
+        );
         assert!(aged_copies(&root, SystemTime::UNIX_EPOCH).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -764,14 +816,26 @@ mod tests {
         age(&stale, week + day);
         age(&newer, week + day);
         let before = SystemTime::now() - week;
-        assert_eq!(aged_copies(&root, before), vec![muted.clone()], "the old folder of copies whole, the fresh copy kept");
+        assert_eq!(
+            aged_copies(&root, before),
+            vec![muted.clone()],
+            "the old folder of copies whole, the fresh copy kept"
+        );
 
         age(&newer, day);
-        assert_eq!(aged_copies(&root, before), vec![stale.clone()], "an old copy beside a fresh one alone");
+        assert_eq!(
+            aged_copies(&root, before),
+            vec![stale.clone()],
+            "an old copy beside a fresh one alone"
+        );
 
         age(&fresh, week + day);
         age(&newer, week + day);
-        assert_eq!(aged_copies(&root, before), vec![clip], "all of it old: the clip's folder whole");
+        assert_eq!(
+            aged_copies(&root, before),
+            vec![clip],
+            "all of it old: the clip's folder whole"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -785,8 +849,14 @@ mod tests {
         std::fs::write(root.join("legacy").join("spuren.json"), b"{}").unwrap();
         let known = HashSet::from(["known".to_string()]);
         let later = SystemTime::now() + Duration::from_secs(60);
-        assert_eq!(orphan_stores(&root, &known, later), vec![root.join("orphan")]);
-        assert!(orphan_stores(&root, &known, SystemTime::UNIX_EPOCH).is_empty(), "a store being written right now");
+        assert_eq!(
+            orphan_stores(&root, &known, later),
+            vec![root.join("orphan")]
+        );
+        assert!(
+            orphan_stores(&root, &known, SystemTime::UNIX_EPOCH).is_empty(),
+            "a store being written right now"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

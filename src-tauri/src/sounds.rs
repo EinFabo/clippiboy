@@ -67,7 +67,11 @@ pub fn audible(streamer: bool, device: Option<&str>, defaults: &[String]) -> boo
 /// in streamer mode.
 pub fn audible_now(device: Option<&str>) -> bool {
     let streamer = crate::streamer::active();
-    let defaults = if streamer && device.is_some() { imp::default_outputs() } else { Vec::new() };
+    let defaults = if streamer && device.is_some() {
+        imp::default_outputs()
+    } else {
+        Vec::new()
+    };
     audible(streamer, device, &defaults)
 }
 
@@ -172,12 +176,15 @@ mod imp {
         // SAFETY: plain COM calls; the id string is freed after copying it.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            let Ok(enumerator) =
+                CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
             else {
                 return out;
             };
             for role in [eConsole, eMultimedia] {
-                let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, role) else { continue };
+                let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, role) else {
+                    continue;
+                };
                 let Ok(id) = device.GetId() else { continue };
                 if let Ok(text) = id.to_string() {
                     if !out.contains(&text) {
@@ -222,7 +229,8 @@ mod imp {
         // WASAPI hands out is written within its length before being released.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
             let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
             let device = enumerator.GetDevice(PCWSTR(wide.as_ptr()))?;
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
@@ -336,10 +344,26 @@ mod tests {
         for kind in ALL {
             let data = wav(kind);
             assert_eq!(&data[0..4], b"RIFF", "{kind:?}");
-            assert_eq!(&data[36..40], b"data", "{kind:?}: header is not the plain 44 bytes");
-            assert_eq!(u16::from_le_bytes([data[20], data[21]]), 1, "{kind:?}: not PCM");
-            assert_eq!(u16::from_le_bytes([data[22], data[23]]), 2, "{kind:?}: not stereo");
-            assert_eq!(u16::from_le_bytes([data[34], data[35]]), 16, "{kind:?}: not 16 bit");
+            assert_eq!(
+                &data[36..40],
+                b"data",
+                "{kind:?}: header is not the plain 44 bytes"
+            );
+            assert_eq!(
+                u16::from_le_bytes([data[20], data[21]]),
+                1,
+                "{kind:?}: not PCM"
+            );
+            assert_eq!(
+                u16::from_le_bytes([data[22], data[23]]),
+                2,
+                "{kind:?}: not stereo"
+            );
+            assert_eq!(
+                u16::from_le_bytes([data[34], data[35]]),
+                16,
+                "{kind:?}: not 16 bit"
+            );
             let length = u32::from_le_bytes([data[40], data[41], data[42], data[43]]) as usize;
             assert_eq!(length, data.len() - HEADER, "{kind:?}");
             let (channels, rate, bits) = header_format(data);

@@ -15,9 +15,9 @@ use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 
-use crate::model::{AudioProcess, CaptureTarget};
 #[cfg(windows)]
 use crate::model::TargetKind;
+use crate::model::{AudioProcess, CaptureTarget};
 
 /// Edge length the shell is asked for. The list shows the icon at 22 px and
 /// the window card at 64 px, so this is sharp on both at 200 % scaling too.
@@ -185,12 +185,19 @@ pub fn dress_windows(_targets: &mut [CaptureTarget], _game_pid: Option<u32>) {}
 pub fn dress_apps(apps: &mut [AudioProcess]) {
     let processes: Vec<Option<Process>> = apps
         .iter()
-        .map(|app| Some(Process { pid: app.pid, path: exe_path(app.pid) }))
+        .map(|app| {
+            Some(Process {
+                pid: app.pid,
+                path: exe_path(app.pid),
+            })
+        })
         .collect();
     look_up_new(&processes);
     let known = cache().lock();
     for (app, process) in apps.iter_mut().zip(&processes) {
-        app.icon = process.as_ref().and_then(|process| icon_for(process, &known));
+        app.icon = process
+            .as_ref()
+            .and_then(|process| icon_for(process, &known));
     }
 }
 
@@ -309,16 +316,27 @@ pub fn png_data_url(width: u32, height: u32, rgba: &[u8]) -> Option<String> {
 
 /// Standard base64 with padding, as a data URL wants it.
 pub fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -332,16 +350,14 @@ mod win {
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
     };
     use windows::Win32::System::Com::{
-        CoInitializeEx, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED,
-        COINIT_DISABLE_OLE1DDE,
+        CoInitializeEx, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
     };
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::Shell::{
-        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
-        SIIGBF_ICONONLY,
+        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
@@ -355,7 +371,10 @@ mod win {
         if pid == 0 {
             return None;
         }
-        Some(super::Process { pid, path: exe_path(pid) })
+        Some(super::Process {
+            pid,
+            path: exe_path(pid),
+        })
     }
 
     pub fn exe_path(pid: u32) -> Option<String> {
@@ -385,35 +404,37 @@ mod win {
         let deadline = std::time::Instant::now() + budget;
         let (done, wait) = std::sync::mpsc::channel::<()>();
         let mut claim = super::Claim(paths.iter().map(|path| super::cache_key(path)).collect());
-        let spawned = std::thread::Builder::new().name("app-icons".into()).spawn(move || {
-            let com = unsafe {
-                CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
-            }
-            .is_ok();
-            for path in paths {
-                let found = if com && std::time::Instant::now() < deadline {
-                    // A panic in the shell is one failed try, like an error.
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| icon_of(&path)))
-                        .unwrap_or(Lookup::Failed)
-                } else {
-                    Lookup::Late
-                };
-                match &found {
-                    Lookup::Icon(_) | Lookup::NoIcon => log::debug!(
-                        "icon lookup for {path}: {}",
-                        matches!(found, Lookup::Icon(_))
-                    ),
-                    Lookup::Failed => log::debug!("icon lookup for {path} failed"),
-                    Lookup::Late => {}
+        let spawned = std::thread::Builder::new()
+            .name("app-icons".into())
+            .spawn(move || {
+                let com = unsafe {
+                    CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
                 }
-                claim.settle(&path, found);
-            }
-            if com {
-                unsafe { CoUninitialize() };
-            }
-            drop(claim);
-            let _ = done.send(());
-        });
+                .is_ok();
+                for path in paths {
+                    let found = if com && std::time::Instant::now() < deadline {
+                        // A panic in the shell is one failed try, like an error.
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| icon_of(&path)))
+                            .unwrap_or(Lookup::Failed)
+                    } else {
+                        Lookup::Late
+                    };
+                    match &found {
+                        Lookup::Icon(_) | Lookup::NoIcon => log::debug!(
+                            "icon lookup for {path}: {}",
+                            matches!(found, Lookup::Icon(_))
+                        ),
+                        Lookup::Failed => log::debug!("icon lookup for {path} failed"),
+                        Lookup::Late => {}
+                    }
+                    claim.settle(&path, found);
+                }
+                if com {
+                    unsafe { CoUninitialize() };
+                }
+                drop(claim);
+                let _ = done.send(());
+            });
         match spawned {
             // A lookup thread that ended early (a panic) drops its sender: no waiting then.
             Ok(_) => {
@@ -437,7 +458,10 @@ mod win {
             // An error here is no answer either — a busy or cold shell fails
             // the same way; only an image without pixels says "no icon".
             let Ok(bitmap) = factory.GetImage(
-                SIZE { cx: super::ICON_SIZE, cy: super::ICON_SIZE },
+                SIZE {
+                    cx: super::ICON_SIZE,
+                    cy: super::ICON_SIZE,
+                },
                 SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
             ) else {
                 return Lookup::Failed;
@@ -560,7 +584,10 @@ mod tests {
     #[test]
     fn a_game_that_refuses_to_be_opened_is_still_the_game() {
         let mut target = window("0x1");
-        let process = Process { pid: 42, path: None };
+        let process = Process {
+            pid: 42,
+            path: None,
+        };
         dress(&mut target, Some(&process), &Cache::new(), Some(42));
         assert!(target.is_game);
         assert_eq!(target.icon, None);
@@ -571,7 +598,10 @@ mod tests {
         let mut target = window("0x1");
         let mut known = Cache::new();
         known.insert(cache_key(r"C:\Apps\Discord.exe"), Some("data:x".into()));
-        let process = Process { pid: 7, path: Some(r"c:\apps\DISCORD.EXE".into()) };
+        let process = Process {
+            pid: 7,
+            path: Some(r"c:\apps\DISCORD.EXE".into()),
+        };
         dress(&mut target, Some(&process), &known, Some(42));
         assert_eq!(target.icon.as_deref(), Some("data:x"));
         assert!(!target.is_game);
@@ -579,7 +609,12 @@ mod tests {
 
     #[test]
     fn each_program_is_looked_up_once_and_never_twice_at_a_time() {
-        let at = |pid, path: &str| Some(Process { pid, path: Some(path.into()) });
+        let at = |pid, path: &str| {
+            Some(Process {
+                pid,
+                path: Some(path.into()),
+            })
+        };
         let processes = vec![
             at(1, r"C:\A\one.exe"),
             at(2, r"c:\a\ONE.exe"),
@@ -611,7 +646,10 @@ mod tests {
         assert_eq!(Lookup::Failed.cached(TRIES - 2), None);
         assert_eq!(Lookup::Failed.cached(TRIES - 1), Some(None));
         assert_eq!(Lookup::Late.cached(TRIES + 5), None);
-        assert_eq!(Lookup::Icon("u".into()).cached(TRIES - 1), Some(Some("u".into())));
+        assert_eq!(
+            Lookup::Icon("u".into()).cached(TRIES - 1),
+            Some(Some("u".into()))
+        );
     }
 
     #[test]

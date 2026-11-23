@@ -161,20 +161,8 @@ pub mod pad {
 
     /// The buttons a game plays with. Bound alone, the game gets the same
     /// press — the settings say so once.
-    pub const GAME_BUTTONS: u32 = SOUTH
-        | EAST
-        | WEST
-        | NORTH
-        | LB
-        | RB
-        | LT
-        | RT
-        | LS
-        | RS
-        | UP
-        | DOWN
-        | LEFT
-        | RIGHT;
+    pub const GAME_BUTTONS: u32 =
+        SOUTH | EAST | WEST | NORTH | LB | RB | LT | RT | LS | RS | UP | DOWN | LEFT | RIGHT;
 
     /// Names in the order they are written: shoulders and the small buttons
     /// first, the face buttons last, as one reads a combo.
@@ -340,9 +328,14 @@ impl PadType {
     }
 
     pub fn from_key(key: &str) -> Option<PadType> {
-        [PadType::Xbox, PadType::PlayStation, PadType::Nintendo, PadType::Other]
-            .into_iter()
-            .find(|ty| ty.key() == key)
+        [
+            PadType::Xbox,
+            PadType::PlayStation,
+            PadType::Nintendo,
+            PadType::Other,
+        ]
+        .into_iter()
+        .find(|ty| ty.key() == key)
     }
 
     /// The profile of its own a pad of this type could have; `All` for
@@ -1057,7 +1050,11 @@ impl<A: Copy + PartialEq> Table<A> {
         held_back: impl Fn(&A) -> bool,
     ) -> Vec<(A, Source)> {
         // Each pad feeds the slots of the profile it goes by, and no others.
-        let profiles: Vec<Profile> = input.pad_types.iter().map(|ty| self.governing(*ty)).collect();
+        let profiles: Vec<Profile> = input
+            .pad_types
+            .iter()
+            .map(|ty| self.governing(*ty))
+            .collect();
         let satisfied: Vec<bool> = self
             .pads
             .iter()
@@ -1128,13 +1125,17 @@ impl<A: Copy + PartialEq> Table<A> {
                 }
                 continue;
             }
-            let outdone = self.pads.iter().enumerate().any(|(other, (by, bigger, _))| {
-                other != at
-                    && live[other]
-                    && *by == profile
-                    && bigger & mask == mask
-                    && *bigger != mask
-            });
+            let outdone = self
+                .pads
+                .iter()
+                .enumerate()
+                .any(|(other, (by, bigger, _))| {
+                    other != at
+                        && live[other]
+                        && *by == profile
+                        && bigger & mask == mask
+                        && *bigger != mask
+                });
             let active = satisfied[at] && !outdone && !self.pad_blocked[at];
             let slot = &mut self.pads[at].2;
             if active && !slot.is_down() {
@@ -1384,7 +1385,10 @@ mod tests {
 
     #[test]
     fn a_single_controller_button_is_a_binding() {
-        assert_eq!(parse("Pad:South").unwrap().trigger, Trigger::Pad(pad::SOUTH));
+        assert_eq!(
+            parse("Pad:South").unwrap().trigger,
+            Trigger::Pad(pad::SOUTH)
+        );
         assert_eq!(round("Pad:A+A"), "Pad:South");
         assert_eq!(round("Hold:Pad:Misc"), "Hold:Pad:Misc");
         assert_eq!(round("Pad:Capture"), "Pad:Misc");
@@ -1392,7 +1396,10 @@ mod tests {
 
     #[test]
     fn guide_is_bindable_under_any_of_its_names() {
-        assert_eq!(parse("Pad:Guide").unwrap().trigger, Trigger::Pad(pad::GUIDE));
+        assert_eq!(
+            parse("Pad:Guide").unwrap().trigger,
+            Trigger::Pad(pad::GUIDE)
+        );
         assert_eq!(round("Pad:Xbox"), "Pad:Guide");
         assert_eq!(round("Pad:Home"), "Pad:Guide");
         assert_eq!(round("Pad:PS+A"), "Pad:Guide+South");
@@ -1447,7 +1454,10 @@ mod tests {
         // The bottom button is B on a Nintendo pad, the right one A.
         assert_eq!(spoken_for("Pad:South", Family::Nintendo), "B");
         assert_eq!(spoken_for("Pad:East", Family::Nintendo), "A");
-        assert_eq!(spoken_for("Hold:Pad:Misc", Family::Nintendo), "Hold Capture");
+        assert_eq!(
+            spoken_for("Hold:Pad:Misc", Family::Nintendo),
+            "Hold Capture"
+        );
         assert_eq!(spoken_for("Pad:Guide", Family::Nintendo), "Home");
         assert_eq!(spoken_for("Pad:East+West", Family::GameCube), "X+B");
     }
@@ -1493,7 +1503,10 @@ mod tests {
         assert!(!clashes(&[one("Mouse5", None), one("Hold:Mouse5", None)]));
         // Two actions on one pad button, tapped and held, in either spelling;
         // a third on it is a clash.
-        assert!(!clashes(&[one("Hold:Pad:View+A", None), one("Pad:Back+South", None)]));
+        assert!(!clashes(&[
+            one("Hold:Pad:View+A", None),
+            one("Pad:Back+South", None)
+        ]));
         assert!(clashes(&[
             one("Mouse5", None),
             one("Hold:Mouse5", None),
@@ -1504,12 +1517,18 @@ mod tests {
             one("F9", Some(1)),
             one("mouse5", None)
         ]));
-        assert!(clashes(&[one("Pad:A+View", None), one("Pad:Back+South", None)]));
+        assert!(clashes(&[
+            one("Pad:A+View", None),
+            one("Pad:Back+South", None)
+        ]));
         assert!(!clashes(&[
             one("Pad:View+A", None),
             one("Pad:View+B", None)
         ]));
-        assert!(!clashes(&[one("Pad:Guide", None), one("Hold:Pad:Xbox", None)]));
+        assert!(!clashes(&[
+            one("Pad:Guide", None),
+            one("Hold:Pad:Xbox", None)
+        ]));
         assert!(!clashes(&[one("Ctrl+Mouse5", None), one("Mouse5", None)]));
         // Keyboard combinations by the parser's id, whatever their spelling.
         assert!(clashes(&[one("ctrl+s", Some(4)), one("Ctrl+S", Some(4))]));
@@ -1657,7 +1676,9 @@ mod tests {
             table.poll(10, &pads(pad::BACK | pad::SOUTH | pad::RT, 0)),
             vec![Act::Clip]
         );
-        assert!(table.poll(1000, &pads(pad::BACK | pad::SOUTH, 0)).is_empty());
+        assert!(table
+            .poll(1000, &pads(pad::BACK | pad::SOUTH, 0))
+            .is_empty());
         assert!(table.poll(1100, &pads(0, 0)).is_empty());
         // A single button too — Guide, on the second pad.
         assert_eq!(table.poll(1200, &pads(0, pad::GUIDE)), vec![Act::Shot]);
@@ -1706,7 +1727,12 @@ mod tests {
     fn a_bigger_combo_takes_over_from_the_smaller_one() {
         let mut table = Table::default();
         table.bind_pad(Profile::All, pad::LB | pad::SOUTH, Mode::Tap, Act::Clip);
-        table.bind_pad(Profile::All, pad::LB | pad::RB | pad::SOUTH, Mode::Tap, Act::Shot);
+        table.bind_pad(
+            Profile::All,
+            pad::LB | pad::RB | pad::SOUTH,
+            Mode::Tap,
+            Act::Shot,
+        );
         table.poll(0, &pads(0, 0));
         assert!(table.poll(10, &pads(pad::LB | pad::SOUTH, 0)).is_empty());
         assert_eq!(
@@ -1739,7 +1765,9 @@ mod tests {
         table.bind_mouse(MouseButton::X2, Mods::NONE, Mode::Tap, Act::Clip);
         let back = |a: &Act| *a == Act::Clip;
         assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
-        assert!(table.poll_holding_back(10, &pads(pad::SOUTH, 0), back).is_empty());
+        assert!(table
+            .poll_holding_back(10, &pads(pad::SOUTH, 0), back)
+            .is_empty());
         assert_eq!(
             table.poll_holding_back(20, &pads(pad::SOUTH | pad::BACK, 0), back),
             vec![(Act::Shot, Source::Pad)]
@@ -1778,7 +1806,9 @@ mod tests {
         table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
         let back = |a: &Act| *a == Act::Clip;
         assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
-        assert!(table.poll_holding_back(10, &pads(pad::SOUTH, 0), back).is_empty());
+        assert!(table
+            .poll_holding_back(10, &pads(pad::SOUTH, 0), back)
+            .is_empty());
         // Back alone waits a moment for the bigger combo — which is out.
         let both = pads(pad::SOUTH | pad::BACK, 0);
         assert!(table.poll_holding_back(20, &both, back).is_empty());
@@ -1795,11 +1825,17 @@ mod tests {
         table.bind_pad(Profile::All, pad::BACK, Mode::Hold, Act::Clip);
         let back = |a: &Act| *a == Act::Clip;
         assert!(table.poll_holding_back(0, &pads(0, 0), back).is_empty());
-        assert!(table.poll_holding_back(10, &pads(pad::BACK, 0), back).is_empty());
-        assert!(table.poll_holding_back(500, &pads(pad::BACK, 0), back).is_empty());
+        assert!(table
+            .poll_holding_back(10, &pads(pad::BACK, 0), back)
+            .is_empty());
+        assert!(table
+            .poll_holding_back(500, &pads(pad::BACK, 0), back)
+            .is_empty());
         assert!(table.poll_holding_back(510, &pads(0, 0), back).is_empty());
         // The tap still comes through.
-        assert!(table.poll_holding_back(520, &pads(pad::BACK, 0), back).is_empty());
+        assert!(table
+            .poll_holding_back(520, &pads(pad::BACK, 0), back)
+            .is_empty());
         assert_eq!(
             table.poll_holding_back(600, &pads(0, 0), back),
             vec![(Act::Shot, Source::Pad)]
@@ -1902,7 +1938,10 @@ mod tests {
     fn a_pad_goes_by_its_types_profile_and_else_by_all() {
         assert_eq!(governing(PadType::Xbox, &[]), Profile::All);
         assert_eq!(governing(PadType::Xbox, &[Profile::Xbox]), Profile::Xbox);
-        assert_eq!(governing(PadType::PlayStation, &[Profile::Xbox]), Profile::All);
+        assert_eq!(
+            governing(PadType::PlayStation, &[Profile::Xbox]),
+            Profile::All
+        );
         // Another pad has no profile of its own.
         assert_eq!(governing(PadType::Other, &[Profile::Xbox]), Profile::All);
         assert_eq!(PadType::from_key("nintendo"), Some(PadType::Nintendo));
@@ -1916,25 +1955,49 @@ mod tests {
         // does nothing there — the profile replaces All, it does not add.
         table.bind_pad(Profile::All, pad::MISC, Mode::Tap, Act::Clip);
         table.bind_pad(Profile::Xbox, pad::GUIDE, Mode::Tap, Act::Shot);
-        let idle = typed(&[(0, PadType::Xbox), (0, PadType::Nintendo), (0, PadType::Other)]);
+        let idle = typed(&[
+            (0, PadType::Xbox),
+            (0, PadType::Nintendo),
+            (0, PadType::Other),
+        ]);
         assert!(table.poll(0, &idle).is_empty());
 
-        let xbox_misc = typed(&[(pad::MISC, PadType::Xbox), (0, PadType::Nintendo), (0, PadType::Other)]);
+        let xbox_misc = typed(&[
+            (pad::MISC, PadType::Xbox),
+            (0, PadType::Nintendo),
+            (0, PadType::Other),
+        ]);
         assert!(table.poll(10, &xbox_misc).is_empty());
         assert!(table.poll(20, &idle).is_empty());
-        let xbox_guide = typed(&[(pad::GUIDE, PadType::Xbox), (0, PadType::Nintendo), (0, PadType::Other)]);
+        let xbox_guide = typed(&[
+            (pad::GUIDE, PadType::Xbox),
+            (0, PadType::Nintendo),
+            (0, PadType::Other),
+        ]);
         assert_eq!(table.poll(30, &xbox_guide), vec![Act::Shot]);
         assert!(table.poll(40, &idle).is_empty());
 
         // The Switch pad has no profile of its own: All's Misc (Capture).
-        let switch_misc = typed(&[(0, PadType::Xbox), (pad::MISC, PadType::Nintendo), (0, PadType::Other)]);
+        let switch_misc = typed(&[
+            (0, PadType::Xbox),
+            (pad::MISC, PadType::Nintendo),
+            (0, PadType::Other),
+        ]);
         assert_eq!(table.poll(50, &switch_misc), vec![Act::Clip]);
         assert!(table.poll(60, &idle).is_empty());
-        let switch_guide = typed(&[(0, PadType::Xbox), (pad::GUIDE, PadType::Nintendo), (0, PadType::Other)]);
+        let switch_guide = typed(&[
+            (0, PadType::Xbox),
+            (pad::GUIDE, PadType::Nintendo),
+            (0, PadType::Other),
+        ]);
         assert!(table.poll(70, &switch_guide).is_empty());
         assert!(table.poll(80, &idle).is_empty());
         // Neither has another pad (pressed later than an echo would come).
-        let other_misc = typed(&[(0, PadType::Xbox), (0, PadType::Nintendo), (pad::MISC, PadType::Other)]);
+        let other_misc = typed(&[
+            (0, PadType::Xbox),
+            (0, PadType::Nintendo),
+            (pad::MISC, PadType::Other),
+        ]);
         assert_eq!(table.poll(200, &other_misc), vec![Act::Clip]);
     }
 
@@ -1945,7 +2008,9 @@ mod tests {
         table.add_profile(Profile::PlayStation);
         let idle = typed(&[(0, PadType::PlayStation)]);
         assert!(table.poll(0, &idle).is_empty());
-        assert!(table.poll(10, &typed(&[(pad::SOUTH, PadType::PlayStation)])).is_empty());
+        assert!(table
+            .poll(10, &typed(&[(pad::SOUTH, PadType::PlayStation)]))
+            .is_empty());
         assert_eq!(table.governing(PadType::PlayStation), Profile::PlayStation);
         assert_eq!(table.governing(PadType::Xbox), Profile::All);
     }
@@ -1966,7 +2031,8 @@ mod tests {
     #[test]
     fn recording_for_a_type_takes_only_a_pad_of_that_type() {
         let mut capture = Capture::new(CaptureFilter::from_key(Some("playstation")));
-        let xbox_then_ps = |xbox: u32, ps: u32| typed(&[(xbox, PadType::Xbox), (ps, PadType::PlayStation)]);
+        let xbox_then_ps =
+            |xbox: u32, ps: u32| typed(&[(xbox, PadType::Xbox), (ps, PadType::PlayStation)]);
         assert_eq!(capture.poll(&xbox_then_ps(0, 0)), None);
         // The Xbox pad is not listened to.
         assert_eq!(capture.poll(&xbox_then_ps(pad::GUIDE, 0)), None);
@@ -1984,7 +2050,10 @@ mod tests {
         let mut all = Capture::new(CaptureFilter::from_key(Some("all")));
         assert_eq!(all.poll(&typed(&[(0, PadType::Other)])), None);
         assert_eq!(all.poll(&typed(&[(pad::NORTH, PadType::Other)])), None);
-        assert_eq!(all.poll(&typed(&[(0, PadType::Other)])), Some("Pad:North".into()));
+        assert_eq!(
+            all.poll(&typed(&[(0, PadType::Other)])),
+            Some("Pad:North".into())
+        );
         assert_eq!(all.poll(&mouse(false, true, false, Mods::NONE)), None);
         assert_eq!(all.poll(&mouse(false, false, false, Mods::NONE)), None);
 
@@ -2005,10 +2074,14 @@ mod tests {
         let mut table: Table<Act> = Table::default();
         table.bind_pad(Profile::All, pad::GUIDE, Mode::Tap, Act::Clip);
         table.bind_pad(Profile::PlayStation, pad::GUIDE, Mode::Tap, Act::Clip);
-        let both = |real: u32, echo: u32| typed(&[(real, PadType::PlayStation), (echo, PadType::Other)]);
+        let both =
+            |real: u32, echo: u32| typed(&[(real, PadType::PlayStation), (echo, PadType::Other)]);
         assert!(table.poll(0, &both(0, 0)).is_empty());
         // In the same round.
-        assert_eq!(table.poll(10, &both(pad::GUIDE, pad::GUIDE)), vec![Act::Clip]);
+        assert_eq!(
+            table.poll(10, &both(pad::GUIDE, pad::GUIDE)),
+            vec![Act::Clip]
+        );
         assert!(table.poll(20, &both(0, 0)).is_empty());
         // A round later.
         assert_eq!(table.poll(200, &both(pad::GUIDE, 0)), vec![Act::Clip]);
@@ -2024,9 +2097,18 @@ mod tests {
         table.bind_pad(Profile::All, pad::BACK | pad::SOUTH, Mode::Tap, Act::Clip);
         table.bind_pad(Profile::Xbox, pad::START | pad::NORTH, Mode::Tap, Act::Clip);
         let clip = |action: &Act| *action == Act::Clip;
-        assert_eq!(table.pad_combo_buttons_for(PadType::Xbox, clip), pad::START | pad::NORTH);
-        assert_eq!(table.pad_combo_buttons_for(PadType::PlayStation, clip), pad::BACK | pad::SOUTH);
-        assert_eq!(table.pad_combo_buttons_for(PadType::Other, clip), pad::BACK | pad::SOUTH);
+        assert_eq!(
+            table.pad_combo_buttons_for(PadType::Xbox, clip),
+            pad::START | pad::NORTH
+        );
+        assert_eq!(
+            table.pad_combo_buttons_for(PadType::PlayStation, clip),
+            pad::BACK | pad::SOUTH
+        );
+        assert_eq!(
+            table.pad_combo_buttons_for(PadType::Other, clip),
+            pad::BACK | pad::SOUTH
+        );
     }
 
     #[test]
