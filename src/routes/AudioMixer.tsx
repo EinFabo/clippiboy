@@ -608,7 +608,7 @@ export function QuickSetup({
   }, [refreshSources]);
   const appCapture = useEngine((s) => s.appCapture);
   // Discord has its own track only through per-app capture.
-  const discord = appCapture ? runningDiscord(processes) : undefined;
+  const discord = appCapture !== false ? runningDiscord(processes) : undefined;
   const discordAdded = hasDiscordSource(sources);
   const output = devices.find((d) => d.kind === "output" && d.isDefault);
   const input = devices.find((d) => d.kind === "input" && d.isDefault);
@@ -670,7 +670,7 @@ export function QuickSetup({
       device: input.name,
     });
   }
-  if (appCapture && (discord || discordAdded)) {
+  if (appCapture !== false && (discord || discordAdded)) {
     rows.push({
       on: withDiscord,
       set: setWithDiscord,
