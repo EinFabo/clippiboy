@@ -703,6 +703,161 @@ fn same_screen(a: &CaptureTarget, b: &CaptureTarget) -> bool {
     }
 }
 
+/// One screen, as far as the capture cares whether anything moved under it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScreenPrint {
+    pub device: String,
+    /// The panel's identity (`CaptureTarget::stable_id`); `None` while Windows
+    /// has not described the screen yet.
+    pub panel: Option<String>,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// One graphics adapter: a driver update or a graphics reset gives it a new
+/// LUID, an update a new driver version.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AdapterPrint {
+    pub luid: i64,
+    /// The user-mode driver version DXGI reports, 0 when it will not say.
+    pub driver: i64,
+    pub name: String,
+}
+
+/// The whole display topology in one comparable value: every screen with its
+/// place on the desktop, and the graphics adapters behind them.
+///
+/// Windows.Graphics.Capture has been seen to die without a word — no frame,
+/// no `Closed` — when the topology changed under it: a DisplayPort screen
+/// dropping out for a moment, even one that was not being recorded. The clock
+/// then repeated the last picture for hours. The fingerprint taken when the
+/// capture started, held against the one that settled afterwards, says when
+/// that may have happened.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fingerprint {
+    /// Sorted, so the order Windows enumerates them in means nothing.
+    pub screens: Vec<ScreenPrint>,
+    /// Sorted as well. Empty when DXGI would not say.
+    pub graphics: Vec<AdapterPrint>,
+}
+
+impl Fingerprint {
+    /// The same screens, with the adapters behind them.
+    pub fn with_graphics(mut self, mut graphics: Vec<AdapterPrint>) -> Self {
+        graphics.sort();
+        self.graphics = graphics;
+        self
+    }
+}
+
+impl std::fmt::Display for Fingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let screens: Vec<String> = self
+            .screens
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} {}x{} at {},{}{} panel {}",
+                    s.device,
+                    s.width,
+                    s.height,
+                    s.x,
+                    s.y,
+                    if s.primary { " primary" } else { "" },
+                    s.panel.as_deref().unwrap_or("unknown"),
+                )
+            })
+            .collect();
+        let graphics: Vec<String> = self
+            .graphics
+            .iter()
+            .map(|a| {
+                let v = a.driver as u64;
+                format!(
+                    "{} luid {:x} driver {}.{}.{}.{}",
+                    a.name,
+                    a.luid,
+                    (v >> 48) & 0xffff,
+                    (v >> 32) & 0xffff,
+                    (v >> 16) & 0xffff,
+                    v & 0xffff
+                )
+            })
+            .collect();
+        write!(
+            f,
+            "{} screen(s): {} | graphics: {}",
+            self.screens.len(),
+            if screens.is_empty() { "none".into() } else { screens.join("; ") },
+            if graphics.is_empty() { "unknown".into() } else { graphics.join("; ") },
+        )
+    }
+}
+
+/// The screens among these targets, as a [`Fingerprint`] without adapters.
+pub fn fingerprint(targets: &[CaptureTarget]) -> Fingerprint {
+    let mut screens: Vec<ScreenPrint> = targets
+        .iter()
+        .filter(|t| t.kind == TargetKind::Monitor)
+        .map(|t| ScreenPrint {
+            device: t.id.clone(),
+            panel: t.stable_id.clone(),
+            x: t.x,
+            y: t.y,
+            width: t.width,
+            height: t.height,
+            primary: t.is_primary,
+        })
+        .collect();
+    screens.sort();
+    Fingerprint { screens, graphics: Vec::new() }
+}
+
+/// Has the topology come to rest? Two readings in a row agree, and Windows
+/// has described every screen in them.
+///
+/// While a screen comes back Windows lists it before `QueryDisplayConfig`
+/// knows its panel, and the desktop is laid out more than once. Acting on such
+/// a reading restarted the capture onto a topology that was gone a second
+/// later.
+pub fn settled(previous: Option<&Fingerprint>, now: &Fingerprint) -> bool {
+    previous == Some(now)
+        && !now.screens.is_empty()
+        && now.screens.iter().all(|s| s.panel.is_some())
+}
+
+/// Does a capture started on `at_start` have to start over now that the
+/// topology settled on `settled`? Any difference counts — a screen gone or
+/// back, moved, renumbered, another resolution, a new adapter or driver — the
+/// recorded screen or not: the capture may have died with it, silently.
+pub fn needs_restart(at_start: &Fingerprint, settled: &Fingerprint) -> bool {
+    at_start != settled
+}
+
+/// Did the graphics adapters change between two settled topologies — a driver
+/// update, a graphics reset? Windows that draw through the GPU (banner,
+/// console) can lose their transparency then and stay black until they are
+/// made anew. Not when either side does not know its adapters.
+pub fn graphics_changed(before: &Fingerprint, settled: &Fingerprint) -> bool {
+    !before.graphics.is_empty()
+        && !settled.graphics.is_empty()
+        && before.graphics != settled.graphics
+}
+
+/// The topology as it is right now: the screens, and the adapters behind them.
+#[cfg(windows)]
+pub fn current_fingerprint() -> Fingerprint {
+    fingerprint(&list_monitors()).with_graphics(crate::gpu::adapter_prints())
+}
+
+#[cfg(not(windows))]
+pub fn current_fingerprint() -> Fingerprint {
+    fingerprint(&list_monitors())
+}
+
 /// Bring a saved selection back in line with reality.
 ///
 /// Two repairs, both quiet and both one-way: a monitor found by its panel under
@@ -1113,5 +1268,154 @@ mod tests {
         assert_eq!(fps_choices(Some(75)), vec![30, 60, 75]);
         assert_eq!(fps_choices(Some(144)), vec![30, 60, 120, 144]);
         assert_eq!(fps_choices(Some(240)), vec![30, 60, 120, 240]);
+    }
+
+    /// Two screens side by side, as on the machines the frozen captures came
+    /// from: the recorded one at 0,0, a second one to its right.
+    fn two_screens() -> Vec<CaptureTarget> {
+        let mut screens = three_screens();
+        screens.truncate(2);
+        screens[0].is_primary = true;
+        screens[1].is_primary = false;
+        screens[1].x = 1920;
+        screens
+    }
+
+    fn print(targets: &[CaptureTarget]) -> Fingerprint {
+        fingerprint(targets)
+    }
+
+    /// Feed readings one at a time the way the watcher does, and say which of
+    /// them it would have restarted on.
+    fn restarts(at_start: &Fingerprint, readings: &[Fingerprint]) -> Vec<usize> {
+        let mut start = at_start.clone();
+        let mut previous: Option<&Fingerprint> = None;
+        let mut out = Vec::new();
+        for (index, now) in readings.iter().enumerate() {
+            if settled(previous, now) && needs_restart(&start, now) {
+                out.push(index);
+                start = now.clone();
+            }
+            previous = Some(now);
+        }
+        out
+    }
+
+    /// Windows lists the screens in an order of its own; the same screens in
+    /// another order are the same topology.
+    #[test]
+    fn the_order_alone_is_no_reason_to_restart() {
+        let screens = two_screens();
+        let mut reversed = screens.clone();
+        reversed.reverse();
+        assert_eq!(print(&screens), print(&reversed));
+        assert!(!needs_restart(&print(&screens), &print(&reversed)));
+    }
+
+    /// The case from the logs: the second screen, not the recorded one, drops
+    /// out and comes back. The capture of the first may have died with it, so
+    /// both settled changes restart it.
+    #[test]
+    fn a_second_screen_gone_and_back_restarts_the_capture() {
+        let both = print(&two_screens());
+        let alone = print(&two_screens()[..1]);
+        let readings = [both.clone(), alone.clone(), alone.clone(), both.clone(), both.clone()];
+        assert_eq!(restarts(&both, &readings), vec![2, 4]);
+    }
+
+    /// Gone for less than two readings: nothing settled on the change, and the
+    /// capture's own topology is the one that settled. The stall watch, armed
+    /// by the change, is what looks after this one.
+    #[test]
+    fn a_blip_shorter_than_two_readings_settles_back_on_the_start() {
+        let both = print(&two_screens());
+        let alone = print(&two_screens()[..1]);
+        assert!(restarts(&both, &[both.clone(), alone, both.clone(), both.clone()]).is_empty());
+    }
+
+    /// Renumbering is no reason for `drift` to move the capture, but the
+    /// topology under it changed all the same.
+    #[test]
+    fn a_renumbered_recorded_screen_restarts_the_capture() {
+        let before = two_screens();
+        let mut after = two_screens();
+        after[0].id = "\\\\.\\DISPLAY5".into();
+        let readings = [print(&after), print(&after)];
+        assert_eq!(restarts(&print(&before), &readings), vec![1]);
+    }
+
+    #[test]
+    fn a_moved_screen_restarts_the_capture() {
+        let before = two_screens();
+        let mut after = two_screens();
+        after[1].x = -1920;
+        assert!(needs_restart(&print(&before), &print(&after)));
+    }
+
+    /// A reading taken while Windows is still putting a screen back — listed,
+    /// but not yet described — is no topology to restart onto.
+    #[test]
+    fn a_reading_in_the_middle_of_a_change_waits() {
+        let both = print(&two_screens());
+        let mut half = two_screens();
+        half[1].stable_id = None;
+        let half = print(&half);
+        assert!(!settled(Some(&half), &half));
+        assert!(!settled(None, &both), "one reading is not two");
+        assert!(!settled(Some(&Fingerprint::default()), &Fingerprint::default()), "no screen at all");
+        assert!(restarts(&both, &[half.clone(), half, both.clone(), both.clone()]).is_empty());
+    }
+
+    /// A screen that flickers slowly enough to settle each time would restart
+    /// the capture on every change; that is for the restart budget to cap
+    /// (`state::RestartBudget`).
+    #[test]
+    fn a_flickering_screen_is_capped_by_the_budget() {
+        let both = print(&two_screens());
+        let alone = print(&two_screens()[..1]);
+        let mut readings = Vec::new();
+        for _ in 0..5 {
+            readings.extend([alone.clone(), alone.clone(), both.clone(), both.clone()]);
+        }
+        let wanted = restarts(&both, &readings);
+        assert_eq!(wanted.len(), 10, "every settled change asks for one");
+        let mut budget = crate::state::RestartBudget::default();
+        let now = std::time::Instant::now();
+        let allowed = wanted
+            .iter()
+            .filter(|index| budget.allow(now + std::time::Duration::from_secs(2 * **index as u64)))
+            .count();
+        assert_eq!(allowed, 3);
+    }
+
+    fn adapter(luid: i64, driver: i64) -> AdapterPrint {
+        AdapterPrint { luid, driver, name: "GPU".into() }
+    }
+
+    /// A driver update brings a new version and, with the reset, a new LUID:
+    /// the capture restarts and the windows over the game are made anew.
+    #[test]
+    fn a_new_driver_is_a_graphics_change() {
+        let before = print(&two_screens()).with_graphics(vec![adapter(0x1234, 10)]);
+        let after = print(&two_screens()).with_graphics(vec![adapter(0x5678, 11)]);
+        assert!(graphics_changed(&before, &after));
+        assert!(needs_restart(&before, &after));
+        let reset = print(&two_screens()).with_graphics(vec![adapter(0x5678, 10)]);
+        assert!(graphics_changed(&before, &reset), "a reset alone moves the LUID");
+    }
+
+    #[test]
+    fn screens_alone_or_unknown_adapters_are_no_graphics_change() {
+        let gpu = vec![adapter(1, 1), adapter(2, 2)];
+        let before = print(&two_screens()).with_graphics(gpu.clone());
+        let after = print(&two_screens()[..1]).with_graphics(gpu.clone());
+        assert!(!graphics_changed(&before, &after));
+        let unknown = print(&two_screens());
+        assert!(!graphics_changed(&before, &unknown));
+        assert!(!graphics_changed(&unknown, &before));
+        let mut swapped = gpu;
+        swapped.reverse();
+        let reordered = print(&two_screens()).with_graphics(swapped);
+        assert!(!graphics_changed(&before, &reordered), "order means nothing");
     }
 }

@@ -202,6 +202,43 @@ pub fn create(app: &tauri::AppHandle) {
     }
 }
 
+/// Wait until the window under `label` is gone, so a new one may take the
+/// label. `destroy` only asks the event loop; never call this on its thread.
+pub(crate) fn wait_gone(app: &tauri::AppHandle, label: &str) -> bool {
+    for _ in 0..60 {
+        if app.get_webview_window(label).is_none() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// Make the banner window anew, after the graphics adapters changed under it.
+///
+/// A driver update or a graphics reset while ClippiBoy ran left the banner a
+/// black box until the next start: the transparent webview had lost what it
+/// draws through. A new window starts on the new device. Off the event loop's
+/// thread — see [`wait_gone`].
+pub fn recreate(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        if let Err(err) = window.destroy() {
+            log::warn!("overlay: could not close the old window: {err}");
+            return;
+        }
+    }
+    if !wait_gone(app, LABEL) {
+        log::warn!("overlay: the old window did not go away \u{2014} keeping it");
+        return;
+    }
+    create(app);
+    // The REC badge lives in the window; the new one has to be told.
+    if BADGE.load(Ordering::SeqCst) {
+        set_recording(app, true);
+    }
+    log::info!("overlay: window made anew");
+}
+
 /// Show or take down the badge that stands for the whole recording.
 ///
 /// The window is the banner's; the page decides what it draws in it (see

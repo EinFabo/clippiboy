@@ -589,6 +589,12 @@ impl AutoBuffer {
         self.session_locked.load(SeqCst) || self.locked.load(SeqCst) >= LOCK_POLLS
     }
 
+    /// Is a restart for the display coming back still owed? Then that restart
+    /// takes the capture onto the new topology, and nothing else has to.
+    pub fn display_pending(&self) -> bool {
+        self.display_pending.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// One round for running without "only in game": the buffer should run as
     /// long as nobody has switched it off by hand.
     ///
@@ -688,6 +694,43 @@ impl RestartBudget {
         self.recent.push_back(now);
         true
     }
+}
+
+/// How long a capture may go without a new picture, after an event that is
+/// known to kill it, before it counts as dead.
+pub const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Has the capture died silently? The second line behind the topology
+/// fingerprint (`capture::needs_restart`).
+///
+/// Windows.Graphics.Capture only hands over a frame when the picture changed,
+/// so "no new frame" alone means nothing on a still desktop — and a game on
+/// another screen than the recorded one leaves the recorded one still. Hence
+/// three conditions, all needed:
+///
+/// * `armed`: an event that has killed captures before happened at this time
+///   — a topology change, the display back on, an unlock, a wake.
+/// * `game_on_screen`: the game in front sits on the screen being recorded,
+///   so new pictures are owed.
+/// * no new frame since the event (`last_new`), for [`STALL_AFTER`] counted
+///   from the event or from the capture's start (`started`), whichever is
+///   later — a capture started after the event gets its own five seconds.
+///
+/// A frame after the event shows the capture alive; the caller disarms then.
+pub fn stalled(
+    armed: Option<std::time::Instant>,
+    last_new: Option<std::time::Instant>,
+    started: std::time::Instant,
+    game_on_screen: bool,
+    now: std::time::Instant,
+) -> bool {
+    let Some(armed) = armed else {
+        return false;
+    };
+    if !game_on_screen || last_new.is_some_and(|at| at >= armed) {
+        return false;
+    }
+    now.saturating_duration_since(armed.max(started)) >= STALL_AFTER
 }
 
 impl AppState {
@@ -2765,6 +2808,50 @@ mod tests {
         assert!(budget.allow(at(120)));
         assert!(!budget.allow(at(180)), "a fourth within ten minutes");
         assert!(budget.allow(at(601)), "the first one has aged out");
+    }
+
+    /// The topology changed at second 10, the capture had started at 0 and
+    /// its last new frame came at 9.
+    fn stall_at(armed: bool, last_new: u64, game_on_screen: bool, now: u64) -> bool {
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        stalled(armed.then(|| at(10)), Some(at(last_new)), at(0), game_on_screen, at(now))
+    }
+
+    #[test]
+    fn a_capture_silent_after_the_event_with_the_game_on_its_screen_is_dead() {
+        assert!(!stall_at(true, 9, true, 14), "four seconds are not five");
+        assert!(stall_at(true, 9, true, 15));
+    }
+
+    /// A game on another screen leaves the recorded one still: no new frame
+    /// is owed, and a restart would throw a good buffer away.
+    #[test]
+    fn a_game_on_another_screen_never_counts_as_a_stall() {
+        assert!(!stall_at(true, 9, false, 600));
+    }
+
+    /// Without an event a still screen is just a still screen.
+    #[test]
+    fn an_unarmed_watch_never_fires() {
+        assert!(!stall_at(false, 9, true, 600));
+    }
+
+    /// One frame after the event shows the capture survived it.
+    #[test]
+    fn frames_after_the_event_mean_the_capture_lives() {
+        assert!(!stall_at(true, 10, true, 600));
+        assert!(!stall_at(true, 11, true, 600));
+    }
+
+    /// A capture started after the event (the unlock's restart, say) gets its
+    /// own five seconds, and one that has never delivered at all counts too.
+    #[test]
+    fn a_capture_started_after_the_event_gets_its_own_time() {
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        assert!(!stalled(Some(at(10)), None, at(12), true, at(16)));
+        assert!(stalled(Some(at(10)), None, at(12), true, at(17)));
     }
 
     #[test]

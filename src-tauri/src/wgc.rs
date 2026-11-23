@@ -142,6 +142,28 @@ fn capture_item(
             let choice = crate::capture::resolve(kind, id, stable)
                 .ok_or_else(|| "no screen found".to_string())?;
             let monitor = find_monitor(&choice.target.id)?;
+            // What a log of a frozen capture has to answer first: which
+            // screen, found how, and whether the lock screen stood in front.
+            let target = &choice.target;
+            log::info!(
+                "capture: screen {} (HMONITOR {:?}) {}x{} at {},{}, found by {:?}, session {}, input desktop {}",
+                target.id,
+                monitor.0,
+                target.width,
+                target.height,
+                target.x,
+                target.y,
+                choice.how,
+                match crate::capture::session_locked() {
+                    Some(true) => "locked",
+                    Some(false) => "unlocked",
+                    None => "unknown",
+                },
+                match crate::capture::input_desktop() {
+                    Ok(()) => "ours".to_string(),
+                    Err(err) => format!("not ours ({err})"),
+                },
+            );
             let item = unsafe { interop.CreateForMonitor(monitor) }
                 .map_err(|err| format!("capture the screen: {err}"))?;
             Ok((item, Some(choice)))

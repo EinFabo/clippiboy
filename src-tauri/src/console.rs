@@ -140,6 +140,27 @@ pub fn create(app: &tauri::AppHandle) {
     }
 }
 
+/// Make the console window anew, after the graphics adapters changed under
+/// it — the same reason as `overlay::recreate`. An open console goes down with
+/// the old window; it opens fresh on the next hotkey. Off the event loop's
+/// thread.
+pub fn recreate(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        if let Err(err) = window.destroy() {
+            log::warn!("console: could not close the old window: {err}");
+            return;
+        }
+    }
+    if !overlay::wait_gone(app, LABEL) {
+        log::warn!("console: the old window did not go away \u{2014} keeping it");
+        return;
+    }
+    PASSIVE.store(false, Ordering::SeqCst);
+    CONSOLE_SHOWN.store(false, Ordering::SeqCst);
+    create(app);
+    log::info!("console: window made anew");
+}
+
 pub fn is_open(app: &tauri::AppHandle) -> bool {
     app.get_webview_window(LABEL)
         .and_then(|window| window.is_visible().ok())

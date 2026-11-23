@@ -486,6 +486,14 @@ pub struct Shared {
     /// Windows has ended the capture: the screen went away, or the desktop was
     /// rebuilt under it. No frame arrives after this.
     pub source_closed: AtomicBool,
+    /// The display topology when this capture started — what the topology
+    /// watcher holds a settled one against (`capture::needs_restart`).
+    pub topology: Mutex<Option<crate::capture::Fingerprint>>,
+    /// When this pipeline was set up.
+    pub started: std::time::Instant,
+    /// When the last *new* picture went out, in milliseconds after `started`
+    /// plus one; 0 while there has been none. A repeat does not count.
+    pub last_new_ms: AtomicU64,
     /// Bumped when `sources` changes. The mixer keeps a copy and only re-reads
     /// when the number has moved.
     pub sources_generation: AtomicU64,
@@ -520,6 +528,7 @@ pub struct Shared {
 struct HealthMark {
     at: std::time::Instant,
     frames: u64,
+    duplicated: u64,
     encoded: u64,
     encode_us: u64,
 }
@@ -548,6 +557,11 @@ pub struct Health {
     pub frames: u64,
     pub dropped: u64,
     pub duplicated: u64,
+    /// New pictures during the interval — frames that were not repeats. Nought
+    /// for minutes with a game running is a capture that died.
+    pub fresh: u64,
+    /// Seconds since the last new picture; `None` before the first.
+    pub last_new_ago: Option<f32>,
     pub overruns: u64,
     /// Mean time a frame spent inside the encoder **during this interval**.
     pub encode_us: u64,
@@ -604,11 +618,15 @@ impl Shared {
     pub fn health(&self) -> Health {
         let now = std::time::Instant::now();
         let frames = self.frames.load(Ordering::Relaxed);
+        let duplicated = self.duplicated.load(Ordering::Relaxed);
 
         let mut out = Health {
             frames,
             dropped: self.dropped.load(Ordering::Relaxed),
-            duplicated: self.duplicated.load(Ordering::Relaxed),
+            duplicated,
+            last_new_ago: self
+                .last_new_frame()
+                .map(|at| now.saturating_duration_since(at).as_secs_f32()),
             ring_seconds: self.buffered_seconds(),
             ring_bytes: self.buffer_bytes(),
             ..Health::default()
@@ -638,6 +656,7 @@ impl Shared {
             *mark = HealthMark {
                 at: now,
                 frames,
+                duplicated,
                 encoded,
                 encode_us,
             };
@@ -648,6 +667,9 @@ impl Shared {
         if seconds > 0.0 {
             out.fps = frames.saturating_sub(before.frames) as f32 / seconds;
         }
+        out.fresh = frames
+            .saturating_sub(before.frames)
+            .saturating_sub(duplicated.saturating_sub(before.duplicated));
         // Only the frames that came out during this interval, and only the time
         // they took. This is the number that moves when an encoder starts to
         // struggle; the running average is the one that does not.
@@ -701,13 +723,19 @@ impl Shared {
         let health = self.health();
         format!(
             "pipeline: {:.1} fps measured (of {} configured), frames={} dropped={} \
-             repeated={} clock-overruns={} | encoder {} µs/frame this second, worst {} µs, \
-             in-flight={} submit-waits={} ({} ms lost) | ring {:.1}s {:.1} MB",
+             repeated={} new={} (last new frame {}) clock-overruns={} | encoder {} µs/frame \
+             this second, worst {} µs, in-flight={} submit-waits={} ({} ms lost) | ring {:.1}s \
+             {:.1} MB",
             health.fps,
             self.fps,
             health.frames,
             health.dropped,
             health.duplicated,
+            health.fresh,
+            match health.last_new_ago {
+                Some(ago) => format!("{ago:.1}s ago"),
+                None => "never".to_string(),
+            },
             health.overruns,
             health.encode_us,
             health.encode_worst_us,
@@ -717,6 +745,20 @@ impl Shared {
             health.ring_seconds,
             health.ring_bytes as f64 / 1_048_576.0,
         )
+    }
+
+    /// When the last new picture went out, if one has.
+    pub fn last_new_frame(&self) -> Option<std::time::Instant> {
+        match self.last_new_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(self.started + std::time::Duration::from_millis(ms - 1)),
+        }
+    }
+
+    /// A new picture went out just now.
+    pub fn note_new_frame(&self) {
+        let ms = self.started.elapsed().as_millis() as u64 + 1;
+        self.last_new_ms.store(ms, Ordering::Relaxed);
     }
 
     /// Record a problem with the running capture.
@@ -844,6 +886,8 @@ mod win {
             }
             if duplicate {
                 self.shared.duplicated.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.shared.note_new_frame();
             }
         }
     }
@@ -914,6 +958,9 @@ mod win {
         // `convert::slots_for`.
         latest.watch_encoder(encoder.stats.clone(), encoder.queue_depth);
 
+        // Before the capture: a topology that changes while it comes up is
+        // one it may not survive, and has to read as a change.
+        *shared.topology.lock() = Some(crate::capture::current_fingerprint());
         let capture = {
             let latest = latest.clone();
             let closed_shared = shared.clone();
@@ -937,6 +984,7 @@ mod win {
                 {
                     let shared = closed_shared.clone();
                     move || {
+                        log::warn!("capture: Windows closed the capture source");
                         shared.source_closed.store(true, Ordering::SeqCst);
                         shared.report(
                             "The capture source has gone away — no more frames are arriving."
@@ -1242,6 +1290,7 @@ impl Pipeline {
             health_mark: Mutex::new(HealthMark {
                 at: std::time::Instant::now(),
                 frames: 0,
+                duplicated: 0,
                 encoded: 0,
                 encode_us: 0,
             }),
@@ -1252,6 +1301,9 @@ impl Pipeline {
             }),
             source: Mutex::new(None),
             source_closed: AtomicBool::new(false),
+            topology: Mutex::new(None),
+            started: std::time::Instant::now(),
+            last_new_ms: AtomicU64::new(0),
         });
 
         #[cfg(windows)]

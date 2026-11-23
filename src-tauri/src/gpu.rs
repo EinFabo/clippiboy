@@ -131,6 +131,42 @@ pub fn adapters() -> Vec<(AdapterInfo, IDXGIAdapter1)> {
     found
 }
 
+/// Every hardware adapter with its LUID and driver version, for the display
+/// topology's fingerprint (`capture::Fingerprint`). Asked every two seconds,
+/// so it says nothing when DXGI fails — the fingerprint just knows no
+/// adapters then.
+pub fn adapter_prints() -> Vec<crate::capture::AdapterPrint> {
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for index in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+            break;
+        };
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+            continue;
+        };
+        if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+            continue;
+        }
+        let end = desc
+            .Description
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(desc.Description.len());
+        // The user-mode driver's version; asking for `IDXGIDevice` is the
+        // documented way to get it.
+        let driver = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.unwrap_or(0);
+        found.push(crate::capture::AdapterPrint {
+            luid: ((desc.AdapterLuid.HighPart as i64) << 32) | desc.AdapterLuid.LowPart as i64,
+            driver,
+            name: String::from_utf16_lossy(&desc.Description[..end]),
+        });
+    }
+    found
+}
+
 /// The adapter this encoder has to run on, or `None` for "whatever DXGI hands
 /// out first".
 ///

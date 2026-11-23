@@ -396,7 +396,7 @@ pub fn resolve_name(exe: &str, title: &str, fullscreen: bool) -> Option<String> 
 mod win {
     use windows::Win32::Foundation::{CloseHandle, HWND, MAX_PATH, RECT};
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -484,6 +484,25 @@ mod win {
                 (rect.left + rect.right) as f64 / 2.0,
                 (rect.top + rect.bottom) as f64 / 2.0,
             ))
+        }
+    }
+
+    /// The device name (`\\.\DISPLAY1`) of the screen the foreground window
+    /// mostly sits on.
+    pub fn foreground_monitor() -> Option<String> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return None;
+            }
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if !GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _).as_bool() {
+                return None;
+            }
+            let end = info.szDevice.iter().position(|c| *c == 0).unwrap_or(info.szDevice.len());
+            Some(String::from_utf16_lossy(&info.szDevice[..end]))
         }
     }
 
@@ -580,6 +599,19 @@ pub fn foreground_is_ours() -> bool {
 #[cfg(not(windows))]
 pub fn foreground_is_ours() -> bool {
     false
+}
+
+/// The screen (device name) a recognised game in front sits on — what the
+/// capture's stall watch asks: new pictures are owed only from that screen.
+#[cfg(windows)]
+pub fn foreground_game_screen() -> Option<String> {
+    detect_detailed()?;
+    win::foreground_monitor()
+}
+
+#[cfg(not(windows))]
+pub fn foreground_game_screen() -> Option<String> {
+    None
 }
 
 /// Centre of the foreground window — for the overlay's monitor choice.

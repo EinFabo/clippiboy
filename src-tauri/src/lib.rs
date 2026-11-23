@@ -780,41 +780,262 @@ fn repair_screens(app: &tauri::AppHandle) {
     let _ = app.emit("config-changed", fixed);
 }
 
-/// Put the banner and the console back on their screens when the screens change.
+/// Put the banner and the console back on their screens when the screens change,
+/// and keep the capture alive across it.
 ///
-/// Both are positioned when they are set up, not for every showing — with a
-/// screen picked by hand the spot already stands. Unplugging that screen makes
-/// Windows push the windows onto one that is left, and plugging it back in
-/// brought nothing back: the banner stayed on the primary screen until the next
-/// start. So the set of screens is remembered, and any change to it — one gone,
-/// one back, another resolution — lays both out again.
+/// Both windows are positioned when they are set up, not for every showing —
+/// with a screen picked by hand the spot already stands. Unplugging that screen
+/// makes Windows push the windows onto one that is left, and plugging it back
+/// in brought nothing back: the banner stayed on the primary screen until the
+/// next start. So the screens are remembered, and any change to them — one
+/// gone, one back, moved, another resolution — lays both out again.
+///
+/// The same reading, once it has settled (`capture::settled`), is held against
+/// the topology the capture started on: see [`watch_topology`]. And a change
+/// of the graphics adapters makes banner and console anew.
 fn watch_monitors(app: &tauri::AppHandle) {
-    type Landscape = Vec<(String, Option<String>, u32, u32, bool)>;
-    static LAST: std::sync::Mutex<Option<Landscape>> = std::sync::Mutex::new(None);
+    use std::sync::Mutex;
+    /// The last reading, settled or not.
+    static LAST: Mutex<Option<capture::Fingerprint>> = Mutex::new(None);
+    /// The last reading that had settled.
+    static SETTLED: Mutex<Option<capture::Fingerprint>> = Mutex::new(None);
 
     // Behind the lock screen the list is whatever Winlogon's desktop shows;
     // the change is caught against the one from before, once signed in.
     if capture::screen_unrecordable() {
         return;
     }
-    let mut now: Landscape = capture::list_monitors()
-        .into_iter()
-        .map(|m| (m.id, m.stable_id, m.width, m.height, m.is_primary))
-        .collect();
-    now.sort();
-    let changed = {
+    let now = capture::current_fingerprint();
+    let (screens_changed, any_change, settled) = {
         let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let changed = last.as_ref().is_some_and(|last| *last != now);
-        *last = Some(now);
-        changed
+        let screens_changed = last.as_ref().is_some_and(|last| last.screens != now.screens);
+        let any_change = last.as_ref().is_some_and(|last| *last != now);
+        let settled = capture::settled(last.as_ref(), &now);
+        *last = Some(now.clone());
+        (screens_changed, any_change, settled)
     };
-    if !changed {
+    if any_change {
+        arm_stall_watch(if screens_changed {
+            "the screens changed"
+        } else {
+            "the graphics adapters changed"
+        });
+    }
+    if screens_changed {
+        log::info!("the screens have changed \u{2014} laying banner and console out again");
+        repair_screens(app);
+        overlay::reposition(app);
+        console::relayout(app);
+    }
+    if !settled {
         return;
     }
-    log::info!("the screens have changed \u{2014} laying banner and console out again");
-    repair_screens(app);
-    overlay::reposition(app);
-    console::relayout(app);
+    let before = {
+        let mut last = SETTLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.as_ref() == Some(&now) {
+            None
+        } else {
+            log::info!("display topology settled: {now}");
+            Some(last.replace(now.clone()))
+        }
+    };
+    if let Some(Some(before)) = before {
+        if capture::graphics_changed(&before, &now) {
+            log::warn!(
+                "the graphics adapters changed \u{2014} making the banner and console windows anew"
+            );
+            let app = app.clone();
+            // Off the status tick, and off the event loop: both wait for the
+            // old window to be gone.
+            std::thread::spawn(move || {
+                overlay::recreate(&app);
+                console::recreate(&app);
+            });
+        }
+    }
+    watch_topology(app, &now);
+}
+
+/// Set while anything restarts the capture — the screen watcher, the topology
+/// and stall watchers, the restart after sleep or the display. Two of them on
+/// the same tick would throw the buffer away twice.
+static CAPTURE_RESTARTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Restarts for a changed topology and for a stalled capture, together: a
+/// screen that keeps dropping out must not empty the buffer every few seconds.
+static CAPTURE_BUDGET: std::sync::Mutex<Option<state::RestartBudget>> =
+    std::sync::Mutex::new(None);
+
+/// May the capture be restarted once more now? Says so once when it may not.
+fn capture_budget_allows(why: &str) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static GAVE_UP: AtomicBool = AtomicBool::new(false);
+    let allowed = CAPTURE_BUDGET
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(state::RestartBudget::default)
+        .allow(std::time::Instant::now());
+    if allowed {
+        GAVE_UP.store(false, Ordering::SeqCst);
+    } else if !GAVE_UP.swap(true, Ordering::SeqCst) {
+        log::warn!("{why} \u{2014} but the capture restarted too often lately, no more for now");
+    }
+    allowed
+}
+
+/// Restart a running buffer whose capture may have died under a topology
+/// change.
+///
+/// Windows.Graphics.Capture does not always survive the desktop being laid out
+/// anew — a DisplayPort screen dropping out for a moment was enough, even one
+/// that was not being recorded. No frame came after that and no `Closed`
+/// either; the clock repeated the last picture (often the lock screen) until
+/// ClippiBoy was restarted. So once the topology has settled, a capture started
+/// on another one starts over.
+///
+/// Not while a recording runs (it would be cut in two), not while the display
+/// is off or its own restart is owed (`AutoBuffer::display_pending`), and not
+/// behind the lock screen — the unlock starts a fresh capture anyway, on the
+/// topology of that moment, and comparing against that is what keeps a second
+/// restart from following it.
+fn watch_topology(app: &tauri::AppHandle, settled: &capture::Fingerprint) {
+    use std::sync::atomic::Ordering;
+    let state = app.state::<AppState>();
+    if state.quitting.load(Ordering::SeqCst)
+        || AUTO_STARTING.load(Ordering::SeqCst)
+        || state.auto.display_pending()
+        || state.auto.screen_locked()
+        || !state.is_buffering()
+        || state.is_recording()
+    {
+        return;
+    }
+    let at_start = state
+        .shared
+        .lock()
+        .as_ref()
+        .and_then(|shared| shared.topology.lock().clone());
+    let Some(at_start) = at_start else {
+        return;
+    };
+    if !capture::needs_restart(&at_start, settled) {
+        return;
+    }
+    if CAPTURE_RESTARTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if !capture_budget_allows("the display topology changed under the capture") {
+        CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
+        return;
+    }
+    log::info!(
+        "the display topology changed under the capture (it started on {at_start}) \u{2014} restarting it"
+    );
+    let app = app.clone();
+    let settled = settled.clone();
+    std::thread::spawn(move || {
+        let _restarting = state::FlagGuard::raise(&CAPTURE_RESTARTING);
+        let state = app.state::<AppState>();
+        // Looked at again: the buffer may have been stopped, or another
+        // restart may have brought the capture onto this topology meanwhile.
+        let still = state
+            .shared
+            .lock()
+            .as_ref()
+            .and_then(|shared| shared.topology.lock().clone())
+            .is_some_and(|at_start| capture::needs_restart(&at_start, &settled));
+        if state.is_buffering() && !state.is_recording() && still {
+            state.stop_pipeline();
+            if let Err(err) = state.start_pipeline() {
+                notify(&app, "error", err.clone());
+                sounds::play(&app, SoundKind::Error);
+                overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
+            }
+        }
+    });
+}
+
+/// When an event that has killed captures before happened, and which — the
+/// stall watch is armed by it ([`watch_stall`]).
+static STALL_ARMED: std::sync::Mutex<Option<(std::time::Instant, &'static str)>> =
+    std::sync::Mutex::new(None);
+
+fn arm_stall_watch(why: &'static str) {
+    *STALL_ARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some((std::time::Instant::now(), why));
+}
+
+/// The second line behind [`watch_topology`]: a capture that has delivered no
+/// new picture since such an event, while the game in front sits on the
+/// recorded screen, has died — restart it. See `state::stalled` for why all of
+/// that is needed before a buffer is thrown away. One restart per event.
+fn watch_stall(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if capture::screen_unrecordable() {
+        return;
+    }
+    let Some((armed, why)) = *STALL_ARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    else {
+        return;
+    };
+    let disarm = || {
+        let mut slot = STALL_ARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some_and(|(at, _)| at == armed) {
+            *slot = None;
+        }
+    };
+    let state = app.state::<AppState>();
+    if state.quitting.load(Ordering::SeqCst) || !state.is_buffering() || state.is_recording() {
+        return;
+    }
+    let Some(shared) = state.shared.lock().clone() else {
+        return;
+    };
+    // A window capture follows its window, not a screen.
+    let Some(screen) = shared.source.lock().as_ref().map(|choice| choice.target.id.clone()) else {
+        return;
+    };
+    let last_new = shared.last_new_frame();
+    if last_new.is_some_and(|at| at >= armed) {
+        disarm();
+        return;
+    }
+    let now = std::time::Instant::now();
+    // The cheap part first: the game is only looked up once the time is up.
+    if !state::stalled(Some(armed), last_new, shared.started, true, now) {
+        return;
+    }
+    let game_on_screen = game::foreground_game_screen().as_deref() == Some(screen.as_str());
+    if !state::stalled(Some(armed), last_new, shared.started, game_on_screen, now) {
+        return;
+    }
+    if CAPTURE_RESTARTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    disarm();
+    if !capture_budget_allows("the capture delivers nothing") {
+        CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
+        return;
+    }
+    let quiet = now.saturating_duration_since(last_new.unwrap_or(shared.started).max(armed));
+    log::warn!(
+        "no new frame for {:.0} s since {why}, with the game on the recorded screen {screen} \u{2014} restarting the capture",
+        quiet.as_secs_f32()
+    );
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _restarting = state::FlagGuard::raise(&CAPTURE_RESTARTING);
+        let state = app.state::<AppState>();
+        if state.is_buffering() && !state.is_recording() {
+            state.stop_pipeline();
+            if let Err(err) = state.start_pipeline() {
+                notify(&app, "error", err.clone());
+                sounds::play(&app, SoundKind::Error);
+                overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
+            }
+        }
+    });
 }
 
 /// Keep the buffer on the screen it is meant to be on.
@@ -830,8 +1051,7 @@ fn watch_monitors(app: &tauri::AppHandle) {
 /// costs the same: what the buffer held so far is gone. Better than keeping
 /// minutes of the wrong screen.
 fn watch_screen(app: &tauri::AppHandle) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static RESTARTING: AtomicBool = AtomicBool::new(false);
+    use std::sync::atomic::Ordering;
 
     // Behind the lock screen nothing can be captured at all, and the buffer
     // automation deals with that on its own.
@@ -842,7 +1062,7 @@ fn watch_screen(app: &tauri::AppHandle) {
     let Some(drift) = state.screen_drift() else {
         return;
     };
-    if RESTARTING.swap(true, Ordering::SeqCst) {
+    if CAPTURE_RESTARTING.swap(true, Ordering::SeqCst) {
         return;
     }
     log::info!(
@@ -885,7 +1105,7 @@ fn watch_screen(app: &tauri::AppHandle) {
                 }
             }
         }
-        RESTARTING.store(false, Ordering::SeqCst);
+        CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -1033,6 +1253,19 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     // the question of *when* recording is wanted arise at all.
     let signals = lock_signals();
     let locked = signals.any();
+    // The events a capture has been seen to die in without a word: the stall
+    // watch keeps an eye on the capture after each (`watch_stall`).
+    {
+        static WAS_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let unlocked = WAS_LOCKED.swap(locked, std::sync::atomic::Ordering::SeqCst) && !locked;
+        if signals.woke {
+            arm_stall_watch("the wake from sleep");
+        } else if signals.display_back {
+            arm_stall_watch("the display came back on");
+        } else if unlocked {
+            arm_stall_watch("the unlock");
+        }
+    }
     let action = match state.auto.poll_lock(signals, active) {
         state::AutoAction::Nothing if locked => return,
         state::AutoAction::Nothing => {
@@ -1045,7 +1278,19 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
                 state.auto.poll_always(active)
             }
         }
-        lock_action => lock_action,
+        lock_action => {
+            // The restart says its reason itself, further down.
+            match lock_action {
+                state::AutoAction::Stop => {
+                    log::info!("the screen is locked \u{2014} the buffer stops until the unlock")
+                }
+                state::AutoAction::Start => {
+                    log::info!("the screen is unlocked \u{2014} the buffer starts on a fresh capture")
+                }
+                _ => {}
+            }
+            lock_action
+        }
     };
     if action == state::AutoAction::Nothing {
         return;
@@ -1064,6 +1309,12 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
         }
         state::AutoAction::Stop => stop_buffer_and_notify(&app),
         state::AutoAction::Restart => {
+            // A restart already under way brings a fresh capture too.
+            if CAPTURE_RESTARTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                log::info!("{reason} \u{2014} the capture is being restarted already");
+                return;
+            }
+            let _restarting = state::FlagGuard::raise(&CAPTURE_RESTARTING);
             let state = app.state::<AppState>();
             // A recording running across the sleep or the dark screen keeps
             // its file whole; the buffer behind it starts over once it has
@@ -1646,6 +1897,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                 // a banner, and that should already stand on the right screen.
                 watch_monitors(&handle);
                 watch_screen(&handle);
+                watch_stall(&handle);
                 watch_encoder(&handle);
             }
             // If the recording reports a problem, somebody has to hear about it.
