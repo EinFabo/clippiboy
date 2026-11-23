@@ -12,7 +12,9 @@
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long a run may take.
@@ -20,33 +22,48 @@ use std::time::{Duration, Instant};
 pub enum Limit {
     /// The whole run, from start to exit.
     Total(Duration),
-    /// No end while `-progress` moves on ([`PROGRESS`] among the arguments);
-    /// ended after this long without a step forward (see [`Watchdog`]).
+    /// No end while the run moves on — its `-progress` ([`PROGRESS`] among
+    /// the arguments) or its own reading and writing; ended after this long
+    /// without either (see [`Watchdog`]).
     Stall(Duration),
 }
 
-/// ffprobe and `-version`: they read a header and answer. Generous for a
-/// first start, when an antivirus scans the 100 MB program before it runs.
+/// ffprobe: it reads a header and answers. Generous for a first start, when
+/// an antivirus scans the 100 MB program before it runs.
 pub const PROBE: Limit = Limit::Total(Duration::from_secs(30));
 
 /// One picture out of a clip: a thumbnail.
 pub const STILL: Limit = Limit::Total(Duration::from_secs(60));
 
-/// The longest a run reporting `-progress` may stand still.
+/// The longest a run may stand still.
 pub const STALL: Duration = Duration::from_secs(120);
 
-/// Work that reports `-progress`.
+/// Work that shows it moves on: `-progress`, or its reading and writing.
 pub const MOVING: Limit = Limit::Stall(STALL);
 
-/// The arguments [`MOVING`] needs: progress on stdout, no stats on stderr.
+/// The arguments that make ffmpeg report its progress on stdout, and no stats
+/// on stderr.
 pub const PROGRESS: [&str; 3] = ["-progress", "pipe:1", "-nostats"];
 
 /// What stdout keeps for the caller. ffprobe's answers are a few hundred
 /// bytes; an hour of `-progress` is megabytes nobody reads.
 const KEEP_STDOUT: usize = 1 << 20;
 
-/// How often a run looks at its clock and at `stop` while waiting.
+/// How often a run looks at its clock, its I/O and `stop` while waiting.
 const TICK: Duration = Duration::from_millis(100);
+
+/// A gap this long between two looks means the PC slept: the run was
+/// suspended with it and does not count that time.
+const SLEPT: Duration = Duration::from_secs(5);
+
+/// Reading and writing of this much counts as a sign of life — well past
+/// the bytes still sitting in a pipe, which the I/O counters already know.
+const IO_STEP: i64 = 64 * 1024;
+
+/// The slowest drive the end of a run is given time for: the index and the
+/// `+faststart` pass after the last frame report no progress and take the
+/// longer the bigger the file. Only where the I/O counters cannot be read.
+const SLOW_DRIVE_BYTES_PER_SEC: u64 = 10 * 1000 * 1000;
 
 /// A fixed limit for work that reports nothing on the way and takes about as
 /// long as the media it reads: the waveform of a whole clip, say. Five times
@@ -59,15 +76,44 @@ pub fn deadline_for(length_ms: u64) -> Limit {
 #[derive(Debug)]
 pub struct Watchdog {
     limit: Limit,
-    /// When the output last moved on.
+    /// When the run last showed it moves on.
     moved_at: Duration,
     /// How far the output has got, in µs; `None` before the first report.
     written_us: Option<i64>,
+    /// How big the output is, from `total_size=`.
+    size: u64,
+    /// The run's own reading and writing in bytes, as of its last sign of
+    /// life (or lower since).
+    io: Option<i64>,
+    /// When the run last looked, and how long the PC slept under it.
+    looked_at: Duration,
+    asleep: Duration,
 }
 
 impl Watchdog {
     pub fn new(limit: Limit) -> Self {
-        Self { limit, moved_at: Duration::ZERO, written_us: None }
+        Self {
+            limit,
+            moved_at: Duration::ZERO,
+            written_us: None,
+            size: 0,
+            io: None,
+            looked_at: Duration::ZERO,
+            asleep: Duration::ZERO,
+        }
+    }
+
+    /// The run looks at `at`. A gap since the last look is sleep — `Instant`
+    /// counts on through it, the suspended ffmpeg does not — and is taken
+    /// off every limit, or a save started before the lid closed would be
+    /// killed on waking.
+    pub fn tick(&mut self, at: Duration) {
+        let gap = at.saturating_sub(self.looked_at);
+        if gap >= SLEPT {
+            self.asleep += gap;
+            self.moved_at += gap;
+        }
+        self.looked_at = self.looked_at.max(at);
     }
 
     /// ffmpeg says its output has reached `out_us`. Only a step forward
@@ -82,29 +128,59 @@ impl Watchdog {
         true
     }
 
-    /// Has the run outstayed its limit at `at`?
-    pub fn expired(&self, at: Duration) -> bool {
-        match self.limit {
-            Limit::Total(limit) => at >= limit,
-            Limit::Stall(limit) => at.saturating_sub(self.moved_at) >= self.allowance(limit),
+    /// ffmpeg says its output file is `bytes` big.
+    pub fn size(&mut self, bytes: u64) {
+        self.size = self.size.max(bytes);
+    }
+
+    /// The run has read and written `bytes` in all, its pipes left out. A
+    /// rise of [`IO_STEP`] is a sign of life: the index and `+faststart`
+    /// pass at the end, or ffprobe reading a whole stream, report nothing
+    /// else. A hung ffmpeg does no I/O.
+    pub fn io(&mut self, at: Duration, bytes: i64) {
+        match self.io {
+            Some(last) if bytes >= last.saturating_add(IO_STEP) => {
+                self.io = Some(bytes);
+                self.moved_at = at;
+            }
+            Some(last) if bytes >= last => {}
+            // The first look, or the pipes read ahead of the counters.
+            _ => self.io = Some(bytes),
         }
     }
 
-    /// How long the run may stand still now. After the last frame ffmpeg
-    /// writes the file's index and, with `+faststart`, reads the whole file
-    /// through once more to put it in front — minutes for an hour's recording
-    /// on a slow drive, and no progress on the way. So the more is written,
-    /// the longer the wait: half the output's length, never under `stall`.
+    /// Has the run outstayed its limit at `at`?
+    pub fn expired(&self, at: Duration) -> bool {
+        match self.limit {
+            Limit::Total(limit) => at.saturating_sub(self.asleep) >= limit,
+            Limit::Stall(limit) => self.still_for(at) >= self.allowance(limit),
+        }
+    }
+
+    /// How long the run has shown no sign of moving on.
+    pub fn still_for(&self, at: Duration) -> Duration {
+        at.saturating_sub(self.moved_at)
+    }
+
+    /// How long the run may stand still: `stall`, or for a big output the
+    /// time a slow drive needs to read it through once more.
     fn allowance(&self, stall: Duration) -> Duration {
-        let written = self.written_us.unwrap_or(0).max(0) as u64;
-        stall.max(Duration::from_micros(written / 2))
+        stall.max(Duration::from_secs(self.size / SLOW_DRIVE_BYTES_PER_SEC))
     }
 }
 
 /// The output time of one `-progress` line, in µs.
 pub fn progress_of(line: &[u8]) -> Option<i64> {
-    let text = std::str::from_utf8(line).ok()?;
-    text.trim().strip_prefix("out_time_us=")?.parse().ok()
+    report_of(line, "out_time_us=")?.parse().ok()
+}
+
+/// The output size of one `-progress` line, in bytes.
+pub fn size_of(line: &[u8]) -> Option<u64> {
+    report_of(line, "total_size=")?.parse().ok()
+}
+
+fn report_of<'a>(line: &'a [u8], key: &str) -> Option<&'a str> {
+    std::str::from_utf8(line).ok()?.trim().strip_prefix(key)
 }
 
 /// May `program` be started? Only by a full path, unless a search of the
@@ -120,15 +196,22 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
     if !may_start(Path::new(command.get_program()), cfg!(debug_assertions)) {
         return Err(io::Error::new(io::ErrorKind::NotFound, "ffmpeg is not ready yet"));
     }
-    let child = command.spawn()?;
+    #[allow(unused_mut)]
+    let mut child = command.spawn()?;
     #[cfg(windows)]
-    job::tie(&child);
+    job::tie(&mut child);
     Ok(child)
 }
 
 /// [`run`] for a caller that only wants the result.
 pub fn output(command: &mut Command, limit: Limit) -> io::Result<Output> {
     run(command, limit, &|_| {}, &|| false)
+}
+
+/// What one line of stdout told.
+enum Report {
+    Out(i64),
+    Size(u64),
 }
 
 /// Run `command` to its end within `limit`, with no input, its stdout and
@@ -152,52 +235,66 @@ pub fn run(
     let mut child = spawn(command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
 
     // Both pipes drained on threads of their own: a full one stalls ffmpeg.
+    // What came through them is counted, to tell it from the run's own I/O.
+    let piped = Arc::new(AtomicU64::new(0));
     let stderr = child.stderr.take();
-    let errors = std::thread::spawn(move || {
-        let mut text = Vec::new();
-        if let Some(mut stderr) = stderr {
-            let _ = stderr.read_to_end(&mut text);
-        }
-        text
-    });
+    let errors = {
+        let piped = piped.clone();
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let Some(mut stderr) = stderr else {
+                return text;
+            };
+            let mut chunk = [0u8; 8192];
+            while let Ok(read @ 1..) = stderr.read(&mut chunk) {
+                piped.fetch_add(read as u64, Ordering::Relaxed);
+                text.extend_from_slice(&chunk[..read]);
+            }
+            text
+        })
+    };
     let stdout = child.stdout.take();
-    let (tx, rx) = mpsc::channel::<i64>();
-    let reader = std::thread::spawn(move || {
-        let mut kept = Vec::new();
-        let Some(stdout) = stdout else {
-            return kept;
-        };
-        let mut stdout = BufReader::new(stdout);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match stdout.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
+    let (tx, rx) = mpsc::channel::<Report>();
+    let reader = {
+        let piped = piped.clone();
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            let Some(stdout) = stdout else {
+                return kept;
+            };
+            let mut stdout = BufReader::new(stdout);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match stdout.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => piped.fetch_add(read as u64, Ordering::Relaxed),
+                };
+                if let Some(us) = progress_of(&line) {
+                    let _ = tx.send(Report::Out(us));
+                } else if let Some(bytes) = size_of(&line) {
+                    let _ = tx.send(Report::Size(bytes));
+                }
+                if kept.len() < KEEP_STDOUT {
+                    kept.extend_from_slice(&line);
+                }
             }
-            if let Some(us) = progress_of(&line) {
-                let _ = tx.send(us);
-            }
-            if kept.len() < KEEP_STDOUT {
-                kept.extend_from_slice(&line);
-            }
-        }
-        kept
-    });
+            kept
+        })
+    };
 
     let mut watchdog = Watchdog::new(limit);
     let mut reporting = true;
     let ended = loop {
-        if reporting {
+        let report = if reporting {
             match rx.recv_timeout(TICK) {
-                Ok(us) => {
-                    if watchdog.progress(started.elapsed(), us) {
-                        on_progress(us);
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
+                Ok(report) => Some(report),
+                Err(RecvTimeoutError::Timeout) => None,
                 // Stdout closed: the program is ending.
-                Err(RecvTimeoutError::Disconnected) => reporting = false,
+                Err(RecvTimeoutError::Disconnected) => {
+                    reporting = false;
+                    None
+                }
             }
         } else {
             match child.try_wait() {
@@ -205,14 +302,29 @@ pub fn run(
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(err) => break Err(err),
             }
+            None
+        };
+        let at = started.elapsed();
+        watchdog.tick(at);
+        match report {
+            Some(Report::Out(us)) => {
+                if watchdog.progress(at, us) {
+                    on_progress(us);
+                }
+            }
+            Some(Report::Size(bytes)) => watchdog.size(bytes),
+            None => {}
+        }
+        if let Some(bytes) = io_bytes(&child) {
+            watchdog.io(at, bytes as i64 - piped.load(Ordering::Relaxed) as i64);
         }
         if stop() {
             break Err(io::Error::new(io::ErrorKind::Interrupted, STOPPED));
         }
-        if watchdog.expired(started.elapsed()) {
+        if watchdog.expired(at) {
             let words = match limit {
                 Limit::Total(limit) => format!("did not finish within {} s", limit.as_secs()),
-                Limit::Stall(_) => format!("stood still for {} s", started.elapsed().saturating_sub(watchdog.moved_at).as_secs()),
+                Limit::Stall(_) => format!("stood still for {} s", watchdog.still_for(at).as_secs()),
             };
             break Err(io::Error::new(io::ErrorKind::TimedOut, format!("{name} {words} and was ended")));
         }
@@ -225,6 +337,25 @@ pub fn run(
     let stdout = reader.join().unwrap_or_default();
     let stderr = errors.join().unwrap_or_default();
     Ok(Output { status: ended?, stdout, stderr })
+}
+
+/// How much `child` has read and written so far, pipes included.
+#[cfg(windows)]
+fn io_bytes(child: &Child) -> Option<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::{GetProcessIoCounters, IO_COUNTERS};
+
+    let mut counters = IO_COUNTERS::default();
+    // SAFETY: the process handle is open while `child` is borrowed, and the
+    // counters are written into a struct of the right type.
+    unsafe { GetProcessIoCounters(HANDLE(child.as_raw_handle()), &mut counters) }.ok()?;
+    Some(counters.ReadTransferCount.saturating_add(counters.WriteTransferCount))
+}
+
+#[cfg(not(windows))]
+fn io_bytes(_child: &Child) -> Option<u64> {
+    None
 }
 
 /// What [`run`] says when `stop` ended it.
@@ -241,8 +372,7 @@ pub fn is_stopped(err: &io::Error) -> bool {
 mod job {
     use std::os::windows::io::AsRawHandle;
     use std::process::Child;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::JobObjects::{
@@ -292,16 +422,23 @@ mod job {
         unsafe { AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())) }
     }
 
-    /// Put `child` into the job. Said once in the log when it cannot be.
-    pub fn tie(child: &Child) {
-        static WARNED: AtomicBool = AtomicBool::new(false);
+    /// Put `child` into the job. A child that already ended needs no tie;
+    /// any other failure is said in the log once per error.
+    pub fn tie(child: &mut Child) {
+        static WARNED: Mutex<Vec<i32>> = Mutex::new(Vec::new());
         let Some(job) = job() else {
             return;
         };
-        if let Err(err) = assign(job, child) {
-            if !WARNED.swap(true, Ordering::Relaxed) {
-                log::warn!("ffmpeg not tied to the app, it may outlive it: {err}");
-            }
+        let Err(err) = assign(job, child) else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let mut warned = WARNED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !warned.contains(&err.code().0) {
+            warned.push(err.code().0);
+            log::warn!("ffmpeg not tied to the app, it may outlive it: {err}");
         }
     }
 }
@@ -350,17 +487,77 @@ mod tests {
     }
 
     /// The index at the end, and `+faststart` reading the file through once
-    /// more, report nothing: an hour written may wait half an hour.
+    /// more, report no progress: a 2.4 GB output may stand still for four
+    /// minutes, a small one for the plain stall.
     #[test]
-    fn the_more_is_written_the_longer_the_end_may_take() {
+    fn the_bigger_the_output_the_longer_its_end_may_take() {
         let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
-        assert!(watchdog.progress(S(600), 3_600_000_000));
-        assert!(!watchdog.expired(S(600 + 1_799)));
-        assert!(watchdog.expired(S(600 + 1_800)));
-        // A short clip keeps the plain stall.
+        assert!(watchdog.progress(S(600), 300_000_000));
+        watchdog.size(2_400_000_000);
+        assert!(!watchdog.expired(S(600 + 239)));
+        assert!(watchdog.expired(S(600 + 240)));
         let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
         assert!(watchdog.progress(S(5), 30_000_000));
+        watchdog.size(40_000_000);
         assert!(watchdog.expired(S(125)));
+    }
+
+    /// The silent end on a slow drive still reads and writes; a hung ffmpeg
+    /// does neither.
+    #[test]
+    fn reading_and_writing_is_a_sign_of_life() {
+        let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
+        assert!(watchdog.progress(S(10), 60_000_000));
+        watchdog.io(S(10), 500_000_000);
+        // A slow +faststart pass: 30 MB/s for ten minutes.
+        for second in 11..=610u64 {
+            watchdog.io(S(second), 500_000_000 + (second as i64 - 10) * 30_000_000);
+            assert!(!watchdog.expired(S(second)), "second {second}");
+        }
+        // Then nothing: the plain stall from the last I/O.
+        assert!(!watchdog.expired(S(610 + 119)));
+        assert!(watchdog.expired(S(610 + 120)));
+
+        // Less than a pipe's worth is no sign.
+        let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
+        watchdog.io(S(0), 1_000);
+        watchdog.io(S(60), 1_000 + IO_STEP - 1);
+        assert!(watchdog.expired(S(120)));
+        // The pipes read ahead of the counters lower the mark, no more.
+        let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
+        watchdog.io(S(0), 1_000);
+        watchdog.io(S(1), -3_000);
+        watchdog.io(S(60), -3_000 + IO_STEP);
+        assert!(!watchdog.expired(S(179)));
+        assert!(watchdog.expired(S(180)));
+    }
+
+    /// `Instant` counts on through sleep; the run, suspended, did not.
+    #[test]
+    fn the_time_the_pc_slept_is_not_counted() {
+        let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
+        watchdog.tick(S(9));
+        assert!(watchdog.progress(S(10), 5_000_000));
+        watchdog.tick(S(10));
+        // The lid closes for an hour; the first look after waking.
+        watchdog.tick(S(3_610));
+        assert!(!watchdog.expired(S(3_610)));
+        assert!(!watchdog.expired(S(3_610 + 119)));
+        assert!(watchdog.expired(S(3_610 + 120)));
+
+        let mut watchdog = Watchdog::new(Limit::Total(S(30)));
+        watchdog.tick(S(1));
+        watchdog.tick(S(3_601));
+        assert!(!watchdog.expired(S(3_601)));
+        assert!(watchdog.expired(S(3_630)));
+
+        // Looks a moment apart are no sleep.
+        let mut watchdog = Watchdog::new(Limit::Total(S(30)));
+        for tenth in 0..=300u64 {
+            watchdog.tick(Duration::from_millis(tenth * 100));
+        }
+        watchdog.tick(S(34));
+        assert!(watchdog.expired(S(34)));
     }
 
     #[test]
@@ -390,6 +587,9 @@ mod tests {
         assert_eq!(progress_of(b"out_time_ms=1500000\n"), None);
         assert_eq!(progress_of(b"out_time=00:00:01.500000\n"), None);
         assert_eq!(progress_of(&[0xff, 0xfe]), None);
+        assert_eq!(size_of(b"total_size=2400000000\n"), Some(2_400_000_000));
+        assert_eq!(size_of(b"total_size=N/A\n"), None);
+        assert_eq!(size_of(b"out_time_us=1500000\n"), None);
     }
 
     #[test]
@@ -477,7 +677,7 @@ mod tests {
             .args(["-y", "-hide_banner", "-loglevel", "error"])
             .args(PROGRESS)
             .args(["-f", "lavfi", "-i", "testsrc=size=640x360:rate=30", "-f", "lavfi", "-i", "sine"])
-            .args(["-t", "10", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-movflags", "+faststart"])
+            .args(["-t", "10", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-c:a", "aac", "-movflags", "+faststart"])
             .arg(&clip);
         let done = run(&mut encode, MOVING, &|us| {
             reports.set(reports.get() + 1);
@@ -487,6 +687,15 @@ mod tests {
         assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
         assert!(reports.get() > 0 && last.get() >= 9_000_000, "{} reports, last {}", reports.get(), last.get());
         assert_eq!(crate::muxer::probe_duration(&clip).unwrap().map(|ms| ms / 100), Some(100));
+
+        // No progress reported, but the file read at its own pace for ten
+        // seconds: alive all along under a two-second stall.
+        let started = Instant::now();
+        let mut reading = crate::muxer::ffmpeg();
+        reading.args(["-hide_banner", "-loglevel", "error", "-re", "-i"]).arg(&clip).args(["-c", "copy", "-f", "null", "-"]);
+        let done = output(&mut reading, Limit::Stall(S(2))).unwrap();
+        assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+        assert!(started.elapsed() >= S(9), "{:?}", started.elapsed());
 
         // Endless input, nothing let through to the output: it stands still.
         let started = Instant::now();

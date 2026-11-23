@@ -137,10 +137,11 @@ pub fn run(command: &mut Command, what: &str, limit: crate::child::Limit) -> Res
 /// Both programs: a save without ffprobe would write the clip and then be unable
 /// to check it.
 pub fn available() -> bool {
-    let answers = |mut program: Command| {
-        crate::child::output(program.arg("-version"), crate::child::PROBE)
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+    // A first start can outlast the limit while an antivirus scans the
+    // program; one that started and did not answer in time is there.
+    let answers = |mut program: Command| match crate::child::output(program.arg("-version"), crate::child::PROBE) {
+        Ok(out) => out.status.success(),
+        Err(err) => err.kind() == std::io::ErrorKind::TimedOut,
     };
     answers(ffmpeg()) && answers(command("ffprobe"))
 }

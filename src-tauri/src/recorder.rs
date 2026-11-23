@@ -1106,8 +1106,8 @@ fn read_full(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
 /// Count the frames of a raw H.264 stream. Only needed after a crash, when the
 /// recorder never got to say how many it wrote.
 ///
-/// ffprobe reads the whole stream for it, gigabytes for a long recording;
-/// half an hour is past any drive that still answers.
+/// ffprobe reads the whole stream for it, gigabytes for a long recording:
+/// no end while it reads, only once it stops.
 fn count_frames(video: &Path) -> Option<u64> {
     let mut probe = muxer::command("ffprobe");
     probe
@@ -1125,7 +1125,7 @@ fn count_frames(video: &Path) -> Option<u64> {
             "csv=p=0",
         ])
         .arg(video);
-    let output = crate::child::output(&mut probe, crate::child::Limit::Total(std::time::Duration::from_secs(30 * 60))).ok()?;
+    let output = crate::child::output(&mut probe, crate::child::MOVING).ok()?;
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
