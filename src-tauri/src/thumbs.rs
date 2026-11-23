@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::clips::{fresh, passes_stopped, with_library, Library};
 use crate::config;
-use crate::muxer::{ffmpeg, run, sanitize};
+use crate::muxer::{clip_input, ffmpeg, run, sanitize};
 
 /// Folder holding all thumbnails.
 pub fn dir() -> PathBuf {
@@ -31,6 +31,7 @@ pub fn make(video: &Path, clip_id: &str) -> Result<PathBuf, String> {
     run(
         ffmpeg()
             .args(["-y", "-hide_banner", "-loglevel", "error", "-ss", "0.5"])
+            .args(clip_input())
             .arg("-i")
             .arg(video)
             .args(["-frames:v", "1", "-vf", "scale=480:-1", "-q:v", "4"])
@@ -54,6 +55,7 @@ pub fn make_still(image: &Path, clip_id: &str) -> Result<PathBuf, String> {
     run(
         ffmpeg()
             .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(clip_input())
             .arg("-i")
             .arg(image)
             .args(["-frames:v", "1", "-vf", "scale=480:-1", "-q:v", "4"])

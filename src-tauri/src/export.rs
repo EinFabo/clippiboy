@@ -191,9 +191,9 @@ pub fn arguments(
         "-progress".into(),
         "pipe:1".into(),
         "-nostats".into(),
-        "-i".into(),
-        source.to_string_lossy().to_string(),
     ];
+    args.extend(crate::muxer::clip_input().map(String::from));
+    args.extend(["-i".into(), source.to_string_lossy().to_string()]);
 
     // The picture, then whatever audio there is. The `?` matters: a clip whose
     // tracks were all muted has no audio stream, and without it ffmpeg refuses
@@ -291,6 +291,7 @@ pub fn portrait_arguments(
     let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"]
         .map(String::from)
         .to_vec();
+    args.extend(crate::muxer::clip_input().map(String::from));
     if inputs.game_seek_ms > 0 {
         args.extend(["-ss".into(), seconds(inputs.game_seek_ms)]);
     }
@@ -412,7 +413,11 @@ mod tests {
         };
         let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, None);
         let joined = args.join(" ");
-        assert!(joined.contains("-ss 5.000 -i clean.mp4 -ss 1.250000 -i cam.mp4 -i clip.mp4 -loop 1 -i mark.png"), "{joined}");
+        let guard = crate::muxer::clip_input().join(" ");
+        assert!(
+            joined.contains(&format!("{guard} -ss 5.000 -i clean.mp4 -ss 1.250000 -i cam.mp4 -i clip.mp4 -loop 1 -i mark.png")),
+            "{joined}"
+        );
         assert!(args.windows(2).any(|w| w == ["-map", "[v]"]), "{joined}");
         assert!(args.windows(2).any(|w| w == ["-map", "2:a:0?"]), "the clip file is input 2: {joined}");
         assert!(args.windows(2).any(|w| w == ["-t", "20.000"]), "{joined}");
@@ -603,7 +608,13 @@ mod tests {
         };
         let args = arguments(Path::new("x.mp4"), Path::new("o.mp4"), &plan, 1080, EncoderId::X264, Some(&remix));
         let joined = args.join(" ");
-        assert!(joined.contains("-i x.mp4 -ss 2.000 -t 120.000 -i t/0.m4a -ss 2.000 -t 120.000 -i t/1.m4a"), "{joined}");
+        let guard = crate::muxer::clip_input().join(" ");
+        assert!(
+            joined.contains(&format!(
+                "{guard} -i x.mp4 {guard} -ss 2.000 -t 120.000 -i t/0.m4a {guard} -ss 2.000 -t 120.000 -i t/1.m4a"
+            )),
+            "{joined}"
+        );
         assert!(!args.iter().any(|a| a == "0:a:0?"), "{joined}");
         assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
         let graph = args.iter().position(|a| a == "-filter_complex").map(|at| &args[at + 1]).unwrap();
@@ -629,7 +640,8 @@ mod tests {
         let remix = crate::stems::Remix { tracks: vec![(Path::new("t/0.m4a").into(), 0.0)], start_ms: 0, length_ms: 20_000 };
         let args = portrait_arguments(&inputs, "[0:v]null[v]", Path::new("out.mp4"), &plan, 20_000, EncoderId::X264, Some(&remix));
         let joined = args.join(" ");
-        assert!(joined.contains("-loop 1 -i mark.png -t 20.000 -i t/0.m4a"), "{joined}");
+        let guard = crate::muxer::clip_input().join(" ");
+        assert!(joined.contains(&format!("-loop 1 -i mark.png {guard} -t 20.000 -i t/0.m4a")), "{joined}");
         assert!(joined.contains("[0:v]null[v];[4:a]volume=1[m0];[m0]anull[aout]"), "{joined}");
         assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
         assert!(!joined.contains("2:a:0?"), "{joined}");

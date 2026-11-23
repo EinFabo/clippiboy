@@ -284,6 +284,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
 
     let mut copy = ffmpeg();
     copy.args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(crate::muxer::clip_input())
         .arg("-i")
         .arg(source)
         .args(["-map", &format!("0:a:{index}"), "-c:a", "copy"])
@@ -299,6 +300,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
         let mut encode = ffmpeg();
         encode
             .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(crate::muxer::clip_input())
             .arg("-i")
             .arg(source)
             .args(["-map", &format!("0:a:{index}"), "-c:a", "aac", "-b:a", "192k"])
@@ -426,6 +428,7 @@ impl Remix {
         let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
         let mut args = Vec::new();
         for (path, _) in &self.tracks {
+            args.extend(crate::muxer::clip_input().map(String::from));
             if self.start_ms > 0 {
                 args.extend(["-ss".into(), seconds(self.start_ms)]);
             }
@@ -717,12 +720,12 @@ mod tests {
             start_ms: 4_000,
             length_ms: 12_500,
         };
-        assert_eq!(
-            remix.inputs(),
-            ["-ss", "4.000", "-t", "12.500", "-i", "a.m4a", "-ss", "4.000", "-t", "12.500", "-i", "b.m4a"]
-                .map(String::from)
-                .to_vec()
-        );
+        let input = |path: &str| {
+            let mut args: Vec<String> = crate::muxer::clip_input().map(String::from).to_vec();
+            args.extend(["-ss", "4.000", "-t", "12.500", "-i", path].map(String::from));
+            args
+        };
+        assert_eq!(remix.inputs(), [input("a.m4a"), input("b.m4a")].concat());
         let filter = remix.filter(1).unwrap();
         assert!(filter.starts_with("[1:a]volume=1[m0];[2:a]volume="), "{filter}");
         assert!(filter.ends_with(MIX_LABEL));

@@ -536,8 +536,9 @@ async fn upload(
     };
 
     // Deleted while it was being shrunk: nothing goes up. Deleted while it
-    // goes up: the request is dropped, the server's catch removes the
-    // half-stored clip and its row, and the week keeps its link.
+    // goes up: the request is dropped and the server's catch removes the
+    // half-stored clip. Its row stays as a failed upload: five a week are
+    // free, past that each one counts as one of the week's links.
     let result = if uploading.deleted() {
         Err(DELETED.to_string())
     } else {
@@ -584,8 +585,10 @@ fn link_identity(name: bool, friend: bool) -> Vec<(&'static str, String)> {
 }
 
 fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std::ffi::OsString> {
-    let mut args: Vec<std::ffi::OsString> = ["-y", "-hide_banner", "-loglevel", "error", "-i"]
-        .iter()
+    let mut args: Vec<std::ffi::OsString> = ["-y", "-hide_banner", "-loglevel", "error"]
+        .into_iter()
+        .chain(crate::muxer::clip_input())
+        .chain(["-i"])
         .map(Into::into)
         .collect();
     args.push(source.into());
@@ -605,7 +608,9 @@ fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std
 /// mixed again from the tracks `remix` keeps (none: no sound), the index at
 /// the front.
 fn remix_args(source: &std::path::Path, output: &std::path::Path, remix: &crate::stems::Remix) -> Vec<String> {
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"].map(String::from).to_vec();
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
+    args.extend(crate::muxer::clip_input().map(String::from));
+    args.push("-i".into());
     args.push(source.to_string_lossy().to_string());
     args.extend(remix.inputs());
     args.extend(["-map", "0:v:0"].map(String::from));
@@ -816,6 +821,8 @@ mod tests {
         for pair in [["-map", "0:v:0"], ["-map", "0:a:0?"], ["-map_metadata", "-1"], ["-map_chapters", "-1"]] {
             assert!(args.windows(2).any(|w| w == pair), "{pair:?} missing in {args:?}");
         }
+        let input = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(args[input - 4..input], crate::muxer::clip_input(), "a clip may come from a friend");
         assert!(!args.windows(2).any(|w| w == ["-map", "0"]), "{args:?}");
     }
 
@@ -828,7 +835,11 @@ mod tests {
         };
         let args = remix_args(Path::new("in.mp4"), Path::new("out.mp4"), &remix);
         let joined = args.join(" ");
-        assert!(joined.starts_with("-y -hide_banner -loglevel error -i in.mp4 -t 30.000 -i t/0.m4a -map 0:v:0"), "{joined}");
+        let guard = crate::muxer::clip_input().join(" ");
+        assert!(
+            joined.starts_with(&format!("-y -hide_banner -loglevel error {guard} -i in.mp4 {guard} -t 30.000 -i t/0.m4a -map 0:v:0")),
+            "{joined}"
+        );
         assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");
         assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]), "the picture is not encoded again: {joined}");
         assert!(!joined.contains("0:a"), "the clip's own sound has Discord in it: {joined}");

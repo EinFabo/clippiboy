@@ -620,12 +620,27 @@ enum Verdict {
     Ask,
     Decline,
     /// No answer at all: not while invisible — an answer would show the user is
-    /// there — and not for a second offer from a friend whose first still waits.
+    /// there — not for a second offer from a friend whose first still waits,
+    /// and not for an offer that cannot be taken at its word (see [`Known`]).
     Ignore,
 }
 
-fn verdict(friends: &FriendsConfig, from: &str, asking_already: bool, sane: bool) -> Verdict {
-    if friends.invisible || asking_already {
+/// What is known here about an offer's sender and id, before it is looked at.
+#[derive(Debug, Clone, Copy)]
+struct Known {
+    /// The sender is on our own friends list. The server checks that too, but
+    /// only what it says it checked is known here.
+    friend: bool,
+    /// The id is in use already — by an offer still open or running, by one of
+    /// our own, or by one called off. A second offer under it would overwrite
+    /// the first one's entry mid-transfer.
+    id_taken: bool,
+    /// An offer from the same friend still waits for an answer.
+    asking_already: bool,
+}
+
+fn verdict(friends: &FriendsConfig, from: &str, known: Known, sane: bool) -> Verdict {
+    if friends.invisible || !known.friend || known.id_taken || known.asking_already {
         return Verdict::Ignore;
     }
     let welcome = match friends.accept_clips {
@@ -652,16 +667,27 @@ fn offered(
     meta: Meta,
 ) {
     let config = app.state::<AppState>().config_snapshot().friends;
-    let asking_already = app
-        .state::<Share>()
-        .incoming
-        .lock()
-        .values()
-        .any(|entry| entry.transfer.friend_id == from && entry.transfer.stage == Stage::Asking);
-    match verdict(&config, from, asking_already, id.len() <= 64 && sha256.len() == 64) {
+    let share = app.state::<Share>();
+    // Relays come in one after another on the one connection to the server,
+    // so nothing can slip in between this check and the insert below.
+    let (in_taken, asking_already) = {
+        let incoming = share.incoming.lock();
+        let asking = incoming
+            .values()
+            .any(|entry| entry.transfer.friend_id == from && entry.transfer.stage == Stage::Asking);
+        (incoming.contains_key(&id), asking)
+    };
+    let known = Known {
+        friend: crate::friends::friend_name(app, from).is_some(),
+        id_taken: in_taken
+            || share.outgoing.lock().contains_key(&id)
+            || share.cancelled.lock().contains_key(&id),
+        asking_already,
+    };
+    match verdict(&config, from, known, id.len() <= 64 && sha256.len() == 64) {
         Verdict::Ask => {}
         Verdict::Ignore => {
-            log::info!("share: an offer from {from} left unanswered");
+            log::info!("share: an offer from {from} left unanswered (friend: {}, id taken: {})", known.friend, known.id_taken);
             return;
         }
         // Busy, or not from someone welcome: a quiet no, without anything popping up.
@@ -763,12 +789,23 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
     std::fs::create_dir_all(&dir).map_err(|err| format!("Could not create the folder: {err}"))?;
     // Room for it first, on both drives: the clip goes to the clip folder,
     // its tracks to the app data folder — usually both on C:.
+    // Other offers on their way take their share of the same drives: each
+    // alone fitting is not enough when they all land.
     let mut meta = meta;
     let tracks_size: u64 = meta.tracks.iter().map(|track| track.size).sum();
+    let pending = app
+        .state::<Share>()
+        .incoming
+        .lock()
+        .iter()
+        .filter(|(key, entry)| key.as_str() != id && entry.transfer.stage == Stage::Moving)
+        .map(|(_, entry)| still_to_come(entry.size, entry.transfer.size, entry.transfer.moved))
+        .fold((0u64, 0u64), |sum, left| (sum.0.saturating_add(left.0), sum.1.saturating_add(left.1)));
     let data_dir = crate::config::data_dir();
-    let same_drive = tracks_size > 0 && crate::disk::same_volume(&dir, &data_dir);
+    let tracks_anywhere = tracks_size > 0 || pending.1 > 0;
+    let same_drive = tracks_anywhere && crate::disk::same_volume(&dir, &data_dir);
     let data_free = if tracks_size > 0 { crate::disk::free_bytes(&data_dir) } else { None };
-    match room(size, tracks_size, crate::disk::free_bytes(&dir), data_free, same_drive) {
+    match room(size, tracks_size, crate::disk::free_bytes(&dir), data_free, same_drive, pending) {
         Room::Fits => {}
         Room::WithoutTracks => {
             // Tracks are a bonus everywhere else as well: the clip still comes.
@@ -823,11 +860,24 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                 // Chosen only now: two offers of one name no longer pick the
                 // same free name while both are still on their way.
                 let target = crate::filing::free_name(&dir, &name);
+                // With every numbered name taken as well, `free_name` hands
+                // back the name itself — and `rename` would replace that file.
+                if target.exists() {
+                    let _ = std::fs::remove_file(&part);
+                    crate::stems::remove(&clip_id);
+                    return Err(format!("There is no free name for this {what} in its folder."));
+                }
                 if let Err(err) = std::fs::rename(&part, &target) {
                     crate::stems::remove(&clip_id);
                     return Err(format!("Could not keep the {what}: {err}"));
                 }
-                return file_clip(app, &clip_id, &target, &meta, size, &from, has_tracks);
+                // ffmpeg makes the thumbnail: seconds, not for an async worker.
+                let app = app.clone();
+                return tokio::task::spawn_blocking(move || {
+                    file_clip(&app, &clip_id, &target, &meta, size, &from, has_tracks)
+                })
+                .await
+                .map_err(|err| err.to_string())?;
             }
             Err(err) => {
                 log::info!("share: attempt {} for {id}: {err}", attempt + 1);
@@ -852,7 +902,20 @@ enum Room {
 /// Room for a clip of `size` and its tracks, with [`SPACE_MARGIN`] left over
 /// on each drive. A free size that cannot be read counts as room: refusing a
 /// clip over a question nobody could answer helps nobody.
-fn room(size: u64, tracks_size: u64, clip_free: Option<u64>, data_free: Option<u64>, same_drive: bool) -> Room {
+///
+/// `pending` is what other receives still have to write, clips and tracks
+/// ([`still_to_come`]): the free space is theirs already.
+fn room(
+    size: u64,
+    tracks_size: u64,
+    clip_free: Option<u64>,
+    data_free: Option<u64>,
+    same_drive: bool,
+    pending: (u64, u64),
+) -> Room {
+    let on_clip_drive = pending.0.saturating_add(if same_drive { pending.1 } else { 0 });
+    let clip_free = clip_free.map(|free| free.saturating_sub(on_clip_drive));
+    let data_free = data_free.map(|free| free.saturating_sub(pending.1));
     let short = |free: Option<u64>, need: u64| free.is_some_and(|free| free < need.saturating_add(SPACE_MARGIN));
     if short(clip_free, size) {
         return Room::None;
@@ -870,6 +933,14 @@ fn room(size: u64, tracks_size: u64, clip_free: Option<u64>, data_free: Option<u
     } else {
         Room::Fits
     }
+}
+
+/// What a running receive still has to write: of its clip and of its tracks.
+/// `total` counts both (`Transfer::size`), and the tracks come first, so the
+/// bytes moved so far count against them first.
+fn still_to_come(clip: u64, total: u64, moved: u64) -> (u64, u64) {
+    let tracks = total.saturating_sub(clip);
+    (clip.saturating_sub(moved.saturating_sub(tracks)), tracks.saturating_sub(moved))
 }
 
 /// The individual tracks into the stems store of the clip to be, each checked
@@ -1012,14 +1083,20 @@ fn file_clip(
     } else {
         crate::thumbs::make(path, &id)
     };
+    // A screenshot's size as its file has it, not as the offer says.
+    let (width, height) = if meta.screenshot {
+        crate::shot::size_of_png(path).unwrap_or((meta.width, meta.height))
+    } else {
+        (meta.width, meta.height)
+    };
     let clip = Clip {
         id: id.clone(),
         path: path.to_string_lossy().into_owned(),
         created_at: now_ms(),
         duration_ms: meta.duration_ms,
         game: meta.game.clone(),
-        width: meta.width,
-        height: meta.height,
+        width,
+        height,
         size_bytes: size,
         thumb_path: thumb.ok().map(|p| p.to_string_lossy().into_owned()),
         title: meta.title.clone(),
@@ -1575,15 +1652,31 @@ mod tests {
         TrackMix { index, gain_db, muted }
     }
 
+    /// A friend's first offer under a new id.
+    const FRESH: Known = Known { friend: true, id_taken: false, asking_already: false };
+    const NO_PENDING: (u64, u64) = (0, 0);
+
+    #[test]
+    fn an_offer_from_someone_not_on_the_list_or_under_a_used_id_gets_no_answer() {
+        let config = FriendsConfig::default();
+        assert_eq!(verdict(&config, "f", Known { friend: false, ..FRESH }, true), Verdict::Ignore);
+        assert_eq!(verdict(&config, "f", Known { id_taken: true, ..FRESH }, true), Verdict::Ignore);
+        // Not even the quiet no a busy user gives: that would answer about the
+        // offer whose id it took.
+        let busy = FriendsConfig { busy: true, ..Default::default() };
+        assert_eq!(verdict(&busy, "f", Known { id_taken: true, ..FRESH }, true), Verdict::Ignore);
+        assert_eq!(verdict(&config, "f", FRESH, true), Verdict::Ask);
+    }
+
     #[test]
     fn an_invisible_user_neither_asks_nor_answers() {
         let config = FriendsConfig { invisible: true, busy: true, ..Default::default() };
-        assert_eq!(verdict(&config, "f", false, true), Verdict::Ignore);
+        assert_eq!(verdict(&config, "f", FRESH, true), Verdict::Ignore);
     }
 
     #[test]
     fn a_second_offer_from_the_same_friend_waits_for_the_first() {
-        assert_eq!(verdict(&FriendsConfig::default(), "f", true, true), Verdict::Ignore);
+        assert_eq!(verdict(&FriendsConfig::default(), "f", Known { asking_already: true, ..FRESH }, true), Verdict::Ignore);
     }
 
     fn outgoing(friend: &str, stage: Stage) -> Transfer {
@@ -1643,11 +1736,11 @@ mod tests {
     #[test]
     fn busy_or_unwelcome_is_a_quiet_no() {
         let favorites = FriendsConfig { accept_clips: AcceptClips::Favorites, favorites: vec!["g".into()], ..Default::default() };
-        assert_eq!(verdict(&FriendsConfig { busy: true, ..Default::default() }, "f", false, true), Verdict::Decline);
-        assert_eq!(verdict(&FriendsConfig { accept_clips: AcceptClips::Off, ..Default::default() }, "f", false, true), Verdict::Decline);
-        assert_eq!(verdict(&favorites, "f", false, true), Verdict::Decline);
-        assert_eq!(verdict(&favorites, "g", false, true), Verdict::Ask);
-        assert_eq!(verdict(&FriendsConfig::default(), "f", false, false), Verdict::Decline);
+        assert_eq!(verdict(&FriendsConfig { busy: true, ..Default::default() }, "f", FRESH, true), Verdict::Decline);
+        assert_eq!(verdict(&FriendsConfig { accept_clips: AcceptClips::Off, ..Default::default() }, "f", FRESH, true), Verdict::Decline);
+        assert_eq!(verdict(&favorites, "f", FRESH, true), Verdict::Decline);
+        assert_eq!(verdict(&favorites, "g", FRESH, true), Verdict::Ask);
+        assert_eq!(verdict(&FriendsConfig::default(), "f", FRESH, false), Verdict::Decline);
     }
 
     #[test]
@@ -1676,15 +1769,48 @@ mod tests {
     fn room_is_checked_for_the_clip_and_its_tracks_together_on_one_drive() {
         const GB: u64 = 1 << 30;
         // Without tracks the app data drive does not matter.
-        assert_eq!(room(3 << 20, 0, Some(10 * GB), Some(0), false), Room::Fits);
+        assert_eq!(room(3 << 20, 0, Some(10 * GB), Some(0), false, NO_PENDING), Room::Fits);
         // Only the app data drive is short: the clip comes alone.
-        assert_eq!(room(GB, GB, Some(10 * GB), Some(GB / 2), false), Room::WithoutTracks);
+        assert_eq!(room(GB, GB, Some(10 * GB), Some(GB / 2), false, NO_PENDING), Room::WithoutTracks);
         // Both on C:, 11 GB free, 10 GB clip and 6 GB tracks: each alone fits,
         // together they do not.
-        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), true), Room::WithoutTracks);
-        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), false), Room::Fits);
-        assert_eq!(room(10 * GB, 0, Some(10 * GB), None, false), Room::None, "the margin counts");
-        assert_eq!(room(10 * GB, 6 * GB, None, None, true), Room::Fits, "unknown counts as room");
+        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), true, NO_PENDING), Room::WithoutTracks);
+        assert_eq!(room(10 * GB, 6 * GB, Some(11 * GB), Some(11 * GB), false, NO_PENDING), Room::Fits);
+        assert_eq!(room(10 * GB, 0, Some(10 * GB), None, false, NO_PENDING), Room::None, "the margin counts");
+        assert_eq!(room(10 * GB, 6 * GB, None, None, true, NO_PENDING), Room::Fits, "unknown counts as room");
+    }
+
+    #[test]
+    fn offers_on_their_way_count_against_the_free_space() {
+        const GB: u64 = 1 << 30;
+        // 10 GB free, two 6 GB clips: the first fits, the second does not
+        // while the first still has all of its bytes to come.
+        assert_eq!(room(6 * GB, 0, Some(10 * GB), None, false, NO_PENDING), Room::Fits);
+        assert_eq!(room(6 * GB, 0, Some(10 * GB), None, false, (6 * GB, 0)), Room::None);
+        // What has arrived is gone from the free space already and is not
+        // counted twice: 5 of the first 6 GB in, 5 GB free, a 3 GB clip fits.
+        let left = still_to_come(6 * GB, 6 * GB, 5 * GB);
+        assert_eq!(left, (GB, 0));
+        assert_eq!(room(3 * GB, 0, Some(5 * GB), None, false, left), Room::Fits);
+        assert_eq!(room(3 * GB, 0, Some(5 * GB), None, false, (6 * GB, 0)), Room::None);
+        // Their tracks weigh on the clip drive only when it is the data drive too.
+        assert_eq!(room(GB, GB, Some(3 * GB), Some(3 * GB), true, (0, 2 * GB)), Room::None);
+        assert_eq!(room(GB, GB, Some(3 * GB), Some(3 * GB), false, (0, 2 * GB)), Room::WithoutTracks);
+        assert_eq!(room(GB, GB, Some(3 * GB), Some(5 * GB), false, (0, 2 * GB)), Room::Fits);
+        assert_eq!(room(GB, 0, None, None, true, (u64::MAX, u64::MAX)), Room::Fits, "unknown still counts as room");
+    }
+
+    #[test]
+    fn what_is_still_to_come_counts_the_tracks_first() {
+        // 100 bytes of clip, 30 of tracks.
+        assert_eq!(still_to_come(100, 130, 0), (100, 30));
+        assert_eq!(still_to_come(100, 130, 20), (100, 10));
+        assert_eq!(still_to_come(100, 130, 50), (80, 0));
+        assert_eq!(still_to_come(100, 130, 130), (0, 0));
+        // A clip received without its tracks: the size shown is the clip's.
+        assert_eq!(still_to_come(100, 100, 40), (60, 0));
+        // Numbers that cannot be right do not wrap round.
+        assert_eq!(still_to_come(100, 50, u64::MAX), (0, 0));
     }
 
     #[test]

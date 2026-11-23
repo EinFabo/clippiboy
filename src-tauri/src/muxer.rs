@@ -77,6 +77,22 @@ pub fn ffmpeg() -> Command {
     command("ffmpeg")
 }
 
+/// The readers a clip file may be opened with: MP4 and MOV, Matroska and WebM,
+/// and the still readers for a screenshot. Each entry names a whole reader as
+/// ffmpeg lists it (`mov,mp4,m4a,3gp,3g2,mj2` is one).
+const CLIP_FORMATS: &str = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,image2,png_pipe,jpeg_pipe";
+
+/// Input options for a clip file or one of its tracks, set before its `-i`.
+///
+/// A clip may come from a friend, and ffmpeg reads a file as whatever its
+/// bytes say it is: a playlist (HLS, concat) pulling other files off the disk
+/// or the network into the picture, or any of the hundreds of rarely used
+/// readers. Only the formats ClippiBoy itself writes are let in, and only from
+/// a file.
+pub fn clip_input() -> [&'static str; 4] {
+    ["-format_whitelist", CLIP_FORMATS, "-protocol_whitelist", "file"]
+}
+
 /// A tool that carries a live picture, above normal priority. It does little
 /// work, but late: below normal, a busy PC (a game, a build) held a camera's
 /// frames back for seconds and let them out in a burst — a frozen face in the
@@ -786,6 +802,22 @@ pub fn probe_duration_ms(path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::buffer::jump_limit_us;
+
+    #[test]
+    fn a_clip_file_is_read_only_as_what_clippiboy_writes_and_only_from_disk() {
+        let args = clip_input();
+        assert_eq!(args[0], "-format_whitelist");
+        let formats: Vec<&str> = args[1].split(',').collect();
+        // ffmpeg matches the readers by any of their names.
+        for reader in ["mp4", "matroska", "webm", "png_pipe", "jpeg_pipe", "image2"] {
+            assert!(formats.contains(&reader), "{reader} missing");
+        }
+        // The ones that open further files or addresses stay out.
+        for reader in ["hls", "concat", "dash", "tee", "lavfi", "mpegts", "rtsp", "sdp"] {
+            assert!(!formats.contains(&reader), "{reader} let in");
+        }
+        assert_eq!(args[2..], ["-protocol_whitelist", "file"]);
+    }
 
     #[test]
     fn a_probed_size_is_read() {

@@ -83,7 +83,7 @@ pub fn png() -> &'static [u8] {
 pub fn picture() -> &'static (u32, u32, Vec<u8>) {
     static PICTURE_RGBA: OnceLock<(u32, u32, Vec<u8>)> = OnceLock::new();
     PICTURE_RGBA.get_or_init(|| {
-        crate::shot::read_rgba(PICTURE).unwrap_or_else(|err| {
+        crate::shot::read_rgba(PICTURE, None).unwrap_or_else(|err| {
             log::error!("watermark picture unreadable: {err}");
             (0, 0, Vec::new())
         })

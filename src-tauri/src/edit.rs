@@ -1136,6 +1136,7 @@ fn arguments(
     // When copying, `video_start_ms` is always 0 — an `-ss` with `-c:v copy`
     // would slide to the keyframe before it (up to two seconds) and, placed after
     // `-i`, would even end up with no leading keyframe at all.
+    args.extend(crate::muxer::clip_input().map(String::from));
     if plan.video_start_ms > 0 {
         args.push("-ss".into());
         args.push(seconds(plan.video_start_ms));
@@ -1145,6 +1146,7 @@ fn arguments(
 
     if from_stems {
         for path in &stem_files {
+            args.extend(crate::muxer::clip_input().map(String::from));
             if plan.stems_start_ms > 0 {
                 args.push("-ss".into());
                 args.push(seconds(plan.stems_start_ms));
@@ -2559,6 +2561,8 @@ pub(crate) mod tests {
         for at in inputs {
             assert_eq!(args[at - 2], "-ss", "jede Eingabe braucht ihr -ss: {args:?}");
             assert_eq!(args[at - 1], "4.000");
+            // Clip and tracks may come from a friend.
+            assert_eq!(args[at - 6..at - 2], crate::muxer::clip_input(), "{args:?}");
         }
     }
 

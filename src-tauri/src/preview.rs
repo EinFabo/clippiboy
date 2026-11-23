@@ -41,6 +41,7 @@ pub fn waveform(clip: &Clip) -> Result<PathBuf, String> {
 
     let mut draw = ffmpeg();
     draw.args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(crate::muxer::clip_input())
         .arg("-i")
         .arg(&clip.path)
         // `split_channels=0` lays left and right on top of each other: the

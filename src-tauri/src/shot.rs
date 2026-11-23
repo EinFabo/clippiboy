@@ -102,10 +102,7 @@ impl Shot {
     /// almost everywhere, so it deflates to a few kilobytes, while the picture
     /// underneath is megabytes.
     pub fn blend(&mut self, layer: &[u8]) -> Result<(), String> {
-        let top = read_rgba(layer)?;
-        if top.0 != self.width || top.1 != self.height {
-            return Err("The layer does not fit the picture.".into());
-        }
+        let top = read_rgba(layer, Some((self.width, self.height)))?;
         for (under, over) in self.rgb.chunks_exact_mut(3).zip(top.2.chunks_exact(4)) {
             let alpha = over[3] as u32;
             if alpha == 0 {
@@ -480,7 +477,45 @@ pub fn size_of_png(path: &Path) -> Result<(u32, u32), String> {
 pub fn read_png(path: &Path) -> Result<Shot, String> {
     let file = std::fs::File::open(path)
         .map_err(|err| format!("could not open '{}': {err}", path.display()))?;
-    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decode_rgb(std::io::BufReader::new(file))
+}
+
+/// Largest edge a picture may have to be decoded — what a Direct3D 11 texture
+/// can hold, so no capture is ever larger.
+const MAX_EDGE: u32 = 16384;
+/// Largest number of pixels a picture may have to be decoded: a quarter of a
+/// gigapixel, at four bytes each a gigabyte.
+const MAX_PIXELS: u64 = 1 << 28;
+
+/// Whether a picture of this size may be decoded. The header alone decides how
+/// much memory the pixels take, and a header is a few bytes anybody can write:
+/// a friend's screenshot claiming 60000 × 60000 asked for some ten gigabytes,
+/// and the process died on the allocation.
+fn decodable(width: u32, height: u32) -> Result<(), String> {
+    if width > MAX_EDGE || height > MAX_EDGE || width as u64 * height as u64 > MAX_PIXELS {
+        return Err(format!("the picture is too large ({width} × {height})"));
+    }
+    Ok(())
+}
+
+/// The buffer for one decoded frame — after [`decodable`], and taken with
+/// `try_reserve_exact`, so a request the system cannot meet is an error
+/// rather than the end of the process.
+fn frame_buffer<R: std::io::Read>(reader: &png::Reader<R>) -> Result<Vec<u8>, String> {
+    let info = reader.info();
+    decodable(info.width, info.height)?;
+    let size = reader.output_buffer_size();
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(size)
+        .map_err(|_| format!("not enough memory for the picture ({} MB)", size >> 20))?;
+    buffer.resize(size, 0);
+    Ok(buffer)
+}
+
+/// [`read_png`] on any source of bytes.
+fn decode_rgb<R: std::io::Read>(source: R) -> Result<Shot, String> {
+    let mut decoder = png::Decoder::new(source);
     // Palettes and 16-bit channels turn into plain 8-bit ones, so only a
     // handful of shapes are left below.
     decoder.set_transformations(
@@ -490,7 +525,7 @@ pub fn read_png(path: &Path) -> Result<Shot, String> {
         .read_info()
         .map_err(|err| format!("could not read the picture: {err}"))?;
 
-    let mut buffer = vec![0u8; reader.output_buffer_size()];
+    let mut buffer = frame_buffer(&reader)?;
     let info = reader
         .next_frame(&mut buffer)
         .map_err(|err| format!("could not read the picture: {err}"))?;
@@ -720,7 +755,10 @@ fn transpose(from: &[u8], to: &mut [u8], width: usize, height: usize) {
 
 /// Decode a PNG keeping its alpha — the counterpart to `read_png`, which throws
 /// it away because a screenshot has none to keep.
-pub(crate) fn read_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+///
+/// With `expect`, a layer of any other size is turned away before its pixels
+/// take any memory.
+pub(crate) fn read_rgba(bytes: &[u8], expect: Option<(u32, u32)>) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(
         png::Transformations::EXPAND | png::Transformations::STRIP_16,
@@ -728,8 +766,11 @@ pub(crate) fn read_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut reader = decoder
         .read_info()
         .map_err(|err| format!("could not read the layer: {err}"))?;
+    if expect.is_some_and(|size| size != (reader.info().width, reader.info().height)) {
+        return Err("The layer does not fit the picture.".into());
+    }
 
-    let mut buffer = vec![0u8; reader.output_buffer_size()];
+    let mut buffer = frame_buffer(&reader)?;
     let info = reader
         .next_frame(&mut buffer)
         .map_err(|err| format!("could not read the layer: {err}"))?;
@@ -935,5 +976,87 @@ mod tests {
         // Wider and taller than what is left of the picture from that corner.
         shot.blur(90, 15, 40, 40, 6, false);
         assert_eq!(shot.rgb.len(), 100 * 20 * 3);
+    }
+
+    /// A real PNG of `width` × `height`, in RGBA when `alpha`.
+    fn png_bytes(width: u32, height: u32, alpha: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(if alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
+        encoder.set_depth(png::BitDepth::Eight);
+        let channels = if alpha { 4 } else { 3 };
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&vec![200u8; (width * height) as usize * channels]).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= *byte as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    /// A 1 × 1 PNG whose header claims another size — what a sender can write
+    /// by hand. The header's checksum is made to match, so only the size is wrong.
+    fn lying_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = png_bytes(1, 1, false);
+        // Signature (8), length (4), "IHDR" (4), then width and height.
+        assert_eq!(&bytes[12..16], b"IHDR");
+        bytes[16..20].copy_from_slice(&width.to_be_bytes());
+        bytes[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        bytes
+    }
+
+    /// Why `decode_rgb` turned the bytes away — `Shot` prints no pixels.
+    fn refused(bytes: Vec<u8>) -> String {
+        match decode_rgb(std::io::Cursor::new(bytes)) {
+            Ok(shot) => panic!("decoded a {} x {} picture", shot.width, shot.height),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn a_header_claiming_a_huge_picture_is_refused_before_anything_is_allocated() {
+        let err = refused(lying_png(60000, 60000));
+        assert!(err.contains("too large"), "{err}");
+        let err = read_rgba(&lying_png(60000, 60000), None).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        // One edge alone is enough.
+        assert!(refused(lying_png(MAX_EDGE + 1, 1)).contains("too large"));
+    }
+
+    #[test]
+    fn the_size_limits_leave_every_real_screen_alone() {
+        assert!(decodable(MAX_EDGE, MAX_EDGE).is_ok());
+        assert!(decodable(3 * 3840, 2160).is_ok(), "three 4K screens side by side");
+        assert!(decodable(MAX_EDGE + 1, 1).is_err());
+        assert!(decodable(1, MAX_EDGE + 1).is_err());
+        assert!(decodable(u32::MAX, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn a_small_picture_still_decodes() {
+        let shot = decode_rgb(std::io::Cursor::new(png_bytes(3, 2, true))).unwrap();
+        assert_eq!((shot.width, shot.height, shot.rgb.len()), (3, 2, 3 * 2 * 3));
+        let (width, height, rgba) = read_rgba(&png_bytes(3, 2, true), Some((3, 2))).unwrap();
+        assert_eq!((width, height, rgba.len()), (3, 2, 3 * 2 * 4));
+    }
+
+    #[test]
+    fn a_layer_of_the_wrong_size_is_refused_before_it_is_decoded() {
+        // The header's size decides, not the pixels: this one could not even be decoded.
+        let err = read_rgba(&lying_png(5000, 5000), Some((100, 20))).unwrap_err();
+        assert!(err.contains("does not fit"), "{err}");
+        let mut shot = split_picture(); // 100 x 20
+        assert!(shot.blend(&png_bytes(20, 100, true)).unwrap_err().contains("does not fit"));
+        assert!(shot.blend(&png_bytes(100, 20, true)).is_ok());
     }
 }
