@@ -2,9 +2,13 @@
 # nothing ran them: a change that broke the build or a test only showed up when
 # the release workflow failed, or not at all.
 #
-# Deliberately no clippy `-D warnings` or `cargo fmt --check` yet — the tree has
-# warnings today, and a gate that is red from the start teaches everyone to
-# ignore it. Those come once the warnings are gone.
+# The Rust code also has to be formatted as rustfmt has it and draw no warning
+# from clippy: both were brought to zero first, so the gate starts green.
+#
+# `npm ci --ignore-scripts`: no package's own install script runs here. None is
+# needed — esbuild, Tauri's CLI, rollup and the Tailwind engine bring their
+# native programs as platform packages, and esbuild's script only checks its
+# binary (on Windows it changes nothing).
 name: CI
 
 on:
@@ -34,15 +38,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          components: rustfmt, clippy
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             src-tauri
             vcam
+      - name: Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --check
       # Type check and bundle; tauri-build also wants `dist` to exist.
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm test
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --lib --tests -- -D warnings
       - name: Unit tests
         working-directory: src-tauri
         run: cargo test --locked --lib
@@ -64,6 +75,8 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: server/package-lock.json
-      - run: npm ci
+      # Type check and node's own test runner: neither wrangler's workerd nor
+      # esbuild has to be set up for that.
+      - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
