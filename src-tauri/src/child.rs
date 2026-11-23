@@ -41,6 +41,12 @@ pub const STALL: Duration = Duration::from_secs(120);
 /// Work that shows it moves on: `-progress`, or its reading and writing.
 pub const MOVING: Limit = Limit::Stall(STALL);
 
+/// The longest any [`Limit::Stall`] run may take, moving on or not, the
+/// PC's sleep left out. A demuxer going round in circles on a damaged file
+/// can report progress for good; nothing ClippiBoy asks of ffmpeg takes this
+/// long, not even a re-encode of a recording of many hours.
+const BACKSTOP: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// The arguments that make ffmpeg report its progress on stdout, and no stats
 /// on stderr.
 pub const PROGRESS: [&str; 3] = ["-progress", "pipe:1", "-nostats"];
@@ -60,9 +66,12 @@ const SLEPT: Duration = Duration::from_secs(5);
 /// the bytes still sitting in a pipe, which the I/O counters already know.
 const IO_STEP: i64 = 64 * 1024;
 
-/// The slowest drive the end of a run is given time for: the index and the
-/// `+faststart` pass after the last frame report no progress and take the
-/// longer the bigger the file. Only where the I/O counters cannot be read.
+/// The slowest drive the end of a run is given time for. The index and the
+/// `+faststart` pass after the last frame report no progress, and
+/// `+faststart` reads the whole file and writes it again: a run may stand
+/// still for twice its output size at this rate ([`Watchdog::allowance`]).
+/// It only comes to that where the I/O counters cannot be read — where they
+/// can, that pass shows as reading and writing ([`Watchdog::io`]).
 const SLOW_DRIVE_BYTES_PER_SEC: u64 = 10 * 1000 * 1000;
 
 /// A fixed limit for work that reports nothing on the way and takes about as
@@ -153,8 +162,13 @@ impl Watchdog {
     pub fn expired(&self, at: Duration) -> bool {
         match self.limit {
             Limit::Total(limit) => at.saturating_sub(self.asleep) >= limit,
-            Limit::Stall(limit) => self.still_for(at) >= self.allowance(limit),
+            Limit::Stall(limit) => self.still_for(at) >= self.allowance(limit) || self.past_backstop(at),
         }
+    }
+
+    /// Has a run that need not stand still to be ended run for [`BACKSTOP`]?
+    pub fn past_backstop(&self, at: Duration) -> bool {
+        matches!(self.limit, Limit::Stall(_)) && at.saturating_sub(self.asleep) >= BACKSTOP
     }
 
     /// How long the run has shown no sign of moving on.
@@ -163,9 +177,9 @@ impl Watchdog {
     }
 
     /// How long the run may stand still: `stall`, or for a big output the
-    /// time a slow drive needs to read it through once more.
+    /// time a slow drive needs to read it through and write it again.
     fn allowance(&self, stall: Duration) -> Duration {
-        stall.max(Duration::from_secs(self.size / SLOW_DRIVE_BYTES_PER_SEC))
+        stall.max(Duration::from_secs(self.size.saturating_mul(2) / SLOW_DRIVE_BYTES_PER_SEC))
     }
 }
 
@@ -324,6 +338,9 @@ pub fn run(
         if watchdog.expired(at) {
             let words = match limit {
                 Limit::Total(limit) => format!("did not finish within {} s", limit.as_secs()),
+                Limit::Stall(_) if watchdog.past_backstop(at) => {
+                    format!("ran for {} hours", BACKSTOP.as_secs() / 3600)
+                }
                 Limit::Stall(_) => format!("stood still for {} s", watchdog.still_for(at).as_secs()),
             };
             break Err(io::Error::new(io::ErrorKind::TimedOut, format!("{name} {words} and was ended")));
@@ -466,6 +483,32 @@ mod tests {
         }
     }
 
+    /// A demuxer going round in circles on a damaged file reports progress
+    /// for good: the backstop ends it all the same — the PC's sleep left out —
+    /// and a fixed limit knows no backstop.
+    #[test]
+    fn a_run_that_moves_on_for_good_is_ended_at_the_backstop() {
+        let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
+        let minutes = BACKSTOP.as_secs() / 60;
+        for minute in 1..minutes {
+            assert!(watchdog.progress(S(minute * 60), minute as i64 * 60_000_000));
+            assert!(!watchdog.expired(S(minute * 60 + 1)), "minute {minute}");
+        }
+        assert!(watchdog.progress(S(minutes * 60), minutes as i64 * 60_000_000));
+        assert!(watchdog.expired(BACKSTOP));
+        assert!(watchdog.past_backstop(BACKSTOP));
+
+        let mut slept = Watchdog::new(Limit::Stall(S(120)));
+        slept.tick(S(1));
+        slept.tick(S(1) + S(3_600));
+        assert!(slept.progress(BACKSTOP, 1));
+        assert!(!slept.expired(BACKSTOP), "an hour of it was sleep");
+        assert!(slept.progress(BACKSTOP + S(3_599), 2));
+        assert!(slept.expired(BACKSTOP + S(3_600)));
+
+        assert!(!Watchdog::new(Limit::Total(BACKSTOP * 2)).past_backstop(BACKSTOP));
+    }
+
     #[test]
     fn a_run_that_never_reports_is_ended_after_the_stall() {
         let watchdog = Watchdog::new(Limit::Stall(S(120)));
@@ -486,16 +529,16 @@ mod tests {
         assert!(watchdog.expired(S(130)));
     }
 
-    /// The index at the end, and `+faststart` reading the file through once
-    /// more, report no progress: a 2.4 GB output may stand still for four
-    /// minutes, a small one for the plain stall.
+    /// The index at the end, and `+faststart` reading the file through and
+    /// writing it again, report no progress: a 2.4 GB output may stand still
+    /// for eight minutes, a small one for the plain stall.
     #[test]
     fn the_bigger_the_output_the_longer_its_end_may_take() {
         let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
         assert!(watchdog.progress(S(600), 300_000_000));
         watchdog.size(2_400_000_000);
-        assert!(!watchdog.expired(S(600 + 239)));
-        assert!(watchdog.expired(S(600 + 240)));
+        assert!(!watchdog.expired(S(600 + 479)));
+        assert!(watchdog.expired(S(600 + 480)));
         let mut watchdog = Watchdog::new(Limit::Stall(S(120)));
         assert!(watchdog.progress(S(5), 30_000_000));
         watchdog.size(40_000_000);

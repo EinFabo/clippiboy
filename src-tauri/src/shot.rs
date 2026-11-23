@@ -483,9 +483,10 @@ pub fn read_png(path: &Path) -> Result<Shot, String> {
 /// Largest edge a picture may have to be decoded — what a Direct3D 11 texture
 /// can hold, so no capture is ever larger.
 const MAX_EDGE: u32 = 16384;
-/// Largest number of pixels a picture may have to be decoded: a quarter of a
-/// gigapixel, at four bytes each a gigabyte.
-const MAX_PIXELS: u64 = 1 << 28;
+/// Largest number of pixels a picture may have to be decoded: 64 megapixels,
+/// at four bytes each a quarter of a gigabyte (and the RGB copy on top).
+/// Still more than an 8K screen, or a 10240 × 4320 ultrawide.
+const MAX_PIXELS: u64 = 1 << 26;
 
 /// Whether a picture of this size may be decoded. The header alone decides how
 /// much memory the pixels take, and a header is a few bytes anybody can write:
@@ -505,11 +506,19 @@ fn frame_buffer<R: std::io::Read>(reader: &png::Reader<R>) -> Result<Vec<u8>, St
     let info = reader.info();
     decodable(info.width, info.height)?;
     let size = reader.output_buffer_size();
+    let mut buffer = converted_buffer(size)?;
+    buffer.resize(size, 0);
+    Ok(buffer)
+}
+
+/// An empty buffer that can take `size` bytes, or an error when the system
+/// cannot give them — for the decoded frame and for its converted copy, which
+/// is about as large again.
+fn converted_buffer(size: usize) -> Result<Vec<u8>, String> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(size)
         .map_err(|_| format!("not enough memory for the picture ({} MB)", size >> 20))?;
-    buffer.resize(size, 0);
     Ok(buffer)
 }
 
@@ -535,21 +544,21 @@ fn decode_rgb<R: std::io::Read>(source: R) -> Result<Shot, String> {
     let rgb = match info.color_type {
         png::ColorType::Rgb => buffer,
         png::ColorType::Rgba => {
-            let mut out = Vec::with_capacity(pixels * 3);
+            let mut out = converted_buffer(pixels * 3)?;
             for pixel in buffer.chunks_exact(4) {
                 out.extend_from_slice(&pixel[..3]);
             }
             out
         }
         png::ColorType::Grayscale => {
-            let mut out = Vec::with_capacity(pixels * 3);
+            let mut out = converted_buffer(pixels * 3)?;
             for grey in &buffer {
                 out.extend_from_slice(&[*grey, *grey, *grey]);
             }
             out
         }
         png::ColorType::GrayscaleAlpha => {
-            let mut out = Vec::with_capacity(pixels * 3);
+            let mut out = converted_buffer(pixels * 3)?;
             for pixel in buffer.chunks_exact(2) {
                 out.extend_from_slice(&[pixel[0], pixel[0], pixel[0]]);
             }
@@ -782,7 +791,7 @@ pub(crate) fn read_rgba(bytes: &[u8], expect: Option<(u32, u32)>) -> Result<(u32
         // A layer with no transparency at all covers everything — unusual, but
         // not a reason to give up.
         png::ColorType::Rgb => {
-            let mut out = Vec::with_capacity(pixels * 4);
+            let mut out = converted_buffer(pixels * 4)?;
             for pixel in buffer.chunks_exact(3) {
                 out.extend_from_slice(pixel);
                 out.push(255);
@@ -1035,8 +1044,11 @@ mod tests {
 
     #[test]
     fn the_size_limits_leave_every_real_screen_alone() {
-        assert!(decodable(MAX_EDGE, MAX_EDGE).is_ok());
         assert!(decodable(3 * 3840, 2160).is_ok(), "three 4K screens side by side");
+        assert!(decodable(7680, 4320).is_ok(), "8K");
+        assert!(decodable(10240, 4320).is_ok(), "the widest ultrawide");
+        assert!(decodable(MAX_EDGE, 4096).is_ok(), "the longest edge, at the pixel limit");
+        assert!(decodable(MAX_EDGE, MAX_EDGE).is_err(), "a gigabyte of pixels");
         assert!(decodable(MAX_EDGE + 1, 1).is_err());
         assert!(decodable(1, MAX_EDGE + 1).is_err());
         assert!(decodable(u32::MAX, u32::MAX).is_err());
