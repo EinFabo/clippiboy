@@ -4,9 +4,10 @@
 # One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
 #
 # Runs on changes to site/ and after every finished release: the latest version,
-# its size, the direct links and the download count are written into the page
-# here (.github/scripts/bake-release.mjs), not looked up by every visitor's
-# browser. The browser only asks GitHub itself if release.json is missing.
+# its size and the direct links are written into the page here
+# (.github/scripts/bake-release.mjs), not looked up by every visitor's browser.
+# The browser only asks GitHub itself if release.json is missing. The download
+# count is not baked: main.js reads it live from clippiboy.com/stats.json.
 
 name: Pages
 
