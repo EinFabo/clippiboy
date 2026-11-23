@@ -77,6 +77,8 @@ const date = new Date(release.publishedAt).toLocaleDateString("en-GB", {
 });
 
 let html = await readFile("site/index.html", "utf8");
+// `replacement` is a function of the match and its groups, never a string: in
+// a string `$&`, `$'` or `` $` `` from a URL or a tag would be expanded.
 const swap = (pattern, replacement) => {
   const next = html.replace(pattern, replacement);
   if (next === html) console.warn(`::warning::Nothing in index.html matched ${pattern}`);
@@ -84,14 +86,20 @@ const swap = (pattern, replacement) => {
 };
 // The download buttons stay on clippiboy.com/get/…, which counts per link and
 // serves this release; main.js carries a ?ref= of the page over to them.
-if (release.plugin) swap(/(data-plugin href=")[^"]*"/g, `$1${escape(release.plugin.url)}"`);
-swap(/(<span data-version>)[^<]*(<\/span>)/, `$1Version ${escape(release.version)}, ${mb} MB$2`);
+if (release.plugin) {
+  swap(/(data-plugin href=")[^"]*"/g, (_, head) => `${head}${escape(release.plugin.url)}"`);
+}
+swap(
+  /(<span data-version>)[^<]*(<\/span>)/,
+  (_, open, close) => `${open}Version ${escape(release.version)}, ${mb} MB${close}`,
+);
 // The download count is not baked: main.js asks clippiboy.com/stats.json, which
 // counts real downloads (GitHub's counter would add every auto-update).
 swap(
   /(<p data-release>)[\s\S]*?(<\/p>)/,
-  `$1ClippiBoy ${escape(release.version)}, released ${date}. ` +
-    `<a href="${escape(release.url)}">What's new</a>$2`,
+  (_, open, close) =>
+    `${open}ClippiBoy ${escape(release.version)}, released ${date}. ` +
+    `<a href="${escape(release.url)}">What's new</a>${close}`,
 );
 await writeFile("site/index.html", html);
 

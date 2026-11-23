@@ -11,9 +11,13 @@
 # Every action is pinned to a commit, not a tag that can be moved: they run
 # next to the updater's signing key.
 #
-# One-time setup (repository → Settings → Secrets → Actions):
+# The job runs in the `release` environment, which holds the two secrets and
+# waits for a reviewer before any step runs. One-time setup (repository →
+# Settings → Environments → release → Environment secrets):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of ~/.clippiboy/updater.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  contents of ~/.clippiboy/updater.password
+#
+# No package's install script runs (`npm ci --ignore-scripts`): see ci.yml.
 name: Release
 
 on:
@@ -22,9 +26,12 @@ on:
   # A trial build, published nowhere.
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   windows:
     runs-on: windows-latest
+    environment: release
     permissions:
       # Create the release and attach the files.
       contents: write
@@ -66,7 +73,7 @@ jobs:
             src-tauri
             vcam
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       # ffmpeg is not part of the package: the app fetches it once on first
       # start from its own release (see ffmpeg.yml).
@@ -81,8 +88,8 @@ jobs:
       - name: Build the Stream Deck plugin
         working-directory: streamdeck
         run: |
-          npm ci
-          npm ci --prefix com.einfabo.clippiboy.sdPlugin
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix com.einfabo.clippiboy.sdPlugin
           npm run pack
 
       # ClippiBoy Camera's setup, which carries the camera's DLL. It goes into
@@ -118,10 +125,12 @@ jobs:
       # installer. Only on a real tag — a trial build made no release.
       - name: Attach the Stream Deck plugin
         if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: >
-          gh release upload ${{ github.ref_name }}
+          gh release upload $env:TAG
           streamdeck/dist/com.einfabo.clippiboy.streamDeckPlugin
           --clobber
 
