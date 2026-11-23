@@ -145,17 +145,36 @@ export function chunks<T>(items: readonly T[], size: number): T[][] {
 }
 
 /**
- * Does a share row count against its owner's week (and, while not deleted,
- * against the bucket)? Finished links do, deleted ones too, and an upload
- * still in time to finish. `COUNTS` in links.ts is the same rule in SQL.
- *
- * An upload that fails is kept as a finished, deleted row (pending 0, no
- * bytes), so it counts like a link: otherwise an account could fail uploads
- * on purpose — a byte that is no MP4 — over and over, each try a row written
- * and removed again, and spend the database's writes for everyone.
+ * Is a share row in the running for its owner's week (and, while not deleted,
+ * the bucket)? Finished links are, deleted ones too, and an upload still in
+ * time to finish. `COUNTS` in links.ts is the same rule in SQL. Of the failed
+ * uploads among them, `weekTimes` then lets a few go free.
  */
 export function countsAgainstWeek(row: { pending: number; created_at: number }, now: number): boolean {
   return row.pending === 0 || row.created_at > now - PENDING_MS;
+}
+
+/** Uploads a week that may fail without costing a link. */
+export const FREE_FAILS = 5;
+
+/**
+ * The creation times that count against the week, from the rows in it:
+ * every link, and of the failed uploads (`failed` 1 — kept as a deleted row,
+ * not removed) all but the newest FREE_FAILS. A dropped line or a cancelled
+ * upload now and then costs nothing; failing on purpose — a byte that is no
+ * MP4, over and over, each try a row written — runs into the limit soon.
+ *
+ * The oldest failures are the ones that count: when the oldest leaves the
+ * week, one fewer counts, so `quota` frees a slot at the right moment.
+ * `RECENT` in links.ts and `departStatement` in db.ts say the same in SQL.
+ */
+export function weekTimes(rows: { created_at: number; failed: number }[]): number[] {
+  const links = rows.filter((row) => row.failed !== 1).map((row) => row.created_at);
+  const failed = rows
+    .filter((row) => row.failed === 1)
+    .map((row) => row.created_at)
+    .sort((a, b) => a - b);
+  return [...links, ...failed.slice(0, Math.max(0, failed.length - FREE_FAILS))];
 }
 
 /** Tags as the page shows them: trimmed, no duplicates, a dozen at most. */

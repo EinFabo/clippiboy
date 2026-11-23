@@ -4,6 +4,7 @@ import {
   canUpload,
   chunks,
   countsAgainstWeek,
+  FREE_FAILS,
   cleanReport,
   cleanTags,
   expiresIn,
@@ -20,6 +21,7 @@ import {
   TOTAL_BYTES,
   WEEK_MS,
   weekStart,
+  weekTimes,
 } from "./shares.ts";
 
 const MB = 1024 * 1024;
@@ -108,13 +110,38 @@ test("keys go to R2 in runs it accepts", () => {
   assert.equal(runs.flat().length, 1201);
 });
 
-test("a failed upload counts against the week, an abandoned one only while it could finish", () => {
-  // Kept as a finished, deleted row: counts like a link.
+test("a row is in the running while it is a link or an upload that could still finish", () => {
+  // A link, deleted or not, or a failed upload kept as a deleted row.
   assert.equal(countsAgainstWeek({ pending: 0, created_at: now - 3 * 24 * 60 * 60 * 1000 }, now), true);
   // Still on its way.
   assert.equal(countsAgainstWeek({ pending: 1, created_at: now - 60_000 }, now), true);
   // Broke off without a word: stops counting, and the sweep takes it.
   assert.equal(countsAgainstWeek({ pending: 1, created_at: now - PENDING_MS - 1 }, now), false);
+});
+
+const hour = 60 * 60 * 1000;
+const link = (ago: number) => ({ created_at: now - ago * hour, failed: 0 });
+const fail = (ago: number) => ({ created_at: now - ago * hour, failed: 1 });
+
+test("a few failed uploads a week are free; the links alone reach the limit", () => {
+  const rows = [fail(9), fail(8), fail(7), link(6), link(5), link(4)];
+  const times = weekTimes(rows);
+  assert.deepEqual([...times].sort((a, b) => a - b), [now - 6 * hour, now - 5 * hour, now - 4 * hour]);
+  assert.deepEqual(canUpload(times, 1, 0), { ok: false, reason: "quota", resetsAt: now - 6 * hour + WEEK_MS });
+  // Two links and the same failures: one link left.
+  assert.equal(canUpload(weekTimes(rows.slice(0, 5)), 1, 0).ok, true);
+  assert.equal(FREE_FAILS, 5);
+});
+
+test("past the free ones, failed uploads count — the oldest first", () => {
+  const rows = Array.from({ length: 8 }, (_, i) => fail(10 - i));
+  const times = weekTimes(rows);
+  assert.equal(times.length, 3);
+  assert.deepEqual(times, [now - 10 * hour, now - 9 * hour, now - 8 * hour]);
+  assert.equal(quota(times, 0).used, 3);
+  // The oldest one leaving the week frees the slot.
+  assert.equal(quota(times, 0).resetsAt, now - 10 * hour + WEEK_MS);
+  assert.deepEqual(weekTimes(rows.slice(0, FREE_FAILS)), []);
 });
 
 test("tags are trimmed, unique and capped", () => {

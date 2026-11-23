@@ -64,15 +64,15 @@ address per /64): `ANON_LIMIT`, 10 a minute per route, plus a daily ceiling
 for pings. Signed-in routes that change something count per account:
 `USER_LIMIT`, 30 a minute, and on top of it
 
-- `SHARE_LIMIT`, 5 a minute: an upload and its poster;
+- `SHARE_LIMIT`, 6 a minute: an upload and its poster;
 - `CONNECT_LIMIT`, 2 a minute: starting "Connect channel";
 - `FRIEND_LIMIT`, 10 a minute: a friend request that writes (a refused one
   does not count, so mistyped names never run into it), unfriending or
   declining, blocking and unblocking, the "accept requests" switch.
 
-An upload that fails stays behind as a deleted link and counts against the
-week, so failing on purpose runs out after three tries. A link takes one
-poster. An account has at most 20 requests waiting for an answer.
+An upload that fails stays behind as a deleted share marked `failed`. Five a
+week are free; past that each counts against the week like a link, so
+failing on purpose runs out after eight tries. A link takes one poster. An account has at most 20 requests waiting for an answer.
 
 What one account can still write is about 55,000 rows a day: some 43,000 from
 friend changes and 12,000 from channel starts, each at its full limit around

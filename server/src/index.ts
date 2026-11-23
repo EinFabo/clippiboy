@@ -149,8 +149,8 @@ async function route(request: Request, env: Env): Promise<Response> {
   // sign-out are not. That keeps a script holding one session from flooding
   // the friends' sockets with notices, but 30 a minute is still tens of
   // thousands of writes a day: the routes that write the most for the least
-  // count against a tighter limit of their own on top (`writeBudget`), and a
-  // failed upload counts against the week like a link (links.ts). What one
+  // count against a tighter limit of their own on top (`writeBudget`), and
+  // failed uploads past a few free ones count against the week (links.ts). What one
   // account can still write in a day is about half the database's free daily
   // writes — see "Limits" in server/README.md.
   if (method !== "GET" && !(path === "/auth/logout" && method === "POST")) {

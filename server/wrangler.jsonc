@@ -47,8 +47,8 @@
     { "name": "USER_LIMIT", "namespace_id": "1004", "simple": { "limit": 30, "period": 60 } },
     // On top of it, per user id, for what writes the most for the least
     // (limits.ts `writeBudget`). Share: an upload and its poster — a link
-    // takes two calls, three a week are allowed.
-    { "name": "SHARE_LIMIT", "namespace_id": "1005", "simple": { "limit": 5, "period": 60 } },
+    // takes two calls, so the week's three links fit in one minute.
+    { "name": "SHARE_LIMIT", "namespace_id": "1005", "simple": { "limit": 6, "period": 60 } },
     // Connect: the start of "Connect channel", a row written and deleted again.
     { "name": "CONNECT_LIMIT", "namespace_id": "1006", "simple": { "limit": 2, "period": 60 } },
     // Friend: a request that writes, unfriending, blocks, the requests switch.

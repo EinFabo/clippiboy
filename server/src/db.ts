@@ -1,6 +1,6 @@
 import { friendCode, HttpError, sha256, base64url } from "./util";
 import { carryOver, KEPT_LINKS, type DepartedRow } from "./departed";
-import { newId, PENDING_MS, WEEK_MS } from "./shares";
+import { FREE_FAILS, newId, PENDING_MS, WEEK_MS } from "./shares";
 
 export interface User {
   id: string;
@@ -177,6 +177,12 @@ export function departStatement(db: D1Database, me: string, departed: string, no
            SELECT json_group_array(created_at) FROM (
              SELECT s.created_at FROM shares s JOIN users o ON o.id = s.owner
               WHERE s.owner = ?3 AND s.created_at > MAX(?4, o.links_reset_at) AND (s.pending = 0 OR s.created_at > ?5)
+                -- The newest few failed uploads are free (weekTimes in shares.ts).
+                AND (s.failed = 0 OR s.id NOT IN (
+                  SELECT f.id FROM shares f
+                   WHERE f.owner = ?3 AND f.failed = 1 AND f.created_at > MAX(?4, o.links_reset_at)
+                   ORDER BY f.created_at DESC LIMIT ?7
+                ))
               ORDER BY s.created_at DESC LIMIT ?6
            )
          ) AS links
@@ -184,7 +190,7 @@ export function departStatement(db: D1Database, me: string, departed: string, no
        ) WHERE banned_at IS NOT NULL OR links != '[]'
        ON CONFLICT (hash) DO UPDATE SET link_times = excluded.link_times, banned_at = excluded.banned_at, left_at = excluded.left_at`,
     )
-    .bind(departed, now, me, now - WEEK_MS, now - PENDING_MS, KEPT_LINKS);
+    .bind(departed, now, me, now - WEEK_MS, now - PENDING_MS, KEPT_LINKS, FREE_FAILS);
 }
 
 export async function tokenHash(token: string): Promise<string> {

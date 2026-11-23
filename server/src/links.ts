@@ -16,6 +16,7 @@ import {
   cleanTags,
   MAX_OPEN_REPORTS,
   expiresIn,
+  FREE_FAILS,
   friendOffer,
   ID_PATTERN,
   LIFETIME_MS,
@@ -33,6 +34,7 @@ import {
   WEEK_MS,
   WEEKLY_LIMIT,
   weekStart,
+  weekTimes,
 } from "./shares";
 
 export const PAGE_ORIGIN = "https://clippiboy.com";
@@ -54,6 +56,8 @@ interface ShareRow {
   /** "Add <name> as friend" offered on this link (Settings → Friends). */
   offer_friend: number;
   pending: number;
+  /** An upload that failed (GAVE_UP), kept so it can count against the week. */
+  failed: number;
 }
 
 const video = (id: string) => `${id}.mp4`;
@@ -64,7 +68,10 @@ const poster = (id: string) => `${id}.jpg`;
 // still in time to finish. The `?` is when a pending one is given up. The same
 // rule as `countsAgainstWeek` in shares.ts.
 const COUNTS = "(pending = 0 OR created_at > ?)";
-const RECENT = `SELECT COUNT(*) FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`;
+// How many count against the week: every link, and failed uploads past the
+// free ones (`weekTimes` in shares.ts).
+const RECENT = `SELECT COALESCE(SUM(failed = 0), 0) + MAX(0, COALESCE(SUM(failed), 0) - ${FREE_FAILS})
+  FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`;
 const LIVE_BYTES = `SELECT COALESCE(SUM(bytes), 0) FROM shares WHERE deleted_at IS NULL AND ${COUNTS}`;
 
 // For testing: accounts listed in the secret QUICK_LINKS_FOR (ids, comma
@@ -99,10 +106,10 @@ async function standingOf(env: Env, me: string): Promise<Standing> {
 
 async function recentOf(env: Env, me: string, now: number, standing: Standing): Promise<number[]> {
   if (standing.unlimited) return [];
-  const { results } = await env.DB.prepare(`SELECT created_at FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`)
+  const { results } = await env.DB.prepare(`SELECT created_at, failed FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`)
     .bind(me, weekStart(now, standing.resetAt), now - PENDING_MS)
-    .all<{ created_at: number }>();
-  return results.map((row) => row.created_at);
+    .all<{ created_at: number; failed: number }>();
+  return weekTimes(results);
 }
 
 async function liveBytes(env: Env, now: number): Promise<number> {
@@ -171,12 +178,12 @@ async function owned(env: Env, me: string, id: string): Promise<ShareRow> {
 // A deleted or run-out share keeps only what counts against the week and the
 // bucket — not what the clip was called, its game or its tags.
 const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0, offer_friend = 0 WHERE id = ?";
-// An upload that failed: the same, finished and empty, so it counts against
-// the week like a link (`countsAgainstWeek`). Removed instead, a failing
-// upload cost nothing and could be tried over and over, every try a row
-// written and deleted and two R2 writes.
+// An upload that failed: the same, finished, empty and marked failed. A few
+// a week are free, past that each counts like a link (`weekTimes`). Removed
+// instead, a failing upload cost nothing and could be tried over and over,
+// every try a row written and deleted and two R2 writes.
 const GAVE_UP =
-  "UPDATE shares SET pending = 0, bytes = 0, deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0, offer_friend = 0 WHERE id = ? AND pending = 1";
+  "UPDATE shares SET pending = 0, failed = 1, bytes = 0, deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0, offer_friend = 0 WHERE id = ? AND pending = 1";
 
 // --- For the app (signed in) --------------------------------------------------
 
