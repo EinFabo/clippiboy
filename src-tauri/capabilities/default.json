@@ -98,6 +98,7 @@
     "allow-friends-cancel-sign-in",
     "allow-friends-sign-out",
     "allow-friends-refresh",
+    "allow-friends-reconnect",
     "allow-friends-request",
     "allow-friends-accept",
     "allow-friends-remove",

@@ -17,8 +17,12 @@ use std::time::{Duration, Instant};
 /// Sessions created together (an app opening several) share one refresh.
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
 /// A session is often created a moment before it starts rendering, and the
-/// refresh only counts sessions that play — so one more refresh follows.
+/// refresh only counts sessions that play — so one more refresh follows, this
+/// long after the last session created.
 pub const FOLLOW_UP: Duration = Duration::from_millis(700);
+/// How long a device that could not be watched waits before it is tried again
+/// — the two-second tick covers it meanwhile.
+pub const RETRY: Duration = Duration::from_secs(30);
 
 /// Decides when the watcher thread fires a refresh. Pure, so it can be tested.
 #[derive(Default)]
@@ -35,9 +39,9 @@ impl Coalescer {
             let earliest = self.last_fire.map_or(now, |last| last + DEBOUNCE);
             self.due = Some(earliest.max(now));
         }
-        if self.follow_up.is_none() {
-            self.follow_up = Some(now + FOLLOW_UP);
-        }
+        // Re-armed each time: the follow-up belongs to the last session of a
+        // burst, not to the first, which may long have been counted.
+        self.follow_up = Some(now + FOLLOW_UP);
     }
 
     /// Should a refresh run now? Consumes what is due.
@@ -69,6 +73,33 @@ impl Coalescer {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+}
+
+/// When failed device registrations are tried again. Pure, so it can be tested.
+#[derive(Default)]
+pub struct Retry {
+    at: Option<Instant>,
+}
+
+impl Retry {
+    /// After registering: everything wanted is watched (`complete`), or a
+    /// device is missing and gets another go after [`RETRY`].
+    pub fn after(&mut self, complete: bool, now: Instant) {
+        self.at = (!complete).then(|| now + RETRY);
+    }
+
+    /// Is a retry due? Consumes it; [`Retry::after`] sets the next one.
+    pub fn due(&mut self, now: Instant) -> bool {
+        if self.at.is_some_and(|at| at <= now) {
+            self.at = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.at
     }
 }
 
@@ -123,15 +154,30 @@ fn run(rx: mpsc::Receiver<Cmd>, tx: Sender<Cmd>, fire: impl Fn()) {
     let _com = platform::ComGuard::new();
     let mut registrations = platform::Registrations::new(tx);
     let mut coalescer = Coalescer::default();
+    let mut retry = Retry::default();
     loop {
-        let wait = coalescer
-            .next_deadline()
+        let wait = [coalescer.next_deadline(), retry.next_deadline()]
+            .into_iter()
+            .flatten()
+            .min()
             .map_or(Duration::from_secs(3600), |at| at.saturating_duration_since(Instant::now()));
         match rx.recv_timeout(wait) {
-            Ok(Cmd::Watch(devices)) => registrations.set(&devices),
+            Ok(Cmd::Watch(devices)) => {
+                let complete = registrations.set(&devices);
+                retry.after(complete, Instant::now());
+            }
             Ok(Cmd::Created) => coalescer.trigger(Instant::now()),
-            Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(Cmd::Stop) => break,
+            // Never while this loop runs: `registrations` keeps a sender of its
+            // own (`own` in `Watcher::start`), so the channel cannot lose its
+            // last one — dropping the `Watcher` sends `Stop` instead. Kept for
+            // completeness, and as a way out should that ever change.
+            Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
+        }
+        if retry.due(Instant::now()) {
+            let complete = registrations.retry();
+            retry.after(complete, Instant::now());
         }
         if coalescer.poll(Instant::now()) {
             fire();
@@ -195,17 +241,20 @@ mod platform {
 
     pub struct Registrations {
         tx: Sender<Cmd>,
+        wanted: Vec<String>,
         active: Vec<Registration>,
     }
 
     impl Registrations {
         pub fn new(tx: Sender<Cmd>) -> Self {
-            Self { tx, active: Vec::new() }
+            Self { tx, wanted: Vec::new(), active: Vec::new() }
         }
 
         /// Drop what is no longer wanted, register what is new. A device that
-        /// fails stays out and is tried again with the next change.
-        pub fn set(&mut self, devices: &[String]) {
+        /// fails stays out until [`Registrations::retry`] or the next change.
+        /// True when every wanted device is watched.
+        pub fn set(&mut self, devices: &[String]) -> bool {
+            self.wanted = devices.to_vec();
             let (keep, drop): (Vec<_>, Vec<_>) = std::mem::take(&mut self.active)
                 .into_iter()
                 .partition(|r| devices.contains(&r.device));
@@ -213,15 +262,37 @@ mod platform {
                 unregister(&r);
             }
             self.active = keep;
-            for id in devices {
+            self.register_missing(true)
+        }
+
+        /// The wanted devices that failed before, once more. Logged only when
+        /// one now works — a device that stays broken said so the first time.
+        pub fn retry(&mut self) -> bool {
+            self.register_missing(false)
+        }
+
+        fn register_missing(&mut self, first: bool) -> bool {
+            let mut complete = true;
+            for id in &self.wanted {
                 if self.active.iter().any(|r| &r.device == id) {
                     continue;
                 }
                 match self.register(id) {
-                    Ok(r) => self.active.push(r),
-                    Err(e) => log::warn!("no session notifications on '{id}': {e}"),
+                    Ok(r) => {
+                        if !first {
+                            log::info!("session notifications on '{id}' after a retry");
+                        }
+                        self.active.push(r);
+                    }
+                    Err(e) => {
+                        complete = false;
+                        if first {
+                            log::warn!("no session notifications on '{id}': {e}");
+                        }
+                    }
                 }
             }
+            complete
         }
 
         fn register(&self, id: &str) -> windows::core::Result<Registration> {
@@ -247,8 +318,8 @@ mod platform {
     }
 
     fn unregister(r: &Registration) {
-        unsafe {
-            let _ = r.manager.UnregisterSessionNotification(&r.notify);
+        if let Err(e) = unsafe { r.manager.UnregisterSessionNotification(&r.notify) } {
+            log::warn!("session notifications on '{}' not unregistered: {e}", r.device);
         }
     }
 }
@@ -270,7 +341,12 @@ mod platform {
         pub fn new(_tx: Sender<Cmd>) -> Self {
             Self
         }
-        pub fn set(&mut self, _devices: &[String]) {}
+        pub fn set(&mut self, _devices: &[String]) -> bool {
+            true
+        }
+        pub fn retry(&mut self) -> bool {
+            true
+        }
         pub fn clear(&mut self) {}
     }
 }
@@ -317,6 +393,41 @@ mod tests {
         assert!(c.poll(at(t0, 700)));
         assert!(!c.poll(at(t0, 5000)));
         assert_eq!(c.next_deadline(), None);
+    }
+
+    /// Sessions that keep coming: the follow-up waits for the last of them.
+    #[test]
+    fn the_follow_up_is_re_armed_by_each_session() {
+        let t0 = Instant::now();
+        let mut c = Coalescer::default();
+        c.trigger(t0);
+        assert!(c.poll(t0));
+        c.trigger(at(t0, 500));
+        assert!(c.poll(at(t0, 500)));
+        // Not 700 ms after the first session, 700 ms after the last.
+        assert!(!c.poll(at(t0, 700)));
+        assert_eq!(c.next_deadline(), Some(at(t0, 1200)));
+        assert!(c.poll(at(t0, 1200)));
+        assert_eq!(c.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_device_that_could_not_be_watched_is_tried_again_slowly() {
+        let t0 = Instant::now();
+        let mut r = Retry::default();
+        r.after(true, t0);
+        assert_eq!(r.next_deadline(), None);
+        assert!(!r.due(t0 + RETRY));
+        r.after(false, t0);
+        assert_eq!(r.next_deadline(), Some(t0 + RETRY));
+        assert!(!r.due(t0 + RETRY - Duration::from_millis(1)));
+        assert!(r.due(t0 + RETRY));
+        // Consumed: only the next result arms it again.
+        assert!(!r.due(t0 + RETRY * 2));
+        r.after(false, t0 + RETRY);
+        assert_eq!(r.next_deadline(), Some(t0 + RETRY * 2));
+        r.after(true, t0 + RETRY * 2);
+        assert_eq!(r.next_deadline(), None);
     }
 
     #[test]

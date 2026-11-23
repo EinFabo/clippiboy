@@ -37,6 +37,10 @@ pub struct AudioProcess {
     /// Is any of them rendering sound right now?
     #[serde(default)]
     pub active: bool,
+    /// The program's icon as a PNG data URL, for the picker
+    /// (`list_audio_processes`); `None` when the process will not say.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

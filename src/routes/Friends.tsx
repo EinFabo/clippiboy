@@ -290,6 +290,9 @@ function SignedIn() {
             <p className="text-sm font-semibold">Can't reach the friends server</p>
             <p className="mt-0.5 text-[13px] text-ink-muted">Trying again by itself</p>
           </div>
+          <Button size="sm" onClick={() => void friendsApi.reconnect().catch(() => {})}>
+            Retry now
+          </Button>
         </Card>
       )}
 

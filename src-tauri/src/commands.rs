@@ -52,10 +52,14 @@ pub async fn list_cameras() -> Vec<crate::model::CameraDevice> {
     .await
 }
 
+/// The applications holding an audio session, with their program's icon —
+/// added here, not in `devices::list_processes`, as for the window list.
 #[tauri::command]
 pub async fn list_audio_processes() -> Vec<AudioProcess> {
     blocking(move || -> Vec<AudioProcess> {
-        devices::list_processes()
+        let mut apps = devices::list_processes();
+        crate::appicon::dress_apps(&mut apps);
+        apps
     })
     .await
 }

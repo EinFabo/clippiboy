@@ -133,6 +133,8 @@ pub struct Friends {
     /// When a friend request from someone was last announced, ms since the
     /// epoch, by id: withdrawing and sending again must not pop up every time.
     announced: Mutex<HashMap<String, i64>>,
+    /// "Retry now": ends the connection loop's wait before the next dial.
+    redial: tokio::sync::Notify,
 }
 
 // --- Setup ---------------------------------------------------------------------
@@ -269,6 +271,18 @@ pub async fn friends_sign_out(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn friends_refresh(app: AppHandle) -> Result<(), String> {
     refresh(&app, false).await
+}
+
+/// "Retry now" while the server cannot be reached: the next dial goes out at
+/// once instead of after the backoff. A press during a dial is kept for the
+/// wait after it, should that dial fail too.
+#[tauri::command]
+pub fn friends_reconnect(app: AppHandle) {
+    let friends = app.state::<Friends>();
+    let signed_in = friends.token.lock().is_some();
+    if signed_in && !friends.view.lock().connected {
+        friends.redial.notify_one();
+    }
 }
 
 /// `sent` or `accepted` — a request to someone who had already asked is a yes.
@@ -475,7 +489,10 @@ fn spawn_connection(app: &AppHandle) {
                 backoff = Duration::from_secs(1);
             }
             let (wait, next) = next_backoff(backoff, random_unit());
-            tokio::time::sleep(wait).await;
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = friends.redial.notified() => log::info!("friends: dialling again on request"),
+            }
             backoff = next;
         }
     });
@@ -546,6 +563,9 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
     let friends = app.state::<Friends>();
     *friends.outbox.lock() = Some(sender);
     friends.view.lock().connected = true;
+    // A "Retry now" pressed during this dial has done its work: it must not
+    // cut short the wait after some later drop.
+    let _ = futures_util::FutureExt::now_or_never(friends.redial.notified());
     crate::telemetry::used(crate::telemetry::Feature::Friends);
     emit(app);
     // The lists may have changed while we were away.

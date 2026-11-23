@@ -16,6 +16,8 @@ export const friendsApi = {
   cancelSignIn: () => invoke<void>("friends_cancel_sign_in"),
   signOut: () => invoke<void>("friends_sign_out"),
   refresh: () => invoke<void>("friends_refresh"),
+  /** Dials the server again at once instead of after the wait. */
+  reconnect: () => invoke<void>("friends_reconnect"),
   /** `"sent"`, or `"accepted"` when they had already asked. */
   request: (query: string) => invoke<"sent" | "accepted">("friends_request", { query }),
   accept: (id: string) => invoke<void>("friends_accept", { id }),

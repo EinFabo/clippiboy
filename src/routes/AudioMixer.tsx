@@ -960,7 +960,11 @@ function AddSourceList({
                     // Stored alongside the pid: the pid is dead the moment the
                     // application restarts, the exe name is not.
                     { type: "process", pid: p.pid, exe: p.exe, mode: "include" },
-                    <IconApp className="h-4 w-4" />,
+                    p.icon ? (
+                      <img src={p.icon} alt="" draggable={false} className="h-5 w-5 object-contain" />
+                    ) : (
+                      <IconApp className="h-4 w-4" />
+                    ),
                     added,
                   ),
                 )}

@@ -549,6 +549,12 @@
           "markdownDescription": "Enables the friends_delete_account command without any pre-configured scope."
         },
         {
+          "description": "Enables the friends_reconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-friends-reconnect",
+          "markdownDescription": "Enables the friends_reconnect command without any pre-configured scope."
+        },
+        {
           "description": "Enables the friends_refresh command without any pre-configured scope.",
           "type": "string",
           "const": "allow-friends-refresh",
@@ -1195,6 +1201,12 @@
           "type": "string",
           "const": "deny-friends-delete-account",
           "markdownDescription": "Denies the friends_delete_account command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the friends_reconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-friends-reconnect",
+          "markdownDescription": "Denies the friends_reconnect command without any pre-configured scope."
         },
         {
           "description": "Denies the friends_refresh command without any pre-configured scope.",

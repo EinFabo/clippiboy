@@ -10,7 +10,7 @@ mod win {
     use super::*;
     use std::collections::HashMap;
     use windows::core::Interface;
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -26,7 +26,7 @@ mod win {
     };
     use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
     };
 
     /// Initialize COM per thread; an already-initialized thread is fine.
@@ -143,7 +143,37 @@ mod win {
             }
             let _ = CloseHandle(snapshot);
         }
+        // Only links to a parent that is there can mislead.
+        let linked: Vec<u32> = out
+            .iter()
+            .filter(|(_, (parent, _))| *parent != 0 && out.contains_key(parent))
+            .flat_map(|(pid, (parent, _))| [*pid, *parent])
+            .collect();
+        let mut created = HashMap::new();
+        for pid in linked {
+            if let std::collections::hash_map::Entry::Vacant(slot) = created.entry(pid) {
+                if let Some(at) = created_at(pid) {
+                    slot.insert(at);
+                }
+            }
+        }
+        crate::audio::cut_reused_parents(&mut out, &created);
         out
+    }
+
+    /// When the process was created, in 100 ns ticks since 1601 — `None` when
+    /// it will not be opened (System, protected processes, some anti-cheat).
+    fn created_at(pid: u32) -> Option<u64> {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut created = FILETIME::default();
+            let (mut exited, mut kernel, mut user) =
+                (FILETIME::default(), FILETIME::default(), FILETIME::default());
+            let read = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
+            let _ = CloseHandle(handle);
+            read.ok()?;
+            Some(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
+        }
     }
 
     /// The sessions on `device_id` — empty string for the default output device.

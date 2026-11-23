@@ -89,6 +89,7 @@ fn main() {
         "friends_cancel_sign_in",
         "friends_sign_out",
         "friends_refresh",
+        "friends_reconnect",
         "friends_request",
         "friends_accept",
         "friends_remove",

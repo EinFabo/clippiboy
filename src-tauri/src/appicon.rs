@@ -1,19 +1,21 @@
-//! Application icons for the window list on the Video page.
+//! Application icons for the window list on the Video page and the
+//! applications in the audio picker.
 //!
 //! A window is drawn with the icon of the program behind it: its exe path from
 //! the process, the shell's own icon for that file (`IShellItemImageFactory`),
 //! as a small PNG data URL the page can put straight into an `<img>`. Each exe
 //! is looked at once per run — the answer, "this program has no icon"
-//! included, is kept; a lookup that failed is tried again on the next list.
-//! A game behind an anti-cheat may refuse to be opened; it gets no icon and
-//! the page draws its generic one, but it is still marked as the game.
+//! included, is kept; a lookup that failed is tried again on the next list,
+//! up to [`TRIES`] times. A game behind an anti-cheat may refuse to be opened;
+//! it gets no icon and the page draws its generic one, but it is still marked
+//! as the game.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 
-use crate::model::CaptureTarget;
+use crate::model::{AudioProcess, CaptureTarget};
 #[cfg(windows)]
 use crate::model::TargetKind;
 
@@ -33,6 +35,10 @@ const ICON_BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
 #[cfg_attr(not(windows), allow(dead_code))]
 const CACHE_LIMIT: usize = 512;
 
+/// Failed lookups an exe gets before it counts as having no icon: a shell that
+/// was only slow gets another go, one that always fails is not asked forever.
+pub const TRIES: u8 = 3;
+
 type Cache = HashMap<String, Option<String>>;
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -47,6 +53,13 @@ fn cache() -> &'static Mutex<Cache> {
 fn pending() -> &'static Mutex<HashSet<String>> {
     static PENDING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Failed lookups so far per exe not yet in the cache.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn failures() -> &'static Mutex<HashMap<String, u8>> {
+    static FAILURES: OnceLock<Mutex<HashMap<String, u8>>> = OnceLock::new();
+    FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// The cache's key for an exe: Windows paths do not care about case, and one
@@ -69,17 +82,23 @@ pub enum Lookup {
     Icon(String),
     /// The shell answered and has nothing to draw — worth remembering.
     NoIcon,
-    /// Something on the way failed; asked again next time.
+    /// Something on the way failed (the shell's image included); asked again
+    /// next time, until [`TRIES`] failures.
     Failed,
+    /// Not begun: the list's time was up, or the thread had no shell to ask.
+    /// Costs no try.
+    Late,
 }
 
 impl Lookup {
-    /// What goes into the cache, if anything.
-    pub fn cached(self) -> Option<Option<String>> {
+    /// What goes into the cache, if anything, for an exe that failed
+    /// `failed_before` times already.
+    pub fn cached(self, failed_before: u8) -> Option<Option<String>> {
         match self {
             Lookup::Icon(url) => Some(Some(url)),
             Lookup::NoIcon => Some(None),
-            Lookup::Failed => None,
+            Lookup::Failed if failed_before.saturating_add(1) >= TRIES => Some(None),
+            Lookup::Failed | Lookup::Late => None,
         }
     }
 }
@@ -101,6 +120,14 @@ pub fn to_look_up(
     out.into_values().collect()
 }
 
+/// The cached icon of a process's exe, if it has one.
+pub fn icon_for(process: &Process, known: &Cache) -> Option<String> {
+    process
+        .path
+        .as_deref()
+        .and_then(|path| known.get(&cache_key(path)).cloned().flatten())
+}
+
 /// One window's icon and game mark. The mark goes by the pid alone, so a game
 /// that refuses to be opened is still marked.
 pub fn dress(
@@ -111,10 +138,23 @@ pub fn dress(
 ) {
     let Some(process) = process else { return };
     target.is_game = game_pid == Some(process.pid);
-    target.icon = process
-        .path
-        .as_deref()
-        .and_then(|path| known.get(&cache_key(path)).cloned().flatten());
+    target.icon = icon_for(process, known);
+}
+
+/// Looks up the exes of these processes that are neither known nor being
+/// looked up, for at most [`ICON_BUDGET`].
+#[cfg(windows)]
+fn look_up_new(processes: &[Option<Process>]) {
+    let missing = {
+        let known = cache().lock();
+        let mut pending = pending().lock();
+        let missing = to_look_up(processes, &known, &pending);
+        pending.extend(missing.iter().map(|path| cache_key(path)));
+        missing
+    };
+    if !missing.is_empty() {
+        win::look_up(missing, ICON_BUDGET);
+    }
 }
 
 /// Adds the icon and the game mark to every window. `game_pid` is the process
@@ -129,18 +169,7 @@ pub fn dress_windows(targets: &mut [CaptureTarget], game_pid: Option<u32>) {
             TargetKind::Monitor => None,
         })
         .collect();
-
-    let missing = {
-        let known = cache().lock();
-        let mut pending = pending().lock();
-        let missing = to_look_up(&processes, &known, &pending);
-        pending.extend(missing.iter().map(|path| cache_key(path)));
-        missing
-    };
-    if !missing.is_empty() {
-        win::look_up(missing, ICON_BUDGET);
-    }
-
+    look_up_new(&processes);
     let known = cache().lock();
     for (target, process) in targets.iter_mut().zip(&processes) {
         dress(target, process.as_ref(), &known, game_pid);
@@ -150,18 +179,77 @@ pub fn dress_windows(targets: &mut [CaptureTarget], game_pid: Option<u32>) {
 #[cfg(not(windows))]
 pub fn dress_windows(_targets: &mut [CaptureTarget], _game_pid: Option<u32>) {}
 
+/// Adds its program's icon to every application of the audio picker, by the
+/// entry's root process — the same cache the window list uses.
+#[cfg(windows)]
+pub fn dress_apps(apps: &mut [AudioProcess]) {
+    let processes: Vec<Option<Process>> = apps
+        .iter()
+        .map(|app| Some(Process { pid: app.pid, path: exe_path(app.pid) }))
+        .collect();
+    look_up_new(&processes);
+    let known = cache().lock();
+    for (app, process) in apps.iter_mut().zip(&processes) {
+        app.icon = process.as_ref().and_then(|process| icon_for(process, &known));
+    }
+}
+
+#[cfg(not(windows))]
+pub fn dress_apps(_apps: &mut [AudioProcess]) {}
+
+/// The full path of a process's exe, if the process lets itself be asked.
+#[cfg(windows)]
+pub fn exe_path(pid: u32) -> Option<String> {
+    win::exe_path(pid)
+}
+
 /// A finished lookup into the cache, and off the pending list.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn settle(path: &str, found: Lookup) {
     let key = cache_key(path);
-    if let Some(entry) = found.cached() {
-        let mut known = cache().lock();
-        if known.len() >= CACHE_LIMIT {
-            known.clear();
+    let failed = found == Lookup::Failed;
+    let before = failures().lock().get(&key).copied().unwrap_or(0);
+    match found.cached(before) {
+        Some(entry) => {
+            let mut known = cache().lock();
+            if known.len() >= CACHE_LIMIT {
+                known.clear();
+                failures().lock().clear();
+            }
+            known.insert(key.clone(), entry);
+            failures().lock().remove(&key);
         }
-        known.insert(key.clone(), entry);
+        None if failed => {
+            failures().lock().insert(key.clone(), before + 1);
+        }
+        None => {}
     }
     pending().lock().remove(&key);
+}
+
+/// The exes one lookup run took on. Each comes off the pending list as it
+/// settles, and whatever is left when the run ends, however it ends: a panic
+/// on the way or a thread that never started must not leave an exe pending —
+/// and so never looked at again — for the rest of the run.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Claim(Vec<String>);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Claim {
+    fn settle(&mut self, path: &str, found: Lookup) {
+        let key = cache_key(path);
+        settle(path, found);
+        self.0.retain(|taken| *taken != key);
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let mut pending = pending().lock();
+        for key in self.0.drain(..) {
+            pending.remove(&key);
+        }
+    }
 }
 
 /// Says once which DPI awareness the target list is read under. Under
@@ -270,7 +358,7 @@ mod win {
         Some(super::Process { pid, path: exe_path(pid) })
     }
 
-    fn exe_path(pid: u32) -> Option<String> {
+    pub fn exe_path(pid: u32) -> Option<String> {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
             let mut buf = [0u16; MAX_PATH as usize * 2];
@@ -293,30 +381,47 @@ mod win {
     /// cache as it comes — one that arrives after the budget is there for the
     /// next list; exes not begun by then are left for it.
     pub fn look_up(paths: Vec<String>, budget: std::time::Duration) {
+        use super::Lookup;
         let deadline = std::time::Instant::now() + budget;
         let (done, wait) = std::sync::mpsc::channel::<()>();
-        std::thread::spawn(move || {
+        let mut claim = super::Claim(paths.iter().map(|path| super::cache_key(path)).collect());
+        let spawned = std::thread::Builder::new().name("app-icons".into()).spawn(move || {
             let com = unsafe {
                 CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
             }
             .is_ok();
             for path in paths {
                 let found = if com && std::time::Instant::now() < deadline {
-                    icon_of(&path)
+                    // A panic in the shell is one failed try, like an error.
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| icon_of(&path)))
+                        .unwrap_or(Lookup::Failed)
                 } else {
-                    super::Lookup::Failed
+                    Lookup::Late
                 };
-                if found != super::Lookup::Failed {
-                    log::debug!("icon lookup for {path}: {}", matches!(found, super::Lookup::Icon(_)));
+                match &found {
+                    Lookup::Icon(_) | Lookup::NoIcon => log::debug!(
+                        "icon lookup for {path}: {}",
+                        matches!(found, Lookup::Icon(_))
+                    ),
+                    Lookup::Failed => log::debug!("icon lookup for {path} failed"),
+                    Lookup::Late => {}
                 }
-                super::settle(&path, found);
+                claim.settle(&path, found);
             }
             if com {
                 unsafe { CoUninitialize() };
             }
+            drop(claim);
             let _ = done.send(());
         });
-        let _ = wait.recv_timeout(budget);
+        match spawned {
+            // A lookup thread that ended early (a panic) drops its sender: no waiting then.
+            Ok(_) => {
+                let _ = wait.recv_timeout(budget);
+            }
+            // The closure, and the claim with it, is gone: nothing stays pending.
+            Err(err) => log::warn!("icon lookup thread did not start: {err}"),
+        }
     }
 
     fn icon_of(path: &str) -> super::Lookup {
@@ -329,11 +434,13 @@ mod win {
             ) else {
                 return Lookup::Failed;
             };
+            // An error here is no answer either — a busy or cold shell fails
+            // the same way; only an image without pixels says "no icon".
             let Ok(bitmap) = factory.GetImage(
                 SIZE { cx: super::ICON_SIZE, cy: super::ICON_SIZE },
                 SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
             ) else {
-                return Lookup::NoIcon;
+                return Lookup::Failed;
             };
             let pixels = read_bitmap(bitmap);
             let _ = DeleteObject(bitmap);
@@ -491,9 +598,57 @@ mod tests {
 
     #[test]
     fn only_a_real_answer_is_kept() {
-        assert_eq!(Lookup::Icon("u".into()).cached(), Some(Some("u".into())));
-        assert_eq!(Lookup::NoIcon.cached(), Some(None));
-        assert_eq!(Lookup::Failed.cached(), None);
+        assert_eq!(Lookup::Icon("u".into()).cached(0), Some(Some("u".into())));
+        assert_eq!(Lookup::NoIcon.cached(0), Some(None));
+        assert_eq!(Lookup::Failed.cached(0), None);
+        assert_eq!(Lookup::Late.cached(0), None);
+    }
+
+    /// A failing shell is asked again, but not forever: the third failure is
+    /// kept as "no icon". A lookup never begun costs no try.
+    #[test]
+    fn an_exe_that_keeps_failing_ends_up_without_an_icon() {
+        assert_eq!(Lookup::Failed.cached(TRIES - 2), None);
+        assert_eq!(Lookup::Failed.cached(TRIES - 1), Some(None));
+        assert_eq!(Lookup::Late.cached(TRIES + 5), None);
+        assert_eq!(Lookup::Icon("u".into()).cached(TRIES - 1), Some(Some("u".into())));
+    }
+
+    #[test]
+    fn failures_are_counted_per_exe_and_settle_into_no_icon() {
+        let path = r"C:\Test\settle-fails.exe";
+        let key = cache_key(path);
+        for _ in 0..TRIES - 1 {
+            pending().lock().insert(key.clone());
+            settle(path, Lookup::Failed);
+            assert!(!cache().lock().contains_key(&key));
+            assert!(!pending().lock().contains(&key));
+        }
+        settle(path, Lookup::Late);
+        assert!(!cache().lock().contains_key(&key));
+        settle(path, Lookup::Failed);
+        assert_eq!(cache().lock().get(&key), Some(&None));
+        assert!(!failures().lock().contains_key(&key));
+    }
+
+    /// However a lookup run ends — here a panic half-way — none of its exes
+    /// stays pending, so the next list asks for them again.
+    #[test]
+    fn a_lookup_that_panics_leaves_nothing_pending() {
+        let paths = [r"C:\Test\claim-a.exe", r"C:\Test\claim-b.exe"];
+        let keys: Vec<String> = paths.iter().map(|path| cache_key(path)).collect();
+        pending().lock().extend(keys.iter().cloned());
+        let run = std::panic::catch_unwind(|| {
+            let mut claim = Claim(keys.clone());
+            claim.settle(paths[0], Lookup::Late);
+            assert!(!pending().lock().contains(&keys[0]));
+            assert!(pending().lock().contains(&keys[1]));
+            panic!("the shell fell over");
+        });
+        assert!(run.is_err());
+        for key in &keys {
+            assert!(!pending().lock().contains(key));
+        }
     }
 
     #[test]

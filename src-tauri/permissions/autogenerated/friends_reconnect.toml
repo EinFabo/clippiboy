@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friends-reconnect"
+description = "Enables the friends_reconnect command without any pre-configured scope."
+commands.allow = ["friends_reconnect"]
+
+[[permission]]
+identifier = "deny-friends-reconnect"
+description = "Denies the friends_reconnect command without any pre-configured scope."
+commands.deny = ["friends_reconnect"]

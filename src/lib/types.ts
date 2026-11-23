@@ -24,6 +24,8 @@ export interface AudioProcess {
   count?: number;
   /** Any of them playing sound right now. */
   active?: boolean;
+  /** The program's icon as a PNG data URL, `null` when Windows will not say. */
+  icon?: string | null;
 }
 
 /** A process a source taps, named by the core. */

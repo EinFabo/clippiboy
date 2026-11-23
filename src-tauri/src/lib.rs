@@ -2531,6 +2531,7 @@ pub fn run() {
             friends::friends_cancel_sign_in,
             friends::friends_sign_out,
             friends::friends_refresh,
+            friends::friends_reconnect,
             friends::friends_request,
             friends::friends_accept,
             friends::friends_remove,

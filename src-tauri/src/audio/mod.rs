@@ -23,7 +23,25 @@ pub struct Stream {
     pub kind: SourceKind,
 }
 
+/// Cuts every parent link the snapshot cannot vouch for. A process keeps the
+/// pid of its parent after the parent ended, and Windows hands that pid to the
+/// next process — a program started later would pass for the parent, and an
+/// application for a child of a game's launcher. A real parent was created
+/// before its child; one created after it is a stranger, and the link becomes
+/// 0 (no parent, as for the System process). `created` holds the creation
+/// times that could be read; a link with a time missing on either side stays.
+pub fn cut_reused_parents(tree: &mut HashMap<u32, (u32, String)>, created: &HashMap<u32, u64>) {
+    for (pid, (parent, _)) in tree.iter_mut() {
+        if let (Some(child_at), Some(parent_at)) = (created.get(pid), created.get(parent)) {
+            if parent_at > child_at {
+                *parent = 0;
+            }
+        }
+    }
+}
+
 /// A process's ancestors, closest first. `pid` itself is not included.
+/// Relies on the tree's links being real, see [`cut_reused_parents`].
 ///
 /// The depth cap is pure defence: a corrupt snapshot with a cycle would
 /// otherwise hang the audio thread.
@@ -74,6 +92,9 @@ pub fn app_of(pid: u32, tree: &HashMap<u32, (u32, String)>) -> u32 {
         let Some((parent, exe)) = tree.get(&current) else {
             break;
         };
+        if *parent == 0 {
+            break;
+        }
         match tree.get(parent) {
             // Never up into the shell or a system host: the helper stays.
             Some((_, parent_exe)) if is_audio_helper(exe) && !is_system_host(parent_exe) =>
@@ -232,6 +253,7 @@ pub fn group_apps(
             exe: group.exe,
             count: group.pids.len() as u32,
             active: group.active,
+            icon: None,
         })
         .collect();
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -2235,6 +2257,38 @@ mod tests {
         let streams = resolve_for(9999, true, &sources, None, &nothing(), &tree, &ledger(""));
         assert_eq!(pid_of(&streams, "cs2"), Some(20));
         assert_eq!(pid_of(&streams, "steam"), None);
+    }
+
+    /// Discord was started by a process that has since ended, and Steam,
+    /// started later, got that pid: Steam is no parent of Discord, and Discord
+    /// is not in Steam's tree. A web view whose host's pid went the same way
+    /// stays itself instead of climbing to the System process.
+    #[test]
+    fn a_parent_created_after_its_child_is_no_parent() {
+        let mut processes = tree(&[
+            (0, 0, "[System Process]"),
+            (1, 0, "explorer.exe"),
+            (500, 1, "steam.exe"),
+            (40, 500, "Discord.exe"),
+            (600, 500, "steamwebhelper.exe"),
+            (70, 800, "msedgewebview2.exe"),
+            (800, 1, "Spotify.exe"),
+        ]);
+        let created: HashMap<u32, u64> =
+            [(1, 10), (40, 100), (70, 120), (500, 200), (600, 210), (800, 300)]
+                .into_iter()
+                .collect();
+        assert!(in_tree_of(40, 500, &processes));
+        cut_reused_parents(&mut processes, &created);
+        assert!(!in_tree_of(40, 500, &processes));
+        assert_eq!(processes[&40].0, 0);
+        assert_eq!(app_of(70, &processes), 70);
+        // Real links stay, and so does one whose time could not be read.
+        assert!(in_tree_of(600, 500, &processes));
+        assert_eq!(processes[&500].0, 1);
+        let mut unread = tree(&[(500, 1, "steam.exe"), (40, 500, "Discord.exe")]);
+        cut_reused_parents(&mut unread, &[(40, 100)].into_iter().collect());
+        assert!(in_tree_of(40, 500, &unread));
     }
 
     /// A web view still plays for its host, and the host with nothing recorded

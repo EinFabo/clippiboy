@@ -7,6 +7,42 @@
 
 use crate::model::{CaptureTarget, TargetKind};
 
+/// Window classes of the shell itself: the desktop ("Program Manager", as large
+/// as the whole desktop), the wallpaper hosts behind it and the taskbars. They
+/// are visible, titled and big, and nobody means to record them.
+const SHELL_CLASSES: &[&str] = &["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"];
+
+/// The class of a store app's core window — the shell's own hosts use it too.
+const CORE_WINDOW: &str = "Windows.UI.Core.CoreWindow";
+
+/// Shell hosts whose core window stays "visible" while nothing of it shows:
+/// the input panel ("Windows Input Experience", titled in the system's
+/// language), the start menu, search and the lock screen app.
+const SHELL_HOSTS: &[&str] = &[
+    "textinputhost.exe",
+    "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe",
+    "searchhost.exe",
+    "searchapp.exe",
+    "searchui.exe",
+    "lockapp.exe",
+];
+
+/// Is this a window of the shell rather than of a program? Decided by class and
+/// exe, never by title — the titles are translated. `exe` (the process's image
+/// path) is asked only for a core window; an app's own core window stays.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_shell_window(class: &str, exe: impl FnOnce() -> Option<String>) -> bool {
+    if SHELL_CLASSES.iter().any(|name| name.eq_ignore_ascii_case(class)) {
+        return true;
+    }
+    class == CORE_WINDOW
+        && exe().is_some_and(|path| {
+            let file = path.rsplit(['\\', '/']).next().unwrap_or(path.as_str());
+            SHELL_HOSTS.iter().any(|host| host.eq_ignore_ascii_case(file))
+        })
+}
+
 #[cfg(windows)]
 mod win {
     use super::*;
@@ -20,7 +56,8 @@ mod win {
     /// MONITORINFOF_PRIMARY — not exported by the windows crate 0.58.
     const PRIMARY_FLAG: u32 = 0x0000_0001;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+        EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindowVisible,
     };
     use windows::Win32::Devices::Display::{
         DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
@@ -256,6 +293,17 @@ mod win {
         let height = (rect.bottom - rect.top) as u32;
         // Tiny helper windows are of no interest.
         if width < 320 || height < 240 {
+            return TRUE;
+        }
+        let mut class = [0u16; 256];
+        let class_len = GetClassNameW(hwnd, &mut class);
+        let class = String::from_utf16_lossy(&class[..class_len.max(0) as usize]);
+        let exe = || {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            (pid != 0).then(|| crate::appicon::exe_path(pid)).flatten()
+        };
+        if is_shell_window(&class, exe) {
             return TRUE;
         }
 
@@ -1015,6 +1063,26 @@ pub fn fit_to_target(recording: &mut crate::model::RecordingConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shell_s_own_windows_are_left_out_of_the_list() {
+        let no_exe = || -> Option<String> { panic!("the exe is only asked for a core window") };
+        assert!(is_shell_window("Progman", no_exe));
+        assert!(is_shell_window("WorkerW", no_exe));
+        assert!(is_shell_window("Shell_TrayWnd", no_exe));
+        assert!(is_shell_window("Shell_SecondaryTrayWnd", no_exe));
+        assert!(!is_shell_window("Chrome_WidgetWin_1", no_exe));
+        assert!(!is_shell_window("UnrealWindow", no_exe));
+        let at = |path: &str| {
+            let path = path.to_string();
+            move || Some(path)
+        };
+        assert!(is_shell_window(CORE_WINDOW, at(r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\TextInputHost.exe")));
+        assert!(is_shell_window(CORE_WINDOW, at(r"C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe")));
+        // A store app's own window, and one whose process will not say.
+        assert!(!is_shell_window(CORE_WINDOW, at(r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe")));
+        assert!(!is_shell_window(CORE_WINDOW, || None));
+    }
 
     /// Each time the display comes back from off counts once, whether it
     /// comes back dimmed or on, and repeated reports change nothing.
