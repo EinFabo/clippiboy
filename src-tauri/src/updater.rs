@@ -7,7 +7,12 @@
 //! window — and the user decides when to install.
 //!
 //! The updater checks authenticity itself: every package is signed with the
-//! private key, the public one sits in `tauri.conf.json`.
+//! private key, the public one sits in `tauri.conf.json`. What the signature
+//! does not cover is the version `latest.json` claims, so ClippiBoy holds it
+//! against the version the signature names before it installs ([`vet`]).
+
+use std::cmp::Ordering;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tauri::Manager;
@@ -59,6 +64,15 @@ const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(150
 /// in practice, never.
 const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
+/// The check is a few hundred bytes of JSON; past this it hangs, and the
+/// hourly round waited on it for good.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Reaching GitHub, for the check and the download alike.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The download takes as long as the line needs, but may not sit without a
+/// byte for longer than this.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The update found last, if it has not been installed yet.
 ///
 /// The window asks for this when it starts. The event alone was not enough:
@@ -72,6 +86,9 @@ pub fn pending(app: &tauri::AppHandle) -> Option<UpdateInfo> {
 pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
     let updater = app
         .updater_builder()
+        // No overall limit here: it would carry over to a download of tens
+        // of megabytes on a slow line. The check gets its own below.
+        .configure_client(|client| client.connect_timeout(CONNECT_TIMEOUT).read_timeout(STALL_TIMEOUT))
         // End the recording cleanly before the restart, otherwise half-finished
         // segment files are left behind.
         .on_before_exit({
@@ -95,14 +112,19 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
         .build()
         .map_err(|err| format!("update check not possible: {err}"))?;
 
-    let found = updater
-        .check()
+    let found = tokio::time::timeout(CHECK_TIMEOUT, updater.check())
         .await
+        .map_err(|_| "update check failed: no answer in time".to_string())?
         .map_err(|err| format!("update check failed: {err}"))?;
 
     let pending = app.state::<Pending>();
     match found {
         Some(update) => {
+            if let Err(why) = vet(&running(app), &update.version, &update.signature) {
+                *pending.0.lock() = None;
+                log::warn!("update {} refused: {why}", update.version);
+                return Err(format!("update {} refused: {why}", update.version));
+            }
             let info = UpdateInfo::of(&update);
             *pending.0.lock() = Some(update);
             Ok(Some(info))
@@ -123,6 +145,9 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(update) = update else {
         return Err("No verified update is ready.".into());
     };
+    // The check vetted it already; this is the last word before the download.
+    vet(&running(app), &update.version, &update.signature)
+        .map_err(|why| format!("could not install the update: {why}"))?;
 
     // The package is some tens of megabytes; without word on how far along it
     // is, the button just sat on "Installing …" for a minute. Chunks come in a
@@ -169,6 +194,99 @@ pub async fn install(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// The version of the app that is running.
+fn running(app: &tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// Whether an update may be installed: its version must be above the running
+/// one, and the signature's trusted comment must name that same version. The
+/// signature covers the package and that comment, not `latest.json` — without
+/// this an older package, validly signed, could come back in as "newer" under
+/// a made-up version. The comment is only read here; the updater checks it is
+/// the key's own once the package is in, and refuses the install otherwise.
+fn vet(running: &str, offered: &str, signature: &str) -> Result<(), String> {
+    let (Some(now), Some(new)) = (Version::parse(running), Version::parse(offered)) else {
+        return Err(format!("{offered:?} cannot be compared with {running}"));
+    };
+    if new.precedence(&now) != Ordering::Greater {
+        return Err(format!("{offered} is not newer than the running {running}"));
+    }
+    let signed = signed_version(signature).ok_or("its signature names no version")?;
+    if Version::parse(&signed).is_none_or(|signed| signed.precedence(&new) != Ordering::Equal) {
+        return Err(format!("its signature is for {signed}, not {offered}"));
+    }
+    Ok(())
+}
+
+/// The version in the installer's name, which the bundler writes into the
+/// trusted comment of the minisign signature (`timestamp:…\tfile:ClippiBoy_1.0.1_x64-setup.exe`).
+/// The signature comes as `latest.json` carries it: the `.sig` file in base64.
+fn signed_version(signature: &str) -> Option<String> {
+    let url_safe = signature.trim_end_matches('=').replace('+', "-").replace('/', "_");
+    let text = String::from_utf8(crate::webhook::from_base64url(&url_safe)?).ok()?;
+    let comment = text.lines().find_map(|line| line.strip_prefix("trusted comment: "))?;
+    let file = comment.split('\t').find_map(|field| field.strip_prefix("file:"))?;
+    // `<product>_<version>_<arch>-setup.exe`, or `…_<arch>_<lang>.msi`.
+    let version = file.split('_').nth(1)?;
+    Version::parse(version).map(|_| version.to_owned())
+}
+
+/// A semantic version, as far as ordering goes: build metadata is dropped.
+struct Version<'a> {
+    core: [u64; 3],
+    pre: Vec<&'a str>,
+}
+
+impl<'a> Version<'a> {
+    fn parse(text: &'a str) -> Option<Self> {
+        let text = text.split('+').next()?;
+        let (core, pre) = match text.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (text, None),
+        };
+        let mut parts = core.split('.');
+        let mut numbers = [0u64; 3];
+        for number in &mut numbers {
+            let part = parts.next().filter(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))?;
+            *number = part.parse().ok()?;
+        }
+        if parts.next().is_some() {
+            return None;
+        }
+        let pre: Vec<&str> = pre.map(|pre| pre.split('.').collect()).unwrap_or_default();
+        if pre.iter().any(|id| id.is_empty()) {
+            return None;
+        }
+        Some(Self { core: numbers, pre })
+    }
+
+    /// Semver precedence: a pre-release ranks below its release, and its
+    /// identifiers compare as numbers where both are numbers.
+    fn precedence(&self, other: &Self) -> Ordering {
+        self.core.cmp(&other.core).then_with(|| match (self.pre.is_empty(), other.pre.is_empty()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => {
+                for (a, b) in self.pre.iter().zip(&other.pre) {
+                    let numeric = |id: &str| id.bytes().all(|b| b.is_ascii_digit()).then(|| id.parse::<u64>().ok()).flatten();
+                    let order = match (numeric(a), numeric(b)) {
+                        (Some(a), Some(b)) => a.cmp(&b),
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => a.cmp(b),
+                    };
+                    if order != Ordering::Equal {
+                        return order;
+                    }
+                }
+                self.pre.len().cmp(&other.pre.len())
+            }
+        })
+    }
+}
+
 /// Set when the update's exit hook started the quit, so a failed install
 /// knows to call it off again.
 static QUIT_FOR_UPDATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -203,4 +321,75 @@ pub fn watch(app: &tauri::AppHandle) {
             std::thread::sleep(INTERVAL);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The signature `latest.json` carries for 1.0.0, as published.
+    const SIGNED_1_0_0: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUTzAzcmFvak1HUHZralYrY2ZhTGlYN0Nnc1pLNW8rSS9KYUtocUVRYkNWdUhoYjVrbkxGVGtZNlBSL3I1MzlLbmVUVXJ1ZXRwZ2kwdnFFaUZ5a1FOL2hDcDgvWElkdFFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MzgxMTQzCWZpbGU6Q2xpcHBpQm95XzEuMC4wX3g2NC1zZXR1cC5leGUKRkFyTkJIbDdySzgvNVNQL2E2WDBNajZJYjhKdVRJeWdXektDTDUzaDB4OXRSTktMNDZyMUVzSWQ2N0hDNU1adnUrRFBsU2k5RTZmMTVYVmZLWXRFQ1E9PQo=";
+
+    fn signature(trusted: &str) -> String {
+        crate::appicon::base64(
+            format!("untrusted comment: signature from tauri secret key\nRUTO\ntrusted comment: {trusted}\nFArN\n").as_bytes(),
+        )
+    }
+
+    fn newer(offered: &str, running: &str) -> Option<bool> {
+        Some(Version::parse(offered)?.precedence(&Version::parse(running)?) == Ordering::Greater)
+    }
+
+    #[test]
+    fn versions_order_by_semver() {
+        assert_eq!(newer("1.0.1", "1.0.0"), Some(true));
+        assert_eq!(newer("1.10.0", "1.9.0"), Some(true));
+        assert_eq!(newer("2.0.0", "1.99.99"), Some(true));
+        assert_eq!(newer("1.0.0", "1.0.0"), Some(false));
+        assert_eq!(newer("0.9.6", "1.0.0"), Some(false));
+        assert_eq!(newer("1.0.0+build.7", "1.0.0"), Some(false));
+        // Pre-releases rank below their release, numbers as numbers.
+        assert_eq!(newer("1.0.0", "1.0.0-rc.1"), Some(true));
+        assert_eq!(newer("1.0.0-rc.1", "1.0.0"), Some(false));
+        assert_eq!(newer("1.0.0-rc.10", "1.0.0-rc.2"), Some(true));
+        assert_eq!(newer("1.0.0-beta", "1.0.0-alpha"), Some(true));
+        assert_eq!(newer("1.0.0-alpha.1", "1.0.0-alpha"), Some(true));
+        assert_eq!(newer("1.0.0-alpha", "1.0.0-1"), Some(true));
+        // Not a version.
+        for junk in ["", "1", "1.0", "1.0.0.0", "v1.0.0", "1.x.0", "1.0.0-", "1.0.0-a..b", "+1.0.0", "1.-1.0"] {
+            assert_eq!(Version::parse(junk).map(|_| ()), None, "{junk}");
+        }
+    }
+
+    #[test]
+    fn the_signature_names_its_version() {
+        assert_eq!(signed_version(SIGNED_1_0_0).as_deref(), Some("1.0.0"));
+        assert_eq!(
+            signed_version(&signature("timestamp:1\tfile:ClippiBoy_1.2.3-rc.1_x64_en-US.msi")).as_deref(),
+            Some("1.2.3-rc.1")
+        );
+        assert_eq!(signed_version(&signature("timestamp:1")), None);
+        assert_eq!(signed_version(&signature("timestamp:1\tfile:ClippiBoy-setup.exe")), None);
+        assert_eq!(signed_version(&signature("timestamp:1\tfile:ClippiBoy_latest_x64-setup.exe")), None);
+        assert_eq!(signed_version("not base64 at all!"), None);
+        assert_eq!(signed_version(""), None);
+    }
+
+    #[test]
+    fn only_a_newer_version_signed_as_such_is_installed() {
+        assert_eq!(vet("0.9.6", "1.0.0", SIGNED_1_0_0), Ok(()));
+        // The same or an older version, whatever the signature says.
+        assert!(vet("1.0.0", "1.0.0", SIGNED_1_0_0).is_err());
+        assert!(vet("1.0.1", "1.0.0", SIGNED_1_0_0).is_err());
+        // An older package under a made-up version.
+        assert!(vet("1.0.0", "1.0.1", SIGNED_1_0_0).is_err());
+        assert!(vet("1.0.0", "9.9.9", SIGNED_1_0_0).is_err());
+        // A signature that names no version, or no versions to compare.
+        assert!(vet("1.0.0", "1.0.1", &signature("timestamp:1")).is_err());
+        assert!(vet("1.0.0", "1.0.1", "").is_err());
+        assert!(vet("1.0.0", "latest", SIGNED_1_0_0).is_err());
+        assert!(vet("dev", "1.0.0", SIGNED_1_0_0).is_err());
+        // Build metadata does not make a version another one.
+        assert_eq!(vet("0.9.6", "1.0.0+ci.4", SIGNED_1_0_0), Ok(()));
+    }
 }

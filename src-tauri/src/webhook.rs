@@ -755,7 +755,7 @@ fn base64url(bytes: &[u8]) -> String {
 }
 
 /// Unpadded base64url, as the server writes it; None for anything else.
-fn from_base64url(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn from_base64url(text: &str) -> Option<Vec<u8>> {
     let value = |c: u8| -> Option<u32> {
         Some(match c {
             b'A'..=b'Z' => c - b'A',

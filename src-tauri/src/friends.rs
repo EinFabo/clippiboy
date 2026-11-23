@@ -36,6 +36,9 @@ const PING_EVERY: Duration = Duration::from_secs(30);
 /// slept, the network went. Better to dial again than to wait for TCP.
 const PONG_DEADLINE: Duration = Duration::from_secs(75);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// A dial (TCP, TLS and the upgrade) or a send that takes longer than this
+/// hangs: the line is given up and dialled again, as for a missing pong.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -471,10 +474,43 @@ fn spawn_connection(app: &AppHandle) {
             if started.elapsed() > Duration::from_secs(60) {
                 backoff = Duration::from_secs(1);
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(BACKOFF_MAX);
+            let (wait, next) = next_backoff(backoff, random_unit());
+            tokio::time::sleep(wait).await;
+            backoff = next;
         }
     });
+}
+
+/// The wait before the next dial and the step after it. The wait is somewhere
+/// in the upper half of the step (`unit` in 0..1), so the apps a server restart
+/// dropped all at once do not all dial back in the same instant; the step
+/// doubles up to [`BACKOFF_MAX`].
+fn next_backoff(step: Duration, unit: f64) -> (Duration, Duration) {
+    let unit = if unit.is_finite() { unit.clamp(0.0, 1.0) } else { 1.0 };
+    let wait = step.mul_f64(0.5 + unit / 2.0).min(step);
+    (wait, (step * 2).min(BACKOFF_MAX))
+}
+
+/// A number in 0..1 for the jitter; 1 (the full step, as before) should the
+/// system's randomness fail.
+fn random_unit() -> f64 {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 4];
+    match ring::rand::SystemRandom::new().fill(&mut bytes) {
+        Ok(()) => f64::from(u32::from_le_bytes(bytes)) / (f64::from(u32::MAX) + 1.0),
+        Err(_) => 1.0,
+    }
+}
+
+/// A send on the socket that does not finish in time ends the line.
+async fn send_within<S>(sink: &mut S, message: Message) -> Result<(), String>
+where
+    S: futures_util::Sink<Message, Error = tungstenite::Error> + Unpin,
+{
+    match tokio::time::timeout(SOCKET_TIMEOUT, sink.send(message)).await {
+        Ok(sent) => sent.map_err(|err| err.to_string()),
+        Err(_) => Err("send timed out — connection presumed dead".into()),
+    }
 }
 
 enum End {
@@ -491,7 +527,12 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {token}")).map_err(|err| err.to_string())?,
     );
-    let (socket, _) = match tokio_tungstenite::connect_async(request).await {
+    // Without a limit a dial into a network that swallows packets waited on
+    // the system's TCP timeouts, and nothing dialled again meanwhile.
+    let dialled = tokio::time::timeout(SOCKET_TIMEOUT, tokio_tungstenite::connect_async(request))
+        .await
+        .map_err(|_| "dial timed out".to_string())?;
+    let (socket, _) = match dialled {
         Ok(ok) => ok,
         Err(tungstenite::Error::Http(response)) if response.status() == 401 => {
             log::info!("friends: session no longer valid — signed out");
@@ -511,9 +552,7 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
     if let Err(err) = refresh(app, true).await {
         log::info!("friends: refresh failed: {err}");
     }
-    sink.send(Message::Text(presence_message(app, "hello").into()))
-        .await
-        .map_err(|err| err.to_string())?;
+    send_within(&mut sink, Message::Text(presence_message(app, "hello").into())).await?;
 
     let mut ping = tokio::time::interval(PING_EVERY);
     let mut last_pong = Instant::now();
@@ -540,7 +579,7 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
                 None => return Ok(End::Dropped),
             },
             outgoing = outbox.recv() => match outgoing {
-                Some(text) => sink.send(Message::Text(text.into())).await.map_err(|err| err.to_string())?,
+                Some(text) => send_within(&mut sink, Message::Text(text.into())).await?,
                 // Signed out: the sender was dropped.
                 None => {
                     let _ = sink.close().await;
@@ -551,7 +590,7 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
                 if last_pong.elapsed() > PONG_DEADLINE {
                     return Err("no pong — connection presumed dead".into());
                 }
-                sink.send(Message::Text("ping".into())).await.map_err(|err| err.to_string())?;
+                send_within(&mut sink, Message::Text("ping".into())).await?;
             }
         }
     }
@@ -967,6 +1006,33 @@ mod tests {
         assert_eq!(add_code_from_url("clippiboy://add"), None);
         assert_eq!(add_code_from_url("clippiboy://addfriend?code=K7QXM2PD"), None);
         assert_eq!(add_code_from_url("clippiboy://auth?code=K7QXM2PD"), None);
+    }
+
+    #[test]
+    fn the_backoff_doubles_to_a_minute_with_the_wait_in_the_upper_half() {
+        let second = Duration::from_secs(1);
+        // The step doubles and stops at the cap, whatever the jitter.
+        let mut step = second;
+        for want in [2, 4, 8, 16, 32, 60, 60] {
+            step = next_backoff(step, 0.3).1;
+            assert_eq!(step, Duration::from_secs(want));
+        }
+        // The wait spans half the step to the full step, never more.
+        assert_eq!(next_backoff(Duration::from_secs(8), 0.0).0, Duration::from_secs(4));
+        assert_eq!(next_backoff(Duration::from_secs(8), 0.5).0, Duration::from_secs(6));
+        assert!(next_backoff(Duration::from_secs(8), 0.999).0 < Duration::from_secs(8));
+        // Out of range clamps instead of waiting past the step or not at all.
+        assert_eq!(next_backoff(BACKOFF_MAX, 7.0).0, BACKOFF_MAX);
+        assert_eq!(next_backoff(BACKOFF_MAX, -1.0).0, BACKOFF_MAX / 2);
+        assert_eq!(next_backoff(BACKOFF_MAX, f64::NAN), (BACKOFF_MAX, BACKOFF_MAX));
+    }
+
+    #[test]
+    fn the_jitter_stays_in_range() {
+        for _ in 0..1000 {
+            let unit = random_unit();
+            assert!((0.0..=1.0).contains(&unit), "{unit}");
+        }
     }
 
     #[test]

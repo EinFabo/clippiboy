@@ -230,6 +230,10 @@ fn change(edit: impl FnOnce(&mut HashMap<String, Link>)) -> Result<(), String> {
 
 /// Its own client: the friends one gives up after 20 s, and 50 MB on a slow
 /// upload line take minutes.
+///
+/// The calls that only ask or delete something set [`SHORT`] for themselves,
+/// so a server that takes the call and then hangs is not waited on for 20
+/// minutes.
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -242,6 +246,11 @@ fn client() -> &'static reqwest::Client {
             .expect("HTTP client")
     })
 }
+
+/// The limit on a call with no clip in it, as on the friends client.
+const SHORT: Duration = Duration::from_secs(20);
+/// The preview picture: some hundred kilobytes.
+const POSTER: Duration = Duration::from_secs(60);
 
 fn token(app: &AppHandle) -> Result<String, String> {
     crate::friends::token(app).ok_or_else(|| "Sign in with Discord to share links.".to_string())
@@ -298,6 +307,7 @@ async fn fetch_quota(app: &AppHandle, token: &str) -> Result<Quota, String> {
     let response = client()
         .get(format!("{}/shares/quota", crate::friends::SERVER))
         .header("Authorization", format!("Bearer {token}"))
+        .timeout(SHORT)
         .send()
         .await
         .map_err(|_| "The ClippiBoy server is not reachable right now.".to_string())?;
@@ -560,6 +570,7 @@ async fn upload(
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "image/jpeg")
             .body(thumb)
+            .timeout(POSTER)
             .send()
             .await;
         if let Err(err) = sent {
@@ -791,6 +802,7 @@ async fn delete_remote(app: &AppHandle, token: &str, link_id: &str) -> Result<()
     let response = client()
         .delete(format!("{}/shares/{}", crate::friends::SERVER, link_id))
         .header("Authorization", format!("Bearer {token}"))
+        .timeout(SHORT)
         .send()
         .await
         .map_err(|_| "The ClippiBoy server is not reachable right now.".to_string())?;
