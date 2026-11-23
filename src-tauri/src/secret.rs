@@ -237,6 +237,7 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    sweep_parts(path);
     let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut part = path.as_os_str().to_owned();
     part.push(format!(".{}-{write}.part", std::process::id()));
@@ -250,6 +251,61 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&part);
         })
+}
+
+/// How old another run's file next to the target must be before it counts as
+/// left behind. A write takes milliseconds; a second ClippiBoy writing the same
+/// file just now keeps its own.
+const PART_STALE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The pid in the name of a file [`write_file`] puts next to `file`
+/// (`<file>.<pid>-<write>.part`), or `None` for any other name.
+fn part_pid(file: &str, name: &str) -> Option<u32> {
+    let rest = name
+        .strip_prefix(file)?
+        .strip_prefix('.')?
+        .strip_suffix(".part")?;
+    let (pid, write) = rest.split_once('-')?;
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    if !digits(pid) || !digits(write) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Removes what a write cut short by a crash or a power cut left next to
+/// `path`: files of other runs only, and only once they are [`PART_STALE`].
+/// Without this each such file would stay for good, as its name is never
+/// written again.
+fn sweep_parts(path: &Path) {
+    let (Some(dir), Some(file)) = (
+        path.parent(),
+        path.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let own = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|name| part_pid(file, name)) else {
+            continue;
+        };
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= PART_STALE);
+        if pid != own && stale {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => log::info!("removed {name:?}, left by a write that did not finish"),
+                Err(err) => log::warn!("could not remove {name:?}: {err}"),
+            }
+        }
+    }
 }
 
 /// Once per file and run: a file that does not open would otherwise be
@@ -369,6 +425,61 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["webhook.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_part_is_known_by_its_name() {
+        assert_eq!(
+            part_pid("webhook.json", "webhook.json.4242-7.part"),
+            Some(4242)
+        );
+        assert_eq!(part_pid("webhook.json", "webhook.json.4242-7"), None);
+        assert_eq!(part_pid("webhook.json", "webhook.json.part"), None);
+        assert_eq!(part_pid("webhook.json", "webhook.json.-7.part"), None);
+        assert_eq!(part_pid("webhook.json", "webhook.json.+1-7.part"), None);
+        assert_eq!(part_pid("webhook.json", "webhook.json.4242-.part"), None);
+        assert_eq!(part_pid("webhook.json", "other.json.4242-7.part"), None);
+        assert_eq!(part_pid("webhook.json", "webhook.json2.4242-7.part"), None);
+    }
+
+    /// A crash between the write and the rename leaves a file next to the
+    /// target. The next write removes another run's once it is old, and keeps
+    /// a fresh one (a second ClippiBoy may be writing it), this run's own, and
+    /// whatever belongs to another file.
+    #[test]
+    fn a_write_sweeps_the_parts_a_crash_left() {
+        let dir = std::env::temp_dir().join(format!(
+            "clippiboy-secret-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("webhook.json");
+        let other = std::process::id().wrapping_add(1);
+        let own = std::process::id();
+        let old = std::time::SystemTime::now() - 2 * PART_STALE;
+        let place = |name: String, modified: Option<std::time::SystemTime>| {
+            let file = std::fs::File::create(dir.join(&name)).unwrap();
+            if let Some(at) = modified {
+                file.set_modified(at).unwrap();
+            }
+            name
+        };
+        let left = place(format!("webhook.json.{other}-3.part"), Some(old));
+        let fresh = place(format!("webhook.json.{other}-4.part"), None);
+        let mine = place(format!("webhook.json.{own}-999999.part"), Some(old));
+        let foreign = place(format!("token.json.{other}-3.part"), Some(old));
+
+        write_file(&path, b"{}").unwrap();
+
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        let mut want = vec![fresh, mine, foreign, "webhook.json".to_string()];
+        want.sort();
+        assert_eq!(names, want, "{left} should be gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
