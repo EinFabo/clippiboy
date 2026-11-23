@@ -120,10 +120,23 @@ pub async fn check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String>
     let pending = app.state::<Pending>();
     match found {
         Some(update) => {
-            if let Err(why) = vet(&running(app), &update.version, &update.signature) {
-                *pending.0.lock() = None;
-                log::warn!("update {} refused: {why}", update.version);
-                return Err(format!("update {} refused: {why}", update.version));
+            match vet(&running(app), &update.version, &update.signature) {
+                Ok(Signed::AsOffered) => {}
+                Ok(Signed::Unnamed) => {
+                    if first_note(&format!("unnamed {}", update.version)) {
+                        log::warn!(
+                            "update {}: its signature names no version, taken on the version floor alone",
+                            update.version
+                        );
+                    }
+                }
+                Err(why) => {
+                    *pending.0.lock() = None;
+                    if first_note(&format!("refused {}", update.version)) {
+                        log::warn!("update {}{REFUSED}{why}", update.version);
+                    }
+                    return Err(format!("update {}{REFUSED}{why}", update.version));
+                }
             }
             let info = UpdateInfo::of(&update);
             *pending.0.lock() = Some(update);
@@ -199,24 +212,57 @@ fn running(app: &tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Between the version and the reason in a refusal; the hourly round leaves
+/// those to the one warning [`check`] gives per version.
+const REFUSED: &str = " refused: ";
+
+/// Notes already logged, so a refusal shows once per version and not hourly.
+static NOTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// True the first time `note` comes by.
+fn first_note(note: &str) -> bool {
+    let mut noted = NOTED.lock();
+    if noted.iter().any(|seen| seen == note) {
+        return false;
+    }
+    noted.push(note.to_owned());
+    true
+}
+
+/// What the signature said about the version.
+#[derive(Debug, PartialEq)]
+enum Signed {
+    /// It names the version offered.
+    AsOffered,
+    /// It names none that could be read.
+    Unnamed,
+}
+
 /// Whether an update may be installed: its version must be above the running
-/// one, and the signature's trusted comment must name that same version. The
-/// signature covers the package and that comment, not `latest.json` — without
-/// this an older package, validly signed, could come back in as "newer" under
-/// a made-up version. The comment is only read here; the updater checks it is
-/// the key's own once the package is in, and refuses the install otherwise.
-fn vet(running: &str, offered: &str, signature: &str) -> Result<(), String> {
+/// one, and a version the signature's trusted comment names must be that same
+/// one. The signature covers the package and that comment, not `latest.json` —
+/// without this an older package, validly signed, could come back in as
+/// "newer" under a made-up version. The comment is only read here; the updater
+/// checks it is the key's own once the package is in, and refuses the install
+/// otherwise.
+///
+/// A comment with no readable version is let through on the version floor
+/// alone: a change in how releases are named must not leave every installed
+/// copy unable to update.
+fn vet(running: &str, offered: &str, signature: &str) -> Result<Signed, String> {
     let (Some(now), Some(new)) = (Version::parse(running), Version::parse(offered)) else {
         return Err(format!("{offered:?} cannot be compared with {running}"));
     };
     if new.precedence(&now) != Ordering::Greater {
         return Err(format!("{offered} is not newer than the running {running}"));
     }
-    let signed = signed_version(signature).ok_or("its signature names no version")?;
+    let Some(signed) = signed_version(signature) else {
+        return Ok(Signed::Unnamed);
+    };
     if Version::parse(&signed).is_none_or(|signed| signed.precedence(&new) != Ordering::Equal) {
         return Err(format!("its signature is for {signed}, not {offered}"));
     }
-    Ok(())
+    Ok(Signed::AsOffered)
 }
 
 /// The version in the installer's name, which the bundler writes into the
@@ -227,9 +273,9 @@ fn signed_version(signature: &str) -> Option<String> {
     let text = String::from_utf8(crate::webhook::from_base64url(&url_safe)?).ok()?;
     let comment = text.lines().find_map(|line| line.strip_prefix("trusted comment: "))?;
     let file = comment.split('\t').find_map(|field| field.strip_prefix("file:"))?;
-    // `<product>_<version>_<arch>-setup.exe`, or `…_<arch>_<lang>.msi`.
-    let version = file.split('_').nth(1)?;
-    Version::parse(version).map(|_| version.to_owned())
+    // `<product>_<version>_<arch>-setup.exe`, or `…_<arch>_<lang>.msi`; the
+    // first part that is a version, so a product name with `_` in it works.
+    file.split('_').skip(1).find(|part| Version::parse(part).is_some()).map(str::to_owned)
 }
 
 /// A semantic version, as far as ordering goes: build metadata is dropped.
@@ -316,6 +362,8 @@ pub fn watch(app: &tauri::AppHandle) {
                 }
                 // With no network or no release this is not an error the user
                 // needs to see; the next round tries again.
+                // A refusal was logged once by `check`.
+                Err(err) if err.contains(REFUSED) => {}
                 Err(err) => log::info!("{err}"),
             }
             std::thread::sleep(INTERVAL);
@@ -371,25 +419,45 @@ mod tests {
         assert_eq!(signed_version(&signature("timestamp:1")), None);
         assert_eq!(signed_version(&signature("timestamp:1\tfile:ClippiBoy-setup.exe")), None);
         assert_eq!(signed_version(&signature("timestamp:1\tfile:ClippiBoy_latest_x64-setup.exe")), None);
+        // An underscore in the product name.
+        assert_eq!(
+            signed_version(&signature("timestamp:1\tfile:Clippi_Boy_1.0.2_x64-setup.exe")).as_deref(),
+            Some("1.0.2")
+        );
         assert_eq!(signed_version("not base64 at all!"), None);
         assert_eq!(signed_version(""), None);
     }
 
     #[test]
     fn only_a_newer_version_signed_as_such_is_installed() {
-        assert_eq!(vet("0.9.6", "1.0.0", SIGNED_1_0_0), Ok(()));
+        assert_eq!(vet("0.9.6", "1.0.0", SIGNED_1_0_0), Ok(Signed::AsOffered));
         // The same or an older version, whatever the signature says.
         assert!(vet("1.0.0", "1.0.0", SIGNED_1_0_0).is_err());
         assert!(vet("1.0.1", "1.0.0", SIGNED_1_0_0).is_err());
         // An older package under a made-up version.
         assert!(vet("1.0.0", "1.0.1", SIGNED_1_0_0).is_err());
         assert!(vet("1.0.0", "9.9.9", SIGNED_1_0_0).is_err());
-        // A signature that names no version, or no versions to compare.
-        assert!(vet("1.0.0", "1.0.1", &signature("timestamp:1")).is_err());
-        assert!(vet("1.0.0", "1.0.1", "").is_err());
+        assert!(vet("0.9.6", "1.0.2", SIGNED_1_0_0).is_err());
+        assert!(vet("1.0.0", "1.0.1", &signature("timestamp:1\tfile:ClippiBoy_1.0.0_x64-setup.exe")).is_err());
+        assert_eq!(
+            vet("1.0.0", "1.0.2", &signature("timestamp:1\tfile:Clippi_Boy_1.0.2_x64-setup.exe")),
+            Ok(Signed::AsOffered)
+        );
+        // A signature that names no version is taken on the floor alone.
+        assert_eq!(vet("1.0.0", "1.0.1", &signature("timestamp:1")), Ok(Signed::Unnamed));
+        assert_eq!(vet("1.0.0", "1.0.1", ""), Ok(Signed::Unnamed));
+        assert!(vet("1.0.1", "1.0.1", &signature("timestamp:1")).is_err());
+        // No versions to compare.
         assert!(vet("1.0.0", "latest", SIGNED_1_0_0).is_err());
         assert!(vet("dev", "1.0.0", SIGNED_1_0_0).is_err());
         // Build metadata does not make a version another one.
-        assert_eq!(vet("0.9.6", "1.0.0+ci.4", SIGNED_1_0_0), Ok(()));
+        assert_eq!(vet("0.9.6", "1.0.0+ci.4", SIGNED_1_0_0), Ok(Signed::AsOffered));
+    }
+
+    #[test]
+    fn a_note_is_logged_once() {
+        assert!(first_note("test refused 0.0.1"));
+        assert!(!first_note("test refused 0.0.1"));
+        assert!(first_note("test refused 0.0.2"));
     }
 }
