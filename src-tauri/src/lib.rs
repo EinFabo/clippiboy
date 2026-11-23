@@ -27,6 +27,8 @@ pub mod friends;
 pub mod game;
 pub mod links;
 pub mod share;
+pub mod peers;
+pub mod secret;
 pub mod gpu;
 pub mod inputpoll;
 #[cfg(test)]

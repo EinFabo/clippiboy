@@ -962,20 +962,21 @@ fn token_path() -> PathBuf {
     crate::config::data_dir().join("friends.json")
 }
 
+/// The session as `friends.json` keeps it — sealed with DPAPI since 1.0.1
+/// (`secret.rs`); a plain one from before is sealed on the first read.
+#[derive(Serialize, Deserialize)]
+struct StoredSession {
+    token: String,
+}
+
 fn load_token() -> Option<String> {
-    #[derive(Deserialize)]
-    struct Stored {
-        token: String,
-    }
-    let text = std::fs::read_to_string(token_path()).ok()?;
-    serde_json::from_str::<Stored>(&text).ok().map(|stored| stored.token)
+    crate::secret::read::<StoredSession>(&token_path(), "friends session").map(|stored| stored.token)
 }
 
 fn save_token(token: Option<&str>) {
     let path = token_path();
     let result = match token {
-        Some(token) => std::fs::create_dir_all(crate::config::data_dir())
-            .and_then(|_| std::fs::write(&path, serde_json::json!({ "token": token }).to_string())),
+        Some(token) => crate::secret::write_sealed(&path, &StoredSession { token: token.to_owned() }, "friends session"),
         None => std::fs::remove_file(&path).or_else(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 Ok(())

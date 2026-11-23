@@ -9,8 +9,9 @@
 //! ciphertext. The key lives only here, in memory, until the link comes.
 //!
 //! The webhook is a credential: whoever has its URL can post into the channel.
-//! It lives in `webhook.json` in ClippiBoy's data folder, never goes to a window
-//! and never into the log — the windows see the server's name only.
+//! It lives in `webhook.json` in ClippiBoy's data folder, sealed with DPAPI
+//! (`secret.rs`), never goes to a window and never into the log — the windows
+//! see the server's name only.
 //!
 //! Posting takes the same Discord copy as "Copy for Discord", sized for a free
 //! account: a webhook's limit is the server's, not the user's Nitro. When even
@@ -127,20 +128,18 @@ fn path() -> PathBuf {
     crate::config::data_dir().join("webhook.json")
 }
 
+/// The webhook, sealed with DPAPI since 1.0.1: its token posts to the channel
+/// for anyone who has it. A plain file from before is sealed on the first read.
 fn load() -> Option<Hook> {
     let _guard = FILE.lock();
-    let text = std::fs::read(path()).ok()?;
-    serde_json::from_slice::<Hook>(&text).ok().filter(Hook::valid)
+    crate::secret::read::<Hook>(&path(), "webhook").filter(Hook::valid)
 }
 
 fn store(hook: Option<&Hook>) -> Result<(), String> {
     let _guard = FILE.lock();
     match hook {
-        Some(hook) => {
-            std::fs::create_dir_all(crate::config::data_dir()).map_err(|err| err.to_string())?;
-            let json = serde_json::to_vec(hook).map_err(|err| err.to_string())?;
-            std::fs::write(path(), json).map_err(|err| format!("Could not keep the channel: {err}"))
-        }
+        Some(hook) => crate::secret::write_sealed(&path(), hook, "webhook")
+            .map_err(|err| format!("Could not keep the channel: {err}")),
         None => match std::fs::remove_file(path()) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.to_string()),
             _ => Ok(()),
@@ -152,9 +151,7 @@ fn store(hook: Option<&Hook>) -> Result<(), String> {
 /// old one, after a disconnect and a new connect, must not take the new one.
 fn forget_if(hook: &Hook) -> bool {
     let _guard = FILE.lock();
-    let stored = std::fs::read(path())
-        .ok()
-        .and_then(|text| serde_json::from_slice::<Hook>(&text).ok());
+    let stored = crate::secret::read::<Hook>(&path(), "webhook");
     if stored.as_ref() != Some(hook) {
         return false;
     }
@@ -742,7 +739,8 @@ fn unseal(key: &[u8; 32], data: &str) -> Option<Hook> {
     serde_json::from_slice(plain).ok()
 }
 
-fn base64url(bytes: &[u8]) -> String {
+/// Unpadded base64url.
+pub(crate) fn base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

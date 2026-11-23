@@ -13,6 +13,12 @@
 //! bytes. Should the line drop, the receiver dials again and asks for the rest.
 //! At the end the SHA-256 from the offer decides whether the file is whole, and
 //! one byte back tells the sender it arrived.
+//!
+//! Each installation keeps its iroh key (`share-key.bin`, sealed with DPAPI),
+//! so its id stays the same across runs. The offer says so (`stable`) and the
+//! answer names the receiver's id (`node`); `peers.rs` keeps the ids a clip
+//! really went to or came from, per friend. For now a device that does not fit
+//! is only logged.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -23,7 +29,7 @@ use std::time::Duration;
 
 use iroh::endpoint::{presets, Connection};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, SecretKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -186,9 +192,21 @@ enum Signal {
         secret: String,
         addr: EndpointAddr,
         meta: Meta,
+        /// `addr.id` stays the same across the sender's runs and may be kept
+        /// (`peers.rs`). Missing before 1.0.1.
+        #[serde(default)]
+        stable: bool,
     },
     #[serde(rename_all = "camelCase")]
-    ShareAnswer { id: String, accept: bool },
+    ShareAnswer {
+        id: String,
+        accept: bool,
+        /// The receiver's lasting iroh id, on a yes — the id that will dial in.
+        /// A string, not an `EndpointId`: an id that does not parse must not
+        /// cost the answer. Missing before 1.0.1, and for a key not kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     ShareCancel { id: String },
 }
@@ -215,6 +233,10 @@ struct Outgoing {
     secret: String,
     /// The individual tracks, cut to the clip, in the order of the offer.
     tracks: Vec<Cut>,
+    /// The receiver's device as their yes named it (`ShareAnswer.node`).
+    answered: Option<String>,
+    /// The device that took the clip, once it arrived.
+    reached: Option<String>,
 }
 
 /// An individual track cut for sending — a file of its own in the temp folder.
@@ -232,6 +254,8 @@ struct Incoming {
     secret: String,
     addr: EndpointAddr,
     meta: Meta,
+    /// `ShareOffer.stable`.
+    stable: bool,
 }
 
 #[derive(Default)]
@@ -321,7 +345,15 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         }
         outgoing.insert(
             id.clone(),
-            Outgoing { transfer, path: path.clone(), size, secret: secret.clone(), tracks: Vec::new() },
+            Outgoing {
+                transfer,
+                path: path.clone(),
+                size,
+                secret: secret.clone(),
+                tracks: Vec::new(),
+                answered: None,
+                reached: None,
+            },
         );
     }
     emit(&app);
@@ -387,7 +419,8 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         entry.tracks = tracks;
     }
     emit(&app);
-    let offer = Signal::ShareOffer { id: id.clone(), size, sha256, secret, addr, meta };
+    let stable = identity(&app).stable;
+    let offer = Signal::ShareOffer { id: id.clone(), size, sha256, secret, addr, meta, stable };
     if !crate::friends::send_relay(&app, &friend_id, &offer) {
         let err = "Not connected to the friends server.".to_string();
         set_out(&app, &id, |t| fail(t, &err));
@@ -422,7 +455,8 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
         entry.transfer.friend_id.clone()
     };
     emit(&app);
-    crate::friends::send_relay(&app, &friend, &Signal::ShareAnswer { id: id.clone(), accept: true });
+    let node = identity(&app).node();
+    crate::friends::send_relay(&app, &friend, &Signal::ShareAnswer { id: id.clone(), accept: true, node });
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         match receive(&app, &id).await {
@@ -477,7 +511,7 @@ pub fn share_decline(app: AppHandle, id: String) {
         entry.transfer.friend_id.clone()
     };
     emit(&app);
-    crate::friends::send_relay(&app, &friend, &Signal::ShareAnswer { id, accept: false });
+    crate::friends::send_relay(&app, &friend, &Signal::ShareAnswer { id, accept: false, node: None });
 }
 
 /// Calls a transfer off, in either direction.
@@ -543,17 +577,23 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
         return;
     };
     match signal {
-        Signal::ShareOffer { id, size, sha256, secret, addr, meta } => {
-            offered(app, from, id, size, sha256, secret, addr, meta)
+        Signal::ShareOffer { id, size, sha256, secret, addr, meta, stable } => {
+            offered(app, from, id, size, sha256, secret, addr, meta, stable)
         }
-        Signal::ShareAnswer { id, accept } => {
-            let from_them = app
-                .state::<Share>()
-                .outgoing
-                .lock()
-                .get(&id)
-                .is_some_and(|o| o.transfer.friend_id == from && o.transfer.stage == Stage::Asking);
-            if !from_them {
+        Signal::ShareAnswer { id, accept, node } => {
+            let asking = {
+                let share = app.state::<Share>();
+                let mut outgoing = share.outgoing.lock();
+                let Some(entry) = outgoing.get_mut(&id).filter(|o| o.transfer.friend_id == from) else { return };
+                // Kept even when their dial beat the answer here (Moving, or
+                // Done already): it only names the device to keep.
+                if accept && entry.answered.is_none() {
+                    entry.answered = node;
+                }
+                entry.transfer.stage == Stage::Asking
+            };
+            settle_pin(app, &id);
+            if !asking {
                 return;
             }
             // Accepted: the bytes start moving once they dial in.
@@ -665,6 +705,7 @@ fn offered(
     secret: String,
     addr: EndpointAddr,
     meta: Meta,
+    stable: bool,
 ) {
     let config = app.state::<AppState>().config_snapshot().friends;
     let share = app.state::<Share>();
@@ -692,7 +733,7 @@ fn offered(
         }
         // Busy, or not from someone welcome: a quiet no, without anything popping up.
         Verdict::Decline => {
-            crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false });
+            crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false, node: None });
             return;
         }
     }
@@ -706,7 +747,7 @@ fn offered(
     }
     let Some(total) = offer_total(size, &meta.tracks) else {
         log::warn!("share: offer {id} from {from} with sizes that cannot be right — refused");
-        crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false });
+        crate::friends::send_relay(app, from, &Signal::ShareAnswer { id, accept: false, node: None });
         return;
     };
     let transfer = Transfer {
@@ -725,9 +766,10 @@ fn offered(
         screenshot: meta.screenshot,
         recording: meta.recording,
     };
+    crate::peers::note(app, from, &addr.id.to_string(), stable, "an offer");
     app.state::<Share>().incoming.lock().insert(
         id.clone(),
-        Incoming { transfer, size, sha256, secret, addr, meta },
+        Incoming { transfer, size, sha256, secret, addr, meta, stable },
     );
     emit(app);
     crate::friends::announce_clip(app, &friend_name, &format!("{friend_name} wants to send you {name} ({})", megabytes(total)));
@@ -763,7 +805,7 @@ fn offered(
 // --- Receiving -----------------------------------------------------------------
 
 async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
-    let (size, sha256, secret, addr, meta, from) = {
+    let (size, sha256, secret, addr, meta, from, (friend_id, stable)) = {
         let share = app.state::<Share>();
         let incoming = share.incoming.lock();
         let entry = incoming.get(id).ok_or("That offer is gone.")?;
@@ -774,6 +816,7 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
             entry.addr.clone(),
             entry.meta.clone(),
             entry.transfer.friend_name.clone(),
+            (entry.transfer.friend_id.clone(), entry.stable),
         )
     };
     let config = app.state::<AppState>().config_snapshot();
@@ -848,6 +891,11 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                     crate::stems::remove(&clip_id);
                     connection.close(1u32.into(), b"bad hash");
                     return Err(format!("The {what} arrived damaged — ask them to send it again."));
+                }
+                // The whole clip came from the key `addr.id` names — the
+                // connection proved it — so that is a device of theirs.
+                if stable {
+                    crate::peers::pin(app, &friend_id, &addr.id.to_string());
                 }
                 if let Ok((mut send, _)) = connection.open_bi().await {
                     let _ = send.write_all(b"k").await;
@@ -1125,6 +1173,130 @@ fn file_clip(
     Ok(clip)
 }
 
+// --- Who this PC is ----------------------------------------------------------------
+
+/// This installation's iroh key, and whether it lasts beyond this run.
+struct Identity {
+    key: SecretKey,
+    stable: bool,
+}
+
+impl Identity {
+    /// The id for `ShareAnswer.node`: only one that lasts is worth keeping.
+    fn node(&self) -> Option<String> {
+        self.stable.then(|| self.key.public().to_string())
+    }
+}
+
+/// What to do with `share-key.bin` as it was found.
+enum KeyFile {
+    Use([u8; 32]),
+    /// None there, or a broken one: make a key and keep it.
+    Create,
+    /// One there that does not open (DPAPI failed, or another user's or PC's
+    /// key): a key for this run only, as before 1.0.1. The file stays — it
+    /// may well open on the next start.
+    Ephemeral(String),
+}
+
+fn key_file(read: std::io::Result<Vec<u8>>, open: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>) -> KeyFile {
+    let sealed = match read {
+        Ok(sealed) => sealed,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return KeyFile::Create,
+        Err(err) => return KeyFile::Ephemeral(err.to_string()),
+    };
+    match open(&sealed) {
+        Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
+            Ok(key) => KeyFile::Use(key),
+            Err(_) => KeyFile::Create,
+        },
+        Err(err) => KeyFile::Ephemeral(err),
+    }
+}
+
+/// Loaded or made once per run; the router and every offer and answer use it.
+fn identity(app: &AppHandle) -> &'static Identity {
+    static IDENTITY: std::sync::OnceLock<Identity> = std::sync::OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        let ephemeral = |reason: &str| {
+            log::warn!("share: no lasting key for this PC ({reason}) — one for this run");
+            Identity { key: SecretKey::generate(), stable: false }
+        };
+        let path = match app.path().app_local_data_dir() {
+            Ok(dir) => dir.join("share-key.bin"),
+            Err(err) => return ephemeral(&err.to_string()),
+        };
+        match key_file(std::fs::read(&path), crate::secret::unprotect) {
+            KeyFile::Use(bytes) => Identity { key: SecretKey::from_bytes(&bytes), stable: true },
+            KeyFile::Create => {
+                let key = SecretKey::generate();
+                let kept = crate::secret::protect(&key.to_bytes())
+                    .and_then(|sealed| crate::secret::write_file(&path, &sealed).map_err(|err| err.to_string()));
+                match kept {
+                    Ok(()) => {
+                        log::info!("share: made this PC's key");
+                        Identity { key, stable: true }
+                    }
+                    Err(err) => ephemeral(&format!("could not keep it: {err}")),
+                }
+            }
+            KeyFile::Ephemeral(reason) => ephemeral(&reason),
+        }
+    })
+}
+
+/// What the sender does with the receiver's device.
+#[derive(Debug, PartialEq)]
+enum SenderPin {
+    /// Not both known yet: the clip has not arrived, or their yes (which can
+    /// come after their dial) has not, or never will (an app before 1.0.1).
+    Wait,
+    /// The device their yes named took the clip: keep it.
+    Pin(String),
+    /// Their yes named one device, another took the clip.
+    Mismatch { answered: String, reached: String },
+}
+
+fn sender_pin(answered: Option<&str>, reached: Option<&str>) -> SenderPin {
+    match (answered, reached) {
+        (Some(answered), Some(reached)) if answered == reached => SenderPin::Pin(reached.to_owned()),
+        (Some(answered), Some(reached)) => {
+            SenderPin::Mismatch { answered: answered.to_owned(), reached: reached.to_owned() }
+        }
+        _ => SenderPin::Wait,
+    }
+}
+
+/// Once an outgoing clip has arrived and their yes is in, in whichever order:
+/// keep the device, or log that it was not the one they named.
+fn settle_pin(app: &AppHandle, id: &str) {
+    let (friend, verdict) = {
+        let share = app.state::<Share>();
+        let mut outgoing = share.outgoing.lock();
+        let Some(entry) = outgoing.get_mut(id) else { return };
+        let verdict = sender_pin(entry.answered.as_deref(), entry.reached.as_deref());
+        if verdict == SenderPin::Wait {
+            return;
+        }
+        // Settled once.
+        entry.answered = None;
+        entry.reached = None;
+        (entry.transfer.friend_id.clone(), verdict)
+    };
+    match verdict {
+        SenderPin::Wait => {}
+        SenderPin::Pin(node) => {
+            crate::peers::note(app, &friend, &node, true, "a clip went");
+            crate::peers::pin(app, &friend, &node);
+        }
+        SenderPin::Mismatch { answered, reached } => log::warn!(
+            "share: {id} to {friend}: their yes named {} but {} took it — noted only",
+            answered.get(..10).unwrap_or(&answered),
+            reached.get(..10).unwrap_or(&reached),
+        ),
+    }
+}
+
 // --- Sending -------------------------------------------------------------------
 
 /// The iroh side, started the first time a clip goes either way and kept for
@@ -1135,7 +1307,9 @@ async fn router(app: &AppHandle) -> Result<Router, String> {
     let router = share
         .router
         .get_or_try_init(|| async move {
-            let endpoint = Endpoint::bind(presets::N0)
+            let endpoint = Endpoint::builder(presets::N0)
+                .secret_key(identity(app).key.clone())
+                .bind()
                 .await
                 .map_err(|err| format!("Could not open the connection for sending clips: {err}"))?;
             Ok::<_, String>(Router::builder(endpoint).accept(ALPN, handler).spawn())
@@ -1262,9 +1436,11 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
             .get_mut(&ask.id)
             .map(|o| {
                 o.tracks.clear();
+                o.reached = Some(connection.remote_id().to_string());
                 (o.transfer.friend_name.clone(), o.transfer.friend_id.clone(), o.transfer.noun())
             })
             .unwrap_or_else(|| ("Your friend".into(), String::new(), "clip"));
+        settle_pin(app, &ask.id);
         // The cut tracks have done their job.
         drop_cuts(&ask.id);
         let avatar = crate::friends::friend_avatar(app, &friend);
@@ -1859,11 +2035,136 @@ mod tests {
     fn signals_round_trip() {
         let text = r#"{"kind":"shareAnswer","id":"o1","accept":true}"#;
         match serde_json::from_str::<Signal>(text).unwrap() {
-            Signal::ShareAnswer { id, accept } => assert!(id == "o1" && accept),
+            Signal::ShareAnswer { id, accept, node } => assert!(id == "o1" && accept && node.is_none()),
             _ => panic!("wrong kind"),
         }
         let cancel = serde_json::to_value(Signal::ShareCancel { id: "x".into() }).unwrap();
         assert_eq!(cancel["kind"], "shareCancel");
+    }
+
+    /// The handshake as 1.0.0 has it, to check both directions against.
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    #[allow(clippy::large_enum_variant)]
+    enum OldSignal {
+        #[serde(rename_all = "camelCase")]
+        ShareOffer { id: String, size: u64, sha256: String, secret: String, addr: EndpointAddr, meta: Meta },
+        #[serde(rename_all = "camelCase")]
+        ShareAnswer { id: String, accept: bool },
+        #[serde(rename_all = "camelCase")]
+        ShareCancel { id: String },
+    }
+
+    fn test_meta() -> Meta {
+        Meta {
+            file_name: "clip.mp4".into(),
+            title: None,
+            game: None,
+            duration_ms: 1000,
+            width: 1920,
+            height: 1080,
+            screenshot: false,
+            recording: false,
+            tracks: Vec::new(),
+            mix: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_1_0_0_app_reads_the_new_handshake() {
+        let key = SecretKey::from_bytes(&[7; 32]);
+        let addr = EndpointAddr::new(key.public());
+        let node = key.public().to_string();
+        let offer = Signal::ShareOffer {
+            id: "o1".into(),
+            size: 5,
+            sha256: "0".repeat(64),
+            secret: "s".into(),
+            addr: addr.clone(),
+            meta: test_meta(),
+            stable: true,
+        };
+        let text = serde_json::to_string(&offer).unwrap();
+        assert!(text.contains(r#""stable":true"#));
+        match serde_json::from_str::<OldSignal>(&text).unwrap() {
+            OldSignal::ShareOffer { id, addr: old_addr, .. } => assert!(id == "o1" && old_addr == addr),
+            other => panic!("wrong kind: {other:?}"),
+        }
+        let answer = Signal::ShareAnswer { id: "o1".into(), accept: true, node: Some(node.clone()) };
+        let text = serde_json::to_string(&answer).unwrap();
+        assert!(text.contains(&format!(r#""node":"{node}""#)));
+        match serde_json::from_str::<OldSignal>(&text).unwrap() {
+            OldSignal::ShareAnswer { id, accept } => assert!(id == "o1" && accept),
+            other => panic!("wrong kind: {other:?}"),
+        }
+        // A no names no device, and leaves the field out.
+        let no = serde_json::to_string(&Signal::ShareAnswer { id: "o1".into(), accept: false, node: None }).unwrap();
+        assert!(!no.contains("node"));
+    }
+
+    #[test]
+    fn the_new_app_reads_a_1_0_0_handshake() {
+        let addr = EndpointAddr::new(SecretKey::from_bytes(&[9; 32]).public());
+        let old = OldSignal::ShareOffer {
+            id: "o2".into(),
+            size: 5,
+            sha256: "0".repeat(64),
+            secret: "s".into(),
+            addr: addr.clone(),
+            meta: test_meta(),
+        };
+        match serde_json::from_str::<Signal>(&serde_json::to_string(&old).unwrap()).unwrap() {
+            Signal::ShareOffer { id, addr: new_addr, stable, .. } => assert!(id == "o2" && new_addr == addr && !stable),
+            _ => panic!("wrong kind"),
+        }
+        let old = serde_json::to_string(&OldSignal::ShareAnswer { id: "o2".into(), accept: true }).unwrap();
+        match serde_json::from_str::<Signal>(&old).unwrap() {
+            Signal::ShareAnswer { node, accept, .. } => assert!(accept && node.is_none()),
+            _ => panic!("wrong kind"),
+        }
+        // A node that is not an id still leaves the answer standing.
+        let odd = r#"{"kind":"shareAnswer","id":"o2","accept":true,"node":"?"}"#;
+        assert!(matches!(serde_json::from_str::<Signal>(odd), Ok(Signal::ShareAnswer { accept: true, .. })));
+        // The ids pins are kept under are what `Display` writes.
+        assert!(crate::peers::is_node(&addr.id.to_string()));
+    }
+
+    #[test]
+    fn the_key_file_is_used_made_or_passed_over() {
+        let found = |bytes: &[u8]| Ok(bytes.to_vec());
+        let opens = |bytes: &[u8]| Ok::<_, String>(bytes.to_vec());
+        assert!(matches!(key_file(found(&[3; 32]), opens), KeyFile::Use(key) if key == [3; 32]));
+        let missing = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(matches!(key_file(missing, opens), KeyFile::Create));
+        // Opens, but is no key: broken, made again.
+        assert!(matches!(key_file(found(&[3; 31]), opens), KeyFile::Create));
+        // Does not open here: this run only, the file left alone.
+        let fails = |_: &[u8]| Err::<Vec<u8>, _>("no".to_string());
+        assert!(matches!(key_file(found(&[3; 200]), fails), KeyFile::Ephemeral(_)));
+        let denied = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(matches!(key_file(denied, opens), KeyFile::Ephemeral(_)));
+    }
+
+    #[test]
+    fn a_key_kept_sealed_is_the_same_key_again() {
+        let key = SecretKey::generate();
+        let sealed = crate::secret::protect(&key.to_bytes()).unwrap();
+        let KeyFile::Use(bytes) = key_file(Ok(sealed), crate::secret::unprotect) else { panic!("did not open") };
+        assert_eq!(SecretKey::from_bytes(&bytes).public(), key.public());
+    }
+
+    #[test]
+    fn the_sender_keeps_the_device_its_yes_named() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        assert_eq!(sender_pin(None, None), SenderPin::Wait);
+        assert_eq!(sender_pin(Some(&a), None), SenderPin::Wait);
+        // An app before 1.0.1 names none: nothing kept, nothing said.
+        assert_eq!(sender_pin(None, Some(&a)), SenderPin::Wait);
+        assert_eq!(sender_pin(Some(&a), Some(&a)), SenderPin::Pin(a.clone()));
+        assert_eq!(
+            sender_pin(Some(&a), Some(&b)),
+            SenderPin::Mismatch { answered: a.clone(), reached: b.clone() }
+        );
     }
 
     #[test]
