@@ -114,7 +114,7 @@ pub fn note(app: &AppHandle, friend: &str, node: &str, stable: bool, what: &str)
         PinVerdict::Changed => {
             log::warn!("peers: {what} with {friend} on a device not seen with them before ({short}…) — noted only")
         }
-        PinVerdict::New => log::info!("peers: {what} with {friend}, first device kept for them ({short}…)"),
+        PinVerdict::New => log::info!("peers: {what} with {friend}, no device known for them yet ({short}…)"),
         PinVerdict::Known | PinVerdict::Unpinnable => {}
     }
     verdict

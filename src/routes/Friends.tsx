@@ -290,9 +290,7 @@ function SignedIn() {
             <p className="text-sm font-semibold">Can't reach the friends server</p>
             <p className="mt-0.5 text-[13px] text-ink-muted">Trying again by itself</p>
           </div>
-          <Button size="sm" onClick={() => void friendsApi.reconnect().catch(() => {})}>
-            Retry now
-          </Button>
+          <RetryNow />
         </Card>
       )}
 
@@ -323,6 +321,25 @@ function SignedIn() {
         </>
       )}
     </>
+  );
+}
+
+/** Dials the friends server at once. Rests for a second after a press, so
+ *  quick clicks do not queue up dials. */
+function RetryNow() {
+  const [resting, setResting] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const press = () => {
+    setResting(true);
+    void friendsApi.reconnect().catch(() => {});
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setResting(false), 1000);
+  };
+  return (
+    <Button size="sm" disabled={resting} onClick={press}>
+      Retry now
+    </Button>
   );
 }
 

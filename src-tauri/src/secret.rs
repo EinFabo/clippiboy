@@ -26,18 +26,48 @@ const ENTROPY: &[u8] = b"ClippiBoy/secret/1";
 
 /// Seals `plain` to the current Windows user.
 pub fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
-    dpapi(plain, true)
+    dpapi(plain, true).map_err(|(_, err)| err)
 }
 
 /// Opens what [`protect`] sealed. Fails for anything sealed by another user,
 /// on another PC or without our entropy, and for anything changed.
 pub fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
+    unprotect_coded(sealed).map_err(|(_, err)| err)
+}
+
+/// [`unprotect`], with the HRESULT of a failure (0 when DPAPI gave none) —
+/// to tell a seal that is no seal ([`seal_broken`]) from one DPAPI cannot
+/// open just now.
+pub fn unprotect_coded(sealed: &[u8]) -> Result<Vec<u8>, (i32, String)> {
     dpapi(sealed, false)
 }
 
-fn dpapi(data: &[u8], seal: bool) -> Result<Vec<u8>, String> {
+/// How every DPAPI blob begins: version 1, then the provider's GUID
+/// (df9d8cd0-1501-11d1-8c7a-00c04fc297eb) as it lies in memory.
+const BLOB_HEAD: [u8; 20] = [
+    0x01, 0x00, 0x00, 0x00, 0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00, 0xc0, 0x4f, 0xc2,
+    0x97, 0xeb,
+];
+
+/// Could `bytes` be a DPAPI blob at all? A file that does not even begin
+/// like one was not written by [`protect`].
+pub fn looks_sealed(bytes: &[u8]) -> bool {
+    bytes.starts_with(&BLOB_HEAD)
+}
+
+/// Did a seal fail to open because it is none — damaged, or sealed with a key
+/// this user no longer has — rather than because DPAPI cannot work right now?
+/// NTE_BAD_DATA, ERROR_INVALID_DATA (as an HRESULT) and NTE_BAD_KEY_STATE.
+pub fn seal_broken(code: i32) -> bool {
+    const NTE_BAD_DATA: u32 = 0x8009_0005;
+    const ERROR_INVALID_DATA: u32 = 0x8007_000D;
+    const NTE_BAD_KEY_STATE: u32 = 0x8009_000B;
+    matches!(code as u32, NTE_BAD_DATA | ERROR_INVALID_DATA | NTE_BAD_KEY_STATE)
+}
+
+fn dpapi(data: &[u8], seal: bool) -> Result<Vec<u8>, (i32, String)> {
     let input = CRYPT_INTEGER_BLOB {
-        cbData: u32::try_from(data.len()).map_err(|_| "too large to seal".to_string())?,
+        cbData: u32::try_from(data.len()).map_err(|_| (0, "too large to seal".to_string()))?,
         pbData: data.as_ptr() as *mut u8,
     };
     let entropy = CRYPT_INTEGER_BLOB { cbData: ENTROPY.len() as u32, pbData: ENTROPY.as_ptr() as *mut u8 };
@@ -68,9 +98,9 @@ fn dpapi(data: &[u8], seal: bool) -> Result<Vec<u8>, String> {
             )
         }
     };
-    result.map_err(|err| err.to_string())?;
+    result.map_err(|err| (err.code().0, err.to_string()))?;
     if output.pbData.is_null() {
-        return Err("DPAPI handed back nothing".into());
+        return Err((0, "DPAPI handed back nothing".into()));
     }
     // SAFETY: see above; an opened secret is wiped before its buffer goes back.
     unsafe {
@@ -129,16 +159,20 @@ fn sealed<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
 pub(crate) fn read<T: Serialize + DeserializeOwned>(path: &Path, what: &str) -> Option<T> {
     let bytes = std::fs::read(path).ok()?;
     match held::<T>(&bytes) {
-        Held::Sealed(blob) => {
-            let opened = unprotect(&blob).and_then(|plain| serde_json::from_slice(&plain).map_err(|err| err.to_string()));
-            match opened {
+        Held::Sealed(blob) => match unprotect(&blob) {
+            Ok(plain) => match serde_json::from_slice(&plain) {
                 Ok(value) => Some(value),
-                Err(err) => {
-                    warn_once(path, &format!("{what}: the stored one does not open here ({err}) — taken as none"));
+                // Not serde's words: they can quote what the file holds.
+                Err(_) => {
+                    warn_once(path, &format!("{what}: the stored one does not parse — taken as none"));
                     None
                 }
+            },
+            Err(err) => {
+                warn_once(path, &format!("{what}: the stored one does not open here ({err}) — taken as none"));
+                None
             }
-        }
+        },
         Held::Plain(value) => {
             match sealed(&value).and_then(|bytes| write_file(path, &bytes).map_err(|err| err.to_string())) {
                 Ok(()) => log::info!("{what}: sealed the one kept from before"),
@@ -166,19 +200,29 @@ pub(crate) fn write_sealed<T: Serialize>(path: &Path, value: &T, what: &str) -> 
     write_file(path, &bytes)
 }
 
-/// Into a file next to it first, then over it: a crash halfway leaves the old
-/// file or the new one, never half of one.
+/// Into a file next to it first, on the disk before it goes over the old one:
+/// a crash or a power cut halfway leaves the old file or the new one, never
+/// half of one. The file next to it is named for this write alone, so two
+/// writes at once (two threads, or a second ClippiBoy) do not share one.
 pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut part = path.as_os_str().to_owned();
-    part.push(".part");
+    part.push(format!(".{}-{write}.part", std::process::id()));
     let part = PathBuf::from(part);
-    std::fs::write(&part, bytes)?;
-    std::fs::rename(&part, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&part);
-    })
+    let written = std::fs::File::create(&part).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    written
+        .and_then(|()| std::fs::rename(&part, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&part);
+        })
 }
 
 /// Once per file and run: a file that does not open would otherwise be
@@ -223,6 +267,57 @@ mod tests {
             let _ = LocalFree(HLOCAL(output.pbData.cast()));
             assert!(unprotect(&foreign).is_err());
         }
+    }
+
+    /// What DPAPI writes begins the same way every time; a file that does not
+    /// was never ours. A blob changed after sealing does not open, and says
+    /// it is broken rather than unopenable for now.
+    #[test]
+    fn a_seal_is_known_by_its_head_and_a_broken_one_by_its_error() {
+        let sealed = protect(b"key").unwrap();
+        assert!(looks_sealed(&sealed));
+        assert!(!looks_sealed(b"not a seal at all, but long enough"));
+        assert!(!looks_sealed(&BLOB_HEAD[..19]));
+        assert!(!looks_sealed(&[0u8; 32]));
+
+        let mut changed = sealed.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        let (code, err) = unprotect_coded(&changed).unwrap_err();
+        assert!(seal_broken(code), "{code:#x}: {err}");
+
+        assert!(seal_broken(0x8009_0005_u32 as i32));
+        assert!(seal_broken(0x8007_000D_u32 as i32));
+        assert!(seal_broken(0x8009_000B_u32 as i32));
+        assert!(!seal_broken(0x8007_0005_u32 as i32), "access denied may pass");
+        assert!(!seal_broken(0));
+    }
+
+    /// Each write has a file of its own next to the target, and none is left
+    /// behind.
+    #[test]
+    fn writes_leave_only_the_file() {
+        let dir = std::env::temp_dir().join(format!("clippiboy-secret-{}", uuid::Uuid::new_v4().simple()));
+        let path = dir.join("webhook.json");
+        let threads: Vec<_> = (0..8u8)
+            .map(|n| {
+                let path = path.clone();
+                // Windows may turn a rename away while another lands on the
+                // same name; what counts is that nothing half is left.
+                std::thread::spawn(move || {
+                    let _ = write_file(&path, &[n; 64]);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let content = std::fs::read(&path).unwrap();
+        assert_eq!(content.len(), 64);
+        assert!(content.iter().all(|byte| *byte == content[0]), "one write whole");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(names, ["webhook.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

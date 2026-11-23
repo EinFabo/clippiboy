@@ -265,6 +265,8 @@ pub struct Share {
     incoming: Mutex<HashMap<String, Incoming>>,
     /// Set for a transfer the user called off, read by the loop moving it.
     cancelled: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Offers that came before the friends lists were ever loaded ([`Held`]).
+    held: Mutex<Vec<Held<Offer>>>,
 }
 
 // --- Commands ------------------------------------------------------------------
@@ -578,7 +580,8 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
     };
     match signal {
         Signal::ShareOffer { id, size, sha256, secret, addr, meta, stable } => {
-            offered(app, from, id, size, sha256, secret, addr, meta, stable)
+            let offer = Offer { id, size, sha256, secret, addr, meta, stable };
+            offered(app, from, offer, std::time::Instant::now())
         }
         Signal::ShareAnswer { id, accept, node } => {
             let asking = {
@@ -588,7 +591,7 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
                 // Kept even when their dial beat the answer here (Moving, or
                 // Done already): it only names the device to keep.
                 if accept && entry.answered.is_none() {
-                    entry.answered = node;
+                    entry.answered = node.filter(|n| crate::peers::is_node(n));
                 }
                 entry.transfer.stage == Stage::Asking
             };
@@ -663,11 +666,18 @@ enum Verdict {
     /// there — not for a second offer from a friend whose first still waits,
     /// and not for an offer that cannot be taken at its word (see [`Known`]).
     Ignore,
+    /// Not yet: the friends lists were never loaded, so whether the sender is
+    /// a friend cannot be told. Held until they are ([`Held`]).
+    Hold,
 }
 
 /// What is known here about an offer's sender and id, before it is looked at.
 #[derive(Debug, Clone, Copy)]
 struct Known {
+    /// The friends lists have been loaded at least once. Until then nobody is
+    /// on them — a refresh that failed after the connection stood left an
+    /// offer from a friend unanswered.
+    lists_loaded: bool,
     /// The sender is on our own friends list. The server checks that too, but
     /// only what it says it checked is known here.
     friend: bool,
@@ -680,7 +690,13 @@ struct Known {
 }
 
 fn verdict(friends: &FriendsConfig, from: &str, known: Known, sane: bool) -> Verdict {
-    if friends.invisible || !known.friend || known.id_taken || known.asking_already {
+    if friends.invisible {
+        return Verdict::Ignore;
+    }
+    if !known.lists_loaded {
+        return Verdict::Hold;
+    }
+    if !known.friend || known.id_taken || known.asking_already {
         return Verdict::Ignore;
     }
     let welcome = match friends.accept_clips {
@@ -695,10 +711,8 @@ fn verdict(friends: &FriendsConfig, from: &str, known: Known, sane: bool) -> Ver
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn offered(
-    app: &AppHandle,
-    from: &str,
+/// A `ShareOffer` as it came in.
+struct Offer {
     id: String,
     size: u64,
     sha256: String,
@@ -706,7 +720,61 @@ fn offered(
     addr: EndpointAddr,
     meta: Meta,
     stable: bool,
-) {
+}
+
+/// An offer held back until the friends lists are loaded ([`Verdict::Hold`]),
+/// and when it came: it is taken up again after the next refresh that worked
+/// ([`retry_held`]), and lasts no longer than it would have anyway.
+struct Held<T> {
+    from: String,
+    id: String,
+    arrived: std::time::Instant,
+    offer: T,
+}
+
+/// How many offers wait for the lists at most; the oldest makes room.
+const MAX_HELD: usize = 8;
+
+/// How long an offer that came at `arrived` is still open at `now` — `None`
+/// once the [`ANSWER_WITHIN`] the sender waits for an answer is up.
+fn open_for(arrived: std::time::Instant, now: std::time::Instant) -> Option<Duration> {
+    ANSWER_WITHIN
+        .checked_sub(now.saturating_duration_since(arrived))
+        .filter(|left| !left.is_zero())
+}
+
+/// Puts an offer aside. Offers that have run out go first; an id held
+/// already is not held twice. False when this one was not held.
+fn hold<T>(held: &mut Vec<Held<T>>, offer: Held<T>, now: std::time::Instant) -> bool {
+    held.retain(|h| open_for(h.arrived, now).is_some());
+    if held.iter().any(|h| h.id == offer.id && h.from == offer.from) {
+        return false;
+    }
+    if held.len() >= MAX_HELD {
+        held.remove(0);
+    }
+    held.push(offer);
+    true
+}
+
+/// The lists have been loaded: the offers held for them are looked at again,
+/// in the order they came, those that have not run out meanwhile.
+pub(crate) fn retry_held(app: &AppHandle) {
+    let Some(share) = app.try_state::<Share>() else { return };
+    let held = std::mem::take(&mut *share.held.lock());
+    let now = std::time::Instant::now();
+    for entry in held {
+        if open_for(entry.arrived, now).is_some() {
+            log::info!("share: taking up the offer {} from {} held for the friends lists", entry.id, entry.from);
+            offered(app, &entry.from, entry.offer, entry.arrived);
+        }
+    }
+}
+
+/// An offer from `from`, which came at `arrived` — now, or earlier when it
+/// was held.
+fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instant) {
+    let Offer { id, size, sha256, secret, addr, meta, stable } = offer;
     let config = app.state::<AppState>().config_snapshot().friends;
     let share = app.state::<Share>();
     // Relays come in one after another on the one connection to the server,
@@ -719,6 +787,7 @@ fn offered(
         (incoming.contains_key(&id), asking)
     };
     let known = Known {
+        lists_loaded: crate::friends::lists_loaded(app),
         friend: crate::friends::friend_name(app, from).is_some(),
         id_taken: in_taken
             || share.outgoing.lock().contains_key(&id)
@@ -729,6 +798,18 @@ fn offered(
         Verdict::Ask => {}
         Verdict::Ignore => {
             log::info!("share: an offer from {from} left unanswered (friend: {}, id taken: {})", known.friend, known.id_taken);
+            return;
+        }
+        Verdict::Hold => {
+            let entry = Held {
+                from: from.to_owned(),
+                id: id.clone(),
+                arrived,
+                offer: Offer { id, size, sha256, secret, addr, meta, stable },
+            };
+            if hold(&mut share.held.lock(), entry, std::time::Instant::now()) {
+                log::info!("share: an offer from {from} held until the friends lists are loaded");
+            }
             return;
         }
         // Busy, or not from someone welcome: a quiet no, without anything popping up.
@@ -791,9 +872,10 @@ fn offered(
         crate::friends::friend_avatar(app, from),
     );
 
+    let left = open_for(arrived, std::time::Instant::now()).unwrap_or_default();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(ANSWER_WITHIN).await;
+        tokio::time::sleep(left).await;
         set_in(&app, &id, |t| {
             if t.stage == Stage::Asking {
                 t.stage = Stage::Expired;
@@ -1189,28 +1271,40 @@ impl Identity {
 }
 
 /// What to do with `share-key.bin` as it was found.
+#[derive(Debug)]
 enum KeyFile {
     Use([u8; 32]),
-    /// None there, or a broken one: make a key and keep it.
-    Create,
-    /// One there that does not open (DPAPI failed, or another user's or PC's
-    /// key): a key for this run only, as before 1.0.1. The file stays — it
-    /// may well open on the next start.
+    /// None there (`None`), or one that is clearly no key of ours (why): make
+    /// a key and keep it. Kept as it was, a broken file would leave this PC
+    /// on a key for one run only for good.
+    Create(Option<String>),
+    /// One there that does not open for a reason that may pass (DPAPI not
+    /// working right now, the file not readable): a key for this run only,
+    /// as before 1.0.1. The file stays — it may well open on the next start.
     Ephemeral(String),
 }
 
-fn key_file(read: std::io::Result<Vec<u8>>, open: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>) -> KeyFile {
+/// `open` is [`crate::secret::unprotect_coded`]: a failure carries its
+/// HRESULT, which tells a broken seal from one that cannot open just now.
+fn key_file(
+    read: std::io::Result<Vec<u8>>,
+    open: impl FnOnce(&[u8]) -> Result<Vec<u8>, (i32, String)>,
+) -> KeyFile {
     let sealed = match read {
         Ok(sealed) => sealed,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return KeyFile::Create,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return KeyFile::Create(None),
         Err(err) => return KeyFile::Ephemeral(err.to_string()),
     };
+    if !crate::secret::looks_sealed(&sealed) {
+        return KeyFile::Create(Some("it is no sealed key".into()));
+    }
     match open(&sealed) {
         Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
             Ok(key) => KeyFile::Use(key),
-            Err(_) => KeyFile::Create,
+            Err(_) => KeyFile::Create(Some(format!("it holds {} bytes, not a key", bytes.len()))),
         },
-        Err(err) => KeyFile::Ephemeral(err),
+        Err((code, err)) if crate::secret::seal_broken(code) => KeyFile::Create(Some(format!("it does not open: {err}"))),
+        Err((_, err)) => KeyFile::Ephemeral(err),
     }
 }
 
@@ -1226,9 +1320,12 @@ fn identity(app: &AppHandle) -> &'static Identity {
             Ok(dir) => dir.join("share-key.bin"),
             Err(err) => return ephemeral(&err.to_string()),
         };
-        match key_file(std::fs::read(&path), crate::secret::unprotect) {
+        match key_file(std::fs::read(&path), crate::secret::unprotect_coded) {
             KeyFile::Use(bytes) => Identity { key: SecretKey::from_bytes(&bytes), stable: true },
-            KeyFile::Create => {
+            KeyFile::Create(replaced) => {
+                if let Some(why) = replaced {
+                    log::warn!("share: the kept key cannot be used ({why}) \u{2014} replacing it with a new one");
+                }
                 let key = SecretKey::generate();
                 let kept = crate::secret::protect(&key.to_bytes())
                     .and_then(|sealed| crate::secret::write_file(&path, &sealed).map_err(|err| err.to_string()));
@@ -1848,7 +1945,7 @@ mod tests {
     }
 
     /// A friend's first offer under a new id.
-    const FRESH: Known = Known { friend: true, id_taken: false, asking_already: false };
+    const FRESH: Known = Known { lists_loaded: true, friend: true, id_taken: false, asking_already: false };
     const NO_PENDING: (u64, u64) = (0, 0);
 
     #[test]
@@ -1867,6 +1964,45 @@ mod tests {
     fn an_invisible_user_neither_asks_nor_answers() {
         let config = FriendsConfig { invisible: true, busy: true, ..Default::default() };
         assert_eq!(verdict(&config, "f", FRESH, true), Verdict::Ignore);
+    }
+
+    /// Before the lists were ever loaded nobody is a friend yet: the offer
+    /// waits for them instead of going unanswered — unless the user is
+    /// invisible, which no list changes.
+    #[test]
+    fn an_offer_before_the_lists_were_loaded_is_held() {
+        let unloaded = Known { lists_loaded: false, friend: false, ..FRESH };
+        assert_eq!(verdict(&FriendsConfig::default(), "f", unloaded, true), Verdict::Hold);
+        assert_eq!(verdict(&FriendsConfig { busy: true, ..Default::default() }, "f", unloaded, true), Verdict::Hold);
+        let invisible = FriendsConfig { invisible: true, ..Default::default() };
+        assert_eq!(verdict(&invisible, "f", unloaded, true), Verdict::Ignore);
+    }
+
+    /// A held offer lasts as long as the sender waits for an answer, counted
+    /// from when it came; the same offer is held once, and the oldest makes
+    /// room.
+    #[test]
+    fn a_held_offer_runs_out_with_the_offer() {
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        assert_eq!(open_for(at(0), at(0)), Some(ANSWER_WITHIN));
+        assert_eq!(open_for(at(0), at(45)), Some(Duration::from_secs(15)));
+        assert_eq!(open_for(at(0), at(60)), None);
+        assert_eq!(open_for(at(0), at(600)), None);
+
+        let held_at = |id: &str, s: u64| Held { from: "f".into(), id: id.into(), arrived: at(s), offer: () };
+        let mut held = Vec::new();
+        assert!(hold(&mut held, held_at("a", 0), at(0)));
+        assert!(!hold(&mut held, held_at("a", 1), at(1)), "the same offer twice");
+        assert!(hold(&mut held, held_at("b", 30), at(30)));
+        assert!(hold(&mut held, held_at("c", 70), at(70)));
+        let ids: Vec<&str> = held.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c"], "a ran out");
+        for n in 0..MAX_HELD - 1 {
+            hold(&mut held, held_at(&format!("n{n}"), 71), at(71));
+        }
+        assert_eq!(held.len(), MAX_HELD);
+        assert_eq!(held[0].id, "c", "b made room first");
     }
 
     #[test]
@@ -2131,16 +2267,28 @@ mod tests {
 
     #[test]
     fn the_key_file_is_used_made_or_passed_over() {
-        let found = |bytes: &[u8]| Ok(bytes.to_vec());
-        let opens = |bytes: &[u8]| Ok::<_, String>(bytes.to_vec());
-        assert!(matches!(key_file(found(&[3; 32]), opens), KeyFile::Use(key) if key == [3; 32]));
+        // A file that begins like a DPAPI blob; `opens` hands back what follows.
+        let blob = |key: &[u8]| {
+            let mut bytes = crate::secret::protect(b"head").unwrap()[..20].to_vec();
+            bytes.extend_from_slice(key);
+            Ok(bytes)
+        };
+        let opens = |bytes: &[u8]| Ok::<_, (i32, String)>(bytes[20..].to_vec());
+        assert!(matches!(key_file(blob(&[3; 32]), opens), KeyFile::Use(key) if key == [3; 32]));
         let missing = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
-        assert!(matches!(key_file(missing, opens), KeyFile::Create));
+        assert!(matches!(key_file(missing, opens), KeyFile::Create(None)));
         // Opens, but is no key: broken, made again.
-        assert!(matches!(key_file(found(&[3; 31]), opens), KeyFile::Create));
-        // Does not open here: this run only, the file left alone.
-        let fails = |_: &[u8]| Err::<Vec<u8>, _>("no".to_string());
-        assert!(matches!(key_file(found(&[3; 200]), fails), KeyFile::Ephemeral(_)));
+        assert!(matches!(key_file(blob(&[3; 31]), opens), KeyFile::Create(Some(_))));
+        // Not even the head of a seal: never ours, made again.
+        assert!(matches!(key_file(Ok(vec![3; 200]), opens), KeyFile::Create(Some(_))));
+        // A seal that is broken, or sealed under a key this user no longer has.
+        for code in [0x8009_0005_u32, 0x8007_000D, 0x8009_000B] {
+            let broken = |_: &[u8]| Err::<Vec<u8>, _>((code as i32, "no".to_string()));
+            assert!(matches!(key_file(blob(&[3; 200]), broken), KeyFile::Create(Some(_))), "{code:#x}");
+        }
+        // Does not open just now: this run only, the file left alone.
+        let fails = |_: &[u8]| Err::<Vec<u8>, _>((0x8007_0005_u32 as i32, "no".to_string()));
+        assert!(matches!(key_file(blob(&[3; 200]), fails), KeyFile::Ephemeral(_)));
         let denied = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
         assert!(matches!(key_file(denied, opens), KeyFile::Ephemeral(_)));
     }
@@ -2149,7 +2297,7 @@ mod tests {
     fn a_key_kept_sealed_is_the_same_key_again() {
         let key = SecretKey::generate();
         let sealed = crate::secret::protect(&key.to_bytes()).unwrap();
-        let KeyFile::Use(bytes) = key_file(Ok(sealed), crate::secret::unprotect) else { panic!("did not open") };
+        let KeyFile::Use(bytes) = key_file(Ok(sealed), crate::secret::unprotect_coded) else { panic!("did not open") };
         assert_eq!(SecretKey::from_bytes(&bytes).public(), key.public());
     }
 

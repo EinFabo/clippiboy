@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -135,6 +135,9 @@ pub struct Friends {
     announced: Mutex<HashMap<String, i64>>,
     /// "Retry now": ends the connection loop's wait before the next dial.
     redial: tokio::sync::Notify,
+    /// The lists have been fetched since signing in ([`lists_loaded`]). Not
+    /// the same as `view.me`: a fresh sign-in brings the profile, not the lists.
+    loaded: AtomicBool,
 }
 
 // --- Setup ---------------------------------------------------------------------
@@ -150,6 +153,11 @@ pub(crate) fn my_id(app: &AppHandle) -> Option<String> {
     let friends = app.try_state::<Friends>()?;
     let view = friends.view.lock();
     view.me.as_ref().map(|me| me.user.id.clone())
+}
+
+/// Whether the friends lists have been loaded at least once this session.
+pub(crate) fn lists_loaded(app: &AppHandle) -> bool {
+    app.try_state::<Friends>().is_some_and(|friends| friends.loaded.load(Ordering::SeqCst))
 }
 
 /// At program start: signed in last time? Then connect straight away.
@@ -391,6 +399,7 @@ fn sign_out_locally(app: &AppHandle) {
     // Dropping the sender ends the connection loop's wait at once.
     *friends.outbox.lock() = None;
     *friends.view.lock() = FriendsView::default();
+    friends.loaded.store(false, Ordering::SeqCst);
     save_token(None);
     emit(app);
 }
@@ -416,7 +425,10 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
         view.last_seen.retain(|id, _| ids.contains(id.as_str()));
         previous
     };
+    friends.loaded.store(true, Ordering::SeqCst);
     emit(app);
+    // Offers that came before the lists did can be looked at now.
+    crate::share::retry_held(app);
     if announce {
         let known: HashSet<&str> = previous.incoming.iter().map(|p| p.user.id.as_str()).collect();
         let now = now_ms();
@@ -488,10 +500,23 @@ fn spawn_connection(app: &AppHandle) {
             if started.elapsed() > Duration::from_secs(60) {
                 backoff = Duration::from_secs(1);
             }
+            // Signed out meanwhile: a loop from before must not sit in the
+            // wait below, where it would take a "Retry now" meant for the next.
+            if friends.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             let (wait, next) = next_backoff(backoff, random_unit());
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
-                _ = friends.redial.notified() => log::info!("friends: dialling again on request"),
+                _ = friends.redial.notified() => {
+                    // Signed out and in again during the wait: the press was
+                    // for the loop of the new sign-in — pass it on.
+                    if friends.generation.load(Ordering::SeqCst) != generation {
+                        friends.redial.notify_one();
+                        return;
+                    }
+                    log::info!("friends: dialling again on request");
+                }
             }
             backoff = next;
         }
