@@ -1,9 +1,14 @@
 // Runs requests, acceptance, live presence, invisibility and blocking against
-// the deployed worker with two test accounts — no Discord needed.
+// a local `wrangler dev` with two test accounts — no Discord needed. See
+// README.md → Test for the whole run.
 //
-//   node scripts/e2e.mjs --seed | npx wrangler d1 execute clippiboy-friends --remote --file /dev/stdin
+//   node scripts/e2e.mjs --seed > seed.sql
+//   npx wrangler d1 execute clippiboy-friends --local --file seed.sql
 //   node scripts/e2e.mjs
-//   npx wrangler d1 execute clippiboy-friends --remote --command "DELETE FROM users WHERE discord_id LIKE 'test-%'"
+//
+// It talks to http://127.0.0.1:8799, or to FRIENDS_SERVER if that is set. A
+// server that is not this computer — the deployed worker above all — only with
+// `--production`; remove the test accounts there afterwards.
 //
 // The seed makes up fresh tokens and friend codes and keeps them only in
 // scripts/e2e-tokens.json (ignored by git). They used to be fixed strings in
@@ -12,8 +17,8 @@
 // same.
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { e2eTarget } from "./target.mjs";
 
-const BASE = process.env.FRIENDS_SERVER ?? "https://api.clippiboy.com";
 const TOKENS = new URL("./e2e-tokens.json", import.meta.url);
 
 if (process.argv.includes("--seed")) {
@@ -36,6 +41,13 @@ INSERT INTO sessions (token_hash, user_id, created_at, last_used) VALUES
   ('${hash(seed.b.token)}', '${seed.b.id}', ${now}, ${now});`);
   process.exit(0);
 }
+const target = e2eTarget(process.env.FRIENDS_SERVER, process.argv.slice(2));
+if ("error" in target) {
+  console.error(target.error);
+  process.exit(2);
+}
+const BASE = target.base;
+console.log(`Against ${BASE}`);
 const { a: A, b: B } = JSON.parse(readFileSync(TOKENS, "utf8"));
 
 async function api(who, method, path, body) {

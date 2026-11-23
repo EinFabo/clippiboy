@@ -81,17 +81,19 @@ down, two together still could. Workers Paid lifts the ceiling altogether.
 
 ## Test
 
-`scripts/e2e.mjs` runs the whole flow with two seeded test accounts — see the
-comment at the top.
-
-Against a local `wrangler dev` instead of the deployed worker:
+`scripts/e2e.mjs` runs the whole flow with two seeded test accounts against a
+local `wrangler dev` — see the comment at the top:
 
 ```sh
 npx wrangler d1 migrations apply clippiboy-friends --local
 node scripts/e2e.mjs --seed > seed.sql && npx wrangler d1 execute clippiboy-friends --local --file seed.sql
 npx wrangler dev --port 8799 &
-FRIENDS_SERVER=http://127.0.0.1:8799 node scripts/e2e.mjs
+node scripts/e2e.mjs
 ```
+
+It goes to `http://127.0.0.1:8799`, or to `FRIENDS_SERVER`. Any server that is
+not this computer, the deployed worker included, it refuses unless run with
+`--production`.
 
 ## Relay
 
