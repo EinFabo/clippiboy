@@ -141,10 +141,22 @@ pub fn create(app: &tauri::AppHandle) {
 }
 
 /// Make the console window anew, after the graphics adapters changed under
-/// it — the same reason as `overlay::recreate`. An open console goes down with
-/// the old window; it opens fresh on the next hotkey. Off the event loop's
-/// thread.
+/// it — the same reason as `overlay::recreate`. An open console is left to the
+/// user: this waits until it has closed, so nothing is pulled from under the
+/// hands and the focus goes back to the game the usual way. Off the event
+/// loop's thread; changes coming in while one waits are one recreate.
 pub fn recreate(app: &tauri::AppHandle) {
+    static WAITING: AtomicBool = AtomicBool::new(false);
+    if WAITING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if is_open(app) {
+        log::info!("console: open \u{2014} made anew once it closes");
+        while is_open(app) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    WAITING.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window(LABEL) {
         if let Err(err) = window.destroy() {
             log::warn!("console: could not close the old window: {err}");

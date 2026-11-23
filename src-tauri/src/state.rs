@@ -700,23 +700,29 @@ impl RestartBudget {
 /// known to kill it, before it counts as dead.
 pub const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long the stall watch stays armed after such an event. A capture can
+/// hand over a few more pictures after the change and only then fall silent —
+/// the logs showed 24 and 31 new frames before nothing came for hours — so the
+/// first frame after the event proves nothing; a minute of watching does.
+pub const STALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Has the capture died silently? The second line behind the topology
 /// fingerprint (`capture::needs_restart`).
 ///
 /// Windows.Graphics.Capture only hands over a frame when the picture changed,
 /// so "no new frame" alone means nothing on a still desktop — and a game on
 /// another screen than the recorded one leaves the recorded one still. Hence
-/// three conditions, all needed:
+/// all of these are needed:
 ///
 /// * `armed`: an event that has killed captures before happened at this time
-///   — a topology change, the display back on, an unlock, a wake.
+///   — a topology change, the display back on, an unlock, a wake — and that
+///   was less than [`STALL_WINDOW`] ago.
 /// * `game_on_screen`: the game in front sits on the screen being recorded,
 ///   so new pictures are owed.
-/// * no new frame since the event (`last_new`), for [`STALL_AFTER`] counted
-///   from the event or from the capture's start (`started`), whichever is
-///   later — a capture started after the event gets its own five seconds.
-///
-/// A frame after the event shows the capture alive; the caller disarms then.
+/// * no new picture for [`STALL_AFTER`], counted from the last one
+///   (`last_new`), from the event, or from the capture's start (`started`) —
+///   whichever is latest. A capture started after the event gets its own five
+///   seconds, and the stillness before the event is not held against it.
 pub fn stalled(
     armed: Option<std::time::Instant>,
     last_new: Option<std::time::Instant>,
@@ -727,10 +733,51 @@ pub fn stalled(
     let Some(armed) = armed else {
         return false;
     };
-    if !game_on_screen || last_new.is_some_and(|at| at >= armed) {
+    if !game_on_screen || now.saturating_duration_since(armed) >= STALL_WINDOW {
         return false;
     }
-    now.saturating_duration_since(armed.max(started)) >= STALL_AFTER
+    let quiet_since = last_new.map_or(started, |at| at.max(started)).max(armed);
+    now.saturating_duration_since(quiet_since) >= STALL_AFTER
+}
+
+/// The stall watch's memory: which event armed it, and when. Fires at most
+/// once per event, and forgets the event once [`STALL_WINDOW`] has passed.
+#[derive(Debug, Default)]
+pub struct StallWatch {
+    armed: Option<(std::time::Instant, &'static str)>,
+}
+
+impl StallWatch {
+    pub const fn new() -> Self {
+        Self { armed: None }
+    }
+
+    /// An event happened at `at`; a newer one starts the window over.
+    pub fn arm(&mut self, at: std::time::Instant, why: &'static str) {
+        self.armed = Some((at, why));
+    }
+
+    /// One look. `Some(why)` when the capture is to be restarted — and the
+    /// watch is disarmed with it, so it fires once per event. `game_on_screen`
+    /// is only asked once the time is up: it walks the foreground process.
+    pub fn check(
+        &mut self,
+        last_new: Option<std::time::Instant>,
+        started: std::time::Instant,
+        game_on_screen: impl FnOnce() -> bool,
+        now: std::time::Instant,
+    ) -> Option<&'static str> {
+        let (at, why) = self.armed?;
+        if now.saturating_duration_since(at) >= STALL_WINDOW {
+            self.armed = None;
+            return None;
+        }
+        if !stalled(Some(at), last_new, started, true, now) || !game_on_screen() {
+            return None;
+        }
+        self.armed = None;
+        Some(why)
+    }
 }
 
 impl AppState {
@@ -2811,7 +2858,7 @@ mod tests {
     }
 
     /// The topology changed at second 10, the capture had started at 0 and
-    /// its last new frame came at 9.
+    /// its last new frame came at `last_new`.
     fn stall_at(armed: bool, last_new: u64, game_on_screen: bool, now: u64) -> bool {
         let start = std::time::Instant::now();
         let at = |s: u64| start + std::time::Duration::from_secs(s);
@@ -2821,27 +2868,67 @@ mod tests {
     #[test]
     fn a_capture_silent_after_the_event_with_the_game_on_its_screen_is_dead() {
         assert!(!stall_at(true, 9, true, 14), "four seconds are not five");
-        assert!(stall_at(true, 9, true, 15));
+        assert!(stall_at(true, 9, true, 15), "the stillness before the event does not count");
     }
 
-    /// A game on another screen leaves the recorded one still: no new frame
-    /// is owed, and a restart would throw a good buffer away.
+    /// The logs: a few dozen pictures after the change, then none. The first
+    /// frames after the event prove nothing.
+    #[test]
+    fn trailing_frames_then_silence_inside_the_window_fire_once() {
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        let mut watch = StallWatch::new();
+        watch.arm(at(10), "the screens changed");
+        assert_eq!(watch.check(Some(at(12)), at(0), || true, at(16)), None, "4 s quiet");
+        assert_eq!(watch.check(Some(at(12)), at(0), || true, at(17)), Some("the screens changed"));
+        assert_eq!(watch.check(Some(at(12)), at(0), || true, at(30)), None, "once per event");
+    }
+
+    /// A game on another screen leaves the recorded one still — a paused game
+    /// as much as a running one: no new frame is owed, and a restart would
+    /// throw a good buffer away.
     #[test]
     fn a_game_on_another_screen_never_counts_as_a_stall() {
-        assert!(!stall_at(true, 9, false, 600));
+        assert!(!stall_at(true, 9, false, 20));
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        let mut watch = StallWatch::new();
+        watch.arm(at(10), "the unlock");
+        for now in 11..80 {
+            assert_eq!(watch.check(Some(at(9)), at(0), || false, at(now)), None);
+        }
     }
 
     /// Without an event a still screen is just a still screen.
     #[test]
     fn an_unarmed_watch_never_fires() {
-        assert!(!stall_at(false, 9, true, 600));
+        assert!(!stall_at(false, 9, true, 30));
+        let mut watch = StallWatch::new();
+        let now = std::time::Instant::now();
+        assert_eq!(watch.check(None, now, || true, now + std::time::Duration::from_secs(30)), None);
     }
 
-    /// One frame after the event shows the capture survived it.
+    /// A minute after the event the capture is trusted again — and the game
+    /// is not even looked up.
     #[test]
-    fn frames_after_the_event_mean_the_capture_lives() {
-        assert!(!stall_at(true, 10, true, 600));
-        assert!(!stall_at(true, 11, true, 600));
+    fn after_the_window_the_watch_never_fires() {
+        assert!(!stall_at(true, 9, true, 70));
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        let mut watch = StallWatch::new();
+        watch.arm(at(10), "the wake from sleep");
+        let asked = std::cell::Cell::new(false);
+        assert_eq!(watch.check(Some(at(9)), at(0), || { asked.set(true); true }, at(70)), None);
+        assert!(!asked.get());
+        assert_eq!(watch.check(Some(at(9)), at(0), || true, at(71)), None, "disarmed");
+    }
+
+    /// New pictures keep coming: the capture lives.
+    #[test]
+    fn steady_frames_after_the_event_mean_the_capture_lives() {
+        for now in 11..70 {
+            assert!(!stall_at(true, now - 1, true, now));
+        }
     }
 
     /// A capture started after the event (the unlock's restart, say) gets its

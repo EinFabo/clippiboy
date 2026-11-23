@@ -957,70 +957,85 @@ fn watch_topology(app: &tauri::AppHandle, settled: &capture::Fingerprint) {
 }
 
 /// When an event that has killed captures before happened, and which — the
-/// stall watch is armed by it ([`watch_stall`]).
-static STALL_ARMED: std::sync::Mutex<Option<(std::time::Instant, &'static str)>> =
-    std::sync::Mutex::new(None);
+/// stall watch is armed by it for a minute ([`watch_stall`]).
+static STALL_WATCH: std::sync::Mutex<state::StallWatch> =
+    std::sync::Mutex::new(state::StallWatch::new());
 
 fn arm_stall_watch(why: &'static str) {
-    *STALL_ARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        Some((std::time::Instant::now(), why));
+    STALL_WATCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .arm(std::time::Instant::now(), why);
 }
 
 /// The second line behind [`watch_topology`]: a capture that has delivered no
-/// new picture since such an event, while the game in front sits on the
-/// recorded screen, has died — restart it. See `state::stalled` for why all of
-/// that is needed before a buffer is thrown away. One restart per event.
+/// new picture for five seconds within a minute of such an event, while the
+/// game in front sits on the recorded screen, has died — restart it. See
+/// `state::stalled` for why all of that is needed before a buffer is thrown
+/// away. One restart per event.
+///
+/// Held off under the same conditions as [`watch_topology`]: with the display
+/// off (DisplayPort screens drop out then) or its own restart still owed, a
+/// restart here would come in the dark and be followed by that one.
+///
+/// Screen captures only. A window capture restarts on a topology change like
+/// any other (`watch_topology` compares the topology, not the source), but
+/// "no new picture" says nothing about it: the window recorded need not be
+/// the game in front, and a window that is minimised or covered legitimately
+/// delivers nothing.
 fn watch_stall(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     if capture::screen_unrecordable() {
         return;
     }
-    let Some((armed, why)) = *STALL_ARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    else {
-        return;
-    };
-    let disarm = || {
-        let mut slot = STALL_ARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if slot.is_some_and(|(at, _)| at == armed) {
-            *slot = None;
-        }
-    };
     let state = app.state::<AppState>();
-    if state.quitting.load(Ordering::SeqCst) || !state.is_buffering() || state.is_recording() {
+    if state.quitting.load(Ordering::SeqCst)
+        || AUTO_STARTING.load(Ordering::SeqCst)
+        || state.auto.display_pending()
+        || state.auto.screen_locked()
+        || !state.is_buffering()
+        || state.is_recording()
+        // Busy restarting already: the event stays armed for the capture that
+        // restart brings up.
+        || CAPTURE_RESTARTING.load(Ordering::SeqCst)
+    {
         return;
     }
     let Some(shared) = state.shared.lock().clone() else {
         return;
     };
-    // A window capture follows its window, not a screen.
-    let Some(screen) = shared.source.lock().as_ref().map(|choice| choice.target.id.clone()) else {
+    let Some(recorded) = shared.source.lock().as_ref().map(|choice| choice.target.clone()) else {
         return;
     };
     let last_new = shared.last_new_frame();
-    if last_new.is_some_and(|at| at >= armed) {
-        disarm();
-        return;
-    }
     let now = std::time::Instant::now();
-    // The cheap part first: the game is only looked up once the time is up.
-    if !state::stalled(Some(armed), last_new, shared.started, true, now) {
+    let fired = STALL_WATCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .check(
+            last_new,
+            shared.started,
+            || {
+                game::foreground_game_screen().is_some_and(|device| {
+                    capture::is_screen(&recorded, &device, &capture::list_monitors())
+                })
+            },
+            now,
+        );
+    let Some(why) = fired else {
         return;
-    }
-    let game_on_screen = game::foreground_game_screen().as_deref() == Some(screen.as_str());
-    if !state::stalled(Some(armed), last_new, shared.started, game_on_screen, now) {
-        return;
-    }
+    };
     if CAPTURE_RESTARTING.swap(true, Ordering::SeqCst) {
         return;
     }
-    disarm();
     if !capture_budget_allows("the capture delivers nothing") {
         CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
         return;
     }
-    let quiet = now.saturating_duration_since(last_new.unwrap_or(shared.started).max(armed));
+    let quiet = now.saturating_duration_since(last_new.unwrap_or(shared.started).max(shared.started));
+    let screen = recorded.id;
     log::warn!(
-        "no new frame for {:.0} s since {why}, with the game on the recorded screen {screen} \u{2014} restarting the capture",
+        "no new frame for {:.0} s after {why}, with the game on the recorded screen {screen} \u{2014} restarting the capture",
         quiet.as_secs_f32()
     );
     let app = app.clone();
@@ -1122,7 +1137,6 @@ fn watch_screen(app: &tauri::AppHandle) {
 /// seconds. Saving refuses meanwhile, with the reason.
 fn watch_encoder(app: &tauri::AppHandle) {
     use std::sync::atomic::{AtomicBool, Ordering};
-    static RESTARTING: AtomicBool = AtomicBool::new(false);
     static BUDGET: std::sync::Mutex<Option<state::RestartBudget>> = std::sync::Mutex::new(None);
     static GAVE_UP: AtomicBool = AtomicBool::new(false);
 
@@ -1138,7 +1152,9 @@ fn watch_encoder(app: &tauri::AppHandle) {
     let Some(why) = state.encoder_failure() else {
         return;
     };
-    if RESTARTING.swap(true, Ordering::SeqCst) {
+    // One flag with the capture restarts: a driver update that kills the
+    // encoder and moves the topology must not restart the buffer twice.
+    if CAPTURE_RESTARTING.swap(true, Ordering::SeqCst) {
         return;
     }
     let allowed = BUDGET
@@ -1147,7 +1163,7 @@ fn watch_encoder(app: &tauri::AppHandle) {
         .get_or_insert_with(state::RestartBudget::default)
         .allow(std::time::Instant::now());
     if !allowed {
-        RESTARTING.store(false, Ordering::SeqCst);
+        CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
         if !GAVE_UP.swap(true, Ordering::SeqCst) {
             log::error!("the video encoder keeps failing ({why}) \u{2014} no more restarts for now");
             notify(app, "error", format!("The video encoder keeps failing ({why})."));
@@ -1222,7 +1238,7 @@ fn watch_encoder(app: &tauri::AppHandle) {
         } else if stopped_recording {
             recording_stopped();
         }
-        RESTARTING.store(false, Ordering::SeqCst);
+        CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
     });
 }
 

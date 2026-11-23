@@ -494,6 +494,9 @@ pub struct Shared {
     /// When the last *new* picture went out, in milliseconds after `started`
     /// plus one; 0 while there has been none. A repeat does not count.
     pub last_new_ms: AtomicU64,
+    /// New pictures so far — frames that were not repeats, whether or not the
+    /// encoder took them.
+    pub fresh: AtomicU64,
     /// Bumped when `sources` changes. The mixer keeps a copy and only re-reads
     /// when the number has moved.
     pub sources_generation: AtomicU64,
@@ -528,7 +531,7 @@ pub struct Shared {
 struct HealthMark {
     at: std::time::Instant,
     frames: u64,
-    duplicated: u64,
+    fresh: u64,
     encoded: u64,
     encode_us: u64,
 }
@@ -618,12 +621,12 @@ impl Shared {
     pub fn health(&self) -> Health {
         let now = std::time::Instant::now();
         let frames = self.frames.load(Ordering::Relaxed);
-        let duplicated = self.duplicated.load(Ordering::Relaxed);
+        let fresh = self.fresh.load(Ordering::Relaxed);
 
         let mut out = Health {
             frames,
             dropped: self.dropped.load(Ordering::Relaxed),
-            duplicated,
+            duplicated: self.duplicated.load(Ordering::Relaxed),
             last_new_ago: self
                 .last_new_frame()
                 .map(|at| now.saturating_duration_since(at).as_secs_f32()),
@@ -656,7 +659,7 @@ impl Shared {
             *mark = HealthMark {
                 at: now,
                 frames,
-                duplicated,
+                fresh,
                 encoded,
                 encode_us,
             };
@@ -667,9 +670,7 @@ impl Shared {
         if seconds > 0.0 {
             out.fps = frames.saturating_sub(before.frames) as f32 / seconds;
         }
-        out.fresh = frames
-            .saturating_sub(before.frames)
-            .saturating_sub(duplicated.saturating_sub(before.duplicated));
+        out.fresh = fresh.saturating_sub(before.fresh);
         // Only the frames that came out during this interval, and only the time
         // they took. This is the number that moves when an encoder starts to
         // struggle; the running average is the one that does not.
@@ -759,6 +760,7 @@ impl Shared {
     pub fn note_new_frame(&self) {
         let ms = self.started.elapsed().as_millis() as u64 + 1;
         self.last_new_ms.store(ms, Ordering::Relaxed);
+        self.fresh.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a problem with the running capture.
@@ -1290,7 +1292,7 @@ impl Pipeline {
             health_mark: Mutex::new(HealthMark {
                 at: std::time::Instant::now(),
                 frames: 0,
-                duplicated: 0,
+                fresh: 0,
                 encoded: 0,
                 encode_us: 0,
             }),
@@ -1304,6 +1306,7 @@ impl Pipeline {
             topology: Mutex::new(None),
             started: std::time::Instant::now(),
             last_new_ms: AtomicU64::new(0),
+            fresh: AtomicU64::new(0),
         });
 
         #[cfg(windows)]

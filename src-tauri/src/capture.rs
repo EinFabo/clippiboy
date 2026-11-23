@@ -833,8 +833,24 @@ pub fn settled(previous: Option<&Fingerprint>, now: &Fingerprint) -> bool {
 /// topology settled on `settled`? Any difference counts — a screen gone or
 /// back, moved, renumbered, another resolution, a new adapter or driver — the
 /// recorded screen or not: the capture may have died with it, silently.
+///
+/// The adapters only when both sides know them: DXGI failing once, at the
+/// start or at a reading, is no graphics change.
 pub fn needs_restart(at_start: &Fingerprint, settled: &Fingerprint) -> bool {
-    at_start != settled
+    at_start.screens != settled.screens || graphics_changed(at_start, settled)
+}
+
+/// Is the screen with this device name, as the screens stand now, the one
+/// `recorded` is? By the panel when both are known — a renumbering hands the
+/// device name to another screen — by the device name otherwise.
+pub fn is_screen(recorded: &CaptureTarget, device: &str, screens: &[CaptureTarget]) -> bool {
+    match screens
+        .iter()
+        .find(|t| t.kind == TargetKind::Monitor && t.id == device)
+    {
+        Some(now) => same_screen(recorded, now),
+        None => recorded.id == device,
+    }
 }
 
 /// Did the graphics adapters change between two settled topologies — a driver
@@ -1402,6 +1418,33 @@ mod tests {
         assert!(needs_restart(&before, &after));
         let reset = print(&two_screens()).with_graphics(vec![adapter(0x5678, 10)]);
         assert!(graphics_changed(&before, &reset), "a reset alone moves the LUID");
+    }
+
+    /// DXGI failing on one side only is no reason to throw the buffer away.
+    #[test]
+    fn unknown_adapters_on_one_side_restart_nothing() {
+        let known = print(&two_screens()).with_graphics(vec![adapter(1, 1)]);
+        let unknown = print(&two_screens());
+        assert!(!needs_restart(&known, &unknown));
+        assert!(!needs_restart(&unknown, &known));
+    }
+
+    /// The game is found on a screen by its device name; after a renumbering
+    /// that name belongs to another panel.
+    #[test]
+    fn the_game_screen_is_matched_by_its_panel() {
+        let before = two_screens();
+        let recorded = before[0].clone();
+        let mut now = two_screens();
+        now[0].id = "\\\\.\\DISPLAY2".into();
+        now[1].id = "\\\\.\\DISPLAY1".into();
+        assert!(is_screen(&recorded, "\\\\.\\DISPLAY2", &now), "the same panel, renumbered");
+        assert!(!is_screen(&recorded, "\\\\.\\DISPLAY1", &now), "its old name, another panel");
+        let mut anonymous = now.clone();
+        for screen in &mut anonymous {
+            screen.stable_id = None;
+        }
+        assert!(is_screen(&recorded, "\\\\.\\DISPLAY1", &anonymous), "no panel: by name");
     }
 
     #[test]
