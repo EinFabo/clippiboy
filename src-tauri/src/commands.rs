@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::audio::{self, devices};
 use crate::capture;
@@ -19,21 +19,45 @@ use crate::state::AppState;
 
 type Result<T> = std::result::Result<T, String>;
 
-#[tauri::command(async)]
-pub fn list_audio_devices() -> Vec<AudioDevice> {
-    devices::list_devices()
+/// Run a command's work on the blocking pool and wait for it there.
+///
+/// A `#[tauri::command(async)]` over a plain `fn` runs its whole body inside
+/// the future, on one of the runtime's few worker threads: a PNG, a blur, a
+/// rename's retry pauses or an ffmpeg run held that worker, and every other
+/// async command and the friends connection queued behind it. A panic in the
+/// work goes on as one, as it did in the body.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(tauri::Error::JoinError(err)) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+        Err(err) => panic!("blocking command work was lost: {err}"),
+    }
+}
+
+#[tauri::command]
+pub async fn list_audio_devices() -> Vec<AudioDevice> {
+    blocking(move || -> Vec<AudioDevice> {
+        devices::list_devices()
+    })
+    .await
 }
 
 /// The cameras for the Facecam tab. Async: listing takes a moment and runs on
 /// a worker, which joins the multithreaded apartment itself.
-#[tauri::command(async)]
-pub fn list_cameras() -> Vec<crate::model::CameraDevice> {
-    crate::camera::list()
+#[tauri::command]
+pub async fn list_cameras() -> Vec<crate::model::CameraDevice> {
+    blocking(move || -> Vec<crate::model::CameraDevice> {
+        crate::camera::list()
+    })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn list_audio_processes() -> Vec<AudioProcess> {
-    devices::list_processes()
+#[tauri::command]
+pub async fn list_audio_processes() -> Vec<AudioProcess> {
+    blocking(move || -> Vec<AudioProcess> {
+        devices::list_processes()
+    })
+    .await
 }
 
 /// Can a single application be recorded on this Windows (build 20348+)?
@@ -45,41 +69,50 @@ pub fn app_capture_supported() -> bool {
 /// Monitors with their place on the desktop and windows with their program's
 /// icon — what the Video page draws. The icons are looked up here and not in
 /// `capture::list_targets`, which the core calls for itself all the time.
-#[tauri::command(async)]
-pub fn list_capture_targets(app: tauri::AppHandle) -> Vec<CaptureTarget> {
-    use tauri::Manager;
-    crate::appicon::log_dpi_awareness();
-    let mut targets = capture::list_targets();
-    let game_pid = app.state::<AppState>().game_pid();
-    crate::appicon::dress_windows(&mut targets, game_pid);
-    targets
+#[tauri::command]
+pub async fn list_capture_targets(app: tauri::AppHandle) -> Vec<CaptureTarget> {
+    blocking(move || -> Vec<CaptureTarget> {
+        use tauri::Manager;
+        crate::appicon::log_dpi_awareness();
+        let mut targets = capture::list_targets();
+        let game_pid = app.state::<AppState>().game_pid();
+        crate::appicon::dress_windows(&mut targets, game_pid);
+        targets
+    })
+    .await
 }
 
 /// Small still images of the screens in `ids` for the monitor map — only with
 /// the main window in front, never in streamer mode or with the lock screen
 /// up (see `stills.rs`).
-#[tauri::command(async)]
-pub fn capture_thumbs(app: tauri::AppHandle, ids: Vec<String>) -> Vec<crate::stills::Thumb> {
-    // Tauri hands out its own `windows` version's HWND — only the pointer counts.
-    #[cfg(windows)]
-    let main = {
-        use tauri::Manager;
-        app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize)
-    };
-    #[cfg(not(windows))]
-    let main = {
-        let _ = app;
-        None
-    };
-    crate::stills::capture(&ids, main)
+#[tauri::command]
+pub async fn capture_thumbs(app: tauri::AppHandle, ids: Vec<String>) -> Vec<crate::stills::Thumb> {
+    blocking(move || -> Vec<crate::stills::Thumb> {
+        // Tauri hands out its own `windows` version's HWND — only the pointer counts.
+        #[cfg(windows)]
+        let main = {
+            use tauri::Manager;
+            app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize)
+        };
+        #[cfg(not(windows))]
+        let main = {
+            let _ = app;
+            None
+        };
+        crate::stills::capture(&ids, main)
+    })
+    .await
 }
 
 /// Async so the Media Foundation enumeration runs off the main thread. It
 /// looks again, so a driver installed while the app runs shows up.
-#[tauri::command(async)]
-pub fn list_encoders() -> Vec<EncoderInfo> {
-    encode::refresh_encoders();
-    encode::list_encoders()
+#[tauri::command]
+pub async fn list_encoders() -> Vec<EncoderInfo> {
+    blocking(move || -> Vec<EncoderInfo> {
+        encode::refresh_encoders();
+        encode::list_encoders()
+    })
+    .await
 }
 
 /// The most a window may put into the log in one report.
@@ -132,7 +165,7 @@ pub fn set_config(
     // granted to the player recursively and the token is what every Stream
     // Deck key holds, so a settings write (a stale page, the mock config) must
     // not carry either — an empty token would kill every key too. Against the
-    // config under its lock, not `previous`: a `set_clip_dir` or a new token
+    // config under its lock, not `previous`: a new clip folder or a new token
     // in between would be undone.
     config.accent_color = crate::model::clean_accent(config.accent_color.as_deref());
     config.accent_color_2 = crate::model::clean_accent(config.accent_color_2.as_deref());
@@ -502,51 +535,139 @@ pub fn watch_controllers() -> crate::inputpoll::Controllers {
     crate::inputpoll::watch_controllers()
 }
 
-/// Change the folder new clips land in.
-///
-/// It is created right away, and written to once as well — a path that only
-/// blows up when the first clip is saved helps nobody.
-#[tauri::command(async)]
-pub fn set_clip_dir(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-    dir: String,
-) -> Result<AppConfig> {
-    // The disk guard measures the drive the recording is on and recovery looks
-    // where its files lie; both would point at the wrong place after a move.
+/// Let the user pick the folder new clips land in, in the core's own folder
+/// dialog. No window hands in a path: the folder is granted to the player in
+/// full, so a script in the page must not be able to name the profile, the
+/// Windows folder or a share (whose mere touch sends the user's NTLM hash out).
+/// `None` when the dialog was cancelled.
+#[tauri::command]
+pub async fn pick_clip_dir(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<Option<AppConfig>> {
+    blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let state = app.state::<AppState>();
+        refuse_while_recording(&state)?;
+        // Off the main thread, which the dialog needs: it is shown there, and
+        // this waits for the answer.
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Folder for new clips")
+            .set_directory(state.config_snapshot().clip_dir)
+            .blocking_pick_folder()
+        else {
+            return Ok(None);
+        };
+        let picked = picked.into_path().map_err(|err| err.to_string())?;
+        let guarded = ClipDirGuard::of_this_machine();
+        if !clip_dir_allowed(&picked, &guarded) {
+            return Err(CLIP_DIR_REFUSED.into());
+        }
+        // Checked as it really is, too: a junction onto the profile is the
+        // profile.
+        if dunce::canonicalize(&picked).is_ok_and(|real| !clip_dir_allowed(&real, &guarded)) {
+            return Err(CLIP_DIR_REFUSED.into());
+        }
+        adopt_clip_dir(&state, &app, &picked).map(Some)
+    })
+    .await
+}
+
+/// Put the clip folder back to the suggested one ("Reset"). The core knows
+/// that folder itself; the window names none.
+#[tauri::command]
+pub async fn reset_clip_dir(app: tauri::AppHandle) -> Result<AppConfig> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        adopt_clip_dir(&state, &app, &crate::config::default_clip_dir())
+    })
+    .await
+}
+
+const CLIP_DIR_REFUSED: &str =
+    "Pick a folder of its own on a local drive — not a whole drive, your user folder, the Windows folder or a network share.";
+
+/// The disk guard measures the drive the recording is on and recovery looks
+/// where its files lie; both would point at the wrong place after a move.
+fn refuse_while_recording(state: &AppState) -> Result<()> {
     if state.is_recording() {
         return Err("Stop the recording before moving the clip folder.".into());
     }
-    let dir = dir.trim();
-    if !usable_clip_dir(dir) {
-        return Err("Pick a folder for the clips, not a whole drive.".into());
+    Ok(())
+}
+
+/// Make `dir` the clip folder. It is created right away, and written to once
+/// as well — a path that only blows up when the first clip is saved helps
+/// nobody.
+fn adopt_clip_dir(state: &AppState, app: &tauri::AppHandle, dir: &Path) -> Result<AppConfig> {
+    // Again: one may have started while the dialog was open.
+    refuse_while_recording(state)?;
+    let shown = dir.display();
+    if !crate::grantable_dir(dir) {
+        return Err(CLIP_DIR_REFUSED.into());
     }
-    let path = std::path::PathBuf::from(dir);
-    std::fs::create_dir_all(&path)
-        .map_err(|err| format!("Folder \"{dir}\" cannot be created: {err}"))?;
+    std::fs::create_dir_all(dir).map_err(|err| format!("Folder \"{shown}\" cannot be created: {err}"))?;
     // Checked as it really is: a junction onto a drive is a whole drive as
-    // well. Kept as typed, though — the clips already filed carry that
+    // well. Kept as picked, though — the clips already filed carry that
     // spelling, and `filing` compares paths as text.
-    if dunce::canonicalize(&path).is_ok_and(|real| !crate::grantable_dir(&real)) {
-        return Err("Pick a folder for the clips, not a whole drive.".into());
+    if dunce::canonicalize(dir).is_ok_and(|real| !crate::grantable_dir(&real)) {
+        return Err(CLIP_DIR_REFUSED.into());
     }
-    let probe = path.join(".clippiboy-schreibtest");
-    std::fs::write(&probe, b"")
-        .map_err(|err| format!("ClippiBoy is not allowed to write in \"{dir}\": {err}"))?;
+    let probe = dir.join(".clippiboy-schreibtest");
+    std::fs::write(&probe, b"").map_err(|err| format!("ClippiBoy is not allowed to write in \"{shown}\": {err}"))?;
     let _ = std::fs::remove_file(&probe);
 
     let mut config = state.config_snapshot();
-    config.clip_dir = path.to_string_lossy().to_string();
+    config.clip_dir = dir.to_string_lossy().to_string();
     let next = state.replace_config(config);
     // Without the grant the player will not play anything that lands here.
-    crate::allow_clip_dir(&app, &next.clip_dir);
+    crate::allow_clip_dir(app, &next.clip_dir);
     Ok(next)
 }
 
-/// A clip folder that may be granted: absolute, not a whole drive, and no
-/// `..` in it — `D:\clips\..` is a whole drive too.
-fn usable_clip_dir(dir: &str) -> bool {
-    crate::grantable_dir(Path::new(dir.trim()))
+/// The folders a clip folder must keep clear of: it is granted to the player
+/// with everything below it.
+struct ClipDirGuard {
+    /// Neither these nor a folder above them: the profile, ClippiBoy's data
+    /// folder (the session tokens lie there).
+    kept_out: Vec<PathBuf>,
+    /// Nothing at or below these: the Windows folder, and ClippiBoy's data
+    /// folder, whose subfolders the core fills and sweeps itself.
+    fenced: Vec<PathBuf>,
+}
+
+impl ClipDirGuard {
+    fn of_this_machine() -> Self {
+        let data = crate::config::data_dir();
+        let mut kept_out = vec![data.clone()];
+        kept_out.extend(dirs::home_dir());
+        let mut fenced = vec![data];
+        fenced.extend(["SystemRoot", "windir"].iter().filter_map(std::env::var_os).map(PathBuf::from));
+        Self { kept_out, fenced }
+    }
+}
+
+/// Whether `dir` may become the clip folder: a folder (not a drive) on a
+/// local drive, given by letter — no share (`\\host\share`), no `\\?\` or
+/// `\\.\` form that skips Windows' own checks — and clear of `guard`.
+/// Compared without case, as Windows treats paths.
+fn clip_dir_allowed(dir: &Path, guard: &ClipDirGuard) -> bool {
+    let text = dir.to_string_lossy();
+    let two_slashes = text.chars().take(2).filter(|c| matches!(c, '\\' | '/')).count() == 2;
+    if two_slashes || !crate::grantable_dir(dir) {
+        return false;
+    }
+    let dir = folded(dir);
+    let above = |kept: &PathBuf| folded(kept).starts_with(&dir);
+    let inside = |fence: &PathBuf| dir.starts_with(&folded(fence));
+    !guard.kept_out.iter().any(above) && !guard.fenced.iter().any(inside)
+}
+
+/// A path's parts in lower case, for comparing as Windows does.
+fn folded(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
 }
 
 /// Where an export goes: the `.mp4` the user picked in the core's save dialog.
@@ -568,11 +689,6 @@ fn export_target(chosen: &Path) -> Result<std::path::PathBuf> {
         return Err("Export to a .mp4 file.".into());
     }
     // Case-insensitive, as Windows treats the folder.
-    let folded = |path: &Path| -> Vec<String> {
-        path.components()
-            .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
-            .collect()
-    };
     if folded(&path).starts_with(&folded(&crate::config::data_dir())) {
         return Err("Export somewhere outside ClippiBoy's own data folder.".into());
     }
@@ -728,20 +844,23 @@ pub async fn cam_preview_frame(
 
 /// The facecam's master switch on its own — the console has no `set_config`.
 /// `async`: it writes the config, and a plain command runs on the main thread.
-#[tauri::command(async)]
-pub fn set_facecam_enabled(
-    state: State<'_, AppState>,
+#[tauri::command]
+pub async fn set_facecam_enabled(
     app: tauri::AppHandle,
     webview: tauri::WebviewWindow,
     enabled: bool,
 ) -> AppConfig {
-    let mut next = state.config_snapshot();
-    next.facecam.enabled = enabled;
-    let saved = state.replace_config(next);
-    if webview.label() != "main" {
-        tell_main(&app, &saved);
-    }
-    saved
+    blocking(move || -> AppConfig {
+        let state = app.state::<AppState>();
+        let mut next = state.config_snapshot();
+        next.facecam.enabled = enabled;
+        let saved = state.replace_config(next);
+        if webview.label() != "main" {
+            tell_main(&app, &saved);
+        }
+        saved
+    })
+    .await
 }
 
 /// Windows' camera privacy page, for "Blocked by Windows privacy".
@@ -756,33 +875,41 @@ pub fn open_camera_privacy(app: tauri::AppHandle) -> Result<()> {
 /// ClippiBoy Camera's switch. On runs the elevated setup first when the DLL is
 /// missing or older (one UAC prompt), then lists the camera; off takes it off
 /// the list and leaves the DLL. `async`: the setup waits for the prompt.
-#[tauri::command(async)]
-pub fn set_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle, on: bool) -> Result<AppConfig> {
-    if on && crate::vcam::needs_setup(state.vcam.installed().as_deref(), vcam_protocol::DLL_VERSION) {
-        run_vcam_setup(&state, &app, "install")?;
-    }
-    let mut next = state.config_snapshot();
-    next.facecam.virtual_camera = on;
-    let saved = state.replace_config(next);
-    // An update leaves the switch as it was, so the config change alone would
-    // not list the camera again.
-    state.reconcile_vcam();
-    Ok(saved)
+#[tauri::command]
+pub async fn set_virtual_camera(app: tauri::AppHandle, on: bool) -> Result<AppConfig> {
+    blocking(move || -> Result<AppConfig> {
+        let state = app.state::<AppState>();
+        if on && crate::vcam::needs_setup(state.vcam.installed().as_deref(), vcam_protocol::DLL_VERSION) {
+            run_vcam_setup(&state, &app, "install")?;
+        }
+        let mut next = state.config_snapshot();
+        next.facecam.virtual_camera = on;
+        let saved = state.replace_config(next);
+        // An update leaves the switch as it was, so the config change alone would
+        // not list the camera again.
+        state.reconcile_vcam();
+        Ok(saved)
+    })
+    .await
 }
 
 /// Takes ClippiBoy Camera off the machine: switch off, then the elevated
 /// uninstall.
-#[tauri::command(async)]
-pub fn remove_virtual_camera(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<AppConfig> {
-    let mut next = state.config_snapshot();
-    next.facecam.virtual_camera = false;
-    let saved = state.replace_config(next);
-    // Off Windows' camera list before its DLL goes: the listing outlives the
-    // app, and one left behind would be a camera that never opens.
-    state.reconcile_vcam();
-    state.vcam.remove(state.camera.shared());
-    run_vcam_setup(&state, &app, "uninstall")?;
-    Ok(saved)
+#[tauri::command]
+pub async fn remove_virtual_camera(app: tauri::AppHandle) -> Result<AppConfig> {
+    blocking(move || -> Result<AppConfig> {
+        let state = app.state::<AppState>();
+        let mut next = state.config_snapshot();
+        next.facecam.virtual_camera = false;
+        let saved = state.replace_config(next);
+        // Off Windows' camera list before its DLL goes: the listing outlives the
+        // app, and one left behind would be a camera that never opens.
+        state.reconcile_vcam();
+        state.vcam.remove(state.camera.shared());
+        run_vcam_setup(&state, &app, "uninstall")?;
+        Ok(saved)
+    })
+    .await
 }
 
 fn run_vcam_setup(state: &AppState, app: &tauri::AppHandle, verb: &str) -> Result<()> {
@@ -855,9 +982,13 @@ pub fn remove_audio_source(
     source_written(&webview, state.remove_source(&id, revision))
 }
 
-#[tauri::command(async)]
-pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
-    state.status_snapshot()
+#[tauri::command]
+pub async fn engine_status(app: tauri::AppHandle) -> EngineStatus {
+    blocking(move || -> EngineStatus {
+        let state = app.state::<AppState>();
+        state.status_snapshot()
+    })
+    .await
 }
 
 /// Start the buffer. Runs through the same path as hotkey and tray, so the
@@ -865,44 +996,57 @@ pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
 ///
 /// `async` for the same reason as `save_clip`: bringing up the capture stack
 /// takes a few hundred milliseconds.
-#[tauri::command(async)]
-pub fn start_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<()> {
-    if state.status.lock().buffer_active {
-        return Ok(());
-    }
-    crate::toggle_buffer_and_notify(&app);
-    match state.status.lock().buffer_active {
-        true => Ok(()),
-        // The message is already out; the error only brings the store back to
-        // the real state.
-        false => Err("The replay buffer could not be started.".into()),
-    }
+#[tauri::command]
+pub async fn start_buffer(app: tauri::AppHandle) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        if state.status.lock().buffer_active {
+            return Ok(());
+        }
+        crate::toggle_buffer_and_notify(&app);
+        let started = state.status.lock().buffer_active;
+        match started {
+            true => Ok(()),
+            // The message is already out; the error only brings the store back to
+            // the real state.
+            false => Err("The replay buffer could not be started.".into()),
+        }
+    })
+    .await
 }
 
 /// Counterpart to `start_buffer`. `async` because stopping waits, if need be,
 /// for a save in progress.
-#[tauri::command(async)]
-pub fn stop_buffer(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<()> {
-    if state.status.lock().buffer_active {
-        crate::toggle_buffer_and_notify(&app);
-    }
-    Ok(())
+#[tauri::command]
+pub async fn stop_buffer(app: tauri::AppHandle) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        if state.status.lock().buffer_active {
+            crate::toggle_buffer_and_notify(&app);
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Start or stop a recording, the same way the hotkey does. `async`: stopping
 /// writes the whole recording out.
-#[tauri::command(async)]
-pub fn toggle_recording(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<bool> {
-    if state.recording_or_closing() {
-        match crate::stop_recording_and_notify(&app) {
-            // A second click while the first stop closed: it has stopped.
-            Err(err) if err != crate::state::NOT_RECORDING => return Err(err),
-            _ => {}
+#[tauri::command]
+pub async fn toggle_recording(app: tauri::AppHandle) -> Result<bool> {
+    blocking(move || -> Result<bool> {
+        let state = app.state::<AppState>();
+        if state.recording_or_closing() {
+            match crate::stop_recording_and_notify(&app) {
+                // A second click while the first stop closed: it has stopped.
+                Err(err) if err != crate::state::NOT_RECORDING => return Err(err),
+                _ => {}
+            }
+        } else {
+            crate::start_recording_and_notify(&app);
         }
-    } else {
-        crate::start_recording_and_notify(&app);
-    }
-    Ok(state.is_recording())
+        Ok(state.is_recording())
+    })
+    .await
 }
 
 /// Saves the buffer. `seconds` is currently only needed by the trim idea; the
@@ -912,21 +1056,24 @@ pub fn toggle_recording(state: State<'_, AppState>, app: tauri::AppHandle) -> Re
 /// `async` because sealing and muxing take several seconds: as a synchronous
 /// command that would run on the main thread and the UI would stand still all
 /// the while — including the window calls the overlay banner sends there.
-#[tauri::command(async)]
-pub fn save_clip(
-    app: tauri::AppHandle,
-    seconds: Option<u32>,
-) -> Result<Clip> {
-    crate::save_clip_and_notify(&app, seconds)
+#[tauri::command]
+pub async fn save_clip(app: tauri::AppHandle, seconds: Option<u32>) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        crate::save_clip_and_notify(&app, seconds)
+    })
+    .await
 }
 
 /// One picture from the recording source, like the hotkey and the tray entry.
 ///
 /// `async` because reading the picture back off the GPU and deflating the PNG
 /// take a few hundred milliseconds, and the window should keep painting.
-#[tauri::command(async)]
-pub fn take_screenshot(app: tauri::AppHandle) -> Result<Clip> {
-    crate::take_screenshot_and_notify(&app)
+#[tauri::command]
+pub async fn take_screenshot(app: tauri::AppHandle) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        crate::take_screenshot_and_notify(&app)
+    })
+    .await
 }
 
 /// One step of the annotation, in the order it was drawn.
@@ -1032,18 +1179,21 @@ pub fn screenshot_edit(state: State<'_, AppState>, id: String) -> Result<ShotEdi
 ///
 /// `async` because decoding, drawing and deflating take a moment on a big
 /// picture.
-#[tauri::command(async)]
-pub fn write_screenshot(
-    state: State<'_, AppState>,
+#[tauri::command]
+pub async fn write_screenshot(
     app: tauri::AppHandle,
     id: String,
     crop: Option<crate::shot::Rect>,
     steps: Vec<Step>,
     marks: String,
 ) -> Result<Clip> {
-    let clip = edit_screenshot(&state, id, crop, steps, marks)?;
-    announce_change(&app);
-    Ok(clip)
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        let clip = edit_screenshot(&state, id, crop, steps, marks)?;
+        announce_change(&app);
+        Ok(clip)
+    })
+    .await
 }
 
 fn edit_screenshot(
@@ -1230,30 +1380,42 @@ fn write_picture(
 /// The file (`copy_clip_file`) only helps where files can be dropped; a chat
 /// window wants the picture. Reading it back and turning it into a bitmap takes
 /// a moment on a 4K screenshot, hence `async`.
-#[tauri::command(async)]
-pub fn copy_clip_image(state: State<'_, AppState>, id: String) -> Result<()> {
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    if !clip.screenshot {
-        return Err("Only a screenshot can go on the clipboard as a picture.".into());
-    }
-    let shot = crate::shot::read_png(std::path::Path::new(&clip.path))?;
-    crate::clipboard::copy_image(&shot.dib())
+#[tauri::command]
+pub async fn copy_clip_image(app: tauri::AppHandle, id: String) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        if !clip.screenshot {
+            return Err("Only a screenshot can go on the clipboard as a picture.".into());
+        }
+        let shot = crate::shot::read_png(std::path::Path::new(&clip.path))?;
+        crate::clipboard::copy_image(&shot.dib())
+    })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<Clip>> {
-    with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))
+#[tauri::command]
+pub async fn list_clips(app: tauri::AppHandle) -> Result<Vec<Clip>> {
+    blocking(move || -> Result<Vec<Clip>> {
+        let state = app.state::<AppState>();
+        with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))
+    })
+    .await
 }
 
 /// Moves a clip into Recently deleted (`trash.rs`). Its file goes into the
 /// hidden `.deleted` folder, its stores stay for a restore; the share link
 /// and the Discord copies go now, they would show what was deleted.
-#[tauri::command(async)]
-pub fn delete_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
-    trash_clip(&state, &app, &id, Asked::ByHand, &|_| true)?;
-    announce_change(&app);
-    Ok(())
+#[tauri::command]
+pub async fn delete_clip(app: tauri::AppHandle, id: String) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        trash_clip(&state, &app, &id, Asked::ByHand, &|_| true)?;
+        announce_change(&app);
+        Ok(())
+    })
+    .await
 }
 
 /// Who wants a clip in Recently deleted.
@@ -1399,84 +1561,100 @@ fn erase_stores(clip: &Clip) {
 }
 
 /// Recently deleted, the latest deletion first.
-#[tauri::command(async)]
-pub fn list_trash(state: State<'_, AppState>) -> Result<Vec<crate::model::Trashed>> {
-    with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))
+#[tauri::command]
+pub async fn list_trash(app: tauri::AppHandle) -> Result<Vec<crate::model::Trashed>> {
+    blocking(move || -> Result<Vec<crate::model::Trashed>> {
+        let state = app.state::<AppState>();
+        with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))
+    })
+    .await
 }
 
 /// Puts a deleted clip back where it was — under a new name when that one
 /// was taken meanwhile.
-#[tauri::command(async)]
-pub fn restore_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
-    let own = edit::clip_lock(&id);
-    let _clip = own.lock();
-    let Some(trashed) = with_library(&state, |lib| lib.trashed_one(&id).map_err(|e| e.to_string()))? else {
-        return Err("This clip is no longer in Recently deleted.".into());
-    };
-    let from = PathBuf::from(&trashed.clip.path);
-    let home = PathBuf::from(&trashed.from_path);
-    let folder = home.parent().map(Path::to_path_buf).unwrap_or_default();
-    let name = home.file_name().unwrap_or_default().to_string_lossy().to_string();
-    if let Err(err) = std::fs::create_dir_all(&folder) {
-        return Err(format!("Could not restore the clip: {err}"));
-    }
-    let target = crate::filing::free_name(&folder, &name);
-    if let Err(err) = move_patiently(&from, &target, 10) {
-        return Err(format!("Could not restore the clip: {err}"));
-    }
-    let target_text = target.to_string_lossy().to_string();
-    let restored = with_library(&state, |lib| lib.restore(&id, &target_text).map_err(|e| e.to_string()));
-    match restored {
-        Ok(Some(clip)) => {
-            // A folder the player was never granted (an old clip folder made
-            // anew) would leave the restored clip unplayable.
-            crate::allow_clip_dir(&app, &folder.to_string_lossy());
-            announce_change(&app);
-            Ok(clip)
+#[tauri::command]
+pub async fn restore_clip(app: tauri::AppHandle, id: String) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        let Some(trashed) = with_library(&state, |lib| lib.trashed_one(&id).map_err(|e| e.to_string()))? else {
+            return Err("This clip is no longer in Recently deleted.".into());
+        };
+        let from = PathBuf::from(&trashed.clip.path);
+        let home = PathBuf::from(&trashed.from_path);
+        let folder = home.parent().map(Path::to_path_buf).unwrap_or_default();
+        let name = home.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if let Err(err) = std::fs::create_dir_all(&folder) {
+            return Err(format!("Could not restore the clip: {err}"));
         }
-        other => {
-            // The row stays in the trash, so the file goes back with it.
-            if let Err(back) = edit::move_across(&target, &from) {
-                log::warn!("restored file of '{id}' left at '{}': {back}", target.display());
+        let target = crate::filing::free_name(&folder, &name);
+        if let Err(err) = move_patiently(&from, &target, 10) {
+            return Err(format!("Could not restore the clip: {err}"));
+        }
+        let target_text = target.to_string_lossy().to_string();
+        let restored = with_library(&state, |lib| lib.restore(&id, &target_text).map_err(|e| e.to_string()));
+        match restored {
+            Ok(Some(clip)) => {
+                // A folder the player was never granted (an old clip folder made
+                // anew) would leave the restored clip unplayable.
+                crate::allow_clip_dir(&app, &folder.to_string_lossy());
+                announce_change(&app);
+                Ok(clip)
             }
-            Err(match other {
-                Err(err) => format!("Could not restore the clip: {err}"),
-                Ok(_) => "This clip is no longer in Recently deleted.".into(),
-            })
+            other => {
+                // The row stays in the trash, so the file goes back with it.
+                if let Err(back) = edit::move_across(&target, &from) {
+                    log::warn!("restored file of '{id}' left at '{}': {back}", target.display());
+                }
+                Err(match other {
+                    Err(err) => format!("Could not restore the clip: {err}"),
+                    Ok(_) => "This clip is no longer in Recently deleted.".into(),
+                })
+            }
         }
-    }
+    })
+    .await
 }
 
 /// Deletes one clip in Recently deleted for good.
-#[tauri::command(async)]
-pub fn purge_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
-    let result = purge(&state, &id);
-    announce_change(&app);
-    result
+#[tauri::command]
+pub async fn purge_clip(app: tauri::AppHandle, id: String) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let result = purge(&state, &id);
+        announce_change(&app);
+        result
+    })
+    .await
 }
 
 /// Empties Recently deleted. A file that will not go keeps its entry; the
 /// rest go anyway. Returns how many went.
-#[tauri::command(async)]
-pub fn empty_trash(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<u32> {
-    let all = with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))?;
-    let mut gone = 0;
-    let mut failed = None;
-    for trashed in all {
-        match purge(&state, &trashed.clip.id) {
-            Ok(()) => gone += 1,
-            Err(err) => failed = Some(err),
+#[tauri::command]
+pub async fn empty_trash(app: tauri::AppHandle) -> Result<u32> {
+    blocking(move || -> Result<u32> {
+        let state = app.state::<AppState>();
+        let all = with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))?;
+        let mut gone = 0;
+        let mut failed = None;
+        for trashed in all {
+            match purge(&state, &trashed.clip.id) {
+                Ok(()) => gone += 1,
+                Err(err) => failed = Some(err),
+            }
         }
-    }
-    announce_change(&app);
-    match failed {
-        Some(err) if gone == 0 => Err(err),
-        Some(err) => {
-            crate::notify(&app, "error", err);
-            Ok(gone)
+        announce_change(&app);
+        match failed {
+            Some(err) if gone == 0 => Err(err),
+            Some(err) => {
+                crate::notify(&app, "error", err);
+                Ok(gone)
+            }
+            None => Ok(gone),
         }
-        None => Ok(gone),
-    }
+    })
+    .await
 }
 
 /// At start and every hour: what has been in Recently deleted for 30 days
@@ -1576,35 +1754,43 @@ pub(crate) fn announce_change(app: &tauri::AppHandle) {
 /// it is and the clip comes back unchanged. The next start catches it up
 /// (`filing::tidy`); the gallery is right in the meantime regardless, because it
 /// reads from the database.
-#[tauri::command(async)]
-pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
-    let clip_dir = state.config_snapshot().clip_dir;
-    // An edit swapping the file in at its old place, or an export reading it,
-    // goes first; the row is read only after.
-    let own = edit::clip_lock(&id);
-    let _clip = own.lock();
-    let clip = with_library(&state, |lib| {
-        let clip = lib
-            .get(&id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "clip not found".to_string())?;
-        match crate::filing::place(&clip, &clip_dir) {
-            Ok(Some(target)) => {
-                lib.set_path(&id, &target.to_string_lossy())
-                    .map_err(|e| e.to_string())?;
-                lib.get(&id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "clip not found".into())
-            }
-            Ok(None) => Ok(clip),
-            Err(err) => {
-                log::warn!("Clip '{id}' stayed where it was: {err}");
-                Ok(clip)
-            }
+#[tauri::command]
+pub async fn file_clip(app: tauri::AppHandle, id: String) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        let clip_dir = state.config_snapshot().clip_dir;
+        // An edit swapping the file in at its old place, or an export reading it,
+        // goes first; the row is read only after.
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        let clip = file_into_place(&state, &id, &clip_dir)?.ok_or_else(|| "clip not found".to_string())?;
+        announce_change(&app);
+        Ok(clip)
+    })
+    .await
+}
+
+/// Move one clip's file into its folder, its own lock held by the caller, and
+/// give back its row as it is now — `None` when the clip is gone. The library
+/// is locked only to read and to write the row, not for the move: that tries
+/// for a while on a file still open and can wait on a sleeping disk, and every
+/// other window's list would wait with it (as in `filing::tidy`).
+fn file_into_place(state: &AppState, id: &str, clip_dir: &str) -> Result<Option<Clip>> {
+    let Some(clip) = with_library(state, |lib| lib.get(id).map_err(|e| e.to_string()))? else {
+        return Ok(None);
+    };
+    match crate::filing::place(&clip, clip_dir) {
+        Ok(Some(target)) => with_library(state, |lib| {
+            lib.set_path(id, &target.to_string_lossy())
+                .map_err(|e| format!("The clip moved, but its new place was not saved: {e}"))?;
+            lib.get(id).map_err(|e| e.to_string())
+        }),
+        Ok(None) => Ok(Some(clip)),
+        Err(err) => {
+            log::warn!("Clip '{id}' stayed where it was: {err}");
+            Ok(Some(clip))
         }
-    })?;
-    announce_change(&app);
-    Ok(clip)
+    }
 }
 
 /// Take a game off every clip that has it, in one transaction, and file each
@@ -1616,40 +1802,29 @@ pub fn file_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) 
 /// Each clip moves under its own lock, one at a time, taken outside the
 /// library lock (see `edit::clip_lock`); its row is read again inside, since
 /// an edit or a delete may have finished while this waited.
-#[tauri::command(async)]
-pub fn clear_game(state: State<'_, AppState>, app: tauri::AppHandle, game: String) -> Result<()> {
-    let clip_dir = state.config_snapshot().clip_dir;
-    let cleared = with_library(&state, |lib| lib.clear_game(&game).map_err(|e| e.to_string()));
-    // The game is off every clip now; the moves below can take a while (each
-    // waits for its clip), and the lists should not show the old game meanwhile.
-    if cleared.is_ok() {
-        announce_change(&app);
-    }
-    for id in cleared.iter().flatten().map(|clip| clip.id.clone()) {
-        let own = edit::clip_lock(&id);
-        let _clip = own.lock();
-        let filed = with_library(&state, |lib| {
-            // Deleted in the meantime: nothing to move.
-            let Some(clip) = lib.get(&id).map_err(|e| e.to_string())? else {
-                return Ok(());
-            };
-            match crate::filing::place(&clip, &clip_dir) {
-                Ok(Some(target)) => {
-                    if let Err(err) = lib.set_path(&id, &target.to_string_lossy()) {
-                        log::warn!("Clip '{id}' moved, but its new place was not saved: {err}");
-                    }
-                }
-                Ok(None) => {}
-                Err(err) => log::warn!("Clip '{id}' stayed where it was: {err}"),
-            }
-            Ok(())
-        });
-        if let Err(err) = filed {
-            log::warn!("Clip '{id}' stayed where it was: {err}");
+#[tauri::command]
+pub async fn clear_game(app: tauri::AppHandle, game: String) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let clip_dir = state.config_snapshot().clip_dir;
+        let cleared = with_library(&state, |lib| lib.clear_game(&game).map_err(|e| e.to_string()));
+        // The game is off every clip now; the moves below can take a while (each
+        // waits for its clip), and the lists should not show the old game meanwhile.
+        if cleared.is_ok() {
+            announce_change(&app);
         }
-    }
-    announce_change(&app);
-    cleared.map(|_| ())
+        for id in cleared.iter().flatten().map(|clip| clip.id.clone()) {
+            let own = edit::clip_lock(&id);
+            let _clip = own.lock();
+            // Deleted in the meantime: nothing to move.
+            if let Err(err) = file_into_place(&state, &id, &clip_dir) {
+                log::warn!("Clip '{id}' was not filed: {err}");
+            }
+        }
+        announce_change(&app);
+        cleared.map(|_| ())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1674,18 +1849,22 @@ pub fn reveal_clip(
 /// clip; in Explorer it drops a copy. A clip whose camera is still being added
 /// is waited for: copied a second after saving, it went out without one.
 /// `async`: the wait must not hold the main thread.
-#[tauri::command(async)]
-pub fn copy_clip_file(state: State<'_, AppState>, id: String) -> Result<()> {
-    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
-        return Err(CAM_ON_ITS_WAY.into());
-    }
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    let path = std::path::PathBuf::from(&clip.path);
-    if !path.is_file() {
-        return Err("The clip file is no longer there.".into());
-    }
-    crate::clipboard::copy_files(&[path])
+#[tauri::command]
+pub async fn copy_clip_file(app: tauri::AppHandle, id: String) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
+            return Err(CAM_ON_ITS_WAY.into());
+        }
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        let path = std::path::PathBuf::from(&clip.path);
+        if !path.is_file() {
+            return Err("The clip file is no longer there.".into());
+        }
+        crate::clipboard::copy_files(&[path])
+    })
+    .await
 }
 
 /// The logo as the main window drew it — square RGBA — for the tray and the
@@ -1745,16 +1924,19 @@ pub fn show_clip_in_app(app: tauri::AppHandle, id: String, at: f64) -> Result<()
 /// into Discord. So the file lands in ClippiBoy's own folder of copies
 /// ([`discord_dir`]), named after the clip with the size added, and goes
 /// straight onto the clipboard.
-#[tauri::command(async)]
-pub fn export_for_discord(
-    state: State<'_, AppState>,
+#[tauri::command]
+pub async fn export_for_discord(
     app: tauri::AppHandle,
     id: String,
     megabytes: u64,
 ) -> Result<String> {
-    let output = discord_copy_of(&state, &app, &id, megabytes, true)?;
-    crate::clipboard::copy_files(&[output.clone()])?;
-    Ok(output.to_string_lossy().to_string())
+    blocking(move || -> Result<String> {
+        let state = app.state::<AppState>();
+        let output = discord_copy_of(&state, &app, &id, megabytes, true)?;
+        crate::clipboard::copy_files(&[output.clone()])?;
+        Ok(output.to_string_lossy().to_string())
+    })
+    .await
 }
 
 /// The largest Discord copy asked for, in MB: well above any upload limit
@@ -1839,11 +2021,19 @@ pub(crate) fn discord_copy_of(
 /// (`shotfit.rs`). Like a clip's Discord copy it lands in ClippiBoy's own
 /// folder of copies — a gallery file put on the clipboard could be moved into
 /// the favorites before it is pasted.
-#[tauri::command(async)]
-pub fn export_shot_for_discord(state: State<'_, AppState>, id: String, megabytes: u64) -> Result<String> {
-    let output = shot_discord_copy_of(&state, &id, megabytes)?;
-    crate::clipboard::copy_files(&[output.clone()])?;
-    Ok(output.to_string_lossy().to_string())
+#[tauri::command]
+pub async fn export_shot_for_discord(
+    app: tauri::AppHandle,
+    id: String,
+    megabytes: u64,
+) -> Result<String> {
+    blocking(move || -> Result<String> {
+        let state = app.state::<AppState>();
+        let output = shot_discord_copy_of(&state, &id, megabytes)?;
+        crate::clipboard::copy_files(&[output.clone()])?;
+        Ok(output.to_string_lossy().to_string())
+    })
+    .await
 }
 
 /// A screenshot's Discord copy under `megabytes` — for "Copy for Discord" and
@@ -1910,18 +2100,22 @@ pub(crate) fn shot_discord_copy_of(
 /// Open the clip in whichever player Windows has chosen for it — once its
 /// camera is in: that player would show it without, and hold the file the
 /// camera has to go into.
-#[tauri::command(async)]
-pub fn open_clip(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<()> {
-    use tauri_plugin_opener::OpenerExt;
-    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
-        return Err(CAM_ON_ITS_WAY.into());
-    }
+#[tauri::command]
+pub async fn open_clip(app: tauri::AppHandle, id: String) -> Result<()> {
+    blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        use tauri_plugin_opener::OpenerExt;
+        if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(60)) {
+            return Err(CAM_ON_ITS_WAY.into());
+        }
 
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    app.opener()
-        .open_path(&clip.path, None::<&str>)
-        .map_err(|e| e.to_string())
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        app.opener()
+            .open_path(&clip.path, None::<&str>)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Put text on the clipboard — for "Copy path" and the text field menu.
@@ -1988,12 +2182,16 @@ pub fn set_clip_tags(
 /// Picture of the audio track for the timeline. Returns the path to the PNG.
 ///
 /// `async` because ffmpeg reads the audio through once from end to end.
-#[tauri::command(async)]
-pub fn clip_waveform(state: State<'_, AppState>, id: String) -> Result<String> {
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    refuse_still(&clip)?;
-    preview::waveform(&clip).map(|path| path.to_string_lossy().to_string())
+#[tauri::command]
+pub async fn clip_waveform(app: tauri::AppHandle, id: String) -> Result<String> {
+    blocking(move || -> Result<String> {
+        let state = app.state::<AppState>();
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        refuse_still(&clip)?;
+        preview::waveform(&clip).map(|path| path.to_string_lossy().to_string())
+    })
+    .await
 }
 
 /// A clip's audio tracks, each with a file of its own for the preview — that is
@@ -2002,14 +2200,18 @@ pub fn clip_waveform(state: State<'_, AppState>, id: String) -> Result<String> {
 /// `async` because catching up a clip from before the changeover takes a second
 /// depending on its length, and the main thread would not paint the window all
 /// that while.
-#[tauri::command(async)]
-pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTrack>> {
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    refuse_still(&clip)?;
-    // From the untouched recording if the clip is trimmed — the individual
-    // tracks are always in coordinates of the original.
-    stems::tracks(&clip.id, &edit::source_path(&clip), edit::audio_untouched(&clip))
+#[tauri::command]
+pub async fn clip_tracks(app: tauri::AppHandle, id: String) -> Result<Vec<ClipTrack>> {
+    blocking(move || -> Result<Vec<ClipTrack>> {
+        let state = app.state::<AppState>();
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        refuse_still(&clip)?;
+        // From the untouched recording if the clip is trimmed — the individual
+        // tracks are always in coordinates of the original.
+        stems::tracks(&clip.id, &edit::source_path(&clip), edit::audio_untouched(&clip))
+    })
+    .await
 }
 
 /// Write the clip exactly as it stands in the editor: mix applied, trim
@@ -2023,9 +2225,8 @@ pub fn clip_tracks(state: State<'_, AppState>, id: String) -> Result<Vec<ClipTra
 /// `async` because a cut at the start re-encodes the picture and that takes a
 /// while depending on length; the main thread would not paint the window in the
 /// meantime.
-#[tauri::command(async)]
-pub fn apply_clip_edit(
-    state: State<'_, AppState>,
+#[tauri::command]
+pub async fn apply_clip_edit(
     app: tauri::AppHandle,
     id: String,
     start_ms: u64,
@@ -2033,79 +2234,83 @@ pub fn apply_clip_edit(
     tracks: Vec<TrackMix>,
     facecam: Option<crate::model::FacecamEdit>,
 ) -> Result<Clip> {
-    // Before the clip's lock: a cam still being added to this clip finishes
-    // first, and its job needs that lock.
-    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
-        return Err(CAM_ON_ITS_WAY.into());
-    }
-    // From before the row is read until the new state is stored: a delete or
-    // a move in between would leave the row describing a file that is gone or
-    // elsewhere. `edit::run` takes the same lock again (it is reentrant) and
-    // reads the row itself, once it holds `WORKING` as well. The settings are
-    // read first: nothing takes a lock before `AppState.config`.
-    let (encoder, quality) = encoder_for(&state);
-    let own = edit::clip_lock(&id);
-    let _clip = own.lock();
-    let trim = edit::Trim { start_ms, end_ms };
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        // Before the clip's lock: a cam still being added to this clip finishes
+        // first, and its job needs that lock.
+        if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+            return Err(CAM_ON_ITS_WAY.into());
+        }
+        // From before the row is read until the new state is stored: a delete or
+        // a move in between would leave the row describing a file that is gone or
+        // elsewhere. `edit::run` takes the same lock again (it is reentrant) and
+        // reads the row itself, once it holds `WORKING` as well. The settings are
+        // read first: nothing takes a lock before `AppState.config`.
+        let (encoder, quality) = encoder_for(&state);
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        let trim = edit::Trim { start_ms, end_ms };
 
-    let loaded = std::cell::Cell::new(false);
-    let applied = edit::apply(
-        &id,
-        load_editable(&state, &id, &loaded),
-        trim,
-        &tracks,
-        facecam.as_ref(),
-        encoder,
-        quality,
-        progress(&app, &id),
-    );
-    let stored = store(&state, &app, applied, tracks, loaded.get(), false);
-    if stored.is_ok() {
-        crate::telemetry::used(crate::telemetry::Feature::Editor);
-    }
-    stored
+        let loaded = std::cell::Cell::new(false);
+        let applied = edit::apply(
+            &id,
+            load_editable(&state, &id, &loaded),
+            trim,
+            &tracks,
+            facecam.as_ref(),
+            encoder,
+            quality,
+            progress(&app, &id),
+        );
+        let stored = store(&state, &app, applied, tracks, loaded.get(), false);
+        if stored.is_ok() {
+            crate::telemetry::used(crate::telemetry::Feature::Editor);
+        }
+        stored
+    })
+    .await
 }
 
 /// Undo the trim: pull the whole recording back, keep the mix.
 ///
 /// `async` for the same reason as [`apply_clip_edit`] — even though this only
 /// copies, remuxing a long recording takes its seconds.
-#[tauri::command(async)]
-pub fn restore_clip_original(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-    id: String,
-) -> Result<Clip> {
-    // Before the clip's lock: a cam still being added to this clip finishes
-    // first, and its job needs that lock.
-    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
-        return Err(CAM_ON_ITS_WAY.into());
-    }
-    // As in `apply_clip_edit`: held across the run and `store`, the settings
-    // read before it.
-    let (encoder, quality) = encoder_for(&state);
-    let own = edit::clip_lock(&id);
-    let _clip = own.lock();
+#[tauri::command]
+pub async fn restore_clip_original(app: tauri::AppHandle, id: String) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        // Before the clip's lock: a cam still being added to this clip finishes
+        // first, and its job needs that lock.
+        if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+            return Err(CAM_ON_ITS_WAY.into());
+        }
+        // As in `apply_clip_edit`: held across the run and `store`, the settings
+        // read before it.
+        let (encoder, quality) = encoder_for(&state);
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
 
-    // If it fails, the record stays on the clip: it carries the offset the
-    // individual tracks sit at. Throwing it away because the recording cannot
-    // be found would leave the preview out of sync forever.
-    //
-    // The mix kept is the one stored on the clip as the run finds it.
-    let loaded = std::cell::Cell::new(false);
-    let applied = edit::restore(
-        &id,
-        load_editable(&state, &id, &loaded),
-        None,
-        encoder,
-        quality,
-        progress(&app, &id),
-    );
-    let tracks = match &applied {
-        Ok((clip, _)) => clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    store(&state, &app, applied, tracks, loaded.get(), true)
+        // If it fails, the record stays on the clip: it carries the offset the
+        // individual tracks sit at. Throwing it away because the recording cannot
+        // be found would leave the preview out of sync forever.
+        //
+        // The mix kept is the one stored on the clip as the run finds it.
+        let loaded = std::cell::Cell::new(false);
+        let applied = edit::restore(
+            &id,
+            load_editable(&state, &id, &loaded),
+            None,
+            encoder,
+            quality,
+            progress(&app, &id),
+        );
+        let tracks = match &applied {
+            Ok((clip, _)) => clip.edit.as_ref().map(|e| e.tracks.clone()).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        store(&state, &app, applied, tracks, loaded.get(), true)
+    })
+    .await
 }
 
 /// The row an edit plans on, read by the run once it has the clip to itself.
@@ -2132,35 +2337,35 @@ fn load_editable<'a>(
 /// *more* than an untrimmed one. Undo is gone afterwards — the trim is not.
 ///
 /// Async: a cam still being added to the clip is waited for first.
-#[tauri::command(async)]
-pub fn discard_clip_original(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-    id: String,
-) -> Result<Clip> {
-    // Before the clip's lock: the composite it waits for takes that lock.
-    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
-        return Err("The cam is still being added to this clip — try again in a moment.".into());
-    }
-    let own = edit::clip_lock(&id);
-    let Some(_clip) = own.try_lock() else {
-        return Err("This clip is being saved — try again in a moment.".into());
-    };
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    if edit::discard_original(&clip.id)? == edit::Discarded::Baked {
-        note_baked(&state, &clip)?;
-    }
-    // The record on the clip stays: it carries the offset the individual tracks
-    // sit at, and a remix without it would run against the picture. What changed
-    // is `original_available`, which the library reads off the disk.
-    let clip = with_library(&state, |lib| {
-        lib.get(&id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "clip not found".to_string())
-    })?;
-    announce_change(&app);
-    Ok(clip)
+#[tauri::command]
+pub async fn discard_clip_original(app: tauri::AppHandle, id: String) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        // Before the clip's lock: the composite it waits for takes that lock.
+        if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+            return Err("The cam is still being added to this clip — try again in a moment.".into());
+        }
+        let own = edit::clip_lock(&id);
+        let Some(_clip) = own.try_lock() else {
+            return Err("This clip is being saved — try again in a moment.".into());
+        };
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        if edit::discard_original(&clip.id)? == edit::Discarded::Baked {
+            note_baked(&state, &clip)?;
+        }
+        // The record on the clip stays: it carries the offset the individual tracks
+        // sit at, and a remix without it would run against the picture. What changed
+        // is `original_available`, which the library reads off the disk.
+        let clip = with_library(&state, |lib| {
+            lib.get(&id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "clip not found".to_string())
+        })?;
+        announce_change(&app);
+        Ok(clip)
+    })
+    .await
 }
 
 /// A clip whose store was baked: `baked` when its file shows the cam, no
@@ -2179,96 +2384,123 @@ fn note_baked(state: &State<'_, AppState>, clip: &Clip) -> Result<()> {
 
 /// Where a clip's 9:16 export cuts its band and its game window. Rewrites no
 /// file — the portrait is only made on export — so it is stored at once.
-#[tauri::command(async)]
-pub fn set_clip_portrait(state: State<'_, AppState>, id: String, portrait: crate::model::PortraitLayout) -> Result<Clip> {
-    let own = edit::clip_lock(&id);
-    let _clip = own.lock();
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    let mut cam = clip.facecam.ok_or_else(|| "This clip has no camera.".to_string())?;
-    cam.portrait = crate::model::PortraitLayout {
-        split: portrait.split.clamp(0.25, 0.5),
-        game_x: portrait.game_x.clamp(0.0, 1.0),
-    };
-    with_library(&state, |lib| {
-        lib.set_facecam(&id, Some(&cam)).map_err(|e| e.to_string())?;
-        lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
-    })
-}
-
-/// Burns a recording's camera in once more after it failed.
-#[tauri::command(async)]
-pub fn retry_recording_cam(state: State<'_, AppState>, id: String) -> Result<Clip> {
-    let clip = {
+#[tauri::command]
+pub async fn set_clip_portrait(
+    app: tauri::AppHandle,
+    id: String,
+    portrait: crate::model::PortraitLayout,
+) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
         let own = edit::clip_lock(&id);
         let _clip = own.lock();
         let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
             .ok_or_else(|| "clip not found".to_string())?;
-        let stored = crate::reccam::read_stored(&id).is_some();
-        let cam = clip.facecam.clone().filter(|cam| crate::reccam::retryable(clip.recording, Some(cam.state), stored));
-        let cam = cam.ok_or_else(|| "The camera of this recording is no longer there.".to_string())?;
-        let next = crate::model::ClipFacecam { state: crate::model::FacecamState::Pending, ..cam };
+        let mut cam = clip.facecam.ok_or_else(|| "This clip has no camera.".to_string())?;
+        cam.portrait = crate::model::PortraitLayout {
+            split: portrait.split.clamp(0.25, 0.5),
+            game_x: portrait.game_x.clamp(0.0, 1.0),
+        };
         with_library(&state, |lib| {
-            lib.set_facecam(&id, Some(&next)).map_err(|e| e.to_string())?;
+            lib.set_facecam(&id, Some(&cam)).map_err(|e| e.to_string())?;
             lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
-        })?
-    };
-    crate::composite::enqueue_recording(&id);
-    Ok(clip)
+        })
+    })
+    .await
+}
+
+/// Burns a recording's camera in once more after it failed.
+#[tauri::command]
+pub async fn retry_recording_cam(app: tauri::AppHandle, id: String) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        let clip = {
+            let own = edit::clip_lock(&id);
+            let _clip = own.lock();
+            let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+                .ok_or_else(|| "clip not found".to_string())?;
+            let stored = crate::reccam::read_stored(&id).is_some();
+            let cam = clip.facecam.clone().filter(|cam| crate::reccam::retryable(clip.recording, Some(cam.state), stored));
+            let cam = cam.ok_or_else(|| "The camera of this recording is no longer there.".to_string())?;
+            let next = crate::model::ClipFacecam { state: crate::model::FacecamState::Pending, ..cam };
+            with_library(&state, |lib| {
+                lib.set_facecam(&id, Some(&next)).map_err(|e| e.to_string())?;
+                lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+            })?
+        };
+        crate::composite::enqueue_recording(&id);
+        Ok(clip)
+    })
+    .await
 }
 
 /// What the player needs to show a clip's camera movable; `None` for a clip
 /// whose camera cannot move (none, baked, store gone).
-#[tauri::command(async)]
-pub fn clip_facecam_view(state: State<'_, AppState>, id: String) -> Result<Option<crate::facecam::FacecamView>> {
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?;
-    Ok(clip.as_ref().and_then(crate::facecam::view_of))
+#[tauri::command]
+pub async fn clip_facecam_view(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Option<crate::facecam::FacecamView>> {
+    blocking(move || -> Result<Option<crate::facecam::FacecamView>> {
+        let state = app.state::<AppState>();
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?;
+        Ok(clip.as_ref().and_then(crate::facecam::view_of))
+    })
+    .await
 }
 
 /// Bakes one clip's cam in for good: its clean picture and cam are freed, the
 /// cam can no longer be moved.
-#[tauri::command(async)]
-pub fn bake_clip_cam(state: State<'_, AppState>, app: tauri::AppHandle, id: String) -> Result<Clip> {
-    if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
-        return Err("The cam is still being added to this clip — try again in a moment.".into());
-    }
-    let own = edit::clip_lock(&id);
-    let _clip = own.lock();
-    let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-        .ok_or_else(|| "clip not found".to_string())?;
-    edit::bake(&clip.id)?;
-    note_baked(&state, &clip)?;
-    let clip = with_library(&state, |lib| {
-        lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
-    })?;
-    announce_change(&app);
-    Ok(clip)
+#[tauri::command]
+pub async fn bake_clip_cam(app: tauri::AppHandle, id: String) -> Result<Clip> {
+    blocking(move || -> Result<Clip> {
+        let state = app.state::<AppState>();
+        if !crate::composite::wait_settled(&id, std::time::Duration::from_secs(300)) {
+            return Err("The cam is still being added to this clip — try again in a moment.".into());
+        }
+        let own = edit::clip_lock(&id);
+        let _clip = own.lock();
+        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+            .ok_or_else(|| "clip not found".to_string())?;
+        edit::bake(&clip.id)?;
+        note_baked(&state, &clip)?;
+        let clip = with_library(&state, |lib| {
+            lib.get(&id).map_err(|e| e.to_string())?.ok_or_else(|| "clip not found".to_string())
+        })?;
+        announce_change(&app);
+        Ok(clip)
+    })
+    .await
 }
 
 /// Bakes every clip's cam, one clip lock at a time. Returns what was freed.
-#[tauri::command(async)]
-pub fn bake_all_cams(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<TrimOriginals> {
-    let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))?;
-    let mut freed = TrimOriginals::default();
-    for clip in clips.into_iter().filter(|c| edit::bakeable(c) && crate::facecam::has_store(&c.id)) {
-        // A cam job still running gets a moment; past it the clip waits for
-        // the next time instead of holding every other one up.
-        if !crate::composite::wait_settled(&clip.id, std::time::Duration::from_secs(5)) {
-            continue;
-        }
-        let own = edit::clip_lock(&clip.id);
-        let _held = own.lock();
-        match edit::bake(&clip.id) {
-            Ok(bytes) => {
-                freed.count += 1;
-                freed.bytes += bytes;
-                let _ = note_baked(&state, &clip);
+#[tauri::command]
+pub async fn bake_all_cams(app: tauri::AppHandle) -> Result<TrimOriginals> {
+    blocking(move || -> Result<TrimOriginals> {
+        let state = app.state::<AppState>();
+        let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string()))?;
+        let mut freed = TrimOriginals::default();
+        for clip in clips.into_iter().filter(|c| edit::bakeable(c) && crate::facecam::has_store(&c.id)) {
+            // A cam job still running gets a moment; past it the clip waits for
+            // the next time instead of holding every other one up.
+            if !crate::composite::wait_settled(&clip.id, std::time::Duration::from_secs(5)) {
+                continue;
             }
-            Err(err) => log::info!("cam of {} kept: {err}", clip.id),
+            let own = edit::clip_lock(&clip.id);
+            let _held = own.lock();
+            match edit::bake(&clip.id) {
+                Ok(bytes) => {
+                    freed.count += 1;
+                    freed.bytes += bytes;
+                    let _ = note_baked(&state, &clip);
+                }
+                Err(err) => log::info!("cam of {} kept: {err}", clip.id),
+            }
         }
-    }
-    announce_change(&app);
-    Ok(freed)
+        announce_change(&app);
+        Ok(freed)
+    })
+    .await
 }
 
 /// Said when "Mute Discord voices when sharing" could not be kept to.
@@ -2527,61 +2759,64 @@ pub fn portrait_job(clip: &Clip, length_ms: u64, out: (u32, u32)) -> PortraitJob
 /// only suggests a name, so no script in it can choose where a file is written,
 /// and whatever the user picks — a network share too — is fine. Returns the
 /// path written, `None` when the user cancelled.
-#[tauri::command(async)]
-pub fn export_clip(
+#[tauri::command]
+pub async fn export_clip(
     window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
     app: tauri::AppHandle,
     id: String,
     target_bytes: u64,
     suggested_name: String,
     orientation: Option<crate::export::Orientation>,
 ) -> Result<Option<String>> {
-    use tauri_plugin_dialog::DialogExt;
-    let orientation = orientation.unwrap_or_default();
+    blocking(move || -> Result<Option<String>> {
+        let state = app.state::<AppState>();
+        use tauri_plugin_dialog::DialogExt;
+        let orientation = orientation.unwrap_or_default();
 
-    let chosen = (|| -> Result<Option<std::path::PathBuf>> {
-        let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
-            .ok_or_else(|| "clip not found".to_string())?;
-        refuse_still(&clip)?;
-        let name = export_file_name(&suggested_name).unwrap_or_else(|| {
-            let stem = Path::new(&clip.path)
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-                .unwrap_or_else(|| "clip".into());
-            manual_export_name(&stem, target_bytes / 1024 / 1024)
-        });
-        // Off the main thread (an async command), which the dialog needs: it
-        // is shown there, and this waits for the answer.
-        let Some(picked) = app
-            .dialog()
-            .file()
-            .set_parent(&window)
-            .set_title("Save the export as")
-            .set_file_name(name)
-            .add_filter("Video", &["mp4"])
-            .blocking_save_file()
-        else {
+        let chosen = (|| -> Result<Option<std::path::PathBuf>> {
+            let clip = with_library(&state, |lib| lib.get(&id).map_err(|e| e.to_string()))?
+                .ok_or_else(|| "clip not found".to_string())?;
+            refuse_still(&clip)?;
+            let name = export_file_name(&suggested_name).unwrap_or_else(|| {
+                let stem = Path::new(&clip.path)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "clip".into());
+                manual_export_name(&stem, target_bytes / 1024 / 1024)
+            });
+            // Off the main thread (an async command), which the dialog needs: it
+            // is shown there, and this waits for the answer.
+            let Some(picked) = app
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .set_title("Save the export as")
+                .set_file_name(name)
+                .add_filter("Video", &["mp4"])
+                .blocking_save_file()
+            else {
+                return Ok(None);
+            };
+            let picked = picked.into_path().map_err(|err| err.to_string())?;
+            let output = export_target(&picked)?;
+            // The dialog asked before replacing what was picked, not the name
+            // with `.mp4` added.
+            if output != picked && output.exists() {
+                let name = output.file_name().unwrap_or_default().to_string_lossy();
+                return Err(format!("\"{name}\" already exists — pick another name."));
+            }
+            Ok(Some(output))
+        })()
+        // Said here, once: the dialog only goes back to ready and relies on this
+        // notice. Cancelling is no failure and says nothing.
+        .inspect_err(|err| crate::notify(&app, "error", err.clone()))?;
+        let Some(output) = chosen else {
             return Ok(None);
         };
-        let picked = picked.into_path().map_err(|err| err.to_string())?;
-        let output = export_target(&picked)?;
-        // The dialog asked before replacing what was picked, not the name
-        // with `.mp4` added.
-        if output != picked && output.exists() {
-            let name = output.file_name().unwrap_or_default().to_string_lossy();
-            return Err(format!("\"{name}\" already exists — pick another name."));
-        }
-        Ok(Some(output))
-    })()
-    // Said here, once: the dialog only goes back to ready and relies on this
-    // notice. Cancelling is no failure and says nothing.
-    .inspect_err(|err| crate::notify(&app, "error", err.clone()))?;
-    let Some(output) = chosen else {
-        return Ok(None);
-    };
-    export_to(&state, &app, &id, target_bytes, &output, orientation, false)?;
-    Ok(Some(output.to_string_lossy().to_string()))
+        export_to(&state, &app, &id, target_bytes, &output, orientation, false)?;
+        Ok(Some(output.to_string_lossy().to_string()))
+    })
+    .await
 }
 
 /// Shrink a clip into `output` and say how it went — the part of an export
@@ -2642,61 +2877,70 @@ fn export_to(
 /// The clips are counted file by file from the library rather than by walking
 /// the clip folder: the folder can have changed, and older clips stay where
 /// they were saved.
-#[tauri::command(async)]
-pub fn storage_usage(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<StorageUsage> {
-    use tauri::Manager;
-    let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string())).unwrap_or_default();
-    let clips_bytes = clips
-        .iter()
-        .filter_map(|clip| std::fs::metadata(&clip.path).ok())
-        .map(|meta| meta.len())
-        .sum();
-    let local = app.path().app_local_data_dir().ok();
-    // ffmpeg lives in the same folder as the web views' cache (`tools.rs`), but
-    // unlike the cache it does not come and go — it gets a row of its own.
-    let tools_bytes = local.as_ref().map(|dir| dir_bytes(&dir.join("ffmpeg"))).unwrap_or(0);
-    let cache_bytes = local.as_ref().map(|dir| dir_bytes(dir)).unwrap_or(0).saturating_sub(tools_bytes);
-    // One store for both: a trimmed clip leaves its `video.mp4` there, a
-    // screenshot its pictures. Only the first is what the row and "Clear all
-    // trims" speak of.
-    let store_bytes = dir_bytes(&edit::root());
-    let originals_bytes = edit::trim_originals(&Default::default()).bytes;
-    let facecam_bytes = facecam_store_bytes();
-    let trash_bytes = with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|trashed| std::fs::metadata(&trashed.clip.path).ok())
-        .map(|meta| meta.len())
-        .sum();
-    Ok(StorageUsage {
-        clips_bytes,
-        originals_bytes,
-        facecam_bytes,
-        shot_edits_bytes: store_bytes.saturating_sub(originals_bytes).saturating_sub(facecam_bytes),
-        tracks_bytes: dir_bytes(&crate::stems::root()),
-        thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
-        cache_bytes,
-        tools_bytes,
-        trash_bytes,
+#[tauri::command]
+pub async fn storage_usage(app: tauri::AppHandle) -> Result<StorageUsage> {
+    blocking(move || -> Result<StorageUsage> {
+        let state = app.state::<AppState>();
+        use tauri::Manager;
+        let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string())).unwrap_or_default();
+        let clips_bytes = clips
+            .iter()
+            .filter_map(|clip| std::fs::metadata(&clip.path).ok())
+            .map(|meta| meta.len())
+            .sum();
+        let local = app.path().app_local_data_dir().ok();
+        // ffmpeg lives in the same folder as the web views' cache (`tools.rs`), but
+        // unlike the cache it does not come and go — it gets a row of its own.
+        let tools_bytes = local.as_ref().map(|dir| dir_bytes(&dir.join("ffmpeg"))).unwrap_or(0);
+        let cache_bytes = local.as_ref().map(|dir| dir_bytes(dir)).unwrap_or(0).saturating_sub(tools_bytes);
+        // One store for both: a trimmed clip leaves its `video.mp4` there, a
+        // screenshot its pictures. Only the first is what the row and "Clear all
+        // trims" speak of.
+        let store_bytes = dir_bytes(&edit::root());
+        let originals_bytes = edit::trim_originals(&Default::default()).bytes;
+        let facecam_bytes = facecam_store_bytes();
+        let trash_bytes = with_library(&state, |lib| lib.trashed().map_err(|e| e.to_string()))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|trashed| std::fs::metadata(&trashed.clip.path).ok())
+            .map(|meta| meta.len())
+            .sum();
+        Ok(StorageUsage {
+            clips_bytes,
+            originals_bytes,
+            facecam_bytes,
+            shot_edits_bytes: store_bytes.saturating_sub(originals_bytes).saturating_sub(facecam_bytes),
+            tracks_bytes: dir_bytes(&crate::stems::root()),
+            thumbs_bytes: dir_bytes(&crate::thumbs::dir()),
+            cache_bytes,
+            tools_bytes,
+            trash_bytes,
+        })
     })
+    .await
 }
 
 /// What "Clear all trims" in the storage settings would free.
-#[tauri::command(async)]
-pub fn trim_originals(state: State<'_, AppState>) -> Result<TrimOriginals> {
-    Ok(edit::trim_originals(&originals_still_needed(&state)?))
+#[tauri::command]
+pub async fn trim_originals(app: tauri::AppHandle) -> Result<TrimOriginals> {
+    blocking(move || -> Result<TrimOriginals> {
+        let state = app.state::<AppState>();
+        Ok(edit::trim_originals(&originals_still_needed(&state)?))
+    })
+    .await
 }
 
 /// Throw away the untouched recording of every trimmed clip. The trims stay;
 /// only undoing them is gone. Returns what was freed.
-#[tauri::command(async)]
-pub fn discard_all_originals(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<TrimOriginals> {
-    let freed = edit::discard_all_originals(&originals_still_needed(&state)?);
-    announce_change(&app);
-    Ok(freed)
+#[tauri::command]
+pub async fn discard_all_originals(app: tauri::AppHandle) -> Result<TrimOriginals> {
+    blocking(move || -> Result<TrimOriginals> {
+        let state = app.state::<AppState>();
+        let freed = edit::discard_all_originals(&originals_still_needed(&state)?);
+        announce_change(&app);
+        Ok(freed)
+    })
+    .await
 }
 
 /// The store folders of clips whose file is missing — a crash between moving
@@ -2909,16 +3153,6 @@ fn answer_after_swap(
     }
 }
 
-/// Show any file in Explorer.
-#[tauri::command]
-pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<()> {
-    use tauri_plugin_opener::OpenerExt;
-
-    app.opener()
-        .reveal_item_in_dir(&path)
-        .map_err(|e| e.to_string())
-}
-
 /// Turn away everything that only a recording has.
 ///
 /// Trimming, the individual tracks and the waveform all run through ffmpeg and
@@ -2932,7 +3166,7 @@ fn refuse_still(clip: &Clip) -> Result<()> {
 }
 
 fn with_library<T>(
-    state: &State<'_, AppState>,
+    state: &AppState,
     f: impl FnOnce(&Library) -> Result<T>,
 ) -> Result<T> {
     let guard = state.library.lock();
@@ -3254,6 +3488,69 @@ mod tests {
             Some(name.as_str()),
             discord_copy(Path::new("d"), "id", stem, 10, false).file_name().and_then(|n| n.to_str())
         );
+    }
+
+    /// The rules without the machine's own folders.
+    fn usable_clip_dir(dir: &str) -> bool {
+        clip_dir_allowed(Path::new(dir), &ClipDirGuard { kept_out: Vec::new(), fenced: Vec::new() })
+    }
+
+    #[cfg(windows)]
+    fn guard() -> ClipDirGuard {
+        ClipDirGuard {
+            kept_out: vec![PathBuf::from(r"C:\Users\me"), PathBuf::from(r"C:\Users\me\AppData\Roaming\ClippiBoy")],
+            fenced: vec![PathBuf::from(r"C:\Users\me\AppData\Roaming\ClippiBoy"), PathBuf::from(r"C:\Windows")],
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_share_or_a_raw_device_path_is_no_clip_folder() {
+        for dir in [
+            r"\\server\share\clips",
+            r"\\server\share",
+            "//server/share/clips",
+            r"\/server\share\clips",
+            r"\\?\C:\clips",
+            r"\\?\UNC\server\share\clips",
+            r"\\.\C:\clips",
+            r"\\.\PhysicalDrive0\clips",
+            r"\??\C:\clips",
+            r"\clips",
+            r"C:clips",
+        ] {
+            assert!(!clip_dir_allowed(Path::new(dir), &guard()), "{dir}");
+        }
+        assert!(clip_dir_allowed(Path::new(r"D:\clips"), &guard()));
+        assert!(clip_dir_allowed(Path::new(r"Z:\nas\clips"), &guard()), "a mapped drive is the user's choice");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_profile_the_data_folder_and_windows_are_no_clip_folder() {
+        for dir in [
+            r"C:\Users\me",
+            r"c:\users\ME\",
+            r"C:\Users",
+            r"C:\Users\me\AppData",
+            r"C:\Users\me\AppData\Roaming",
+            r"C:\Users\me\AppData\Roaming\ClippiBoy",
+            r"C:\Users\me\AppData\Roaming\clippiboy\discord",
+            r"C:\Windows",
+            r"c:\windows\System32\clips",
+        ] {
+            assert!(!clip_dir_allowed(Path::new(dir), &guard()), "{dir}");
+        }
+        for dir in [
+            r"C:\Users\me\Videos\ClippiBoy",
+            r"C:\Users\me\Desktop",
+            r"C:\Users\me2\clips",
+            r"C:\Users\me\AppData\Roaming\ClippiBoy2",
+            r"C:\WindowsClips",
+            r"D:\Windows",
+        ] {
+            assert!(clip_dir_allowed(Path::new(dir), &guard()), "{dir}");
+        }
     }
 
     #[test]

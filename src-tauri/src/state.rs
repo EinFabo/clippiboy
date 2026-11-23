@@ -956,8 +956,8 @@ impl AppState {
     /// the current one under the config lock, before it is saved. What has to
     /// come from the config as it stands — the clip folder and the token,
     /// changed only by their own commands — is taken from there: from a copy
-    /// read earlier, an overlapping `set_clip_dir` or "New" token (`control::restart`) would
-    /// be undone.
+    /// read earlier, an overlapping clip folder change or "New" token
+    /// (`control::restart`) would be undone.
     ///
     /// Before that, `incoming` is put onto the current config by its revision
     /// (`config::accept`): one built on an older copy — a window that has not

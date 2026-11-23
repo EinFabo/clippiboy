@@ -693,6 +693,12 @@
           "markdownDescription": "Enables the pending_update command without any pre-configured scope."
         },
         {
+          "description": "Enables the pick_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pick-clip-dir",
+          "markdownDescription": "Enables the pick_clip_dir command without any pre-configured scope."
+        },
+        {
           "description": "Enables the preview_sound command without any pre-configured scope.",
           "type": "string",
           "const": "allow-preview-sound",
@@ -721,6 +727,12 @@
           "type": "string",
           "const": "allow-remove-virtual-camera",
           "markdownDescription": "Enables the remove_virtual_camera command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reset_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reset-clip-dir",
+          "markdownDescription": "Enables the reset_clip_dir command without any pre-configured scope."
         },
         {
           "description": "Enables the restore_clip command without any pre-configured scope.",
@@ -759,12 +771,6 @@
           "markdownDescription": "Enables the reveal_clip command without any pre-configured scope."
         },
         {
-          "description": "Enables the reveal_path command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-reveal-path",
-          "markdownDescription": "Enables the reveal_path command without any pre-configured scope."
-        },
-        {
           "description": "Enables the save_clip command without any pre-configured scope.",
           "type": "string",
           "const": "allow-save-clip",
@@ -775,12 +781,6 @@
           "type": "string",
           "const": "allow-screenshot-edit",
           "markdownDescription": "Enables the screenshot_edit command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the set_clip_dir command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-set-clip-dir",
-          "markdownDescription": "Enables the set_clip_dir command without any pre-configured scope."
         },
         {
           "description": "Enables the set_clip_favorite command without any pre-configured scope.",
@@ -1341,6 +1341,12 @@
           "markdownDescription": "Denies the pending_update command without any pre-configured scope."
         },
         {
+          "description": "Denies the pick_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pick-clip-dir",
+          "markdownDescription": "Denies the pick_clip_dir command without any pre-configured scope."
+        },
+        {
           "description": "Denies the preview_sound command without any pre-configured scope.",
           "type": "string",
           "const": "deny-preview-sound",
@@ -1369,6 +1375,12 @@
           "type": "string",
           "const": "deny-remove-virtual-camera",
           "markdownDescription": "Denies the remove_virtual_camera command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reset_clip_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reset-clip-dir",
+          "markdownDescription": "Denies the reset_clip_dir command without any pre-configured scope."
         },
         {
           "description": "Denies the restore_clip command without any pre-configured scope.",
@@ -1407,12 +1419,6 @@
           "markdownDescription": "Denies the reveal_clip command without any pre-configured scope."
         },
         {
-          "description": "Denies the reveal_path command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-reveal-path",
-          "markdownDescription": "Denies the reveal_path command without any pre-configured scope."
-        },
-        {
           "description": "Denies the save_clip command without any pre-configured scope.",
           "type": "string",
           "const": "deny-save-clip",
@@ -1423,12 +1429,6 @@
           "type": "string",
           "const": "deny-screenshot-edit",
           "markdownDescription": "Denies the screenshot_edit command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the set_clip_dir command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-set-clip-dir",
-          "markdownDescription": "Denies the set_clip_dir command without any pre-configured scope."
         },
         {
           "description": "Denies the set_clip_favorite command without any pre-configured scope.",

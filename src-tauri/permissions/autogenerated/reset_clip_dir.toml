@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-clip-dir"
+description = "Enables the reset_clip_dir command without any pre-configured scope."
+commands.allow = ["reset_clip_dir"]
+
+[[permission]]
+identifier = "deny-reset-clip-dir"
+description = "Denies the reset_clip_dir command without any pre-configured scope."
+commands.deny = ["reset_clip_dir"]

@@ -28,7 +28,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: https://cdn.discordapp.com; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: https://cdn.discordapp.com; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": []

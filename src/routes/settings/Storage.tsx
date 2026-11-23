@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { Card, SectionTitle } from "@/components/ui/Card";
@@ -338,8 +337,12 @@ function ClearTrimsCard({
 
 /** Folder for new clips — pick, reset, open. */
 function ClipDir() {
-  const { config, setClipDir } = useEngine(
-    useShallow((s) => ({ config: s.config, setClipDir: s.setClipDir })),
+  const { config, pickClipDir, resetClipDir } = useEngine(
+    useShallow((s) => ({
+      config: s.config,
+      pickClipDir: s.pickClipDir,
+      resetClipDir: s.resetClipDir,
+    })),
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -348,13 +351,14 @@ function ClipDir() {
   // remembered, so the button is there (or not) from the first frame.
   const fallback = useStorageInfo((s) => s.defaultDir);
 
-  const apply = async (dir: string) => {
+  // The core opens the folder dialog itself and checks what was picked: the
+  // page never names a folder.
+  const apply = async (change: () => Promise<boolean>) => {
     setBusy(true);
     setError(null);
     try {
-      await setClipDir(dir);
-      // The numbers were the old folder's.
-      useStorageInfo.getState().prefetch(true);
+      // The numbers were the old folder's; a cancelled dialog changed nothing.
+      if (await change()) useStorageInfo.getState().prefetch(true);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -362,24 +366,12 @@ function ClipDir() {
     }
   };
 
-  const pick = async () => {
-    setError(null);
-    let picked: string | string[] | null;
-    try {
-      picked = await openDialog({
-        directory: true,
-        multiple: false,
-        defaultPath: config.clipDir,
-        title: "Folder for new clips",
-      });
-    } catch (err) {
-      setError(String(err));
-      return;
-    }
-    // Cancelling the dialog yields null.
-    if (typeof picked !== "string") return;
-    await apply(picked);
-  };
+  const pick = () => apply(pickClipDir);
+  const reset = () =>
+    apply(async () => {
+      await resetClipDir();
+      return true;
+    });
 
   const canReset = fallback !== null && fallback !== config.clipDir;
 
@@ -400,7 +392,7 @@ function ClipDir() {
               variant="ghost"
               className={canReset ? undefined : "invisible"}
               disabled={busy || !canReset}
-              onClick={() => canReset && apply(fallback)}
+              onClick={() => canReset && reset()}
             >
               Reset
             </Button>

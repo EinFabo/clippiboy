@@ -141,7 +141,9 @@ export interface EngineState {
     changes: Partial<Pick<AppConfig, HotkeyField>>,
     pads?: PadProfiles,
   ) => Promise<void>;
-  setClipDir: (dir: string) => Promise<void>;
+  /** The core asks for the folder in its own dialog; `false` when cancelled. */
+  pickClipDir: () => Promise<boolean>;
+  resetClipDir: () => Promise<void>;
   /** New token for the Stream Deck port; the old one stops working at once. */
   regenerateControlToken: () => Promise<void>;
   upsertSource: (source: AudioSource) => Promise<void>;
@@ -653,12 +655,16 @@ export const useEngine = create<EngineState>((set, get) => ({
     }
   },
 
-  async setClipDir(dir) {
-    if (!inTauri) {
-      set((st) => ({ config: { ...st.config, clipDir: dir } }));
-      return;
-    }
-    outbox.offer(await api.setClipDir(dir));
+  async pickClipDir() {
+    if (!inTauri) return false;
+    const next = await api.pickClipDir();
+    if (next) outbox.offer(next);
+    return next !== null;
+  },
+
+  async resetClipDir() {
+    if (!inTauri) return;
+    outbox.offer(await api.resetClipDir());
   },
 
   async upsertSource(source) {

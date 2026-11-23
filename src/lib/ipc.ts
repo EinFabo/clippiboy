@@ -80,8 +80,11 @@ export const api = {
   /** Throws when a combination is invalid or already taken. */
   /** All four at once — the core only accepts them together. */
   setHotkeys: (hotkeys: HotkeySet) => invoke<AppConfig>("set_hotkeys", { hotkeys }),
-  /** Throws when the folder cannot be created or written to. */
-  setClipDir: (dir: string) => invoke<AppConfig>("set_clip_dir", { dir }),
+  /** Opens the core's folder dialog; `null` when it was cancelled. Throws when
+   *  the folder is refused or cannot be created or written to. */
+  pickClipDir: () => invoke<AppConfig | null>("pick_clip_dir"),
+  /** Back to the suggested folder, which the core knows itself. */
+  resetClipDir: () => invoke<AppConfig>("reset_clip_dir"),
   defaultClipDir: () => invoke<string>("default_clip_dir"),
   /** Suspend the hotkeys while the settings record a combination. */
   suspendHotkeys: () => invoke<void>("suspend_hotkeys"),
@@ -146,7 +149,6 @@ export const api = {
   purgeClip: (id: string) => invoke<void>("purge_clip", { id }),
   emptyTrash: () => invoke<number>("empty_trash"),
   revealClip: (id: string) => invoke<void>("reveal_clip", { id }),
-  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   updateClip: (
     id: string,
     meta: { title: string | null; description: string | null; game: string | null },

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pick-clip-dir"
+description = "Enables the pick_clip_dir command without any pre-configured scope."
+commands.allow = ["pick_clip_dir"]
+
+[[permission]]
+identifier = "deny-pick-clip-dir"
+description = "Denies the pick_clip_dir command without any pre-configured scope."
+commands.deny = ["pick_clip_dir"]
