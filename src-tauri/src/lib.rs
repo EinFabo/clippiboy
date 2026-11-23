@@ -497,18 +497,39 @@ pub(crate) mod format {
     }
 }
 
-/// Switch the replay buffer on or off and report the result.
-///
-/// The route for hotkey, tray and button — so always a decision by the user.
-/// The automation therefore signs off, or back on, here.
+/// Flip the replay buffer for the user and report the result — hotkey, tray
+/// and the control port's toggle. Against what the user saw when pressing:
+/// see [`state::BufferWant::toggled`].
 pub fn toggle_buffer_and_notify(app: &tauri::AppHandle) {
-    let state = app.state::<AppState>();
-    if state.status.lock().buffer_active {
-        state.auto.manual_stop();
-        stop_buffer_and_notify(app);
-    } else {
-        state.auto.manual_start();
-        start_buffer_and_notify(app);
+    let shown = app.state::<AppState>().status.lock().buffer_active;
+    let _ = set_buffer_and_notify(app, state::BufferWant::toggled(shown));
+}
+
+/// Switch the replay buffer on or off for the user — window, control port —
+/// and report the result. A user's switch: the automation signs off, or back
+/// on, in `AppState::set_buffer`, which is the one place that decides.
+pub fn set_buffer_and_notify(
+    app: &tauri::AppHandle,
+    want: state::BufferWant,
+) -> Result<state::BufferStep, String> {
+    let outcome = app
+        .state::<AppState>()
+        .set_buffer(want, state::BufferOrigin::User);
+    match &outcome {
+        Ok(step) => announce_buffer(app, *step),
+        Err(err) => buffer_failed(app, err.clone()),
+    }
+    outcome
+}
+
+/// Say what a switch did — only what it changed. A start that found the
+/// buffer running (the slow start of an earlier tick, a second hotkey) says
+/// nothing, or the banner and sound came twice.
+fn announce_buffer(app: &tauri::AppHandle, step: state::BufferStep) {
+    match step {
+        state::BufferStep::Start => buffer_started(app),
+        state::BufferStep::Stop => buffer_stopped(app),
+        state::BufferStep::Nothing => log::info!("buffer: already as asked, nothing to switch"),
     }
 }
 
@@ -561,38 +582,22 @@ fn settings_restarted(app: &tauri::AppHandle, outcome: Result<bool, String>) {
     }
 }
 
-/// Start the buffer and report the result.
-pub fn start_buffer_and_notify(app: &tauri::AppHandle) {
-    match app.state::<AppState>().start_pipeline() {
-        Ok(started) => announce_started(app, started),
-        Err(err) => buffer_failed(app, err),
-    }
-}
-
-/// Say the buffer is running — only when this start made it so. One that
-/// found it running already (the slow start of an earlier tick, a second
-/// hotkey) says nothing, or the banner and sound came twice.
-fn announce_started(app: &tauri::AppHandle, started: bool) {
-    if started {
-        buffer_started(app);
-    } else {
-        log::info!("buffer: start found the buffer already running");
-    }
-}
-
 /// Set while a start the automation spawned runs. A start brings up the whole
 /// capture stack and can outlast several two-second ticks; without this each
 /// tick would see "not running" and start again, and count a failure again.
 static AUTO_STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The automation's start. Reports a failure once, not on every retry — see
+/// The automation's start, as decided when the user's choices stood at
+/// `seen`. Reports a failure once, not on every retry — see
 /// `AutoBuffer::start_failed`.
-fn auto_start_buffer(app: &tauri::AppHandle) {
+fn auto_start_buffer(app: &tauri::AppHandle, seen: u64) {
     let state = app.state::<AppState>();
-    match state.start_pipeline() {
-        Ok(started) => {
-            state.auto.start_succeeded();
-            announce_started(app, started);
+    match state.set_buffer(state::BufferWant::On, state::BufferOrigin::Auto(seen)) {
+        Ok(step) => {
+            if step == state::BufferStep::Start {
+                state.auto.start_succeeded();
+            }
+            announce_buffer(app, step);
         }
         Err(err) => {
             let first = state.auto.start_failures() == 0;
@@ -695,10 +700,16 @@ fn report_audio_trouble(app: &tauri::AppHandle) {
     overlay::show(app, BannerKind::Error, headline, Some(detail));
 }
 
-/// Stop the buffer and report the result.
-pub fn stop_buffer_and_notify(app: &tauri::AppHandle) {
+/// The automation's stop, as decided when the user's choices stood at `seen`.
+fn auto_stop_buffer(app: &tauri::AppHandle, seen: u64) {
     let state = app.state::<AppState>();
-    state.stop_pipeline();
+    match state.set_buffer(state::BufferWant::Off, state::BufferOrigin::Auto(seen)) {
+        Ok(step) => announce_buffer(app, step),
+        Err(err) => log::warn!("buffer: automatic stop failed: {err}"),
+    }
+}
+
+fn buffer_stopped(app: &tauri::AppHandle) {
     notify(app, "ok", "Replay buffer stopped");
     sounds::play(app, SoundKind::BufferOff);
     overlay::show(app, BannerKind::BufferOff, "Replay buffer off", None);
@@ -722,9 +733,16 @@ fn start_buffer_if_configured(app: &tauri::AppHandle) {
         return;
     }
     let app = app.clone();
+    // The automation's start like any other: a "stop" pressed meanwhile wins,
+    // and the tick does not start a second one beside it.
+    let seen = app.state::<AppState>().auto.decisions();
+    let starting = state::FlagGuard::raise(&AUTO_STARTING);
     // Not on the setup thread: bringing up the recording takes a moment and the
     // window should already be there while it happens.
-    std::thread::spawn(move || start_buffer_and_notify(&app));
+    std::thread::spawn(move || {
+        let _starting = starting;
+        auto_start_buffer(&app, seen);
+    });
 }
 
 /// Bring every saved screen choice in line with the screens that are here —
@@ -940,19 +958,18 @@ fn watch_topology(app: &tauri::AppHandle, settled: &capture::Fingerprint) {
         let state = app.state::<AppState>();
         // Looked at again: the buffer may have been stopped, or another
         // restart may have brought the capture onto this topology meanwhile.
-        let still = state
-            .shared
-            .lock()
-            .as_ref()
-            .and_then(|shared| shared.topology.lock().clone())
-            .is_some_and(|at_start| capture::needs_restart(&at_start, &settled));
-        if state.is_buffering() && !state.is_recording() && still {
-            state.stop_pipeline();
-            if let Err(err) = state.start_pipeline() {
-                notify(&app, "error", err.clone());
-                sounds::play(&app, SoundKind::Error);
-                overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
-            }
+        let still = || {
+            state
+                .shared
+                .lock()
+                .as_ref()
+                .and_then(|shared| shared.topology.lock().clone())
+                .is_some_and(|at_start| capture::needs_restart(&at_start, &settled))
+        };
+        if let Err(err) = state.restart_capture(still) {
+            notify(&app, "error", err.clone());
+            sounds::play(&app, SoundKind::Error);
+            overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
         }
     });
 }
@@ -1043,13 +1060,10 @@ fn watch_stall(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         let _restarting = state::FlagGuard::raise(&CAPTURE_RESTARTING);
         let state = app.state::<AppState>();
-        if state.is_buffering() && !state.is_recording() {
-            state.stop_pipeline();
-            if let Err(err) = state.start_pipeline() {
-                notify(&app, "error", err.clone());
-                sounds::play(&app, SoundKind::Error);
-                overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
-            }
+        if let Err(err) = state.restart_capture(|| true) {
+            notify(&app, "error", err.clone());
+            sounds::play(&app, SoundKind::Error);
+            overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
         }
     });
 }
@@ -1093,9 +1107,11 @@ fn watch_screen(app: &tauri::AppHandle) {
         // then there is nothing to move.
         if state.is_buffering() && !state.is_recording() {
             repair_screens(&app);
-            state.stop_pipeline();
-            match state.start_pipeline() {
-                Ok(_) => {
+            // Asked again under `lifecycle`: a stop may come in while the
+            // screens are repaired.
+            match state.restart_capture(|| true) {
+                Ok(false) => {}
+                Ok(true) => {
                     let screen = state.status_snapshot().screen_fallback;
                     let title = match drift {
                         capture::Drift::Resized => "Recording follows the new resolution",
@@ -1204,40 +1220,40 @@ fn watch_encoder(app: &tauri::AppHandle) {
             sounds::play(&app, SoundKind::Error);
             overlay::show(&app, BannerKind::Error, "Recording stopped", Some(stop_body.clone()));
         };
-        if state.is_buffering() {
-            state.stop_pipeline();
-            match state.start_pipeline() {
-                Ok(_) => {
-                    // Announced again should it ever have to give up later on.
-                    GAVE_UP.store(false, Ordering::SeqCst);
-                    // One banner stands at a time: the ended recording is the
-                    // one that has to stay, the restart is a side note then.
-                    if stopped_recording {
-                        recording_stopped();
-                    } else {
-                        overlay::show(
-                            &app,
-                            BannerKind::Info,
-                            "Buffer restarted",
-                            Some(format!(
-                                "The video encoder stopped ({why}) \u{2014} the buffer starts over"
-                            )),
-                        );
-                    }
-                }
-                Err(err) => {
-                    // The buffer's banner wins here — it is the one to act
-                    // on; the ended recording still gets its notice.
-                    if stopped_recording {
-                        notify(&app, "error", format!("Recording stopped: {stop_body}"));
-                    }
-                    notify(&app, "error", err.clone());
-                    sounds::play(&app, SoundKind::Error);
-                    overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
+        match state.restart_capture(|| true) {
+            Ok(false) => {
+                if stopped_recording {
+                    recording_stopped();
                 }
             }
-        } else if stopped_recording {
-            recording_stopped();
+            Ok(true) => {
+                // Announced again should it ever have to give up later on.
+                GAVE_UP.store(false, Ordering::SeqCst);
+                // One banner stands at a time: the ended recording is the
+                // one that has to stay, the restart is a side note then.
+                if stopped_recording {
+                    recording_stopped();
+                } else {
+                    overlay::show(
+                        &app,
+                        BannerKind::Info,
+                        "Buffer restarted",
+                        Some(format!(
+                            "The video encoder stopped ({why}) \u{2014} the buffer starts over"
+                        )),
+                    );
+                }
+            }
+            Err(err) => {
+                // The buffer's banner wins here — it is the one to act
+                // on; the ended recording still gets its notice.
+                if stopped_recording {
+                    notify(&app, "error", format!("Recording stopped: {stop_body}"));
+                }
+                notify(&app, "error", err.clone());
+                sounds::play(&app, SoundKind::Error);
+                overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
+            }
         }
         CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
     });
@@ -1253,8 +1269,9 @@ fn watch_encoder(app: &tauri::AppHandle) {
 /// `playing` is `GameTick::playing` and not the held name on purpose: the name
 /// outlives the foreground so clips keep their game, but the automation has to
 /// follow the foreground or an alt-tab into the browser would leave the buffer
-/// and its encoder running until the game is closed.
-fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
+/// and its encoder running until the game is closed. `game_alive` (the held
+/// name) is what lifts the user's own "off": only the end of the process does.
+fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
     if AUTO_STARTING.load(std::sync::atomic::Ordering::SeqCst) {
         // Deliberately delays lock and auto-stop polling until the running
         // start finishes; the counters keep their state meanwhile.
@@ -1262,6 +1279,9 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     }
     let state = app.state::<AppState>();
     let config = state.config_snapshot();
+    // Noted before the polls: a user's switch from here on voids what they
+    // decide (`AutoBuffer::admit`).
+    let seen = state.auto.decisions();
     let active = state.status.lock().buffer_active;
 
     // The lock screen comes first, and it applies whatever the settings say: a
@@ -1290,7 +1310,7 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
                 return;
             }
             if config.only_buffer_in_game {
-                state.auto.poll(playing, active)
+                state.auto.poll(playing, game_alive, active)
             } else {
                 state.auto.poll_always(active)
             }
@@ -1322,9 +1342,9 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
     std::thread::spawn(move || match action {
         state::AutoAction::Start => {
             let _starting = starting;
-            auto_start_buffer(&app);
+            auto_start_buffer(&app, seen);
         }
-        state::AutoAction::Stop => stop_buffer_and_notify(&app),
+        state::AutoAction::Stop => auto_stop_buffer(&app, seen),
         state::AutoAction::Restart => {
             // A restart already under way brings a fresh capture too.
             if CAPTURE_RESTARTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1335,14 +1355,14 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool) {
             let state = app.state::<AppState>();
             // A recording running across the sleep or the dark screen keeps
             // its file whole; the buffer behind it starts over once it has
-            // stopped.
-            if state.is_buffering() && !state.is_recording() {
+            // stopped (`restart_capture` leaves it alone).
+            let restarted = state.restart_capture(|| {
                 log::info!("{reason} \u{2014} the capture starts over");
-                state.stop_pipeline();
-                if let Err(err) = state.start_pipeline() {
-                    notify(&app, "error", err.clone());
-                    overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
-                }
+                true
+            });
+            if let Err(err) = restarted {
+                notify(&app, "error", err.clone());
+                overlay::show(&app, BannerKind::Error, "Buffer will not start", Some(err));
             }
         }
         state::AutoAction::Nothing => {}
@@ -1909,7 +1929,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
                     *state.source_notes.lock() = notes;
                     *state.mixer_notes.lock() = mixer_notes;
                 }
-                apply_auto_buffer(&handle, tick_game.playing);
+                apply_auto_buffer(&handle, tick_game.playing, tick_game.held.is_some());
                 // The windows first: the buffer's restart announces itself with
                 // a banner, and that should already stand on the right screen.
                 watch_monitors(&handle);

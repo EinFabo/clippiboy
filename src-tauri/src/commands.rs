@@ -998,12 +998,10 @@ pub async fn engine_status(app: tauri::AppHandle) -> EngineStatus {
 #[tauri::command]
 pub async fn start_buffer(app: tauri::AppHandle) -> Result<()> {
     blocking(move || -> Result<()> {
-        let state = app.state::<AppState>();
-        if state.status.lock().buffer_active {
-            return Ok(());
-        }
-        crate::toggle_buffer_and_notify(&app);
-        let started = state.status.lock().buffer_active;
+        // On, not a toggle: decided under `lifecycle`, so a start that
+        // finishes meanwhile cannot turn this into a stop.
+        let _ = crate::set_buffer_and_notify(&app, crate::state::BufferWant::On);
+        let started = app.state::<AppState>().status.lock().buffer_active;
         match started {
             true => Ok(()),
             // The message is already out; the error only brings the store back to
@@ -1019,10 +1017,7 @@ pub async fn start_buffer(app: tauri::AppHandle) -> Result<()> {
 #[tauri::command]
 pub async fn stop_buffer(app: tauri::AppHandle) -> Result<()> {
     blocking(move || -> Result<()> {
-        let state = app.state::<AppState>();
-        if state.status.lock().buffer_active {
-            crate::toggle_buffer_and_notify(&app);
-        }
+        let _ = crate::set_buffer_and_notify(&app, crate::state::BufferWant::Off);
         Ok(())
     })
     .await

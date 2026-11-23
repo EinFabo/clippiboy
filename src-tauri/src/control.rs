@@ -353,9 +353,15 @@ fn handle(app: &tauri::AppHandle, request: &Request, token: &str) -> (u16, Value
         },
         ("POST", "/v1/buffer") => match action().as_str() {
             action @ ("toggle" | "start" | "stop") => {
+                // The user's switch, the same as hotkey and tray: a "stop"
+                // here holds the automation off until the game ends too.
                 match action {
-                    "start" => crate::start_buffer_and_notify(app),
-                    "stop" => crate::stop_buffer_and_notify(app),
+                    "start" => {
+                        let _ = crate::set_buffer_and_notify(app, crate::state::BufferWant::On);
+                    }
+                    "stop" => {
+                        let _ = crate::set_buffer_and_notify(app, crate::state::BufferWant::Off);
+                    }
                     _ => crate::toggle_buffer_and_notify(app),
                 }
                 let active = app.state::<AppState>().status.lock().buffer_active;

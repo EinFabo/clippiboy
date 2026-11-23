@@ -395,6 +395,10 @@ pub struct AutoBuffer {
     failures: std::sync::atomic::AtomicU32,
     /// Checks still to sit out before the next automatic start.
     wait: std::sync::atomic::AtomicU32,
+    /// Counts the user's choices — every `manual_start` and `manual_stop`.
+    /// The automation notes it before it polls; a switch it decided on goes
+    /// ahead only if no choice of the user's has come in since (`admit`).
+    decisions: std::sync::atomic::AtomicU64,
 }
 
 /// Automatic starts that may fail in a row before the automation gives up
@@ -471,7 +475,14 @@ const DISPLAY_SETTLE_POLLS: u32 = 2;
 impl AutoBuffer {
     /// One round of the automation. Called at the cadence of game detection,
     /// and only when both "auto start" and "only in game" are on.
-    pub fn poll(&self, game_present: bool, buffer_active: bool) -> AutoAction {
+    ///
+    /// `game_present` is the user at the game (`GameTick::playing`),
+    /// `game_alive` its process still running (`GameTick::held`). Half a
+    /// minute away from the game stops a buffer the automation started, but
+    /// only the end of the process lifts the user's own "off" and a back-off
+    /// that gave up: a manual stop used to come undone after thirty seconds
+    /// in the browser, with the game still open.
+    pub fn poll(&self, game_present: bool, game_alive: bool, buffer_active: bool) -> AutoAction {
         use std::sync::atomic::Ordering::SeqCst;
         if game_present {
             self.missing.store(0, SeqCst);
@@ -487,8 +498,10 @@ impl AutoBuffer {
         }
         // The game really has ended: a new one may start the buffer again, even
         // if the user switched it off in between — or the automation gave up.
-        self.suppressed.store(false, SeqCst);
-        self.start_succeeded();
+        if !game_alive {
+            self.suppressed.store(false, SeqCst);
+            self.start_succeeded();
+        }
         if buffer_active && self.started.swap(false, SeqCst) {
             AutoAction::Stop
         } else {
@@ -652,6 +665,7 @@ impl AutoBuffer {
     /// The user started the buffer themselves.
     pub fn manual_start(&self) {
         use std::sync::atomic::Ordering::SeqCst;
+        self.decisions.fetch_add(1, SeqCst);
         self.started.store(false, SeqCst);
         self.suppressed.store(false, SeqCst);
         self.start_succeeded();
@@ -660,8 +674,92 @@ impl AutoBuffer {
     /// The user stopped the buffer themselves.
     pub fn manual_stop(&self) {
         use std::sync::atomic::Ordering::SeqCst;
+        self.decisions.fetch_add(1, SeqCst);
         self.started.store(false, SeqCst);
         self.suppressed.store(true, SeqCst);
+    }
+
+    /// Where the user's choices stand — noted by the automation before it
+    /// polls, and handed back with its switch as [`BufferOrigin::Auto`].
+    pub fn decisions(&self) -> u64 {
+        self.decisions.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Let a switch of the buffer through, or not. Called under `lifecycle`.
+    ///
+    /// The user's always goes ahead, and the automation takes note of it: it
+    /// stands back from a buffer switched off by hand until the game is gone,
+    /// and leaves one switched on by hand running. The automation's goes
+    /// ahead only if the user has not chosen since it polled — its thread may
+    /// reach `lifecycle` after a "stop" pressed in between, and starting then
+    /// would undo it.
+    pub fn admit(&self, want: BufferWant, origin: BufferOrigin) -> bool {
+        match origin {
+            BufferOrigin::User => {
+                match want {
+                    BufferWant::On => self.manual_start(),
+                    BufferWant::Off => self.manual_stop(),
+                }
+                true
+            }
+            BufferOrigin::Auto(seen) => self.decisions() == seen,
+        }
+    }
+}
+
+/// What a switch of the buffer asks for.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum BufferWant {
+    On,
+    Off,
+}
+
+impl BufferWant {
+    /// A toggle, against the state the user saw when pressing it. Settled
+    /// then rather than under `lifecycle`: a press while the automation's
+    /// start runs saw the buffer off and means "on", and must not stop the
+    /// buffer that start brings up a moment later.
+    pub fn toggled(shown_active: bool) -> Self {
+        if shown_active {
+            BufferWant::Off
+        } else {
+            BufferWant::On
+        }
+    }
+}
+
+/// Who switches the buffer.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum BufferOrigin {
+    /// Hotkey, tray, window or control port (Stream Deck).
+    User,
+    /// The automation, with [`AutoBuffer::decisions`] as it stood when it
+    /// polled.
+    Auto(u64),
+}
+
+/// What a switch of the buffer does — and, once done, what it did.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum BufferStep {
+    Start,
+    Stop,
+    /// Already as asked, overtaken by a choice of the user's, or quitting.
+    Nothing,
+}
+
+/// The step a switch takes, decided under `lifecycle`. Asked for what it
+/// already is, it does nothing — two starts in a row bring up one capture
+/// and say so once.
+pub fn buffer_step(want: BufferWant, active: bool, admitted: bool, quitting: bool) -> BufferStep {
+    if !admitted {
+        return BufferStep::Nothing;
+    }
+    match (want, active) {
+        // Quit takes the pipeline down; one started behind it would hold the
+        // capture until the process ends.
+        (BufferWant::On, false) if !quitting => BufferStep::Start,
+        (BufferWant::Off, true) => BufferStep::Stop,
+        _ => BufferStep::Nothing,
     }
 }
 
@@ -1181,11 +1279,54 @@ pub fn start_step(pipeline_running: bool, buffer_wanted: bool) -> StartStep {
 }
 
 impl AppState {
-    /// Starts recording into the replay buffer. `Ok(true)` only when this call
-    /// brought the pipeline up or turned a recording-only one into a buffer;
-    /// `Ok(false)` when the buffer was running already (see [`start_step`]).
-    pub fn start_pipeline(&self) -> Result<bool, String> {
+    /// Switch the replay buffer on or off — the one way every switch takes:
+    /// hotkey, tray, window, control port and the automation. Decided and
+    /// done under `lifecycle`, so two of them cannot both see "off" and both
+    /// start, nor a stop slip in between a check and a start. Says what it
+    /// did; announcing it is the caller's, once `lifecycle` is let go.
+    pub fn set_buffer(&self, want: BufferWant, origin: BufferOrigin) -> Result<BufferStep, String> {
         let _lifecycle = self.lifecycle.lock();
+        let step = buffer_step(
+            want,
+            self.is_buffering(),
+            self.auto.admit(want, origin),
+            self.quitting.load(std::sync::atomic::Ordering::SeqCst),
+        );
+        match step {
+            BufferStep::Start => {
+                self.start_held()?;
+            }
+            BufferStep::Stop => self.stop_held(),
+            BufferStep::Nothing => {}
+        }
+        Ok(step)
+    }
+
+    /// Start the capture over on a fresh pipeline, for a watcher that no
+    /// longer trusts the running one. `Ok(false)` when there is nothing to
+    /// restart: the buffer is off, a recording holds the capture (it would be
+    /// cut in two), or `still` — asked under `lifecycle` — says the reason has
+    /// gone. Stop and start under one hold of `lifecycle`, with the buffer
+    /// shown as on throughout: a "stop" in between used to find it off, do
+    /// nothing, and see the restart start it again.
+    pub fn restart_capture(&self, still: impl FnOnce() -> bool) -> Result<bool, String> {
+        let _lifecycle = self.lifecycle.lock();
+        if !self.is_buffering() || self.is_recording() || !still() {
+            return Ok(false);
+        }
+        self.take_down(true);
+        if let Err(err) = self.launch_pipeline(true) {
+            self.status.lock().buffer_active = false;
+            return Err(err);
+        }
+        Ok(true)
+    }
+
+    /// Starts recording into the replay buffer; the caller holds `lifecycle`.
+    /// `Ok(true)` only when this call brought the pipeline up or turned a
+    /// recording-only one into a buffer; `Ok(false)` when the buffer was
+    /// running already (see [`start_step`]).
+    fn start_held(&self) -> Result<bool, String> {
         let step = start_step(
             self.pipeline.lock().is_some(),
             self.buffer_wanted.load(std::sync::atomic::Ordering::SeqCst),
@@ -1276,10 +1417,17 @@ impl AppState {
         Ok(())
     }
 
-    /// Switch the replay buffer off. A running recording keeps the pipeline:
-    /// only the ring shrinks, and the buffer counts as off.
+    /// The buffer off for quitting or an update, once the recording is
+    /// closed. Switching it off otherwise goes through [`Self::set_buffer`].
     pub fn stop_pipeline(&self) {
         let _lifecycle = self.lifecycle.lock();
+        self.stop_held();
+    }
+
+    /// Switch the replay buffer off; the caller holds `lifecycle`. A running
+    /// recording keeps the pipeline: only the ring shrinks, and the buffer
+    /// counts as off.
+    fn stop_held(&self) {
         if self.is_recording() {
             self.buffer_wanted
                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2807,18 +2955,146 @@ mod tests {
         // Two minutes of checks with a game running and a buffer that never
         // comes up.
         for _ in 0..60 {
-            if auto.poll(true, false) == AutoAction::Start {
+            if auto.poll(true, true, false) == AutoAction::Start {
                 starts += 1;
                 gave_up |= auto.start_failed();
             }
         }
         assert!(gave_up, "still trying after {starts} starts");
         assert_eq!(starts, MAX_START_FAILURES, "not every check, not forever");
-        // The game ends: the next one gets a fresh go.
+        // Half a minute away with the game still open changes nothing…
         for _ in 0..GRACE_POLLS {
-            auto.poll(false, false);
+            auto.poll(false, true, false);
         }
-        assert_eq!(auto.poll(true, false), AutoAction::Start);
+        assert_eq!(auto.poll(true, true, false), AutoAction::Nothing);
+        // …the game ending does: the next one gets a fresh go.
+        for _ in 0..GRACE_POLLS {
+            auto.poll(false, false, false);
+        }
+        assert_eq!(auto.poll(true, true, false), AutoAction::Start);
+    }
+
+    /// ST-9: a buffer switched off by hand stays off while the game runs,
+    /// however long the user looks at something else.
+    #[test]
+    fn a_manual_stop_outlasts_time_away_from_the_game() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll(true, true, false), AutoAction::Start);
+        auto.manual_stop();
+        // Forty seconds in the browser, the game still open.
+        for _ in 0..20 {
+            assert_eq!(auto.poll(false, true, false), AutoAction::Nothing);
+        }
+        assert_eq!(auto.poll(true, true, false), AutoAction::Nothing, "back at the game");
+    }
+
+    /// Once the game's process is gone, the next game starts the buffer again.
+    #[test]
+    fn the_end_of_the_game_lifts_a_manual_stop() {
+        let auto = AutoBuffer::default();
+        auto.manual_stop();
+        for _ in 0..GRACE_POLLS - 1 {
+            auto.poll(false, false, false);
+        }
+        assert_eq!(auto.poll(true, true, false), AutoAction::Nothing, "not before the grace is up");
+        for _ in 0..GRACE_POLLS {
+            auto.poll(false, false, false);
+        }
+        assert_eq!(auto.poll(true, true, false), AutoAction::Start);
+    }
+
+    /// Half a minute away still stops what the automation started — the
+    /// process need not end for that — and coming back starts it again.
+    #[test]
+    fn time_away_stops_an_automatic_buffer_and_coming_back_restarts_it() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll(true, true, false), AutoAction::Start);
+        for _ in 0..GRACE_POLLS - 1 {
+            assert_eq!(auto.poll(false, true, true), AutoAction::Nothing);
+        }
+        assert_eq!(auto.poll(false, true, true), AutoAction::Stop);
+        assert_eq!(auto.poll(true, true, false), AutoAction::Start);
+    }
+
+    /// A buffer started by hand is not the automation's to stop.
+    #[test]
+    fn time_away_leaves_a_manual_buffer_running() {
+        let auto = AutoBuffer::default();
+        assert!(auto.admit(BufferWant::On, BufferOrigin::User));
+        for _ in 0..GRACE_POLLS * 2 {
+            assert_eq!(auto.poll(false, false, true), AutoAction::Nothing);
+        }
+    }
+
+    /// ST-5: a "stop" by any of the user's ways — the control port included —
+    /// keeps the automation from starting the buffer again.
+    #[test]
+    fn a_user_stop_holds_off_the_automation() {
+        let auto = AutoBuffer::default();
+        assert!(auto.admit(BufferWant::Off, BufferOrigin::User));
+        assert_eq!(auto.poll(true, true, false), AutoAction::Nothing);
+        assert_eq!(auto.poll_always(false), AutoAction::Nothing);
+        assert!(auto.admit(BufferWant::On, BufferOrigin::User));
+        assert_eq!(auto.poll_always(false), AutoAction::Start);
+    }
+
+    /// The automation's switch is void once the user has chosen since it
+    /// polled; without a choice in between it goes ahead.
+    #[test]
+    fn a_user_choice_overtakes_the_automations_switch() {
+        let auto = AutoBuffer::default();
+        let seen = auto.decisions();
+        assert_eq!(auto.poll(true, true, false), AutoAction::Start);
+        assert!(auto.admit(BufferWant::On, BufferOrigin::Auto(seen)));
+        auto.manual_stop();
+        assert!(!auto.admit(BufferWant::On, BufferOrigin::Auto(seen)));
+        let seen = auto.decisions();
+        assert!(auto.admit(BufferWant::Off, BufferOrigin::Auto(seen)));
+    }
+
+    #[test]
+    fn a_switch_to_what_already_is_does_nothing() {
+        use BufferStep::*;
+        use BufferWant::*;
+        assert_eq!(buffer_step(On, false, true, false), Start);
+        assert_eq!(buffer_step(On, true, true, false), Nothing);
+        assert_eq!(buffer_step(Off, true, true, false), Stop);
+        assert_eq!(buffer_step(Off, false, true, false), Nothing);
+        // Overtaken by the user.
+        assert_eq!(buffer_step(On, false, false, false), Nothing);
+        assert_eq!(buffer_step(Off, true, false, false), Nothing);
+        // Quitting: no new start, but a stop still goes through.
+        assert_eq!(buffer_step(On, false, true, true), Nothing);
+        assert_eq!(buffer_step(Off, true, true, true), Stop);
+    }
+
+    #[test]
+    fn a_toggle_goes_against_what_was_shown() {
+        assert_eq!(BufferWant::toggled(true), BufferWant::Off);
+        assert_eq!(BufferWant::toggled(false), BufferWant::On);
+    }
+
+    /// Through the whole path: a "stop" on a buffer that is off changes no
+    /// capture but still holds the automation off, and the automation's
+    /// stale start brings nothing up.
+    #[test]
+    fn set_buffer_records_the_users_stop_and_drops_a_stale_start() {
+        let state = AppState::new(false);
+        let seen = state.auto.decisions();
+        assert_eq!(state.set_buffer(BufferWant::Off, BufferOrigin::User), Ok(BufferStep::Nothing));
+        assert_eq!(state.auto.poll(true, true, false), AutoAction::Nothing);
+        assert_eq!(
+            state.set_buffer(BufferWant::On, BufferOrigin::Auto(seen)),
+            Ok(BufferStep::Nothing)
+        );
+        assert!(!state.is_buffering());
+        state.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+        let now = state.auto.decisions();
+        assert_eq!(
+            state.set_buffer(BufferWant::On, BufferOrigin::Auto(now)),
+            Ok(BufferStep::Nothing),
+            "no start while quitting"
+        );
     }
 
     #[test]
