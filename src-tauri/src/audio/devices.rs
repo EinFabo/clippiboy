@@ -113,6 +113,19 @@ mod win {
     /// child separately records the child twice, and an application that holds
     /// several sessions gets torn apart across sources.
     pub fn process_tree() -> HashMap<u32, (u32, String)> {
+        static CREATED: std::sync::Mutex<Option<crate::audio::CreatedCache>> = std::sync::Mutex::new(None);
+        let mut out = process_snapshot();
+        let created = {
+            let mut cache = CREATED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            crate::audio::creation_times(&out, cache.get_or_insert_with(HashMap::new), created_at)
+        };
+        crate::audio::cut_reused_parents(&mut out, &created);
+        out
+    }
+
+    /// Every process as pid -> (parent pid, exe name), the parent links as
+    /// Windows reports them — [`process_tree`] without its check of them.
+    pub fn process_snapshot() -> HashMap<u32, (u32, String)> {
         let mut out = HashMap::new();
         unsafe {
             let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
@@ -143,21 +156,6 @@ mod win {
             }
             let _ = CloseHandle(snapshot);
         }
-        // Only links to a parent that is there can mislead.
-        let linked: Vec<u32> = out
-            .iter()
-            .filter(|(_, (parent, _))| *parent != 0 && out.contains_key(parent))
-            .flat_map(|(pid, (parent, _))| [*pid, *parent])
-            .collect();
-        let mut created = HashMap::new();
-        for pid in linked {
-            if let std::collections::hash_map::Entry::Vacant(slot) = created.entry(pid) {
-                if let Some(at) = created_at(pid) {
-                    slot.insert(at);
-                }
-            }
-        }
-        crate::audio::cut_reused_parents(&mut out, &created);
         out
     }
 
@@ -397,6 +395,18 @@ pub fn process_tree() -> std::collections::HashMap<u32, (u32, String)> {
 
 #[cfg(not(windows))]
 pub fn process_tree() -> std::collections::HashMap<u32, (u32, String)> {
+    std::collections::HashMap::new()
+}
+
+/// Every process as pid -> (parent pid, exe name), the parent links unchecked
+/// — for a look at the names alone, which needs no process opened.
+#[cfg(windows)]
+pub fn process_snapshot() -> std::collections::HashMap<u32, (u32, String)> {
+    win::process_snapshot()
+}
+
+#[cfg(not(windows))]
+pub fn process_snapshot() -> std::collections::HashMap<u32, (u32, String)> {
     std::collections::HashMap::new()
 }
 

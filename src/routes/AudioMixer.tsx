@@ -961,7 +961,7 @@ function AddSourceList({
                     // application restarts, the exe name is not.
                     { type: "process", pid: p.pid, exe: p.exe, mode: "include" },
                     p.icon ? (
-                      <img src={p.icon} alt="" draggable={false} className="h-5 w-5 object-contain" />
+                      <img src={p.icon} alt="" draggable={false} className="h-4 w-4 object-contain" />
                     ) : (
                       <IconApp className="h-4 w-4" />
                     ),

@@ -258,7 +258,8 @@ fn run(app: &AppHandle, inbox: &Receiver<()>) {
 }
 
 fn streaming_app_running() -> Option<bool> {
-    let tree = crate::audio::devices::process_tree();
+    // Names only: the parent links are not looked at, so not checked either.
+    let tree = crate::audio::devices::process_snapshot();
     streaming_app_among(tree.values().map(|(_, exe)| exe.as_str()))
 }
 

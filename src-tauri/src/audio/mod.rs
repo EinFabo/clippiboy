@@ -40,6 +40,56 @@ pub fn cut_reused_parents(tree: &mut HashMap<u32, (u32, String)>, created: &Hash
     }
 }
 
+/// Creation times kept between snapshots, by pid, parent pid and exe: a pid
+/// Windows has handed to another process comes with another parent or name
+/// and is looked up anew.
+pub type CreatedCache = HashMap<(u32, u32, String), u64>;
+
+/// The creation times [`cut_reused_parents`] needs for `tree` — of every
+/// process linked to a parent that is there, and of that parent. `lookup`
+/// (which opens the process) is asked only for what `cache` does not know,
+/// and once per pid in a call even when it refuses: a protected launcher with
+/// forty children used to be opened forty times, every two seconds. `cache`
+/// is left holding the processes of `tree` alone.
+pub fn creation_times(
+    tree: &HashMap<u32, (u32, String)>,
+    cache: &mut CreatedCache,
+    mut lookup: impl FnMut(u32) -> Option<u64>,
+) -> HashMap<u32, u64> {
+    // Only links to a parent that is there can mislead.
+    let linked: Vec<u32> = tree
+        .iter()
+        .filter(|(_, (parent, _))| *parent != 0 && tree.contains_key(parent))
+        .flat_map(|(pid, (parent, _))| [*pid, *parent])
+        .collect();
+    let mut asked: HashMap<u32, Option<u64>> = HashMap::new();
+    for pid in linked {
+        if asked.contains_key(&pid) {
+            continue;
+        }
+        let Some((parent, exe)) = tree.get(&pid) else {
+            continue;
+        };
+        let key = (pid, *parent, exe.clone());
+        let at = match cache.get(&key) {
+            Some(at) => Some(*at),
+            None => {
+                let at = lookup(pid);
+                // A refusal is not kept: it is asked again next time.
+                if let Some(at) = at {
+                    cache.insert(key, at);
+                }
+                at
+            }
+        };
+        asked.insert(pid, at);
+    }
+    cache.retain(|(pid, parent, exe), _| {
+        tree.get(pid).is_some_and(|(now_parent, now_exe)| now_parent == parent && now_exe == exe)
+    });
+    asked.into_iter().filter_map(|(pid, at)| Some((pid, at?))).collect()
+}
+
 /// A process's ancestors, closest first. `pid` itself is not included.
 /// Relies on the tree's links being real, see [`cut_reused_parents`].
 ///
@@ -2289,6 +2339,54 @@ mod tests {
         let mut unread = tree(&[(500, 1, "steam.exe"), (40, 500, "Discord.exe")]);
         cut_reused_parents(&mut unread, &[(40, 100)].into_iter().collect());
         assert!(in_tree_of(40, 500, &unread));
+    }
+
+    /// A creation time is read once per process and kept while the process
+    /// is there; a process that refuses is opened once per snapshot, not once
+    /// per child; a pid that now belongs to another process is read anew.
+    #[test]
+    fn creation_times_are_read_once_and_forgotten_with_the_process() {
+        let processes = tree(&[
+            (1, 0, "explorer.exe"),
+            (500, 1, "launcher.exe"),
+            (40, 500, "game.exe"),
+            (41, 500, "helper.exe"),
+            (42, 500, "helper.exe"),
+        ]);
+        let mut cache = CreatedCache::new();
+        let asked = std::cell::RefCell::new(Vec::new());
+        // The launcher (500) will not be opened.
+        let lookup = |pid: u32| {
+            asked.borrow_mut().push(pid);
+            (pid != 500).then_some(u64::from(pid) * 10)
+        };
+        let created = creation_times(&processes, &mut cache, lookup);
+        let mut first = asked.borrow().clone();
+        first.sort_unstable();
+        assert_eq!(first, [1, 40, 41, 42, 500], "each once, the refusing launcher too");
+        assert_eq!(created.len(), 4);
+        assert!(!created.contains_key(&500));
+
+        asked.borrow_mut().clear();
+        let again = creation_times(&processes, &mut cache, lookup);
+        assert_eq!(*asked.borrow(), [500], "only the refusal is asked again");
+        assert_eq!(again, created);
+
+        // 42 ended and its pid went to another program; 41 ended.
+        let later = tree(&[
+            (1, 0, "explorer.exe"),
+            (500, 1, "launcher.exe"),
+            (40, 500, "game.exe"),
+            (42, 1, "other.exe"),
+        ]);
+        asked.borrow_mut().clear();
+        creation_times(&later, &mut cache, lookup);
+        let mut third = asked.borrow().clone();
+        third.sort_unstable();
+        assert_eq!(third, [42, 500]);
+        assert!(cache.keys().all(|(pid, _, _)| *pid != 41), "41 is forgotten");
+        assert!(cache.contains_key(&(42, 1, "other.exe".to_string())));
+        assert!(!cache.contains_key(&(42, 500, "helper.exe".to_string())));
     }
 
     /// A web view still plays for its host, and the host with nothing recorded
