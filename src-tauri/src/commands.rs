@@ -72,7 +72,6 @@ pub fn app_capture_supported() -> bool {
 #[tauri::command]
 pub async fn list_capture_targets(app: tauri::AppHandle) -> Vec<CaptureTarget> {
     blocking(move || -> Vec<CaptureTarget> {
-        use tauri::Manager;
         crate::appicon::log_dpi_awareness();
         let mut targets = capture::list_targets();
         let game_pid = app.state::<AppState>().game_pid();
@@ -91,7 +90,6 @@ pub async fn capture_thumbs(app: tauri::AppHandle, ids: Vec<String>) -> Vec<crat
         // Tauri hands out its own `windows` version's HWND — only the pointer counts.
         #[cfg(windows)]
         let main = {
-            use tauri::Manager;
             app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize)
         };
         #[cfg(not(windows))]
@@ -559,13 +557,14 @@ pub async fn pick_clip_dir(window: tauri::WebviewWindow, app: tauri::AppHandle) 
             return Ok(None);
         };
         let picked = picked.into_path().map_err(|err| err.to_string())?;
-        let guarded = ClipDirGuard::of_this_machine();
-        if !clip_dir_allowed(&picked, &guarded) {
+        let guard = ClipDirGuard::of_this_machine();
+        if !form_allowed(&picked) || !clear_of(&picked, &guard) {
             return Err(CLIP_DIR_REFUSED.into());
         }
         // Checked as it really is, too: a junction onto the profile is the
-        // profile.
-        if dunce::canonicalize(&picked).is_ok_and(|real| !clip_dir_allowed(&real, &guarded)) {
+        // profile. Only for what it lies in — a mapped network drive resolves
+        // to its share, and that drive is the user's to pick, as before.
+        if dunce::canonicalize(&picked).is_ok_and(|real| !crate::grantable_dir(&real) || !clear_of(&real, &guard)) {
             return Err(CLIP_DIR_REFUSED.into());
         }
         adopt_clip_dir(&state, &app, &picked).map(Some)
@@ -647,16 +646,19 @@ impl ClipDirGuard {
     }
 }
 
-/// Whether `dir` may become the clip folder: a folder (not a drive) on a
-/// local drive, given by letter — no share (`\\host\share`), no `\\?\` or
-/// `\\.\` form that skips Windows' own checks — and clear of `guard`.
-/// Compared without case, as Windows treats paths.
-fn clip_dir_allowed(dir: &Path, guard: &ClipDirGuard) -> bool {
+/// Whether a folder as picked has a form the clip folder may take: a folder
+/// (not a drive) on a drive given by letter, a mapped network drive too — no
+/// share named directly (`\\host\share`, whose mere touch sends the NTLM
+/// hash), no `\\?\`, `\\.\` or `\??\` form that skips Windows' own checks.
+fn form_allowed(dir: &Path) -> bool {
     let text = dir.to_string_lossy();
     let two_slashes = text.chars().take(2).filter(|c| matches!(c, '\\' | '/')).count() == 2;
-    if two_slashes || !crate::grantable_dir(dir) {
-        return false;
-    }
+    !two_slashes && crate::grantable_dir(dir)
+}
+
+/// Whether `dir` keeps clear of `guard`'s folders. Compared without case, as
+/// Windows treats paths.
+fn clear_of(dir: &Path, guard: &ClipDirGuard) -> bool {
     let dir = folded(dir);
     let above = |kept: &PathBuf| folded(kept).starts_with(&dir);
     let inside = |fence: &PathBuf| dir.starts_with(&folded(fence));
@@ -814,7 +816,6 @@ pub async fn cam_preview_frame(
     after: u64,
 ) -> Result<tauri::ipc::Response> {
     use std::sync::atomic::Ordering;
-    use tauri::Manager;
     let state = app.state::<AppState>();
     let config = state.config_snapshot();
     preview_allowed(
@@ -913,7 +914,6 @@ pub async fn remove_virtual_camera(app: tauri::AppHandle) -> Result<AppConfig> {
 }
 
 fn run_vcam_setup(state: &AppState, app: &tauri::AppHandle, verb: &str) -> Result<()> {
-    use tauri::Manager;
     let exe = crate::vcam::setup_exe(app.path().resource_dir().ok())
         .ok_or_else(|| "The virtual camera's setup is missing".to_string())?;
     #[cfg(windows)]
@@ -939,7 +939,6 @@ pub(crate) fn tell_main(app: &tauri::AppHandle, config: &AppConfig) {
 /// The answer of a source command, and the main window told when another
 /// window (the console) sent it.
 fn source_written(webview: &tauri::WebviewWindow, config: AppConfig) -> AppConfig {
-    use tauri::Manager;
     if webview.label() != "main" {
         tell_main(webview.app_handle(), &config);
     }
@@ -1660,7 +1659,6 @@ pub async fn empty_trash(app: tauri::AppHandle) -> Result<u32> {
 /// At start and every hour: what has been in Recently deleted for 30 days
 /// goes for good.
 pub fn purge_expired(app: &tauri::AppHandle) {
-    use tauri::Manager;
     let state = app.state::<AppState>();
     let now = crate::trash::now_ms();
     let all = crate::clips::with_library(&state.library, |lib| lib.trashed())
@@ -2881,7 +2879,6 @@ fn export_to(
 pub async fn storage_usage(app: tauri::AppHandle) -> Result<StorageUsage> {
     blocking(move || -> Result<StorageUsage> {
         let state = app.state::<AppState>();
-        use tauri::Manager;
         let clips = with_library(&state, |lib| lib.list().map_err(|e| e.to_string())).unwrap_or_default();
         let clips_bytes = clips
             .iter()
@@ -3490,9 +3487,8 @@ mod tests {
         );
     }
 
-    /// The rules without the machine's own folders.
     fn usable_clip_dir(dir: &str) -> bool {
-        clip_dir_allowed(Path::new(dir), &ClipDirGuard { kept_out: Vec::new(), fenced: Vec::new() })
+        form_allowed(Path::new(dir))
     }
 
     #[cfg(windows)]
@@ -3519,10 +3515,26 @@ mod tests {
             r"\clips",
             r"C:clips",
         ] {
-            assert!(!clip_dir_allowed(Path::new(dir), &guard()), "{dir}");
+            assert!(!form_allowed(Path::new(dir)), "{dir}");
         }
-        assert!(clip_dir_allowed(Path::new(r"D:\clips"), &guard()));
-        assert!(clip_dir_allowed(Path::new(r"Z:\nas\clips"), &guard()), "a mapped drive is the user's choice");
+        assert!(form_allowed(Path::new(r"D:\clips")));
+        assert!(form_allowed(Path::new(r"Z:\Clips")), "a mapped drive is the user's choice");
+    }
+
+    /// A mapped drive resolves to its share: that form is refused only as
+    /// picked, the resolved one is checked for what it lies in.
+    #[cfg(windows)]
+    #[test]
+    fn a_mapped_drive_resolved_to_its_share_still_counts() {
+        for resolved in [r"\\?\UNC\nas\share\Clips", r"\\nas\share\Clips"] {
+            let resolved = Path::new(resolved);
+            assert!(crate::grantable_dir(resolved), "{}", resolved.display());
+            assert!(clear_of(resolved, &guard()), "{}", resolved.display());
+        }
+        assert!(!form_allowed(Path::new(r"\\nas\share")));
+        assert!(!form_allowed(Path::new(r"\\nas\share\Clips")));
+        // A junction onto the profile is caught by what it resolves to.
+        assert!(!clear_of(Path::new(r"C:\Users\me"), &guard()));
     }
 
     #[cfg(windows)]
@@ -3539,7 +3551,7 @@ mod tests {
             r"C:\Windows",
             r"c:\windows\System32\clips",
         ] {
-            assert!(!clip_dir_allowed(Path::new(dir), &guard()), "{dir}");
+            assert!(!clear_of(Path::new(dir), &guard()), "{dir}");
         }
         for dir in [
             r"C:\Users\me\Videos\ClippiBoy",
@@ -3549,7 +3561,7 @@ mod tests {
             r"C:\WindowsClips",
             r"D:\Windows",
         ] {
-            assert!(clip_dir_allowed(Path::new(dir), &guard()), "{dir}");
+            assert!(clear_of(Path::new(dir), &guard()), "{dir}");
         }
     }
 
