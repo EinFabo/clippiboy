@@ -5,6 +5,7 @@ import {
   relatedIds,
   toMe,
   toUser,
+  SESSION_IDLE_MS,
   tokenHash,
   upsertDiscordUser,
   userByCode,
@@ -13,7 +14,7 @@ import {
   type DiscordUser,
   type User,
 } from "./db";
-import { statesIn, withState } from "./login";
+import { pageCsp, statesIn, withState } from "./login";
 import { base64url, body, escapeHtml, HttpError, json, normalizeCode, randomToken, sameText, sha256 } from "./util";
 import {
   applySuspensions,
@@ -27,7 +28,7 @@ import {
   shareQuota,
   sweep,
 } from "./links";
-import { addressKey, readLimited } from "./limits";
+import { addressKey, readLimited, writeBudget } from "./limits";
 import { departedCutoff, fingerprint } from "./departed";
 import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
 import { NOBODY, requestRule, type RequestOutcome } from "./friendrules";
@@ -79,6 +80,8 @@ export default {
         env.DB.prepare("DELETE FROM anon_budget WHERE day < ?").bind(utcDay(Date.now() - DAY_MS)).run(),
         // What a deleted account left behind is kept for seven days.
         env.DB.prepare("DELETE FROM departed WHERE left_at <= ?").bind(departedCutoff(Date.now())).run(),
+        // Sessions unused for that long no longer sign anyone in; their rows go too.
+        env.DB.prepare("DELETE FROM sessions WHERE last_used < ?").bind(Date.now() - SESSION_IDLE_MS).run(),
       ]).then((outcomes) => {
         for (const outcome of outcomes) {
           if (outcome.status === "rejected") console.error("cron", outcome.reason);
@@ -143,12 +146,19 @@ async function route(request: Request, env: Env): Promise<Response> {
   const me = await authenticate(request, env.DB);
 
   // Everything that changes something is counted per user; reads and the
-  // sign-out are not. A script holding one session cannot spend the day's
-  // database writes or flood the friends' sockets with notices.
+  // sign-out are not. That keeps a script holding one session from flooding
+  // the friends' sockets with notices, but 30 a minute is still tens of
+  // thousands of writes a day: the routes that write the most for the least
+  // count against a tighter limit of their own on top (`writeBudget`), and a
+  // failed upload counts against the week like a link (links.ts). What one
+  // account can still write in a day is about half the database's free daily
+  // writes — see "Limits" in server/README.md.
   if (method !== "GET" && !(path === "/auth/logout" && method === "POST")) {
     if (!(await env.USER_LIMIT.limit({ key: me })).success) {
       throw new HttpError(429, "Slow down — try again in a minute.");
     }
+    const budget = writeBudget(method, path);
+    if (budget) await spend(env, me, budget);
   }
 
   if (path === "/webhook/begin" && method === "POST") return webhookBegin(request, url, env);
@@ -174,7 +184,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (path === "/me" && method === "GET") return json(await loadMe(env, me));
   if (path === "/me" && method === "PATCH") {
-    const { allowRequests } = await body<{ allowRequests?: boolean }>(request);
+    const { allowRequests } = await body<{ allowRequests: boolean }>(request);
     if (typeof allowRequests === "boolean") {
       // Only a real change writes.
       await env.DB.prepare("UPDATE users SET allow_requests = ? WHERE id = ? AND allow_requests != ?")
@@ -186,8 +196,8 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/me" && method === "DELETE") return deleteAccount(env, me);
   if (path === "/friends" && method === "GET") return json(await listFriends(env, me));
   if (path === "/friends/request" && method === "POST") {
-    const { query } = await body<{ query?: string }>(request);
-    return json(await sendRequest(env, me, String(query ?? "")));
+    const { query } = await body<{ query: string }>(request);
+    return json(await sendRequest(env, me, typeof query === "string" ? query : ""));
   }
 
   const friend = path.match(/^\/friends\/([0-9a-f-]{36})(\/accept)?$/);
@@ -206,6 +216,12 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
   }
   throw new HttpError(404, "Not found.");
+}
+
+/** Counts one call against one of the user's tighter limits, or refuses it. */
+async function spend(env: Env, me: string, budget: "share" | "connect" | "friend"): Promise<void> {
+  const limit = { share: env.SHARE_LIMIT, connect: env.CONNECT_LIMIT, friend: env.FRIEND_LIMIT }[budget];
+  if (!(await limit.limit({ key: me })).success) throw new HttpError(429, "Slow down — try again in a minute.");
 }
 
 /**
@@ -365,8 +381,11 @@ async function inviteAtSignIn(
 }
 
 async function authExchange(request: Request, env: Env): Promise<Response> {
-  const { code, verifier } = await body<{ code?: string; verifier?: string }>(request);
-  if (!code || !verifier) throw new HttpError(400, "Missing code or verifier.");
+  const { code, verifier } = await body<{ code: string; verifier: string }>(request);
+  // Strings only: anything else went to the database as it was, and ended in a 500.
+  if (typeof code !== "string" || typeof verifier !== "string" || !code || !verifier) {
+    throw new HttpError(400, "Missing code or verifier.");
+  }
   const login = await env.DB.prepare("SELECT state, challenge, user_id, created_at FROM logins WHERE code = ?")
     .bind(code)
     .first<{ state: string; challenge: string; user_id: string; created_at: number }>();
@@ -416,7 +435,7 @@ async function revokeToken(env: Env, token: string): Promise<void> {
 // started, as with sign-in.
 
 async function webhookBegin(request: Request, url: URL, env: Env): Promise<Response> {
-  const { key } = await body<{ key?: unknown }>(request);
+  const { key } = await body<{ key: string }>(request);
   if (!isKey(key)) throw new HttpError(400, "Missing key.");
   if (!env.DISCORD_CLIENT_ID) throw new HttpError(503, "Discord is not configured yet.");
   const state = randomToken(24);
@@ -428,7 +447,7 @@ async function webhookBegin(request: Request, url: URL, env: Env): Promise<Respo
 
 /** "Cancel" in the app: the start page refuses the tab from then on. */
 async function webhookCancel(request: Request, env: Env): Promise<Response> {
-  const { state } = await body<{ state?: unknown }>(request);
+  const { state } = await body<{ state: string }>(request);
   if (isState(state)) await env.DB.prepare("DELETE FROM webhook_logins WHERE state = ?").bind(state).run();
   return json({ ok: true });
 }
@@ -514,23 +533,34 @@ async function webhookCallback(request: Request, url: URL, env: Env): Promise<Re
   const webhook = grantedWebhook(granted, guilds);
   if (!webhook) return page("Discord said no", "Discord did not hand over the channel. Try again from ClippiBoy.");
   const back = webhookLink(await seal(row.key, webhook));
-  const response = page("Almost done", `Return to ClippiBoy to finish connecting ${webhook.guild}. You can close this tab.`, back, [
+  // No cache keeps it (page): its link carries the sealed webhook.
+  return page("Almost done", `Return to ClippiBoy to finish connecting ${webhook.guild}. You can close this tab.`, back, [
     `${WEBHOOK_COOKIE}=; Path=/webhook; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
   ]);
-  response.headers.set("Cache-Control", "no-store");
-  return response;
 }
 
+/**
+ * The small pages of sign-in and channel connection. Only their own style and
+ * script run (by nonce), nobody may frame them, and no cache keeps them: the
+ * one after sign-in carries a one-time code in its link.
+ */
 function page(title: string, text: string, redirect?: string, cookies: string[] = []): Response {
+  const nonce = randomToken(16);
   const link = redirect
-    ? `<p><a href="${escapeHtml(redirect)}">Open ClippiBoy</a></p><script>location.href=${JSON.stringify(redirect)}</script>`
+    ? `<p><a href="${escapeHtml(redirect)}">Open ClippiBoy</a></p><script nonce="${nonce}">location.href=${JSON.stringify(redirect)}</script>`
     : "";
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClippiBoy</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08080a;color:#f4f4f5;font:16px/1.5 system-ui,sans-serif}
+<style nonce="${nonce}">body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08080a;color:#f4f4f5;font:16px/1.5 system-ui,sans-serif}
 main{background:#121215;border:1px solid #26262c;border-radius:20px;padding:32px 36px;max-width:360px;text-align:center}
 h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;margin:0}a{display:inline-block;margin-top:20px;background:#fff;color:#08080a;border-radius:999px;padding:10px 20px;text-decoration:none;font-weight:600}</style></head>
 <body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>${link}</main></body></html>`;
-  const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+  const headers = new Headers({
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": pageCsp(nonce),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+  });
   for (const cookie of cookies) headers.append("Set-Cookie", cookie);
   return new Response(html, { headers });
 }
@@ -621,12 +651,17 @@ async function requestTo(
   handedOut: boolean,
 ): Promise<RequestOutcome> {
   const [a, b] = pair(me, target.id);
-  const [blockedByTarget, blockedByMe, existing] = await Promise.all([
+  const [blockedByTarget, blockedByMe, existing, waiting] = await Promise.all([
     isBlocked(env, target.id, me),
     isBlocked(env, me, target.id),
     env.DB.prepare("SELECT status, requester FROM friendships WHERE user_a = ? AND user_b = ?")
       .bind(a, b)
       .first<{ status: "pending" | "accepted"; requester: string }>(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM friendships WHERE (user_a = ?1 OR user_b = ?1) AND requester = ?1 AND status = 'pending'",
+    )
+      .bind(me)
+      .first<{ n: number }>(),
   ]);
   const outcome = requestRule({
     me,
@@ -635,7 +670,11 @@ async function requestTo(
     blockedByMe,
     existing,
     handedOut,
+    pendingOut: waiting?.n ?? 0,
   });
+  // Only a request that writes counts against the friend limit: a refusal
+  // writes nothing, and a few mistyped names must not lock the field.
+  if (outcome.kind !== "refuse") await spend(env, me, "friend");
   if (outcome.kind === "accept") {
     await env.DB.prepare("UPDATE friendships SET status = 'accepted' WHERE user_a = ? AND user_b = ?").bind(a, b).run();
   } else if (outcome.kind === "send") {

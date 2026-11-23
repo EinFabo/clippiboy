@@ -5,6 +5,9 @@
 
 export const NOBODY = "Nobody with that name or code uses ClippiBoy.";
 
+/** Requests one account may have waiting for an answer at once. */
+export const MAX_PENDING_OUT = 20;
+
 export interface RequestFacts {
   me: string;
   target: { id: string; allowRequests: boolean };
@@ -16,6 +19,8 @@ export interface RequestFacts {
   existing: { status: "pending" | "accepted"; requester: string } | null;
   /** Found by friend code (or an invite) rather than by Discord name. */
   handedOut: boolean;
+  /** My requests still waiting for an answer, to anyone. */
+  pendingOut: number;
 }
 
 export type RequestOutcome =
@@ -39,6 +44,15 @@ export function requestRule(f: RequestFacts): RequestOutcome {
     return f.handedOut
       ? { kind: "refuse", status: 403, message: "They don't take friend requests right now." }
       : { kind: "refuse", status: 404, message: NOBODY };
+  }
+  // Last, so it tells nothing a sent request would not: past the cap only a
+  // new request is refused, never saying yes to one that came in.
+  if (f.pendingOut >= MAX_PENDING_OUT) {
+    return {
+      kind: "refuse",
+      status: 429,
+      message: "You have too many requests waiting — withdraw some or wait for answers.",
+    };
   }
   return { kind: "send" };
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addressKey, readLimited } from "./limits.ts";
+import { addressKey, isJsonObject, readLimited, writeBudget } from "./limits.ts";
 
 const req = (body: string | ReadableStream | null, headers: Record<string, string> = {}) =>
   ({ headers: new Headers(headers), body: typeof body === "string" ? new Response(body).body : body });
@@ -22,4 +22,34 @@ test("an IPv6 address counts as its /64, an IPv4 address as itself", () => {
   assert.equal(addressKey("unknown"), "unknown");
   assert.equal(addressKey("::ffff:203.0.113.7"), "203.0.113.7");
   assert.equal(addressKey("not:an:address"), "not:an:address");
+});
+
+test("only a JSON object is a body the routes take apart", () => {
+  assert.equal(isJsonObject({}), true);
+  assert.equal(isJsonObject({ code: "x" }), true);
+  assert.equal(isJsonObject(null), false);
+  assert.equal(isJsonObject([]), false);
+  assert.equal(isJsonObject("text"), false);
+  assert.equal(isJsonObject(5), false);
+  assert.equal(isJsonObject(undefined), false);
+});
+
+test("the routes that write most count against a tighter limit", () => {
+  const id = "00000000-0000-4000-8000-00000000000a";
+  assert.equal(writeBudget("POST", "/shares"), "share");
+  assert.equal(writeBudget("PUT", "/shares/abcdefghjk/poster"), "share");
+  assert.equal(writeBudget("POST", "/webhook/begin"), "connect");
+  assert.equal(writeBudget("PATCH", "/me"), "friend");
+  assert.equal(writeBudget("DELETE", `/friends/${id}`), "friend");
+  assert.equal(writeBudget("POST", `/blocks/${id}`), "friend");
+  assert.equal(writeBudget("DELETE", `/blocks/${id}`), "friend");
+  // Counted in requestTo, and only when it writes.
+  assert.equal(writeBudget("POST", "/friends/request"), null);
+  // Needs a request from the other side first.
+  assert.equal(writeBudget("POST", `/friends/${id}/accept`), null);
+  // Reads, removals of one's own link, sign-out.
+  assert.equal(writeBudget("GET", "/shares/quota"), null);
+  assert.equal(writeBudget("DELETE", "/shares/abcdefghjk"), null);
+  assert.equal(writeBudget("POST", "/auth/logout"), null);
+  assert.equal(writeBudget("POST", "/webhook/cancel"), null);
 });

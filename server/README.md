@@ -54,7 +54,30 @@ Discord returns the browser to `/auth/callback`, which hands the app a one-time
 code through `clippiboy://auth?code=…`. Only the app holding the verifier can
 trade that code for a session at `/auth/exchange`, and a cookie ties the
 callback to the browser that started the login. Sessions are stored as hashes
-and expire after 180 days without use.
+and expire after 180 days without use; the hourly cron then deletes them.
+
+## Limits
+
+D1's free plan writes 100,000 rows a day for everybody together, so no single
+caller may come near that. Routes anyone may call count per address (an IPv6
+address per /64): `ANON_LIMIT`, 10 a minute per route, plus a daily ceiling
+for pings. Signed-in routes that change something count per account:
+`USER_LIMIT`, 30 a minute, and on top of it
+
+- `SHARE_LIMIT`, 5 a minute: an upload and its poster;
+- `CONNECT_LIMIT`, 2 a minute: starting "Connect channel";
+- `FRIEND_LIMIT`, 10 a minute: a friend request that writes (a refused one
+  does not count, so mistyped names never run into it), unfriending or
+  declining, blocking and unblocking, the "accept requests" switch.
+
+An upload that fails stays behind as a deleted link and counts against the
+week, so failing on purpose runs out after three tries. A link takes one
+poster. An account has at most 20 requests waiting for an answer.
+
+What one account can still write is about 55,000 rows a day: some 43,000 from
+friend changes and 12,000 from channel starts, each at its full limit around
+the clock. That is half the free writes — one account cannot take the rest
+down, two together still could. Workers Paid lifts the ceiling altogether.
 
 ## Test
 

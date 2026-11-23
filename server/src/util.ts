@@ -1,4 +1,4 @@
-import { readLimited } from "./limits";
+import { isJsonObject, readLimited } from "./limits";
 import { randomCode } from "./shares";
 
 export class HttpError extends Error {
@@ -14,15 +14,22 @@ export function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
 }
 
-/** A JSON body of at most 4 KB — more is refused unread. */
-export async function body<T>(request: Request): Promise<T> {
+/**
+ * A JSON object of at most 4 KB — more is refused unread, and anything that is
+ * not an object (null, a list, a bare value) with a 400. Its fields are still
+ * whatever was sent: each route checks the types of those it uses.
+ */
+export async function body<T extends object>(request: Request): Promise<{ [K in keyof T]?: unknown }> {
   const text = await readLimited(request, 4096);
   if (text === null) throw new HttpError(413, "Request too large.");
+  let value: unknown;
   try {
-    return JSON.parse(text) as T;
+    value = JSON.parse(text);
   } catch {
     throw new HttpError(400, "Expected a JSON body.");
   }
+  if (!isJsonObject(value)) throw new HttpError(400, "Expected a JSON body.");
+  return value as { [K in keyof T]?: unknown };
 }
 
 /** Random bytes as base64url, for tokens, states and one-time codes. */

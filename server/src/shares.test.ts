@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  byteRange,
   canUpload,
+  chunks,
+  countsAgainstWeek,
   cleanReport,
   cleanTags,
   expiresIn,
@@ -13,6 +14,8 @@ import {
   MAX_BYTES,
   newId,
   offersFriend,
+  parseRange,
+  PENDING_MS,
   quota,
   TOTAL_BYTES,
   WEEK_MS,
@@ -69,10 +72,49 @@ test("the page says how long is left", () => {
   assert.equal(expiresIn(now + 60_000, now), "in a few minutes");
 });
 
-test("ranges come back as offset and length", () => {
-  assert.deepEqual(byteRange({ offset: 100 }, 1000), { offset: 100, length: 900 });
-  assert.deepEqual(byteRange({ offset: 0, length: 10 }, 1000), { offset: 0, length: 10 });
-  assert.deepEqual(byteRange({ suffix: 50 }, 1000), { offset: 950, length: 50 });
+test("a single range is served as a part, clamped to the file", () => {
+  assert.deepEqual(parseRange("bytes=100-", 1000), { kind: "part", offset: 100, length: 900 });
+  assert.deepEqual(parseRange("bytes=0-9", 1000), { kind: "part", offset: 0, length: 10 });
+  assert.deepEqual(parseRange("bytes=-50", 1000), { kind: "part", offset: 950, length: 50 });
+  assert.deepEqual(parseRange("bytes=-5000", 1000), { kind: "part", offset: 0, length: 1000 });
+  assert.deepEqual(parseRange("bytes=990-5000", 1000), { kind: "part", offset: 990, length: 10 });
+  assert.deepEqual(parseRange("bytes=999-999", 1000), { kind: "part", offset: 999, length: 1 });
+});
+
+test("no range, several or a malformed one get the whole file", () => {
+  assert.deepEqual(parseRange(null, 1000), { kind: "whole" });
+  assert.deepEqual(parseRange("", 1000), { kind: "whole" });
+  assert.deepEqual(parseRange("bytes=0-1,5-9", 1000), { kind: "whole" });
+  assert.deepEqual(parseRange("bytes=-", 1000), { kind: "whole" });
+  assert.deepEqual(parseRange("bytes=9-5", 1000), { kind: "whole" });
+  assert.deepEqual(parseRange("items=0-5", 1000), { kind: "whole" });
+  assert.deepEqual(parseRange("bytes=a-b", 1000), { kind: "whole" });
+});
+
+test("a range past the end cannot be served", () => {
+  assert.deepEqual(parseRange("bytes=1000-", 1000), { kind: "unsatisfiable" });
+  assert.deepEqual(parseRange("bytes=5000-6000", 1000), { kind: "unsatisfiable" });
+  assert.deepEqual(parseRange("bytes=-0", 1000), { kind: "unsatisfiable" });
+  assert.deepEqual(parseRange("bytes=99999999999999999999-", 1000), { kind: "unsatisfiable" });
+});
+
+test("keys go to R2 in runs it accepts", () => {
+  assert.deepEqual(chunks([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
+  assert.deepEqual(chunks([], 400), []);
+  const keys = Array.from({ length: 1201 }, (_, i) => `k${i}`);
+  const runs = chunks(keys, 800);
+  assert.equal(runs.length, 2);
+  assert.ok(runs.every((run) => run.length <= 1000));
+  assert.equal(runs.flat().length, 1201);
+});
+
+test("a failed upload counts against the week, an abandoned one only while it could finish", () => {
+  // Kept as a finished, deleted row: counts like a link.
+  assert.equal(countsAgainstWeek({ pending: 0, created_at: now - 3 * 24 * 60 * 60 * 1000 }, now), true);
+  // Still on its way.
+  assert.equal(countsAgainstWeek({ pending: 1, created_at: now - 60_000 }, now), true);
+  // Broke off without a word: stops counting, and the sweep takes it.
+  assert.equal(countsAgainstWeek({ pending: 1, created_at: now - PENDING_MS - 1 }, now), false);
 });
 
 test("tags are trimmed, unique and capped", () => {

@@ -104,17 +104,58 @@ export function expiresIn(expiresAt: number, now: number): string {
   return "in a few minutes";
 }
 
-/** The part of a Range answer that R2 reports back, as offset and length. */
-export function byteRange(
-  range: { offset?: number; length?: number; suffix?: number },
-  size: number,
-): { offset: number; length: number } {
-  if (range.suffix !== undefined) {
-    const length = Math.min(range.suffix, size);
-    return { offset: size - length, length };
+export type ByteRange =
+  /** No Range, or one we do not serve (several ranges, bad syntax): the whole file, 200. */
+  | { kind: "whole" }
+  /** Starts past the end: 416. */
+  | { kind: "unsatisfiable" }
+  | { kind: "part"; offset: number; length: number };
+
+/**
+ * A Range header against a file of `size` bytes. One range only, as players
+ * ask for it; anything else is ignored and gets the whole file, which a server
+ * may always do. Only what is checked here reaches R2 — passed on raw, a bad
+ * or unsatisfiable range came back as a 206 or a 500.
+ */
+export function parseRange(header: string | null, size: number): ByteRange {
+  const match = header?.trim().match(/^bytes=(\d*)-(\d*)$/i);
+  if (!match) return { kind: "whole" };
+  const [, first, last] = match;
+  if (first === "") {
+    // The last n bytes.
+    if (last === "") return { kind: "whole" };
+    const suffix = Number(last);
+    if (suffix === 0 || size === 0) return { kind: "unsatisfiable" };
+    const length = Math.min(suffix, size);
+    return { kind: "part", offset: size - length, length };
   }
-  const offset = range.offset ?? 0;
-  return { offset, length: range.length ?? size - offset };
+  const offset = Number(first);
+  const end = last === "" ? Infinity : Number(last);
+  // "9-5" is no range at all; "5000-" on a smaller file one that cannot be met.
+  if (end < offset) return { kind: "whole" };
+  if (offset >= size) return { kind: "unsatisfiable" };
+  return { kind: "part", offset, length: Math.min(end, size - 1) - offset + 1 };
+}
+
+/** `items` in runs of at most `size` — R2 deletes at most a thousand keys at once. */
+export function chunks<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Does a share row count against its owner's week (and, while not deleted,
+ * against the bucket)? Finished links do, deleted ones too, and an upload
+ * still in time to finish. `COUNTS` in links.ts is the same rule in SQL.
+ *
+ * An upload that fails is kept as a finished, deleted row (pending 0, no
+ * bytes), so it counts like a link: otherwise an account could fail uploads
+ * on purpose — a byte that is no MP4 — over and over, each try a row written
+ * and removed again, and spend the database's writes for everyone.
+ */
+export function countsAgainstWeek(row: { pending: number; created_at: number }, now: number): boolean {
+  return row.pending === 0 || row.created_at > now - PENDING_MS;
 }
 
 /** Tags as the page shows them: trimmed, no duplicates, a dozen at most. */

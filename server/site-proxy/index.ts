@@ -1,9 +1,8 @@
 import { addressKey } from "../src/limits";
 import { downloadName, isBot, refFromPath, utcDay } from "../src/telemetry";
+import { HOME, ORIGIN, rewriteLocation, validRelease, withSecurityHeaders } from "./rules";
 
-const ORIGIN = "https://einfabo.github.io/clippiboy";
 const RELEASES = "https://github.com/EinFabo/clippiboy/releases/latest";
-const HOME = "https://clippiboy.com";
 
 interface Env {
   API: Fetcher;
@@ -46,11 +45,8 @@ export default {
     const response = new Response(upstream.body, upstream);
     // GitHub's own redirects (/img → /img/) point at github.io; keep them here.
     const location = response.headers.get("Location");
-    if (location?.startsWith(ORIGIN)) {
-      response.headers.set("Location", HOME + location.slice(ORIGIN.length));
-    } else if (location?.startsWith("/clippiboy")) {
-      response.headers.set("Location", location.slice("/clippiboy".length) || "/");
-    }
+    if (location) response.headers.set("Location", rewriteLocation(location));
+    withSecurityHeaders(response.headers);
     return response;
   },
 };
@@ -62,14 +58,17 @@ export default {
  * one to its link's count for the day; nothing else about the request is kept.
  */
 async function download(request: Request, env: Env, ctx: ExecutionContext, ref: string): Promise<Response> {
-  let release: { version: string; setup: { url: string } };
+  let release: { version: string; url: string };
   let file: Response;
   try {
-    // The release the page itself shows, baked in after every release.
+    // The release the page itself shows, baked in after every release. Only
+    // a setup of our own releases is fetched, under a plain version number.
     const baked = await fetch(`${ORIGIN}/release.json`, { cf: { cacheEverything: true, cacheTtl: 300 } });
     if (!baked.ok) throw new Error(`release.json: ${baked.status}`);
-    release = await baked.json();
-    file = await fetch(release.setup.url, { method: request.method });
+    const checked = validRelease(await baked.json());
+    if (!checked) throw new Error("release.json: not a release of ours");
+    release = checked;
+    file = await fetch(release.url, { method: request.method });
     if (!file.ok) throw new Error(`setup: ${file.status}`);
   } catch (err) {
     console.error(err);

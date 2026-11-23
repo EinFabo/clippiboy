@@ -1,5 +1,6 @@
-// Bounds for the routes anyone may call: how much of a body is read, and which
-// address a rate limit counts against.
+// Bounds on requests: how much of a body is read and what it must be, which
+// address a rate limit counts against, and which signed-in routes count
+// against a tighter limit of their own.
 //
 // No imports, so `node --test` can load this file as it is and the site proxy
 // can share it.
@@ -76,4 +77,31 @@ function expandIpv6(address: string): number[] | null {
   const missing = 8 - head.length - tail.length;
   if (missing < 1) return null;
   return [...head, ...new Array<number>(missing).fill(0), ...tail];
+}
+
+/**
+ * A JSON body the routes can take apart: an object, not null, an array or a
+ * bare value. Destructuring `null` threw, and the request ended in a 500.
+ */
+export function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The tighter limit a signed-in route counts against on top of the user's
+ * general one, or null. These are the routes whose calls write the most for
+ * the least: an upload that fails (each try a row and two R2 writes), a poster,
+ * the start of a channel connection (a row, deleted again), and friend changes
+ * that can be undone and done again. A friend request counts only once it
+ * writes something (see `requestTo` in index.ts): a mistyped name must not run
+ * into it.
+ */
+export function writeBudget(method: string, path: string): "share" | "connect" | "friend" | null {
+  if (method === "POST" && path === "/shares") return "share";
+  if (method === "POST" && path === "/webhook/begin") return "connect";
+  if (method === "PUT" && /^\/shares\/[a-z0-9]+\/poster$/.test(path)) return "share";
+  if (method === "PATCH" && path === "/me") return "friend";
+  if (method === "DELETE" && /^\/friends\/[0-9a-f-]{36}$/.test(path)) return "friend";
+  if ((method === "POST" || method === "DELETE") && /^\/blocks\/[0-9a-f-]{36}$/.test(path)) return "friend";
+  return null;
 }

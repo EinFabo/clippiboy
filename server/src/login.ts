@@ -24,3 +24,19 @@ export function statesIn(cookieHeader: string | null, name: string): string[] {
 export function withState(states: string[], state: string): string {
   return [...states, state].slice(-STATES_KEPT).join(".");
 }
+
+/**
+ * The policy of the sign-in and channel pages: nothing loads, only the page's
+ * own style and script (by `nonce`) run, no form goes anywhere, and nobody
+ * frames them.
+ */
+export function pageCsp(nonce: string): string {
+  return [
+    "default-src 'none'",
+    `style-src 'nonce-${nonce}'`,
+    `script-src 'nonce-${nonce}'`,
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}

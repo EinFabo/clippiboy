@@ -191,7 +191,8 @@ export async function tokenHash(token: string): Promise<string> {
   return base64url(await sha256(token));
 }
 
-const SESSION_IDLE_MS = 180 * 24 * 60 * 60 * 1000;
+/** A session unused this long signs nobody in; the hourly cron deletes it. */
+export const SESSION_IDLE_MS = 180 * 24 * 60 * 60 * 1000;
 const TOUCH_EVERY_MS = 24 * 60 * 60 * 1000;
 
 /** The user behind a bearer token, or a 401. */

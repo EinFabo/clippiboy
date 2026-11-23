@@ -10,8 +10,8 @@ import { addressKey, readLimited } from "./limits";
 import { renderGone, renderPage } from "./page";
 import { inviteKey } from "./invite";
 import {
-  byteRange,
   canUpload,
+  chunks,
   cleanReport,
   cleanTags,
   MAX_OPEN_REPORTS,
@@ -25,6 +25,7 @@ import {
   Mp4Boxes,
   newId,
   offersFriend,
+  parseRange,
   PENDING_MS,
   quota,
   REPORT_KEEP_MS,
@@ -60,7 +61,8 @@ const poster = (id: string) => `${id}.jpg`;
 
 // What counts against the week and the bucket (keep `departStatement` in db.ts,
 // which carries the newest of these over a deleted account, in step with it): finished shares, and uploads
-// still in time to finish. The `?` is when a pending one is given up.
+// still in time to finish. The `?` is when a pending one is given up. The same
+// rule as `countsAgainstWeek` in shares.ts.
 const COUNTS = "(pending = 0 OR created_at > ?)";
 const RECENT = `SELECT COUNT(*) FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`;
 const LIVE_BYTES = `SELECT COALESCE(SUM(bytes), 0) FROM shares WHERE deleted_at IS NULL AND ${COUNTS}`;
@@ -169,6 +171,12 @@ async function owned(env: Env, me: string, id: string): Promise<ShareRow> {
 // A deleted or run-out share keeps only what counts against the week and the
 // bucket — not what the clip was called, its game or its tags.
 const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0, offer_friend = 0 WHERE id = ?";
+// An upload that failed: the same, finished and empty, so it counts against
+// the week like a link (`countsAgainstWeek`). Removed instead, a failing
+// upload cost nothing and could be tried over and over, every try a row
+// written and deleted and two R2 writes.
+const GAVE_UP =
+  "UPDATE shares SET pending = 0, bytes = 0, deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0, offer_friend = 0 WHERE id = ? AND pending = 1";
 
 // --- For the app (signed in) --------------------------------------------------
 
@@ -263,7 +271,7 @@ export async function createShare(request: Request, env: Env, me: string): Promi
     ]);
   } catch (err) {
     await env.CLIPS.delete(video(id)).catch(() => {});
-    await env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(id).run();
+    await env.DB.prepare(GAVE_UP).bind(Date.now(), id).run();
     if (mp4.refused()) throw new HttpError(415, "Only clips can be shared as links.");
     console.error("upload", id, err);
     throw new HttpError(502, "The upload broke off. Try again.");
@@ -279,6 +287,8 @@ export async function createShare(request: Request, env: Env, me: string): Promi
     .run();
   if (!finished.meta.changes) {
     await env.CLIPS.delete(video(id)).catch(() => {});
+    // Still there and pending (too slow, not deleted): it counts like any failed upload.
+    await env.DB.prepare(GAVE_UP).bind(Date.now(), id).run();
     throw new HttpError(410, "The upload took too long. Try again.");
   }
   return json({ id, url: `${PAGE_ORIGIN}/c/${id}`, expiresAt });
@@ -293,6 +303,10 @@ export async function putPoster(request: Request, env: Env, me: string, id: stri
   if (!request.body || !Number.isFinite(length) || length <= 0 || length > MAX_POSTER_BYTES) {
     throw new HttpError(413, "Poster too large.");
   }
+  // One per link: the app sends it once, right after the upload. Replaced over
+  // and over, it was an R2 write each time for nothing — Discord keeps the
+  // first one it saw anyway.
+  if (await env.CLIPS.head(poster(id))) throw new HttpError(409, "This link has its picture already.");
   const data = await request.arrayBuffer();
   if (data.byteLength === 0 || data.byteLength > MAX_POSTER_BYTES) throw new HttpError(413, "Poster too large.");
   if (!looksLikeJpeg(new Uint8Array(data, 0, Math.min(3, data.byteLength)))) {
@@ -311,12 +325,18 @@ export async function deleteShare(env: Env, me: string, id: string): Promise<Res
   return json({ ok: true });
 }
 
-/** Before an account goes: its clips go with it, not five days later. */
+/**
+ * Before an account goes: its clips go with it, not five days later. In runs
+ * R2 accepts (two keys a link): an account without the weekly limit can have
+ * more links than one call may delete, and then deleting the account failed.
+ */
 export async function deleteSharesOf(env: Env, me: string): Promise<void> {
   const { results } = await env.DB.prepare("SELECT id FROM shares WHERE owner = ? AND deleted_at IS NULL")
     .bind(me)
     .all<{ id: string }>();
-  if (results.length > 0) await env.CLIPS.delete(results.flatMap((row) => [video(row.id), poster(row.id)]));
+  for (const run of chunks(results, SUSPEND_BATCH)) {
+    await env.CLIPS.delete(run.flatMap((row) => [video(row.id), poster(row.id)]));
+  }
 }
 
 // --- For everyone ---------------------------------------------------------------
@@ -418,13 +438,29 @@ export async function sharePage(env: Env, id: string): Promise<Response> {
   });
 }
 
-/** The video or the poster, with seeking (Range) for the video. */
+/**
+ * The video or the poster, with seeking (Range) for the video. HEAD reads only
+ * the object's details, and a copy the browser still has (If-None-Match) is
+ * answered with a 304 and no body.
+ */
 export async function shareFile(request: Request, env: Env, id: string, kind: "mp4" | "jpg"): Promise<Response> {
   const now = Date.now();
   const row = await live(env, id, now);
   if (!row) return new Response("This clip has expired.", { status: 410 });
   const key = kind === "mp4" ? video(id) : poster(id);
-  const object = await env.CLIPS.get(key, { range: request.headers });
+  // The video's size is the row's: the upload was stored at exactly that
+  // length. A poster is small and always sent whole.
+  const range = kind === "mp4" ? parseRange(request.headers.get("Range"), row.bytes) : ({ kind: "whole" } as const);
+  if (range.kind === "unsatisfiable") {
+    return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${row.bytes}` } });
+  }
+  const head = request.method === "HEAD";
+  const object = head
+    ? await env.CLIPS.head(key)
+    : await env.CLIPS.get(key, {
+        range: range.kind === "part" ? { offset: range.offset, length: range.length } : undefined,
+        onlyIf: ifNoneMatch(request.headers),
+      });
   if (!object) return new Response("Not found.", { status: 404 });
 
   const headers = new Headers();
@@ -435,19 +471,28 @@ export async function shareFile(request: Request, env: Env, id: string, kind: "m
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Content-Disposition", "inline");
   headers.set("Access-Control-Allow-Origin", "*");
+  // A link is not for search engines, and once deleted it should not live on
+  // in shared caches: only the viewer's browser keeps it, and only briefly.
+  headers.set("X-Robots-Tag", "noindex");
   const left = Math.max(0, Math.floor((row.expires_at - now) / 1000));
-  headers.set("Cache-Control", `public, max-age=${Math.min(left, 3600)}`);
+  headers.set("Cache-Control", `private, max-age=${Math.min(left, 300)}`);
+  // The condition failed: R2 sent the details without the body.
+  if (!head && !("body" in object)) return new Response(null, { status: 304, headers });
 
-  const ranged = request.headers.has("Range") && object.range !== undefined;
-  if (ranged) {
-    const { offset, length } = byteRange(object.range as { offset?: number; length?: number; suffix?: number }, object.size);
-    headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
-    headers.set("Content-Length", String(length));
+  if (range.kind === "part") {
+    headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${object.size}`);
+    headers.set("Content-Length", String(range.length));
   } else {
     headers.set("Content-Length", String(object.size));
   }
-  const body = request.method === "HEAD" || !("body" in object) ? null : (object as R2ObjectBody).body;
-  return new Response(body, { status: ranged ? 206 : 200, headers });
+  const body = head ? null : (object as R2ObjectBody).body;
+  return new Response(body, { status: range.kind === "part" ? 206 : 200, headers });
+}
+
+/** Only the request's If-None-Match, for R2 to check — not its other headers. */
+function ifNoneMatch(request: Headers): Headers | undefined {
+  const etag = request.get("If-None-Match");
+  return etag ? new Headers({ "If-None-Match": etag }) : undefined;
 }
 
 /**
@@ -507,34 +552,51 @@ async function suspend(env: Env, id: string, bannedAt: number): Promise<void> {
   await env.DB.prepare("UPDATE users SET suspension_applied_at = ? WHERE id = ?").bind(bannedAt, id).run();
 }
 
-/** Delete what has run out, and forget rows that no longer count for anything. */
+/**
+ * Delete what has run out, and forget rows that no longer count for anything.
+ * Each step on its own: one that fails (R2 or D1 having a bad moment) must not
+ * keep the others from running this hour.
+ */
 export async function sweep(env: Env): Promise<void> {
   const now = Date.now();
-  const { results } = await env.DB.prepare(
-    "SELECT id FROM shares WHERE deleted_at IS NULL AND expires_at <= ? LIMIT 400",
-  )
-    .bind(now)
-    .all<{ id: string }>();
-  if (results.length > 0) {
-    // R2 takes up to a thousand keys at once; two per clip.
-    await env.CLIPS.delete(results.flatMap((row) => [video(row.id), poster(row.id)]));
-    await env.DB.batch(
-      results.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)),
-    );
-  }
+  const step = async (name: string, run: () => Promise<unknown>) => {
+    try {
+      await run();
+    } catch (err) {
+      console.error("sweep", name, err);
+    }
+  };
+  await step("expired", async () => {
+    const { results } = await env.DB.prepare(
+      "SELECT id FROM shares WHERE deleted_at IS NULL AND expires_at <= ? LIMIT 400",
+    )
+      .bind(now)
+      .all<{ id: string }>();
+    if (results.length > 0) {
+      // R2 takes up to a thousand keys at once; two per clip.
+      await env.CLIPS.delete(results.flatMap((row) => [video(row.id), poster(row.id)]));
+      await env.DB.batch(
+        results.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)),
+      );
+    }
+  });
   // Uploads that broke off without their catch running: whatever reached R2
   // goes, and the row with it — it never was a link.
-  const { results: stale } = await env.DB.prepare("SELECT id FROM shares WHERE pending = 1 AND created_at <= ? LIMIT 400")
-    .bind(now - PENDING_MS)
-    .all<{ id: string }>();
-  if (stale.length > 0) {
-    await env.CLIPS.delete(stale.flatMap((row) => [video(row.id), poster(row.id)]));
-    await env.DB.batch(stale.map((row) => env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(row.id)));
-  }
+  await step("stale", async () => {
+    const { results: stale } = await env.DB.prepare("SELECT id FROM shares WHERE pending = 1 AND created_at <= ? LIMIT 400")
+      .bind(now - PENDING_MS)
+      .all<{ id: string }>();
+    if (stale.length > 0) {
+      await env.CLIPS.delete(stale.flatMap((row) => [video(row.id), poster(row.id)]));
+      await env.DB.batch(stale.map((row) => env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(row.id)));
+    }
+  });
   // A week to count against, plus a margin.
-  await env.DB.prepare("DELETE FROM shares WHERE deleted_at IS NOT NULL AND created_at < ?")
-    .bind(now - 2 * WEEK_MS)
-    .run();
+  await step("tombstones", () =>
+    env.DB.prepare("DELETE FROM shares WHERE deleted_at IS NOT NULL AND created_at < ?")
+      .bind(now - 2 * WEEK_MS)
+      .run(),
+  );
   // Reports are for reviewing, not for keeping.
-  await env.DB.prepare("DELETE FROM reports WHERE created_at < ?").bind(now - REPORT_KEEP_MS).run();
+  await step("reports", () => env.DB.prepare("DELETE FROM reports WHERE created_at < ?").bind(now - REPORT_KEEP_MS).run());
 }

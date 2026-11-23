@@ -7,6 +7,9 @@ interface __BaseEnv_Env {
 	REPORT_LIMIT: RateLimit;
 	ANON_LIMIT: RateLimit;
 	USER_LIMIT: RateLimit;
+	SHARE_LIMIT: RateLimit;
+	CONNECT_LIMIT: RateLimit;
+	FRIEND_LIMIT: RateLimit;
 	DISCORD_CLIENT_ID: "1553530949491236894";
 	ANON_PINGS_PER_DAY: "6000";
 	HUB: DurableObjectNamespace<import("./src/index").Hub>;
