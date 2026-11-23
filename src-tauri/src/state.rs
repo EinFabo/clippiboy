@@ -274,6 +274,12 @@ impl<'a> FlagGuard<'a> {
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
         Self(flag)
     }
+
+    /// Raise the flag unless it is up already — then `None`, and the flag
+    /// stays with whoever raised it.
+    pub fn try_raise(flag: &'a std::sync::atomic::AtomicBool) -> Option<Self> {
+        (!flag.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(Self(flag))
+    }
 }
 
 impl Drop for FlagGuard<'_> {
@@ -671,12 +677,21 @@ impl AutoBuffer {
         self.start_succeeded();
     }
 
-    /// The user stopped the buffer themselves.
+    /// The user stopped the buffer themselves — also one the lock screen
+    /// had stopped: it stays off after the unlock.
     pub fn manual_stop(&self) {
         use std::sync::atomic::Ordering::SeqCst;
         self.decisions.fetch_add(1, SeqCst);
         self.started.store(false, SeqCst);
         self.suppressed.store(true, SeqCst);
+        self.for_lock.store(false, SeqCst);
+    }
+
+    /// The automation's start found the buffer running already — started by
+    /// the user, or by the unlock. Not the automation's, so the end of the
+    /// game does not stop it.
+    pub fn not_started(&self) {
+        self.started.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Where the user's choices stand — noted by the automation before it
@@ -692,7 +707,8 @@ impl AutoBuffer {
     /// and leaves one switched on by hand running. The automation's goes
     /// ahead only if the user has not chosen since it polled — its thread may
     /// reach `lifecycle` after a "stop" pressed in between, and starting then
-    /// would undo it.
+    /// would undo it. The lock screen's stop always goes ahead, and is no
+    /// choice of the user's.
     pub fn admit(&self, want: BufferWant, origin: BufferOrigin) -> bool {
         match origin {
             BufferOrigin::User => {
@@ -703,6 +719,7 @@ impl AutoBuffer {
                 true
             }
             BufferOrigin::Auto(seen) => self.decisions() == seen,
+            BufferOrigin::Lock => true,
         }
     }
 }
@@ -736,6 +753,12 @@ pub enum BufferOrigin {
     /// The automation, with [`AutoBuffer::decisions`] as it stood when it
     /// polled.
     Auto(u64),
+    /// The lock screen's stop: a capture behind it records nothing but a
+    /// still of the lock screen, whatever the user chose since the poll — a
+    /// "start" pressed in between is stopped too, and comes back at the
+    /// unlock (`AutoBuffer::poll_lock`). The unlock's start stays
+    /// [`Self::Auto`]: a "stop" pressed just then wins.
+    Lock,
 }
 
 /// What a switch of the buffer does — and, once done, what it did.
@@ -834,8 +857,17 @@ pub fn stalled(
     if !game_on_screen || now.saturating_duration_since(armed) >= STALL_WINDOW {
         return false;
     }
-    let quiet_since = last_new.map_or(started, |at| at.max(started)).max(armed);
-    now.saturating_duration_since(quiet_since) >= STALL_AFTER
+    now.saturating_duration_since(quiet_since(armed, last_new, started)) >= STALL_AFTER
+}
+
+/// Since when the capture has counted as quiet for [`stalled`]: its last new
+/// picture, the event or its start, whichever is latest.
+pub fn quiet_since(
+    armed: std::time::Instant,
+    last_new: Option<std::time::Instant>,
+    started: std::time::Instant,
+) -> std::time::Instant {
+    last_new.map_or(started, |at| at.max(started)).max(armed)
 }
 
 /// The stall watch's memory: which event armed it, and when. Fires at most
@@ -855,16 +887,17 @@ impl StallWatch {
         self.armed = Some((at, why));
     }
 
-    /// One look. `Some(why)` when the capture is to be restarted — and the
-    /// watch is disarmed with it, so it fires once per event. `game_on_screen`
-    /// is only asked once the time is up: it walks the foreground process.
+    /// One look. `Some((at, why))` — the event's time and what it was — when
+    /// the capture is to be restarted, and the watch is disarmed with it, so it
+    /// fires once per event. `game_on_screen` is only asked once the time is
+    /// up: it walks the foreground process.
     pub fn check(
         &mut self,
         last_new: Option<std::time::Instant>,
         started: std::time::Instant,
         game_on_screen: impl FnOnce() -> bool,
         now: std::time::Instant,
-    ) -> Option<&'static str> {
+    ) -> Option<(std::time::Instant, &'static str)> {
         let (at, why) = self.armed?;
         if now.saturating_duration_since(at) >= STALL_WINDOW {
             self.armed = None;
@@ -874,7 +907,7 @@ impl StallWatch {
             return None;
         }
         self.armed = None;
-        Some(why)
+        Some((at, why))
     }
 }
 
@@ -1311,7 +1344,13 @@ impl AppState {
     /// nothing, and see the restart start it again.
     pub fn restart_capture(&self, still: impl FnOnce() -> bool) -> Result<bool, String> {
         let _lifecycle = self.lifecycle.lock();
-        if !self.is_buffering() || self.is_recording() || !still() {
+        // Quit takes the pipeline down; one brought up behind it would hold
+        // the capture until the process ends.
+        if self.quitting.load(std::sync::atomic::Ordering::SeqCst)
+            || !self.is_buffering()
+            || self.is_recording()
+            || !still()
+        {
             return Ok(false);
         }
         self.take_down(true);
@@ -2937,6 +2976,17 @@ mod tests {
         assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Nothing);
     }
 
+    /// A "stop" by hand while the screen is locked holds after the unlock:
+    /// the buffer the lock stopped stays off.
+    #[test]
+    fn a_user_stop_while_locked_holds_after_the_unlock() {
+        let auto = AutoBuffer::default();
+        assert_eq!(hold_locked(&auto, true), AutoAction::Stop);
+        assert!(auto.admit(BufferWant::Off, BufferOrigin::User));
+        assert_eq!(auto.poll_lock(LockSignals::desktop(false), false), AutoAction::Nothing);
+        assert_eq!(auto.poll_always(false), AutoAction::Nothing);
+    }
+
     /// And it comes back exactly once — a second check must not restart a buffer
     /// the user has switched off in the meantime.
     #[test]
@@ -3052,6 +3102,32 @@ mod tests {
         assert!(auto.admit(BufferWant::Off, BufferOrigin::Auto(seen)));
     }
 
+    /// The lock screen's stop goes ahead whatever the user chose since the
+    /// poll, and is no choice of the user's: nothing is held off by it.
+    #[test]
+    fn the_lock_screens_stop_is_not_overtaken() {
+        let auto = AutoBuffer::default();
+        let seen = auto.decisions();
+        auto.manual_start();
+        assert!(!auto.admit(BufferWant::Off, BufferOrigin::Auto(seen)));
+        assert!(auto.admit(BufferWant::Off, BufferOrigin::Lock));
+        assert_eq!(auto.decisions(), seen + 1, "not counted as a choice");
+        assert_eq!(auto.poll_always(false), AutoAction::Start, "nothing suppressed");
+    }
+
+    /// The automation decided to start, but the buffer was running already
+    /// (started by hand a moment before): it is not the automation's, and the
+    /// end of the game leaves it running.
+    #[test]
+    fn a_start_that_found_the_buffer_running_leaves_it_to_the_user() {
+        let auto = AutoBuffer::default();
+        assert_eq!(auto.poll(true, true, false), AutoAction::Start);
+        auto.not_started();
+        for _ in 0..GRACE_POLLS * 2 {
+            assert_eq!(auto.poll(false, false, true), AutoAction::Nothing);
+        }
+    }
+
     #[test]
     fn a_switch_to_what_already_is_does_nothing() {
         use BufferStep::*;
@@ -3156,7 +3232,10 @@ mod tests {
         let mut watch = StallWatch::new();
         watch.arm(at(10), "the screens changed");
         assert_eq!(watch.check(Some(at(12)), at(0), || true, at(16)), None, "4 s quiet");
-        assert_eq!(watch.check(Some(at(12)), at(0), || true, at(17)), Some("the screens changed"));
+        assert_eq!(
+            watch.check(Some(at(12)), at(0), || true, at(17)),
+            Some((at(10), "the screens changed"))
+        );
         assert_eq!(watch.check(Some(at(12)), at(0), || true, at(30)), None, "once per event");
     }
 
@@ -3173,6 +3252,19 @@ mod tests {
         for now in 11..80 {
             assert_eq!(watch.check(Some(at(9)), at(0), || false, at(now)), None);
         }
+    }
+
+    /// The quiet time the log reports counts from the event when the last
+    /// picture came before it — a still desktop for an hour is not an hour of
+    /// stall — and from the last picture when that came after it.
+    #[test]
+    fn quiet_time_counts_from_the_event_or_a_later_frame() {
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        assert_eq!(quiet_since(at(100), Some(at(5)), at(0)), at(100));
+        assert_eq!(quiet_since(at(100), None, at(0)), at(100));
+        assert_eq!(quiet_since(at(100), Some(at(103)), at(0)), at(103));
+        assert_eq!(quiet_since(at(100), Some(at(103)), at(104)), at(104));
     }
 
     /// Without an event a still screen is just a still screen.

@@ -558,6 +558,10 @@ pub fn restart_buffer_for_settings(app: &tauri::AppHandle) {
         }
         let _ended = Ended(&state.restarts);
         while state.restarts.next() {
+            // A watcher's restart queued behind this one finds the flag up and
+            // stays away: this pass brings a fresh capture too. One running
+            // already keeps the flag; this pass still has to apply the change.
+            let _restarting = state::FlagGuard::try_raise(&CAPTURE_RESTARTING);
             settings_restarted(&app, state.restart_if_buffering());
         }
     });
@@ -596,8 +600,12 @@ fn auto_start_buffer(app: &tauri::AppHandle, seen: u64) {
     let state = app.state::<AppState>();
     match state.set_buffer(state::BufferWant::On, state::BufferOrigin::Auto(seen)) {
         Ok(step) => {
-            if step == state::BufferStep::Start {
-                state.auto.start_succeeded();
+            match step {
+                state::BufferStep::Start => state.auto.start_succeeded(),
+                // Running already, or overtaken by the user: not the
+                // automation's buffer, so the game's end must not stop it.
+                state::BufferStep::Nothing => state.auto.not_started(),
+                state::BufferStep::Stop => {}
             }
             announce_buffer(app, step);
         }
@@ -702,10 +710,11 @@ fn report_audio_trouble(app: &tauri::AppHandle) {
     overlay::show(app, BannerKind::Error, headline, Some(detail));
 }
 
-/// The automation's stop, as decided when the user's choices stood at `seen`.
-fn auto_stop_buffer(app: &tauri::AppHandle, seen: u64) {
+/// The automation's stop — the lock screen's ([`state::BufferOrigin::Lock`])
+/// or one decided when the user's choices stood at `seen`.
+fn auto_stop_buffer(app: &tauri::AppHandle, origin: state::BufferOrigin) {
     let state = app.state::<AppState>();
-    match state.set_buffer(state::BufferWant::Off, state::BufferOrigin::Auto(seen)) {
+    match state.set_buffer(state::BufferWant::Off, origin) {
         Ok(step) => announce_buffer(app, step),
         Err(err) => log::warn!("buffer: automatic stop failed: {err}"),
     }
@@ -878,8 +887,9 @@ fn watch_monitors(app: &tauri::AppHandle) {
 }
 
 /// Set while anything restarts the capture — the screen watcher, the topology
-/// and stall watchers, the restart after sleep or the display. Two of them on
-/// the same tick would throw the buffer away twice.
+/// and stall watchers, the restart after sleep or the display, a restart for
+/// changed settings. Two of them on the same tick would throw the buffer away
+/// twice.
 static CAPTURE_RESTARTING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -1027,6 +1037,10 @@ fn watch_stall(app: &tauri::AppHandle) {
     let Some(recorded) = shared.source.lock().as_ref().map(|choice| choice.target.clone()) else {
         return;
     };
+    // A window capture: see above.
+    if recorded.kind != model::TargetKind::Monitor {
+        return;
+    }
     let last_new = shared.last_new_frame();
     let now = std::time::Instant::now();
     let fired = STALL_WATCH
@@ -1042,7 +1056,7 @@ fn watch_stall(app: &tauri::AppHandle) {
             },
             now,
         );
-    let Some(why) = fired else {
+    let Some((armed_at, why)) = fired else {
         return;
     };
     if CAPTURE_RESTARTING.swap(true, Ordering::SeqCst) {
@@ -1052,7 +1066,7 @@ fn watch_stall(app: &tauri::AppHandle) {
         CAPTURE_RESTARTING.store(false, Ordering::SeqCst);
         return;
     }
-    let quiet = now.saturating_duration_since(last_new.unwrap_or(shared.started).max(shared.started));
+    let quiet = now.saturating_duration_since(state::quiet_since(armed_at, last_new, shared.started));
     let screen = recorded.id;
     log::warn!(
         "no new frame for {:.0} s after {why}, with the game on the recorded screen {screen} \u{2014} restarting the capture",
@@ -1305,6 +1319,7 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
             arm_stall_watch("the unlock");
         }
     }
+    let mut stop_origin = state::BufferOrigin::Auto(seen);
     let action = match state.auto.poll_lock(signals, active) {
         state::AutoAction::Nothing if locked => return,
         state::AutoAction::Nothing => {
@@ -1321,6 +1336,7 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
             // The restart says its reason itself, further down.
             match lock_action {
                 state::AutoAction::Stop => {
+                    stop_origin = state::BufferOrigin::Lock;
                     log::info!("the screen is locked \u{2014} the buffer stops until the unlock")
                 }
                 state::AutoAction::Start => {
@@ -1346,7 +1362,7 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
             let _starting = starting;
             auto_start_buffer(&app, seen);
         }
-        state::AutoAction::Stop => auto_stop_buffer(&app, seen),
+        state::AutoAction::Stop => auto_stop_buffer(&app, stop_origin),
         state::AutoAction::Restart => {
             // A restart already under way brings a fresh capture too.
             if CAPTURE_RESTARTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
