@@ -37,6 +37,7 @@ pub fn make(video: &Path, clip_id: &str) -> Result<PathBuf, String> {
             .args(["-frames:v", "1", "-vf", "scale=480:-1", "-q:v", "4"])
             .arg(&out),
         "thumbnail",
+        crate::child::STILL,
     )?;
     Ok(out)
 }
@@ -61,6 +62,7 @@ pub fn make_still(image: &Path, clip_id: &str) -> Result<PathBuf, String> {
             .args(["-frames:v", "1", "-vf", "scale=480:-1", "-q:v", "4"])
             .arg(&out),
         "thumbnail",
+        crate::child::STILL,
     )?;
     Ok(out)
 }

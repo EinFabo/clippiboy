@@ -57,7 +57,7 @@ pub fn waveform(clip: &Clip) -> Result<PathBuf, String> {
             "1",
         ])
         .arg(&out);
-    run(&mut draw, "draw waveform")?;
+    run(&mut draw, "draw waveform", crate::child::deadline_for(clip.duration_ms))?;
     Ok(out)
 }
 

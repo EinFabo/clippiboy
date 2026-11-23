@@ -313,7 +313,7 @@ pub fn secure(
         let name = segment.file.replace(".h264", ".mp4");
         let out = store.join(&name);
         let args = crate::facecam::cam_mp4_arguments(&work_dir.join(&segment.file), &out);
-        match crate::muxer::command("ffmpeg").args(&args).output() {
+        match crate::child::output(crate::muxer::command("ffmpeg").args(&args), crate::child::MOVING) {
             Ok(done) if done.status.success() => {}
             Ok(done) => {
                 log::warn!("recording camera: {name}: {}", String::from_utf8_lossy(&done.stderr).trim());

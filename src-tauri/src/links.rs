@@ -587,6 +587,7 @@ fn link_identity(name: bool, friend: bool) -> Vec<(&'static str, String)> {
 fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = ["-y", "-hide_banner", "-loglevel", "error"]
         .into_iter()
+        .chain(crate::child::PROGRESS)
         .chain(crate::muxer::clip_input())
         .chain(["-i"])
         .map(Into::into)
@@ -609,6 +610,7 @@ fn faststart_args(source: &std::path::Path, output: &std::path::Path) -> Vec<std
 /// the front.
 fn remix_args(source: &std::path::Path, output: &std::path::Path, remix: &crate::stems::Remix) -> Vec<String> {
     let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
+    args.extend(crate::child::PROGRESS.map(String::from));
     args.extend(crate::muxer::clip_input().map(String::from));
     args.push("-i".into());
     args.push(source.to_string_lossy().to_string());
@@ -636,7 +638,7 @@ pub(crate) fn remix_copy(
 ) -> Result<(), String> {
     let mut command = crate::muxer::ffmpeg();
     command.args(remix_args(source, output, remix));
-    crate::muxer::run(&mut command, doing)
+    crate::muxer::run(&mut command, doing, crate::child::MOVING)
 }
 
 /// Copy the clip with its index at the front, as [`faststart_args`] says.
@@ -645,7 +647,7 @@ pub(crate) fn remix_copy(
 pub(crate) fn faststart(source: &std::path::Path, output: &std::path::Path, doing: &str) -> Result<(), String> {
     let mut command = crate::muxer::ffmpeg();
     command.args(faststart_args(source, output));
-    crate::muxer::run(&mut command, doing)
+    crate::muxer::run(&mut command, doing, crate::child::MOVING)
 }
 
 /// Stream the file up, reporting as the chunks leave.
@@ -837,7 +839,9 @@ mod tests {
         let joined = args.join(" ");
         let guard = crate::muxer::clip_input().join(" ");
         assert!(
-            joined.starts_with(&format!("-y -hide_banner -loglevel error {guard} -i in.mp4 {guard} -t 30.000 -i t/0.m4a -map 0:v:0")),
+            joined.starts_with(&format!(
+                "-y -hide_banner -loglevel error -progress pipe:1 -nostats {guard} -i in.mp4 {guard} -t 30.000 -i t/0.m4a -map 0:v:0"
+            )),
             "{joined}"
         );
         assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]), "{joined}");

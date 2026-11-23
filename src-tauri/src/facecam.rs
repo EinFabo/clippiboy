@@ -134,9 +134,11 @@ pub struct FacecamFacts {
 /// fps — the grid made it constant — copied into an MP4.
 pub fn cam_mp4_arguments(h264: &std::path::Path, output: &std::path::Path) -> Vec<String> {
     [
-        "-y", "-hide_banner", "-loglevel", "error", "-f", "h264", "-r", "30", "-i",
+        "-y", "-hide_banner", "-loglevel", "error",
     ]
     .into_iter()
+    .chain(crate::child::PROGRESS)
+    .chain(["-f", "h264", "-r", "30", "-i"])
     .map(String::from)
     .chain([h264.to_string_lossy().into_owned()])
     .chain(["-c:v", "copy", "-an", "-movflags", "+faststart"].into_iter().map(String::from))
@@ -170,9 +172,7 @@ pub fn write_phase_one(clip_id: &str, out: &CamCutOut, clip_length_us: u64, game
             stream.extend_from_slice(&packet.data);
         }
         std::fs::write(&h264, &stream).map_err(|err| format!("cam stream: {err}"))?;
-        let run = crate::muxer::command("ffmpeg")
-            .args(cam_mp4_arguments(&h264, &part))
-            .output()
+        let run = crate::child::output(crate::muxer::command("ffmpeg").args(cam_mp4_arguments(&h264, &part)), crate::child::MOVING)
             .map_err(|err| format!("ffmpeg: {err}"))?;
         if !run.status.success() {
             return Err(format!("ffmpeg: {}", String::from_utf8_lossy(&run.stderr).trim()));
@@ -434,6 +434,7 @@ pub(crate) mod tests {
         let args = cam_mp4_arguments(std::path::Path::new("cam.part.h264"), std::path::Path::new("cam.part.mp4"));
         let input = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(&args[input - 4..input], ["-f", "h264", "-r", "30"]);
+        assert!(args.windows(3).any(|w| w == crate::child::PROGRESS), "a stuck copy is ended: {args:?}");
         assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]));
         assert!(!args.iter().any(|a| a == "-filter_complex" || a == "-ss"));
         assert_eq!(args.last().map(String::as_str), Some("cam.part.mp4"));

@@ -4,6 +4,7 @@ pub mod bindings;
 pub mod buffer;
 pub mod camera;
 pub mod camtrack;
+pub mod child;
 pub mod capture;
 pub mod cleanup;
 pub mod clipboard;

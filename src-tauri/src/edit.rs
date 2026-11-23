@@ -35,9 +35,7 @@
 //!    generation, however often you trim again.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Weak};
 
 use parking_lot::{Mutex, ReentrantMutex};
@@ -1377,7 +1375,8 @@ pub(crate) fn run_command_with_progress(
 pub(crate) const STOPPED: &str = "stopped";
 
 /// Like [`run_command_with_progress`], and ends the program as soon as `stop`
-/// says so — asked at every line it writes, with `-progress` twice a second.
+/// says so. Never ends while `-progress` moves on; one that stands still is
+/// ended ([`crate::child::MOVING`]), so a hung encoder gives its caller back.
 pub(crate) fn run_command_watched(
     mut command: std::process::Command,
     args: &[String],
@@ -1385,66 +1384,24 @@ pub(crate) fn run_command_watched(
     on_progress: &dyn Fn(f32),
     stop: &dyn Fn() -> bool,
 ) -> Result<(), String> {
-    let mut child = command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("could not start ffmpeg: {err}"))?;
-
-    // Drain stderr on a thread of its own: if the pipe filled up, ffmpeg could
-    // hang while writing.
-    let stderr = child.stderr.take();
-    let collector = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(stderr) = stderr {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                text.push_str(&line);
-                text.push('\n');
-            }
+    let report = |us: i64| on_progress((us.max(0) as f32 / 1000.0 / length_ms.max(1) as f32).clamp(0.0, 0.99));
+    let output = match crate::child::run(command.args(args), crate::child::MOVING, &report, stop) {
+        Ok(output) => output,
+        Err(err) if crate::child::is_stopped(&err) => return Err(STOPPED.into()),
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+            return Err(format!("ffmpeg failed while writing the clip: {err}"))
         }
-        text
-    });
-
-    let mut stopped = false;
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if stop() {
-                stopped = true;
-                let _ = child.kill();
-                break;
-            }
-            let Some(time) = line.strip_prefix("out_time=") else {
-                continue;
-            };
-            if let Some(ms) = parse_timestamp_ms(time) {
-                on_progress((ms as f32 / length_ms.max(1) as f32).clamp(0.0, 0.99));
-            }
-        }
-    }
-
-    let status = child.wait().map_err(|err| err.to_string())?;
-    let stderr = collector.join().unwrap_or_default();
-    if stopped {
-        return Err(STOPPED.into());
-    }
-    if status.success() {
+        Err(err) => return Err(format!("could not start ffmpeg: {err}")),
+    };
+    if output.status.success() {
         return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
     let tail: Vec<&str> = stderr.lines().rev().take(4).collect();
     Err(format!(
         "ffmpeg failed while writing the clip: {}",
         tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
     ))
-}
-
-/// `00:01:02.500000` in milliseconds.
-fn parse_timestamp_ms(text: &str) -> Option<u64> {
-    let mut parts = text.trim().split(':');
-    let hours: f64 = parts.next()?.parse().ok()?;
-    let minutes: f64 = parts.next()?.parse().ok()?;
-    let seconds: f64 = parts.next()?.parse().ok()?;
-    Some(((hours * 3600.0 + minutes * 60.0 + seconds) * 1000.0) as u64)
 }
 
 /// Is what lies there the whole recording again?
@@ -2799,13 +2756,6 @@ pub(crate) mod tests {
             70, None,
         );
         assert!(!args.iter().any(|a| a == "-avoid_negative_ts"), "{args:?}");
-    }
-
-    #[test]
-    fn timestamps_become_milliseconds() {
-        assert_eq!(parse_timestamp_ms("00:00:01.500000"), Some(1_500));
-        assert_eq!(parse_timestamp_ms("01:02:03.000000"), Some(3_723_000));
-        assert_eq!(parse_timestamp_ms("kaputt"), None);
     }
 
     /// x264 is the fallback when the hardware refuses — it always has to produce

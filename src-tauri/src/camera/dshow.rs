@@ -168,10 +168,10 @@ mod win {
         if !crate::tools::is_ready() {
             return Vec::new();
         }
-        let out = crate::muxer::ffmpeg()
-            .args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"])
-            .stdin(Stdio::null())
-            .output();
+        let out = crate::child::output(
+            crate::muxer::ffmpeg().args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]),
+            crate::child::PROBE,
+        );
         match out {
             Ok(out) => video_devices(&String::from_utf8_lossy(&out.stderr)),
             Err(err) => {
@@ -211,15 +211,16 @@ mod win {
     pub fn open(device: &CameraDevice, sink: Sink, cancelled: &dyn Fn() -> bool) -> Result<Box<dyn Source>, Error> {
         let name = name_of(&device.id).ok_or_else(|| Error::Unsupported(format!("the camera name {}", device.name)))?;
         // Verbose: when an open fails, its last lines say how far DirectShow got.
-        let mut child = crate::muxer::live("ffmpeg")
-            .arg("-loglevel")
-            .arg("verbose")
-            .args(arguments(name))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| Error::Other(format!("ffmpeg: {err}")))?;
+        let mut child = crate::child::spawn(
+            crate::muxer::live("ffmpeg")
+                .arg("-loglevel")
+                .arg("verbose")
+                .args(arguments(name))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .map_err(|err| Error::Other(format!("ffmpeg: {err}")))?;
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
             let _ = child.kill();
             return Err(Error::Other("ffmpeg without pipes".into()));

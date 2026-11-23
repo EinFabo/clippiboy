@@ -51,6 +51,14 @@ const BACKOFF: [Duration; 4] = [
     Duration::from_secs(30 * 60),
 ];
 
+/// The most the archive may weigh. Today's is some 80 MB; a server sending
+/// more is not sending it, and would fill the drive on the way.
+const MAX_ARCHIVE_BYTES: u64 = 300 * 1024 * 1024;
+
+/// The most one program may unpack to (each is some 100 MB). A bigger one
+/// is cut off here and then fails its checksum.
+const MAX_PROGRAM_BYTES: u64 = 200 * 1024 * 1024;
+
 /// How often the download reports its progress to the UI at most.
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
 
@@ -114,7 +122,7 @@ fn set(app: &tauri::AppHandle, status: Status) {
 }
 
 /// Make the programs available: at once if they are there, otherwise in the
-/// background. Until then [`crate::muxer`] falls back to the PATH.
+/// background. Until then a release build starts neither (`child::spawn`).
 pub fn setup(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -267,6 +275,9 @@ async fn download(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<
         .map_err(|err| format!("download failed: {err}"))?;
 
     let total = response.content_length();
+    if total.is_some_and(too_big) {
+        return Err(format!("the download is too big ({} bytes)", total.unwrap_or(0)));
+    }
     let archive = root.join(format!("{VERSION}.zip.part"));
     let mut file =
         File::create(&archive).map_err(|err| format!("could not write {}: {err}", archive.display()))?;
@@ -278,9 +289,14 @@ async fn download(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<
         .await
         .map_err(|err| format!("download broke off: {err}"))?
     {
+        downloaded += chunk.len() as u64;
+        if too_big(downloaded) {
+            drop(file);
+            let _ = std::fs::remove_file(&archive);
+            return Err(format!("the download is too big (over {downloaded} bytes)"));
+        }
         file.write_all(&chunk)
             .map_err(|err| format!("could not write the download: {err}"))?;
-        downloaded += chunk.len() as u64;
         if last_emit.map_or(true, |at| at.elapsed() >= PROGRESS_EVERY) {
             last_emit = Some(Instant::now());
             set(app, Status::Downloading { downloaded, total });
@@ -296,6 +312,11 @@ async fn download(app: &tauri::AppHandle, root: &Path, target: &Path) -> Result<
     let result = unpack(&archive, root, target);
     let _ = std::fs::remove_file(&archive);
     result
+}
+
+/// More than an archive of the two programs can be.
+fn too_big(bytes: u64) -> bool {
+    bytes > MAX_ARCHIVE_BYTES
 }
 
 /// Take both programs out of the archive, check them, and only then give them
@@ -316,7 +337,7 @@ fn unpack(archive: &Path, root: &Path, target: &Path) -> Result<(), String> {
             let path = staging.join(name);
             let mut out =
                 File::create(&path).map_err(|err| format!("could not write {name}: {err}"))?;
-            let found = copy_hashing(&mut entry, &mut out)
+            let found = copy_hashing(&mut (&mut entry).take(MAX_PROGRAM_BYTES), &mut out)
                 .map_err(|err| format!("could not unpack {name}: {err}"))?;
             if found != hash {
                 return Err(format!("{name} does not match its checksum — download rejected"));
@@ -385,6 +406,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn an_oversized_download_is_refused() {
+        // Today's archive is some 80 MB, its programs some 100 MB each.
+        assert!(!too_big(90 * 1024 * 1024));
+        assert!(!too_big(MAX_ARCHIVE_BYTES));
+        assert!(too_big(MAX_ARCHIVE_BYTES + 1));
+        const _: () = assert!(MAX_PROGRAM_BYTES > 103 * 1024 * 1024);
+    }
+
+    /// A program is cut off at its cap while it is unpacked, so one that
+    /// would go on and on can only fail its checksum.
+    #[test]
+    fn an_oversized_program_is_cut_off_and_fails_its_checksum() {
+        let whole = copy_hashing(&mut &b"0123456789"[..], &mut std::io::sink()).unwrap();
+        let mut out = Vec::new();
+        let cut = copy_hashing(&mut (&b"0123456789"[..]).take(4), &mut out).unwrap();
+        assert_eq!(out, b"0123");
+        assert_ne!(cut, whole);
     }
 
     #[test]

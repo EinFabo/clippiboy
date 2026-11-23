@@ -303,6 +303,8 @@ pub fn portrait_arguments(
         args.extend(["-i".into(), cam.to_string_lossy().to_string()]);
     }
     let audio_input = 1 + usize::from(inputs.cam.is_some());
+    // The clip again, for its sound: read only as a clip, like the picture.
+    args.extend(crate::muxer::clip_input().map(String::from));
     args.extend(["-i".into(), inputs.audio.to_string_lossy().to_string()]);
     if let Some(mark) = inputs.mark {
         args.extend(["-loop".into(), "1".into(), "-i".into(), mark.to_string_lossy().to_string()]);
@@ -415,7 +417,7 @@ mod tests {
         let joined = args.join(" ");
         let guard = crate::muxer::clip_input().join(" ");
         assert!(
-            joined.contains(&format!("{guard} -ss 5.000 -i clean.mp4 -ss 1.250000 -i cam.mp4 -i clip.mp4 -loop 1 -i mark.png")),
+            joined.contains(&format!("{guard} -ss 5.000 -i clean.mp4 -ss 1.250000 -i cam.mp4 {guard} -i clip.mp4 -loop 1 -i mark.png")),
             "{joined}"
         );
         assert!(args.windows(2).any(|w| w == ["-map", "[v]"]), "{joined}");

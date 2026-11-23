@@ -1522,7 +1522,6 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
             return Err(format!("{} tracks", stems.len()));
         }
         std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-        let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
         let mut cuts = Vec::with_capacity(stems.len());
         let mut sorted: Vec<_> = stems.iter().collect();
         sorted.sort_by_key(|track| track.index);
@@ -1531,12 +1530,8 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
             let path = dir.join(format!("{slot}.m4a"));
             // Copying AAC cuts on a frame, some 20 ms — nothing an ear hears.
             let mut command = crate::muxer::ffmpeg();
-            command
-                .args(["-y", "-hide_banner", "-loglevel", "error", "-ss", &seconds(start_ms), "-i"])
-                .arg(source)
-                .args(["-t", &seconds(length_ms), "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"])
-                .arg(&path);
-            crate::muxer::run(&mut command, "cutting a track to send")?;
+            command.args(cut_track_args(Path::new(source), &path, start_ms, length_ms));
+            crate::muxer::run(&mut command, "cutting a track to send", crate::child::MOVING)?;
             let size = std::fs::metadata(&path).map_err(|err| err.to_string())?.len();
             let sha256 = hash_file(&path, u64::MAX)?;
             cuts.push(Cut { label: track.label.clone(), path, size, sha256 });
@@ -1551,6 +1546,20 @@ fn cut_tracks(id: &str, stems: &[crate::model::ClipTrack], start_ms: u64, length
             Vec::new()
         }
     }
+}
+
+/// The ffmpeg line [`cut_tracks`] runs for one track. The track file is the
+/// clip's own, but read as no more than one all the same.
+fn cut_track_args(source: &Path, output: &Path, start_ms: u64, length_ms: u64) -> Vec<String> {
+    let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
+    args.extend(crate::child::PROGRESS.map(String::from));
+    args.extend(crate::muxer::clip_input().map(String::from));
+    args.extend(["-ss".into(), seconds(start_ms), "-i".into(), source.to_string_lossy().into_owned()]);
+    args.extend(["-t".into(), seconds(length_ms)]);
+    args.extend(["-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"].map(String::from));
+    args.push(output.to_string_lossy().into_owned());
+    args
 }
 
 /// SHA-256 of the first `limit` bytes, as hex.
@@ -1637,6 +1646,16 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::model::ClipTrack;
+
+    #[test]
+    fn a_track_is_cut_from_a_file_read_only_as_a_clip() {
+        let args = cut_track_args(Path::new("t/0.m4a"), Path::new("cuts/0.m4a"), 4_000, 12_500);
+        let input = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(args[input - 6..input - 2], crate::muxer::clip_input(), "{args:?}");
+        assert_eq!(args[input - 2..input + 4], ["-ss", "4.000", "-i", "t/0.m4a", "-t", "12.500"]);
+        assert!(args.windows(3).any(|w| w == crate::child::PROGRESS), "{args:?}");
+        assert_eq!(args.last().map(String::as_str), Some("cuts/0.m4a"));
+    }
 
     #[test]
     fn a_peer_that_goes_quiet_is_given_up_on() {

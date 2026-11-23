@@ -204,20 +204,14 @@ pub fn tracks(clip_id: &str, source: &Path, keep_single: bool) -> Result<Vec<Cli
 
 /// A clip file's audio tracks, in the file's own order.
 pub fn tracks_in_file(source: &Path) -> Result<Vec<ClipTrack>, String> {
-    let output = command("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "a",
-            "-show_entries",
-            "stream=index,channels:stream_tags",
-            "-of",
-            "json",
-        ])
-        .arg(source)
-        .output()
-        .map_err(|err| format!("could not start ffprobe: {err}"))?;
+    // Read only as a clip: it may come from a friend.
+    let mut probe = command("ffprobe");
+    probe
+        .args(crate::muxer::clip_input())
+        .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index,channels:stream_tags", "-of", "json"])
+        .arg(source);
+    let output = crate::child::output(&mut probe, crate::child::PROBE)
+        .map_err(|err| format!("could not run ffprobe: {err}"))?;
     if !output.status.success() {
         return Err("Could not read the clip's audio tracks.".into());
     }
@@ -284,6 +278,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
 
     let mut copy = ffmpeg();
     copy.args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(crate::child::PROGRESS)
         .args(crate::muxer::clip_input())
         .arg("-i")
         .arg(source)
@@ -292,7 +287,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
         .arg("-f")
         .arg("mp4")
         .arg(&temp);
-    let mut outcome = run(&mut copy, "extracting an audio track");
+    let mut outcome = run(&mut copy, "extracting an audio track", crate::child::MOVING);
 
     if outcome.is_err() {
         // If the track is in a format an MP4 will not take (PCM, say), only
@@ -300,6 +295,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
         let mut encode = ffmpeg();
         encode
             .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(crate::child::PROGRESS)
             .args(crate::muxer::clip_input())
             .arg("-i")
             .arg(source)
@@ -308,7 +304,7 @@ fn extract(clip_id: &str, source: &Path, index: u32) -> Result<PathBuf, String> 
             .arg("-f")
             .arg("mp4")
             .arg(&temp);
-        outcome = run(&mut encode, "extracting an audio track");
+        outcome = run(&mut encode, "extracting an audio track", crate::child::MOVING);
     }
 
     if let Err(err) = outcome {

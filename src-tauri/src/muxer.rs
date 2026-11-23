@@ -29,30 +29,48 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Set once they are in place.
 static TOOL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Where to find ffmpeg and ffprobe. Without a call only PATH is searched.
+/// Where to find ffmpeg and ffprobe. Until then a release build starts
+/// neither (`child::spawn`).
 pub fn set_tool_dir(dir: PathBuf) {
     let _ = TOOL_DIR.set(dir);
 }
 
-/// ClippiBoy's own program, otherwise the name for the PATH search.
+/// ClippiBoy's own program, otherwise the bare name.
 ///
 /// Its own deliberately beats PATH: some ffmpeg version that happens to be
 /// installed may have different defaults, and the one pinned in `tools.rs` is the
-/// one that was tested.
+/// one that was tested. The bare name is only ever searched for in a debug
+/// build: a release refuses to start it ([`crate::child::may_start`]) and
+/// says ffmpeg is not ready, rather than run an unchecked one off the PATH.
 fn tool(name: &str) -> PathBuf {
     let file = if cfg!(windows) {
         format!("{name}.exe")
     } else {
         name.to_string()
     };
-    match TOOL_DIR.get().map(|dir| dir.join(&file)) {
-        Some(path) if path.is_file() => path,
+    resolve_tool(TOOL_DIR.get().map(PathBuf::as_path), name, &file, &|path| path.is_file())
+}
+
+/// `file` in `dir` when it is there, otherwise the bare `name`.
+fn resolve_tool(dir: Option<&Path>, name: &str, file: &str, is_file: &dyn Fn(&Path) -> bool) -> PathBuf {
+    match dir.map(|dir| dir.join(file)) {
+        Some(path) if is_file(&path) => path,
         _ => PathBuf::from(name),
     }
 }
 
-pub fn command(name: &str) -> Command {
+/// A new command for `name`. ffmpeg gets `-nostdin` first: it never reads a
+/// key press from ClippiBoy, and [`crate::child::run`] gives it no input.
+fn new_command(name: &str) -> Command {
     let mut command = Command::new(tool(name));
+    if name == "ffmpeg" {
+        command.arg("-nostdin");
+    }
+    command
+}
+
+pub fn command(name: &str) -> Command {
+    let mut command = new_command(name);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -63,7 +81,7 @@ pub fn command(name: &str) -> Command {
 
 /// A tool at below-normal priority, for work that runs next to a game.
 pub fn background(name: &str) -> Command {
-    let mut command = Command::new(tool(name));
+    let mut command = new_command(name);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -98,7 +116,7 @@ pub fn clip_input() -> [&'static str; 4] {
 /// frames back for seconds and let them out in a burst — a frozen face in the
 /// clip, and seconds of delay in ClippiBoy Camera.
 pub fn live(name: &str) -> Command {
-    let mut command = Command::new(tool(name));
+    let mut command = new_command(name);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -108,19 +126,10 @@ pub fn live(name: &str) -> Command {
     command
 }
 
-pub fn run(command: &mut Command, what: &str) -> Result<(), String> {
-    let output = command
-        .output()
-        .map_err(|err| format!("could not start ffmpeg ({what}): {err}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
-    Err(format!(
-        "ffmpeg failed at '{what}': {}",
-        tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
-    ))
+/// Run an ffmpeg `command` within `limit` ([`crate::child`]); `what` names the
+/// step in an error, with the last lines ffmpeg wrote.
+pub fn run(command: &mut Command, what: &str, limit: crate::child::Limit) -> Result<(), String> {
+    run_reporting(command, what, limit, None, &|_| {})
 }
 
 /// Can ffmpeg be found?
@@ -129,9 +138,7 @@ pub fn run(command: &mut Command, what: &str) -> Result<(), String> {
 /// to check it.
 pub fn available() -> bool {
     let answers = |mut program: Command| {
-        program
-            .arg("-version")
-            .output()
+        crate::child::output(program.arg("-version"), crate::child::PROBE)
             .map(|out| out.status.success())
             .unwrap_or(false)
     };
@@ -470,7 +477,7 @@ pub fn encode(
 
     let mut command = ffmpeg();
     command.args(arguments(video, wavs, &pending, &stem_outputs));
-    let outcome = run_reporting(&mut command, "writing the clip", length_ms, on_progress);
+    let outcome = run_reporting(&mut command, "writing the clip", crate::child::MOVING, length_ms, on_progress);
 
     // Everything from here that says "no" has to leave the half-written file
     // behind it gone, not lying in the clip folder.
@@ -660,49 +667,26 @@ pub fn replace_file(temp: &Path, target: &Path) -> Result<(), String> {
 }
 
 /// [`run`], reading `-progress` along the way when the length is known.
-///
-/// Stdout carries the progress, stderr the error; both are drained on their
-/// own, or a full pipe would stall ffmpeg.
 fn run_reporting(
     command: &mut Command,
     what: &str,
+    limit: crate::child::Limit,
     length_ms: Option<u64>,
     on_progress: &dyn Fn(f32),
 ) -> Result<(), String> {
-    use std::io::{BufRead, BufReader};
-    use std::process::Stdio;
-
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("could not start ffmpeg ({what}): {err}"))?;
-    let stderr = child.stderr.take();
-    let collector = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(stderr) = stderr {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                text.push_str(&line);
-                text.push('\n');
-            }
+    let report = |us: i64| {
+        if let Some(length) = length_ms {
+            on_progress((us.max(0) as f32 / 1000.0 / length.max(1) as f32).clamp(0.0, 0.99));
         }
-        text
-    });
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let (Some(length), Some(us)) = (length_ms, line.strip_prefix("out_time_us=")) else {
-                continue;
-            };
-            if let Ok(us) = us.trim().parse::<u64>() {
-                on_progress((us as f32 / 1000.0 / length.max(1) as f32).clamp(0.0, 0.99));
-            }
-        }
-    }
-    let status = child.wait().map_err(|err| err.to_string())?;
-    let stderr = collector.join().unwrap_or_default();
-    if status.success() {
+    };
+    let output = crate::child::run(command, limit, &report, &|| false).map_err(|err| match err.kind() {
+        std::io::ErrorKind::TimedOut => format!("ffmpeg failed at '{what}': {err}"),
+        _ => format!("could not start ffmpeg ({what}): {err}"),
+    })?;
+    if output.status.success() {
         return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
     let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
     Err(format!(
         "ffmpeg failed at '{what}': {}",
@@ -727,25 +711,30 @@ pub fn scratch_name(clip_id: &str, kind: &str) -> String {
 }
 
 /// The length of a media file in milliseconds. `Err` means ffprobe could not
-/// be started at all — that says nothing about the file; `Ok(None)` means it ran
-/// and could not read the file.
+/// be started or did not answer in time — that says nothing about the file;
+/// `Ok(None)` means it ran and could not read the file.
 pub fn probe_duration(path: &Path) -> Result<Option<u64>, String> {
     probe_duration_by(command("ffprobe"), path)
 }
 
-fn probe_duration_by(mut program: Command, path: &Path) -> Result<Option<u64>, String> {
-    let output = program
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-        ])
-        .arg(path)
-        .output()
-        .map_err(|err| format!("could not start ffprobe: {err}"))?;
+/// ffprobe on a clip file: read only as what [`clip_input`] lets in, since a
+/// clip may come from a friend, and within [`crate::child::PROBE`].
+fn probe(program: Command, entries: &[&str], path: &Path) -> std::io::Result<std::process::Output> {
+    crate::child::output(&mut probe_command(program, entries, path), crate::child::PROBE)
+}
+
+fn probe_command(mut program: Command, entries: &[&str], path: &Path) -> Command {
+    program.args(clip_input()).args(["-v", "error"]).args(entries).arg(path);
+    program
+}
+
+fn probe_duration_by(program: Command, path: &Path) -> Result<Option<u64>, String> {
+    let output = probe(
+        program,
+        &["-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"],
+        path,
+    )
+    .map_err(|err| format!("could not run ffprobe: {err}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text
         .trim()
@@ -757,30 +746,15 @@ fn probe_duration_by(mut program: Command, path: &Path) -> Result<Option<u64>, S
 /// Where a file's video really starts, in µs: a clip's first frame sits a
 /// little after 0 (SAVE-7), and the cam has to follow it.
 pub fn probe_video_start_us(path: &Path) -> Option<i64> {
-    let output = command("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=start_time",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-        ])
-        .arg(path)
-        .output()
-        .ok()?;
+    let entries = ["-select_streams", "v:0", "-show_entries", "stream=start_time", "-of", "default=noprint_wrappers=1:nokey=1"];
+    let output = probe(command("ffprobe"), &entries, path).ok()?;
     parse_start_us(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// A file's first video stream's size.
 pub fn probe_video_size(path: &Path) -> Option<(u32, u32)> {
-    let output = command("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
-        .arg(path)
-        .output()
-        .ok()?;
+    let entries = ["-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"];
+    let output = probe(command("ffprobe"), &entries, path).ok()?;
     parse_size(&String::from_utf8_lossy(&output.stdout))
 }
 
@@ -817,6 +791,36 @@ mod tests {
             assert!(!formats.contains(&reader), "{reader} let in");
         }
         assert_eq!(args[2..], ["-protocol_whitelist", "file"]);
+    }
+
+    #[test]
+    fn a_probe_reads_the_file_only_as_a_clip() {
+        let probe = probe_command(Command::new("ffprobe"), &["-show_entries", "format=duration"], Path::new("in.mp4"));
+        let args: Vec<String> = probe.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args[..4], clip_input());
+        assert_eq!(args.last().map(String::as_str), Some("in.mp4"));
+    }
+
+    #[test]
+    fn ffmpeg_never_waits_for_a_key_press() {
+        for program in [command("ffmpeg"), background("ffmpeg"), live("ffmpeg"), ffmpeg()] {
+            assert_eq!(program.get_args().next().and_then(|a| a.to_str()), Some("-nostdin"));
+        }
+        // ffprobe knows no `-nostdin`.
+        assert_eq!(command("ffprobe").get_args().count(), 0);
+    }
+
+    #[test]
+    fn its_own_program_wins_and_without_it_only_the_bare_name_is_left() {
+        let dir = Path::new("C:/data/ffmpeg/9.0.1");
+        let there = |_: &Path| true;
+        let gone = |_: &Path| false;
+        assert_eq!(resolve_tool(Some(dir), "ffmpeg", "ffmpeg.exe", &there), dir.join("ffmpeg.exe"));
+        // Quarantined, or not fetched yet: the bare name, which a release
+        // does not start.
+        assert_eq!(resolve_tool(Some(dir), "ffmpeg", "ffmpeg.exe", &gone), PathBuf::from("ffmpeg"));
+        assert_eq!(resolve_tool(None, "ffprobe", "ffprobe.exe", &there), PathBuf::from("ffprobe"));
+        assert!(!crate::child::may_start(&resolve_tool(None, "ffprobe", "ffprobe.exe", &there), false));
     }
 
     #[test]
