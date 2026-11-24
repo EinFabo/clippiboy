@@ -37,7 +37,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The job's write token stays out of .git/config, out of reach of
           # every later step; the steps that need it get it by name.
@@ -57,7 +57,7 @@ jobs:
             throw "tag says $want; tauri.conf.json $conf, package.json $npm, Cargo.toml $cargo"
           }
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -100,7 +100,7 @@ jobs:
         shell: pwsh
         run: ./build.ps1
 
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -137,7 +137,7 @@ jobs:
       # A trial build keeps what it made here instead, for a week.
       - name: Keep the trial build
         if: "!startsWith(github.ref, 'refs/tags/')"
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: clippiboy-trial-${{ github.sha }}
           retention-days: 7
