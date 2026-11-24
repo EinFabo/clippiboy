@@ -18,7 +18,7 @@ writes, so the pictures show what a user gets.
 
 - **Name:** ClippiBoy
 - **Category:** Gaming (Streaming as second choice, if the console allows two)
-- **Platforms:** Windows 10, Windows 11. Stream Deck 6.5 or newer. Keypad keys only (no dials or touch strip).
+- **Platforms:** Windows 10, Windows 11. Stream Deck 6.9 or newer. Keypad keys only (no dials or touch strip).
 - **Price:** Free
 - **Version:** 1.0.0.0
 
