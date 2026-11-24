@@ -92,21 +92,18 @@ def draw_record(art: ImageDraw.ImageDraw, n: float, running: bool) -> None:
 # Which glyph goes in which file, and whether the bottom of the picture has to
 # stay clear. It does on the keys themselves: the buffer level is written across
 # the lower quarter, and a glyph drawn into it would show through the digits. The
-# small pictures for the action list carry no writing and use the whole square.
+# small pictures for the action list are not drawn here: Elgato wants them
+# monochrome white, and streamdeck/tools/list-icons.py renders them from SVG.
 #
 # Every one is written twice: `x.png` at the plain size and `x@2x.png` at double,
 # which is what the Stream Deck software expects to find beside it.
 KEYS = [
     ("actions/save/key", 72, draw_save, True),
-    ("actions/save/icon", 20, draw_save, False),
     ("actions/screenshot/key", 72, draw_screenshot, True),
-    ("actions/screenshot/icon", 20, draw_screenshot, False),
     ("actions/buffer/on", 72, lambda art, n: draw_buffer(art, n, True), True),
     ("actions/buffer/off", 72, lambda art, n: draw_buffer(art, n, False), True),
-    ("actions/buffer/icon", 20, lambda art, n: draw_buffer(art, n, True), False),
     ("actions/record/on", 72, lambda art, n: draw_record(art, n, True), True),
     ("actions/record/off", 72, lambda art, n: draw_record(art, n, False), True),
-    ("actions/record/icon", 20, lambda art, n: draw_record(art, n, True), False),
 ]
 
 
@@ -132,7 +129,9 @@ def main() -> None:
     # The plugin itself is the app, so here the mark does belong.
     master = Image.open(MASTER).convert("RGBA")
     os.makedirs(OUT + "plugin", exist_ok=True)
-    for name, size in [("marketplace", 256), ("category", 28)]:
+    # The category icon is not drawn here: like the action-list icons it has to be
+    # monochrome white for the Marketplace, see streamdeck/tools/list-icons.py.
+    for name, size in [("marketplace", 256)]:
         master.resize((size, size), Image.LANCZOS).save(f"{OUT}plugin/{name}.png")
         master.resize((size * 2, size * 2), Image.LANCZOS).save(f"{OUT}plugin/{name}@2x.png")
 

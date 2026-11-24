@@ -85,11 +85,15 @@
 				overflow-wrap: anywhere;
 				color: var(--muted);
 			}
+			a {
+				color: #c4b5fd;
+			}
 		</style>
 	</head>
 	<body>
 		<div class="state"><span class="dot" id="dot"></span><span id="state">Looking for ClippiBoy…</span></div>
 		<p class="note" id="note"></p>
+		<p class="note" id="get" hidden>Don't have ClippiBoy yet? It's free: <a href="#" id="get-link">clippiboy.com</a></p>
 
 		<div class="length" id="length" hidden>
 			<label
@@ -103,7 +107,7 @@
 			<summary>Enter port and token by hand</summary>
 			<p class="note">
 				Only needed when ClippiBoy is not found by itself — normally it hands both over through
-				<code id="path"></code>. The token changes every time ClippiBoy starts. Both are in ClippiBoy under <em>Settings → Stream Deck</em>.
+				<code id="path"></code>. The token changes every time ClippiBoy starts. Both are in ClippiBoy under <em>Settings → Hotkeys → Stream Deck</em>.
 			</p>
 			<label>Port <input id="port" type="number" min="1" max="65535" placeholder="47653" /></label>
 			<label>Token <input id="token" type="text" placeholder="from ClippiBoy's settings" /></label>
@@ -225,6 +229,8 @@
 				const note = document.getElementById("note");
 				document.getElementById("path").textContent = reach.handshakePath ?? "";
 
+				clearTimeout(retry);
+				document.getElementById("get").hidden = reach.connected || Boolean(reach.port);
 				if (reach.connected) {
 					dot.classList.add("on");
 					state.textContent = "ClippiBoy " + (reach.version ?? "") + " on port " + reach.port;
@@ -239,16 +245,28 @@
 				state.textContent = "ClippiBoy is not answering";
 				note.textContent = reach.port
 					? "Nothing is listening on port " + reach.port + ". Is ClippiBoy running?"
-					: "Start ClippiBoy, and switch the control port on under Settings \u2192 Stream Deck.";
-				document.getElementById("manual").open = !reach.port;
+					: "Start ClippiBoy. If it is running, check Allow the Stream Deck under Settings \u2192 Hotkeys \u2192 Stream Deck.";
+				retry = setTimeout(probe, 3000);
 			}
+
+			// While ClippiBoy is not answering, ask again every few seconds, so the dot
+			// turns on by itself once the app is started — no reopening the inspector.
+			let retry = null;
+			function probe() {
+				send({ event: "sendToPlugin", context: uuid, action: actionUUID, payload: { command: "probe" } });
+			}
+
+			document.getElementById("get-link").addEventListener("click", (event) => {
+				event.preventDefault();
+				send({ event: "openUrl", payload: { url: "https://clippiboy.com" } });
+			});
 
 			document.getElementById("save").addEventListener("click", () => {
 				const port = Number(document.getElementById("port").value) || undefined;
 				const token = document.getElementById("token").value.trim() || undefined;
 				send({ event: "setGlobalSettings", context: uuid, payload: { port, token } });
 				// The plugin re-reads where ClippiBoy is and answers with the result.
-				send({ event: "sendToPlugin", context: uuid, action: actionUUID, payload: { command: "probe" } });
+				probe();
 			});
 		</script>
 	</body>

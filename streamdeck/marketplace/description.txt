@@ -1,0 +1,15 @@
+Save a clip, take a screenshot, switch the replay buffer and start a recording in ClippiBoy, straight from your Stream Deck. The keys show what is going on: how much is in the buffer, whether it runs, and how long a recording has been going.
+
+Requires ClippiBoy, the free replay-buffer app for Windows 10 and 11 (clippiboy.com). The plugin finds it by itself: no port, no password, nothing to set up.
+
+Four actions:
+- Save Clip: writes the last seconds of your game to a clip. Each key can have its own length (for example 30 seconds on one key, 2:30 on another), and the key shows what a press will save.
+- Screenshot: into ClippiBoy's folder and gallery.
+- Replay Buffer: on and off. The key follows along when you switch the buffer by hotkey, from the tray or in the app.
+- Recording: start and stop, with the running time on the key.
+
+A check mark confirms that the clip, screenshot or recording was saved. A warning sign means it was not, so you know right away and not hours later. While ClippiBoy is closed, the keys show a quiet dash.
+
+The plugin only talks to ClippiBoy on your own PC and sends nothing anywhere else. It only asks ClippiBoy for its status while one of its keys is on screen.
+
+Keypad keys only. Windows only.

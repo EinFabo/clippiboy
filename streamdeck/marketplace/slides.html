@@ -1,0 +1,197 @@
+<!doctype html>
+<!--
+  The Elgato Marketplace images, one per #hash. render.py photographs each at
+  1920×960. Keys use the plugin's real images and the titles the plugin really
+  writes (bufferLabel, recordingLabel), so the pictures show what a user gets.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face { font-family: "Inter"; src: url("../../site/fonts/inter.woff2") format("woff2"); font-weight: 100 900; }
+  :root {
+    --base: #08080a; --surface: #121215; --elevated: #1a1a1f; --line: #26262c; --line-strong: #34343d;
+    --ink: #fff; --muted: #9a9aa6; --accent: #8b5cf6; --accent-bright: #a78bfa;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1920px; height: 960px; overflow: hidden; }
+  body { background: var(--base); color: var(--ink); font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  section { display: none; position: relative; width: 1920px; height: 960px; overflow: hidden; }
+  section.on { display: block; }
+  .glow { position: absolute; inset: 0; background:
+      radial-gradient(1100px 620px at 78% -10%, rgba(124, 58, 237, .55), transparent 70%),
+      radial-gradient(900px 600px at 0% 110%, rgba(76, 29, 149, .35), transparent 70%); }
+  .wrap { position: relative; height: 100%; padding: 110px 130px; display: grid; align-items: center; }
+
+  h1 { margin: 0; font-size: 96px; line-height: 1.02; letter-spacing: -0.035em; font-weight: 750; }
+  h2 { margin: 0; font-size: 76px; line-height: 1.05; letter-spacing: -0.03em; font-weight: 720; }
+  .lede { margin: 30px 0 0; font-size: 34px; line-height: 1.4; color: rgba(255, 255, 255, .78); max-width: 20em; }
+  .eyebrow { font-size: 26px; font-weight: 600; letter-spacing: .02em; color: var(--accent-bright); margin-bottom: 22px; }
+
+  /* A key, the way the Stream Deck shows it: black, rounded, title along the bottom. */
+  .key { position: relative; display: grid; place-items: center; width: var(--k, 200px); height: var(--k, 200px);
+    border-radius: calc(var(--k, 200px) * .17); background: #000;
+    box-shadow: inset 0 0 0 2px var(--line-strong), 0 6px 0 var(--line), 0 30px 60px rgba(0, 0, 0, .45); }
+  .key img { width: 100%; height: 100%; display: block; }
+  .key b { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center;
+    font-size: calc(var(--k, 200px) * .15); font-weight: 650; letter-spacing: -.01em; }
+  .pad { display: grid; gap: 34px; padding: 38px; background: rgba(18, 18, 21, .85);
+    border: 2px solid var(--line); border-radius: 44px; }
+  .cap { margin-top: 22px; text-align: center; font-size: 26px; color: var(--muted); line-height: 1.35; }
+  .cap strong { display: block; color: var(--ink); font-weight: 650; font-size: 28px; margin-bottom: 4px; }
+
+  /* thumbnail */
+  #thumb .wrap { grid-template-columns: 1fr auto; gap: 100px; }
+  #thumb .brand { display: flex; align-items: center; gap: 28px; margin-bottom: 44px; }
+  #thumb .brand img { width: 120px; height: 120px; }
+  #thumb .brand span { font-size: 54px; font-weight: 700; letter-spacing: -.02em; }
+  #thumb .pad { grid-template-columns: repeat(2, auto); --k: 230px; }
+
+  /* lengths */
+  #lengths .wrap { grid-template-columns: 1fr auto; gap: 90px; }
+  #lengths .row { display: flex; gap: 46px; }
+  #lengths .key { --k: 250px; }
+
+  /* states */
+  #states .wrap { align-content: center; justify-items: center; text-align: center; padding-top: 90px; }
+  #states .row { display: flex; gap: 60px; margin-top: 80px; }
+  #states .key { --k: 220px; }
+  #states .lede { margin-left: auto; margin-right: auto; max-width: 30em; font-size: 30px; }
+
+  /* setup */
+  #setup .wrap { grid-template-columns: 1fr 640px; gap: 110px; }
+  .pi { background: #1e1e22; border: 2px solid #34343d; border-radius: 18px; padding: 34px; font-size: 25px;
+    box-shadow: 0 40px 80px rgba(0, 0, 0, .5); color: #d6d3e0; }
+  .pi .bar { display: flex; align-items: center; gap: 14px; margin: -34px -34px 30px; padding: 20px 30px;
+    border-bottom: 2px solid #34343d; color: #fff; font-weight: 600; }
+  .pi .bar img { width: 34px; height: 34px; }
+  .pi .state { display: flex; align-items: center; gap: 16px; padding: 18px 22px; border: 2px solid #3a3646; border-radius: 14px; }
+  .pi .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); flex: none; }
+  .pi .note { margin: 16px 4px 0; color: #8b869c; }
+  .pi label { display: block; margin-top: 30px; }
+  .pi .select { margin-top: 10px; padding: 14px 18px; border: 2px solid #3a3646; border-radius: 12px; background: #1c1926;
+    display: flex; justify-content: space-between; }
+  .ticks { list-style: none; padding: 0; margin: 46px 0 0; display: grid; gap: 22px; font-size: 30px; color: rgba(255, 255, 255, .85); }
+  .ticks li { display: flex; gap: 18px; align-items: baseline; }
+  .ticks li::before { content: ""; flex: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); transform: translateY(-3px); }
+
+  /* actions */
+  #actions .wrap { grid-template-columns: 1fr 1fr; gap: 110px; }
+  .list { display: grid; gap: 20px; }
+  .item { display: grid; grid-template-columns: auto 1fr; gap: 30px; align-items: center; padding: 18px 26px;
+    background: rgba(18, 18, 21, .85); border: 2px solid var(--line); border-radius: 28px; }
+  .item .key { --k: 120px; box-shadow: inset 0 0 0 2px var(--line-strong); }
+  .item h3 { margin: 0; font-size: 34px; font-weight: 680; letter-spacing: -.01em; }
+  .item p { margin: 8px 0 0; font-size: 25px; line-height: 1.35; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- Thumbnail -->
+<section id="thumb">
+  <div class="glow"></div>
+  <div class="wrap">
+    <div>
+      <div class="brand"><img src="../../site/img/logo.svg" alt=""><span>ClippiBoy</span></div>
+      <h1>Clip your game<br>from a key.</h1>
+      <p class="lede">Save a clip, take a screenshot, switch the replay buffer and record. The keys show what's happening.</p>
+    </div>
+    <div class="pad">
+      <div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/save/key@2x.png" alt=""><b>1:00</b></div>
+      <div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/screenshot/key@2x.png" alt=""><b></b></div>
+      <div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/buffer/on@2x.png" alt=""><b>2:58</b></div>
+      <div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/record/on@2x.png" alt=""><b>12:34</b></div>
+    </div>
+  </div>
+</section>
+
+<!-- Gallery 1: one key per length -->
+<section id="lengths">
+  <div class="glow"></div>
+  <div class="wrap">
+    <div>
+      <div class="eyebrow">Save Clip</div>
+      <h2>One press saves<br>what just happened.</h2>
+      <p class="lede">Give every key its own length. The number on the key is exactly what a press will save.</p>
+    </div>
+    <div>
+      <div class="row">
+        <div><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/save/key@2x.png" alt=""><b>30s</b></div><div class="cap"><strong>30 seconds</strong>the quick one</div></div>
+        <div><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/save/key@2x.png" alt=""><b>1:00</b></div><div class="cap"><strong>App default</strong>from ClippiBoy</div></div>
+        <div><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/save/key@2x.png" alt=""><b>2:30</b></div><div class="cap"><strong>2:30</strong>the whole round</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Gallery 2: state on the keys -->
+<section id="states">
+  <div class="glow"></div>
+  <div class="wrap">
+    <div>
+      <div class="eyebrow">Live on the key</div>
+      <h2>Know at a glance.</h2>
+      <p class="lede">The keys follow ClippiBoy, even when you switch it from a hotkey, the tray or the app.</p>
+    </div>
+    <div class="row">
+      <div><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/buffer/off@2x.png" alt=""><b>off</b></div><div class="cap"><strong>Buffer off</strong>nothing is kept</div></div>
+      <div><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/buffer/on@2x.png" alt=""><b>2:58</b></div><div class="cap"><strong>Buffer on</strong>2:58 ready to save</div></div>
+      <div><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/record/on@2x.png" alt=""><b>12:34</b></div><div class="cap"><strong>Recording</strong>time so far</div></div>
+      <div><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/save/key@2x.png" alt=""><b>—</b></div><div class="cap"><strong>ClippiBoy closed</strong>a quiet dash</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Gallery 3: setup -->
+<section id="setup">
+  <div class="glow"></div>
+  <div class="wrap">
+    <div>
+      <div class="eyebrow">Setup</div>
+      <h2>Nothing to set up.</h2>
+      <ul class="ticks">
+        <li>Finds ClippiBoy by itself, no port or password to type</li>
+        <li>Stays on your PC: it only talks to ClippiBoy on this machine</li>
+        <li>Asks only while a ClippiBoy key is on screen</li>
+      </ul>
+    </div>
+    <div class="pi">
+      <div class="bar"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/save/icon@2x.png" alt="">Save Clip</div>
+      <div class="state"><span class="dot"></span>ClippiBoy 1.0.1 on port 47653</div>
+      <p class="note">Found by itself — nothing to set up.</p>
+      <label>Clip length
+        <div class="select"><span>App default — 1:00</span><span>▾</span></div>
+      </label>
+      <p class="note">How much of the 3:00 buffer this key saves. Put two keys side by side for two lengths.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Gallery 4: the four actions -->
+<section id="actions">
+  <div class="glow"></div>
+  <div class="wrap">
+    <div>
+      <div class="eyebrow">Four actions</div>
+      <h2>What you need mid-game, one key each.</h2>
+      <p class="lede">Works with the free ClippiBoy app for Windows 10 and 11.</p>
+    </div>
+    <div class="list">
+      <div class="item"><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/save/key@2x.png" alt=""><b>1:00</b></div><div><h3>Save Clip</h3><p>The last seconds of your game as a clip.</p></div></div>
+      <div class="item"><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/screenshot/key@2x.png" alt=""><b></b></div><div><h3>Screenshot</h3><p>Into ClippiBoy's folder and gallery.</p></div></div>
+      <div class="item"><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/buffer/on@2x.png" alt=""><b>2:58</b></div><div><h3>Replay Buffer</h3><p>On and off, with the buffer level on the key.</p></div></div>
+      <div class="item"><div class="key"><img src="../com.einfabo.clippiboy.sdPlugin/imgs/actions/record/on@2x.png" alt=""><b>12:34</b></div><div><h3>Recording</h3><p>Start and stop, with the time on the key.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const show = () => {
+    const id = location.hash.slice(1) || "thumb";
+    for (const s of document.querySelectorAll("section")) s.classList.toggle("on", s.id === id);
+  };
+  addEventListener("hashchange", show);
+  show();
+</script>
+</body>
+</html>

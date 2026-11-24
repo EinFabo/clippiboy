@@ -39,7 +39,7 @@ confirm, done. Right for installing once, wrong for changing a line and wanting
 to see it — hence the script.
 
 Either way the keys show a dash until ClippiBoy itself is running **with the
-control port on**, under *Settings → Stream Deck*. A ClippiBoy older than that
+Stream Deck allowed**, under *Settings → Hotkeys → Stream Deck*. A ClippiBoy older than that
 setting has no port at all; the plugin needs the version this folder ships with.
 
 ## Building
