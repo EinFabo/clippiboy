@@ -60,6 +60,8 @@ test("add answer: nothing to do is calm, refusals are red in the server's words"
   assert.deepEqual(addAnswer({ ok: false, error: "Nobody with that name or code uses ClippiBoy." }, null), {
     tone: "bad",
     text: "Nobody with that name or code uses ClippiBoy.",
+    // Not on ClippiBoy: the answer offers the invite link.
+    invite: true,
   });
   assert.equal(addAnswer({ ok: false, error: "They don't take friend requests right now." }, null).tone, "bad");
   assert.equal(addAnswer({ ok: false, error: "  " }, null).text, "Something went wrong.");

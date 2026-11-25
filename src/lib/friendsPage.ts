@@ -62,6 +62,8 @@ export function requestsSummary(allow: boolean, nameOnLinks: boolean, friendOnLi
 
 /** What the server answers when there is nothing to do — said calmly, not in red. */
 const ALREADY = ["You are already friends.", "Request already sent."];
+/** The server's answer for a name or code it does not know (`friendrules.ts`). */
+const NOBODY = "Nobody with that name or code uses ClippiBoy.";
 
 export type AddOutcome =
   | { ok: true; status: "sent" | "accepted" }
@@ -70,6 +72,8 @@ export type AddOutcome =
 export interface AddAnswer {
   tone: "ok" | "info" | "bad";
   text: string;
+  /** They are not on ClippiBoy yet: the next step is the invite link. */
+  invite?: true;
 }
 
 /**
@@ -88,6 +92,7 @@ export function addAnswer(outcome: AddOutcome, name: string | null): AddAnswer {
     return { tone: "ok", text: name ? `Request sent to ${name}.` : "Request sent." };
   }
   const error = outcome.error.trim() || "Something went wrong.";
+  if (error === NOBODY) return { tone: "bad", text: error, invite: true };
   return { tone: ALREADY.includes(error) ? "info" : "bad", text: error };
 }
 

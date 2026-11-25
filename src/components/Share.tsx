@@ -2,7 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { UploadCard, useLinkUploads } from "./Links";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
-import { canReceive, lastSeenText, playingFor, useFriends } from "@/lib/friends";
+import {
+  canReceive,
+  cancelSignIn,
+  lastSeenText,
+  playingFor,
+  showSignInCard,
+  startSignIn,
+  useFriends,
+  useFriendsExtra,
+} from "@/lib/friends";
+import { useLinks } from "@/lib/links";
 import { friendStatus } from "@/lib/friendsList";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
 import { fileUrl } from "@/lib/ipc";
@@ -31,11 +41,11 @@ import { cardLeft, cardStack, noun, onFriendsPage, transferKind, type Ended } fr
 import type { Clip, FriendPresence, FriendUser, Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { toast } from "@/lib/toastBus";
-import { Avatar } from "@/routes/Friends";
+import { AddFriendForm, Avatar } from "@/routes/Friends";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
 import { ProgressBar } from "@/components/ui/ProgressBar";
-import { IconCheck, IconClose, IconGamepad, IconHeart, IconRetry, IconSend } from "@/components/icons";
+import { IconCheck, IconClose, IconGamepad, IconHeart, IconLink, IconPlus, IconRetry, IconSend } from "@/components/icons";
 
 /** The dim behind both pickers and their panel. */
 const DIM = "fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm";
@@ -91,9 +101,10 @@ function PresenceLine({
 
 /**
  * "Send to a friend" from a clip: everyone, in the Friends page's order. The
- * busy and offline ones stand greyed, so nobody seems to have gone missing.
- * Clips only go across while both are online — like Quick Share, there is no
- * mailbox in between.
+ * busy and offline ones stand greyed, so nobody seems to have gone missing —
+ * and a click on one copies a share link instead. Clips only go across while
+ * both are online — like Quick Share, there is no mailbox in between. Signed
+ * out or without friends, the way there is right in the picker.
  */
 export function SharePicker() {
   const clip = useShare((s) => s.picking);
@@ -104,14 +115,17 @@ export function SharePicker() {
   const presence = useFriends((s) => s.presence);
   const lastSeen = useFriends((s) => s.lastSeen);
   const signedIn = useFriends((s) => s.signedIn);
+  const me = useFriends((s) => s.me);
   const favorites = useEngine((s) => s.config.friends.favorites);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const close = () => pick(null);
 
   useEffect(() => {
     setError(null);
     setSending(null);
+    setAdding(false);
   }, [clip]);
   useEscape(clip !== null, () => pick(null));
 
@@ -138,38 +152,52 @@ export function SharePicker() {
       });
   };
 
+  // Offline or busy: the clip can still go as a share link, copied — the
+  // card bottom right shows the upload, as from the clip's menu.
+  const copyLink = () => {
+    void useLinks.getState().create(clip.id, clip.title ?? "Clip");
+    close();
+  };
+
   const row = (friend: FriendUser, reachable: boolean) => (
     <button
       key={friend.id}
-      disabled={!reachable || sending !== null}
-      onClick={() => send(friend.id)}
+      disabled={sending !== null}
+      onClick={() => (reachable ? send(friend.id) : copyLink())}
       className={cn(
         "group flex w-full items-center gap-3 rounded-inner px-2.5 py-2 text-left transition-colors",
         "hover:bg-hover disabled:cursor-default disabled:hover:bg-transparent",
-        !reachable && "opacity-45",
         sending === friend.id && "bg-hover",
       )}
     >
-      <Avatar user={friend} status={friendStatus(presence[friend.id])} />
-      <span className="flex min-w-0 flex-1 flex-col">
-        <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-          <span className="truncate">{friend.displayName}</span>
-          {favorites.includes(friend.id) && <IconHeart filled className="h-3.5 w-3.5 shrink-0 text-accent-bright" />}
+      <span className={cn("contents", !reachable && "[&>*]:opacity-45")}>
+        <Avatar user={friend} status={friendStatus(presence[friend.id])} />
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+            <span className="truncate">{friend.displayName}</span>
+            {favorites.includes(friend.id) && <IconHeart filled className="h-3.5 w-3.5 shrink-0 text-accent-bright" />}
+          </span>
+          <PresenceLine presence={presence[friend.id]} lastSeen={lastSeen[friend.id]} now={now} />
         </span>
-        <PresenceLine presence={presence[friend.id]} lastSeen={lastSeen[friend.id]} now={now} />
       </span>
       {sending === friend.id ? (
         <span className="text-xs text-ink-muted">Asking…</span>
+      ) : reachable ? (
+        <span
+          aria-hidden
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-pill bg-elevated text-ink opacity-0 transition-opacity
+            group-hover:opacity-100 group-focus-visible:opacity-100"
+        >
+          <IconSend className="h-[15px] w-[15px]" />
+        </span>
       ) : (
-        reachable && (
-          <span
-            aria-hidden
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-pill bg-elevated text-ink opacity-0 transition-opacity
-              group-hover:opacity-100 group-focus-visible:opacity-100"
-          >
-            <IconSend className="h-[15px] w-[15px]" />
-          </span>
-        )
+        <span
+          className="flex h-8 shrink-0 items-center gap-1.5 rounded-pill bg-elevated px-3 text-xs font-medium text-ink opacity-0
+            transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+        >
+          <IconLink className="h-3.5 w-3.5" />
+          Copy link instead
+        </span>
       )}
     </button>
   );
@@ -202,9 +230,18 @@ export function SharePicker() {
 
         <div className="max-h-[360px] overflow-y-auto">
           {!signedIn ? (
-            <p className="rounded-inner bg-elevated px-4 py-3 text-sm text-ink-muted">Sign in on the Friends page first.</p>
+            <PickerSignIn />
           ) : friends.length === 0 ? (
-            <p className="rounded-inner bg-elevated px-4 py-3 text-sm text-ink-muted">No friends yet.</p>
+            adding ? (
+              <AddFriendForm me={me} className="px-1 pt-1" />
+            ) : (
+              <div className="flex items-center gap-3 rounded-inner bg-elevated py-2 pr-2 pl-4">
+                <p className="flex-1 text-sm text-ink-muted">No friends yet.</p>
+                <Button size="sm" variant="primary" icon={<IconPlus className="h-4 w-4" />} onClick={() => setAdding(true)}>
+                  Add friend
+                </Button>
+              </div>
+            )
           ) : (
             <>
               {rows.online.map(({ friend, reachable }) => row(friend, reachable))}
@@ -227,6 +264,33 @@ export function SharePicker() {
       </div>
     </div>,
     document.body,
+  );
+}
+
+/** Signed out in the send picker: the sign-in itself, not a pointer to it. */
+function PickerSignIn() {
+  const signingIn = useFriends((s) => s.signingIn);
+  const error = useFriendsExtra((s) => s.signInError);
+  // The line here says why a sign-in failed — no toast as well.
+  useEffect(showSignInCard, []);
+  return (
+    <div className="rounded-inner bg-elevated py-2 pr-2 pl-4">
+      <div className="flex items-center gap-3">
+        <p className="flex-1 text-sm text-ink-muted">
+          {signingIn ? "Waiting for Discord…" : "Sign in to send clips to friends."}
+        </p>
+        {signingIn ? (
+          <Button size="sm" variant="ghost" onClick={cancelSignIn}>
+            Cancel
+          </Button>
+        ) : (
+          <Button size="sm" variant="primary" icon={error ? <IconRetry className="h-3.5 w-3.5" /> : undefined} onClick={startSignIn}>
+            {error ? "Try again" : "Sign in"}
+          </Button>
+        )}
+      </div>
+      {error && !signingIn && <p className="mt-1 pb-1 text-xs text-live">{error}</p>}
+    </div>
   );
 }
 

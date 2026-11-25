@@ -689,6 +689,27 @@ function AddFriendPopover({
   initialQuery: string;
   onClose: () => void;
 }) {
+  return (
+    <Popover anchor={anchor} label="Add friend" onClose={onClose} className="w-[440px] max-w-[calc(100vw-16px)]">
+      <AddFriendForm me={me} initialQuery={initialQuery} className="p-3" />
+    </Popover>
+  );
+}
+
+/**
+ * The field for a Discord username or friend code, its answer, and one's own
+ * invite link and code — in the Add friend popover, and in the send picker
+ * when there is nobody to send to yet.
+ */
+export function AddFriendForm({
+  me,
+  initialQuery = "",
+  className,
+}: {
+  me: FriendMe | null;
+  initialQuery?: string;
+  className?: string;
+}) {
   const [query, setQuery] = useState(initialQuery);
   const [busy, setBusy] = useState(false);
   /** The outcome and who was already there, so the newcomer can be named. */
@@ -743,94 +764,103 @@ function AddFriendPopover({
     "grid h-7 w-7 shrink-0 place-items-center rounded-pill text-ink transition-colors hover:bg-hover";
 
   return (
-    <Popover anchor={anchor} label="Add friend" onClose={onClose} className="w-[440px] max-w-[calc(100vw-16px)]">
-      <div className="p-3">
-        <form onSubmit={submit} className="flex gap-2">
-          <input
-            ref={input}
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setResult(null);
-            }}
-            placeholder="Discord name or friend code"
-            aria-label="Discord name or friend code"
-            className="h-10 min-w-0 flex-1 rounded-pill border border-line bg-surface px-4 text-sm outline-none
-              transition-colors placeholder:text-ink-faint focus:border-line-strong"
-          />
-          <Button type="submit" variant="primary" disabled={!query.trim() || busy}>
-            Add
-          </Button>
-        </form>
-        {answer && (
-          <p
-            role="status"
-            className={cn(
-              "mx-2 mt-2.5 flex items-center gap-1.5 text-xs",
-              answer.tone === "ok" ? "text-ok" : answer.tone === "info" ? "text-ink-muted" : "text-live",
-            )}
-          >
-            {answer.tone === "bad" ? <IconClose className="h-3.5 w-3.5 shrink-0" /> : <IconCheck className="h-3.5 w-3.5 shrink-0" />}
-            {answer.text}
-          </p>
-        )}
-        {me && (
-          <>
-            <div className="mx-1 my-2.5 border-t border-white/8" />
-            <div className={row}>
-              <IconLink className="h-4 w-4 shrink-0 text-ink-muted" />
-              Invite link
-              <span className="ml-auto truncate text-ink-muted">{streamer ? "Hidden" : shortLink(me.friendCode)}</span>
+    <div className={className}>
+      <form onSubmit={submit} className="flex gap-2">
+        <input
+          ref={input}
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setResult(null);
+          }}
+          placeholder="Discord username or friend code"
+          aria-label="Discord username or friend code"
+          className="h-10 min-w-0 flex-1 rounded-pill border border-line bg-surface px-4 text-sm outline-none
+            transition-colors placeholder:text-ink-faint focus:border-line-strong"
+        />
+        <Button type="submit" variant="primary" disabled={!query.trim() || busy}>
+          Add
+        </Button>
+      </form>
+      {answer && (
+        <div
+          role="status"
+          className={cn(
+            "mx-2 mt-2.5 flex items-center gap-1.5 text-xs",
+            answer.tone === "ok" ? "text-ok" : answer.tone === "info" ? "text-ink-muted" : "text-live",
+          )}
+        >
+          {answer.tone === "bad" ? <IconClose className="h-3.5 w-3.5 shrink-0" /> : <IconCheck className="h-3.5 w-3.5 shrink-0" />}
+          <span className="min-w-0 flex-1">{answer.text}</span>
+          {/* Not on ClippiBoy yet: the link brings them, and then the request. */}
+          {answer.invite && me && (
+            <Button
+              size="sm"
+              className="-my-1 shrink-0"
+              icon={copied === "invite" ? <IconCheck className="h-3.5 w-3.5 text-ok" /> : <IconLink className="h-3.5 w-3.5" />}
+              onClick={() => copy("invite", inviteLink(me.friendCode))}
+            >
+              {copied === "invite" ? "Copied" : "Copy invite link"}
+            </Button>
+          )}
+        </div>
+      )}
+      {me && (
+        <>
+          <div className="mx-1 my-2.5 border-t border-white/8" />
+          <div className={row}>
+            <IconLink className="h-4 w-4 shrink-0 text-ink-muted" />
+            Invite link
+            <span className="ml-auto truncate text-ink-muted">{streamer ? "Hidden" : shortLink(me.friendCode)}</span>
+            <button
+              aria-label="Copy invite link"
+              title="Copy invite link"
+              onClick={() => copy("link", inviteLink(me.friendCode))}
+              className={iconButton}
+            >
+              {copied === "link" ? <IconCheck className="h-[15px] w-[15px] text-ok" /> : <IconCopy className="h-[15px] w-[15px]" />}
+            </button>
+          </div>
+          <div className={row}>
+            <IconHash className="h-4 w-4 shrink-0 text-ink-muted" />
+            Your code
+            <span className="ml-auto font-mono text-ink tracking-[0.04em]">
+              {streamer && !revealed ? maskedCode(me.friendCode) : formatCode(me.friendCode)}
+            </span>
+            {streamer && (
               <button
-                aria-label="Copy invite link"
-                title="Copy invite link"
-                onClick={() => copy("link", inviteLink(me.friendCode))}
-                className={iconButton}
+                aria-label="Show the code for a moment"
+                title="Show the code for a moment"
+                aria-pressed={revealed}
+                onClick={() => setRevealed((v) => !v)}
+                className={cn(iconButton, !revealed && "text-ink-muted")}
               >
-                {copied === "link" ? <IconCheck className="h-[15px] w-[15px] text-ok" /> : <IconCopy className="h-[15px] w-[15px]" />}
+                <IconEye className="h-[15px] w-[15px]" />
               </button>
-            </div>
-            <div className={row}>
-              <IconHash className="h-4 w-4 shrink-0 text-ink-muted" />
-              Your code
-              <span className="ml-auto font-mono text-ink tracking-[0.04em]">
-                {streamer && !revealed ? maskedCode(me.friendCode) : formatCode(me.friendCode)}
-              </span>
-              {streamer && (
-                <button
-                  aria-label="Show the code for a moment"
-                  title="Show the code for a moment"
-                  aria-pressed={revealed}
-                  onClick={() => setRevealed((v) => !v)}
-                  className={cn(iconButton, !revealed && "text-ink-muted")}
-                >
-                  <IconEye className="h-[15px] w-[15px]" />
-                </button>
-              )}
-              <button
-                aria-label="Copy your friend code"
-                title="Copy your friend code"
-                onClick={() => copy("code", formatCode(me.friendCode))}
-                className={iconButton}
-              >
-                {copied === "code" ? <IconCheck className="h-[15px] w-[15px] text-ok" /> : <IconCopy className="h-[15px] w-[15px]" />}
-              </button>
-            </div>
-            {!me.allowRequests && (
-              <>
-                <div className="mx-1 my-2.5 border-t border-white/8" />
-                <div className={cn(row, "text-ink-muted")}>
-                  <span className="flex-1">You don't accept requests right now</span>
-                  <Button size="sm" onClick={() => void friendsApi.setAllowRequests(true).catch(report)}>
-                    Turn on
-                  </Button>
-                </div>
-              </>
             )}
-          </>
-        )}
-      </div>
-    </Popover>
+            <button
+              aria-label="Copy your friend code"
+              title="Copy your friend code"
+              onClick={() => copy("code", formatCode(me.friendCode))}
+              className={iconButton}
+            >
+              {copied === "code" ? <IconCheck className="h-[15px] w-[15px] text-ok" /> : <IconCopy className="h-[15px] w-[15px]" />}
+            </button>
+          </div>
+          {!me.allowRequests && (
+            <>
+              <div className="mx-1 my-2.5 border-t border-white/8" />
+              <div className={cn(row, "text-ink-muted")}>
+                <span className="flex-1">You don't accept requests right now</span>
+                <Button size="sm" onClick={() => void friendsApi.setAllowRequests(true).catch(report)}>
+                  Turn on
+                </Button>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
