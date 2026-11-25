@@ -48,6 +48,11 @@ const ATTEMPTS: u32 = 6;
 const HANDSHAKE: Duration = Duration::from_secs(10);
 /// How long a peer may go without sending or taking a chunk before it is given up on.
 const IDLE: Duration = Duration::from_secs(30);
+/// How long a send under way may go without the receiver dialling in before
+/// the sender counts it as failed. Longer than the receiver's longest pause
+/// between two tries: a stall it notices after the sender does ([`IDLE`]),
+/// its longest back-off, a dial and a handshake.
+const NO_REDIAL: Duration = Duration::from_secs(120);
 const CHUNK: usize = 256 * 1024;
 /// Progress reaches the page at most this often.
 const EMIT_EVERY: Duration = Duration::from_millis(250);
@@ -246,6 +251,10 @@ struct Outgoing {
     answered: Option<String>,
     /// The device that took the clip, once it arrived.
     reached: Option<String>,
+    /// Connections of the receiver being served right now.
+    serving: u32,
+    /// Since when none has been — see [`NO_REDIAL`].
+    quiet_since: std::time::Instant,
 }
 
 /// An individual track cut for sending — a file of its own in the temp folder.
@@ -379,6 +388,8 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
                 tracks: Vec::new(),
                 answered: None,
                 reached: None,
+                serving: 0,
+                quiet_since: std::time::Instant::now(),
             },
         );
     }
@@ -708,6 +719,13 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
                     Stage::Declined
                 }
             });
+            if accept {
+                // A yes from an app that closes before it dials is no transfer.
+                if let Some(entry) = app.state::<Share>().outgoing.lock().get_mut(&id) {
+                    entry.quiet_since = std::time::Instant::now();
+                }
+                watch_redial(app, &id);
+            }
         }
         Signal::ShareCancel { id } => {
             let theirs = |t: &Transfer| t.friend_id == from;
@@ -1752,7 +1770,7 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         entry.transfer.stage = Stage::Moving;
         // The tracks go first, so the clip's bytes count after all of them.
         let tracks: u64 = entry.tracks.iter().map(|cut| cut.size).sum();
-        match ask.track {
+        let what = match ask.track {
             None => (entry.path.clone(), entry.size, tracks),
             Some(index) => {
                 let index = index as usize;
@@ -1760,7 +1778,16 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
                 let before = entry.tracks[..index].iter().map(|cut| cut.size).sum();
                 (cut.path.clone(), cut.size, before)
             }
-        }
+        };
+        // Counted out again by `_serving` below, with the lock let go.
+        entry.serving += 1;
+        what
+    };
+    // Counts this connection out again however it ends, and has the sender
+    // give up if the receiver does not dial again.
+    let _serving = Serving {
+        app: app.clone(),
+        id: ask.id.clone(),
     };
     emit(app);
     let offset = ask.offset.min(size);
@@ -1801,7 +1828,7 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
     }
 
     // The receiver checks the hash and answers on a second stream.
-    let arrived = tokio::time::timeout(Duration::from_secs(120), async {
+    let arrived = tokio::time::timeout(hash_wait(size), async {
         let (_, mut recv) = connection.accept_bi().await.ok()?;
         let mut ok = [0u8; 1];
         recv.read_exact(&mut ok).await.ok()?;
@@ -1857,6 +1884,76 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+/// How long the sender waits for the receiver's "k": the receiver reads the
+/// whole file again for its hash first, which on a slow hard drive takes a
+/// while for a recording of several gigabytes.
+fn hash_wait(size: u64) -> Duration {
+    /// A slow hard drive, read while it is being written to elsewhere.
+    const SLOW_READ: u64 = 20 * 1024 * 1024;
+    Duration::from_secs(120 + size / SLOW_READ)
+}
+
+/// A connection of the receiver being served — see [`serve`].
+struct Serving {
+    app: AppHandle,
+    id: String,
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        let moving = {
+            let share = self.app.state::<Share>();
+            let mut outgoing = share.outgoing.lock();
+            outgoing.get_mut(&self.id).is_some_and(|entry| {
+                entry.serving = entry.serving.saturating_sub(1);
+                entry.quiet_since = std::time::Instant::now();
+                entry.transfer.stage == Stage::Moving
+            })
+        };
+        if moving {
+            watch_redial(&self.app, &self.id);
+        }
+    }
+}
+
+/// Has the receiver of a send under way gone quiet for good? Their app
+/// closed, crashed or slept mid-transfer: nobody else would ever end it, and
+/// the card stood at "Moving" with its copy and tracks kept.
+fn given_up(stage: Stage, serving: u32, quiet: Duration) -> bool {
+    stage == Stage::Moving && serving == 0 && quiet >= NO_REDIAL
+}
+
+/// Fails the send `id` once the receiver has not dialled in for
+/// [`NO_REDIAL`].
+fn watch_redial(app: &AppHandle, id: &str) {
+    let app = app.clone();
+    let id = id.to_owned();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(NO_REDIAL).await;
+        let friend = {
+            let share = app.state::<Share>();
+            let mut outgoing = share.outgoing.lock();
+            let Some(entry) = outgoing.get_mut(&id) else {
+                return;
+            };
+            if !given_up(
+                entry.transfer.stage,
+                entry.serving,
+                entry.quiet_since.elapsed(),
+            ) {
+                return;
+            }
+            fail(&mut entry.transfer, "They stopped receiving it.");
+            entry.transfer.friend_id.clone()
+        };
+        log::info!("share: {id}: the receiver has not dialled in again — given up");
+        emit(&app);
+        drop_cuts(&id);
+        // Should they still be trying, they stop.
+        crate::friends::send_relay(&app, &friend, &Signal::ShareCancel { id });
+    });
 }
 
 /// Did the receiver hang up with "bad hash" (code 1)?
@@ -2317,6 +2414,30 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// App layer #1: a receiver that went away mid-transfer ends the send.
+    #[test]
+    fn a_send_whose_receiver_went_quiet_is_given_up() {
+        assert!(given_up(Stage::Moving, 0, NO_REDIAL));
+        assert!(
+            !given_up(Stage::Moving, 0, NO_REDIAL - Duration::from_secs(1)),
+            "they may still dial again"
+        );
+        assert!(
+            !given_up(Stage::Moving, 1, NO_REDIAL * 2),
+            "a connection is being served"
+        );
+        for stage in [Stage::Asking, Stage::Done, Stage::Failed, Stage::Cancelled] {
+            assert!(!given_up(stage, 0, NO_REDIAL * 2), "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn the_wait_for_the_hash_grows_with_the_file() {
+        assert_eq!(hash_wait(0), Duration::from_secs(120));
+        assert_eq!(hash_wait(100 * 1024 * 1024), Duration::from_secs(125));
+        assert!(hash_wait(10 * 1024 * 1024 * 1024) >= Duration::from_secs(600));
+    }
     use crate::model::ClipTrack;
 
     #[test]
