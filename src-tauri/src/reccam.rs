@@ -530,11 +530,13 @@ pub fn recording_arguments(job: &BurnIn) -> Vec<String> {
         job.quality,
         crate::edit::Speed::Save,
     ));
+    // No `-avoid_negative_ts make_zero` (SAVE-7): it moved the picture later
+    // by the AAC priming (and by x264's B-frame delay) and dropped the sound's
+    // edit list, so the clip's track and its stored tracks no longer started
+    // together — every save after put the picture 21–66 ms behind the sound.
     args.extend([
         "-g".into(),
         job.gop.max(1).to_string(),
-        "-avoid_negative_ts".into(),
-        "make_zero".into(),
         "-t".into(),
         format!("{:.3}", job.length_ms as f64 / 1000.0),
         job.output.to_string_lossy().into_owned(),
@@ -1051,6 +1053,13 @@ mod tests {
             .find(|w| w[0] == "-filter_complex")
             .map(|w| w[1].clone())
             .unwrap_or_default()
+    }
+
+    /// Facecam #3: the picture keeps its place against the sound.
+    #[test]
+    fn a_burn_in_leaves_the_timestamps_where_they_are() {
+        let a = args(&[input("cam.0.mp4", 0)], false);
+        assert!(!a.iter().any(|a| a == "-avoid_negative_ts"), "{a:?}");
     }
 
     #[test]
