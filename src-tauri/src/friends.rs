@@ -437,6 +437,21 @@ fn sign_out_locally(app: &AppHandle) {
     emit(app);
 }
 
+/// Signs out when `token` is still the session's: a request or a dial of a
+/// session signed out since — the old one's last request, answered 401 just
+/// after a sign-in — must not sign the new one out. True when it did.
+fn sign_out_if_current(app: &AppHandle, token: &str) -> bool {
+    let current = same_session(app.state::<Friends>().token.lock().as_deref(), token);
+    if current {
+        sign_out_locally(app);
+    }
+    current
+}
+
+fn same_session(current: Option<&str>, used: &str) -> bool {
+    current == Some(used)
+}
+
 // --- Lists ---------------------------------------------------------------------
 
 /// Fetches profile and lists. With `announce`, whatever is new since the last
@@ -533,10 +548,15 @@ fn spawn_connection(app: &AppHandle) {
                 return;
             };
             let started = Instant::now();
-            match serve(&app, &token).await {
+            match serve(&app, &token, generation).await {
                 Ok(End::SignedOut) => return,
                 Ok(End::Dropped) => {}
                 Err(err) => log::info!("friends: connection: {err}"),
+            }
+            // Signed out meanwhile, and maybe in again: what is there now is
+            // the new session's, its line and its list.
+            if friends.generation.load(Ordering::SeqCst) != generation {
+                return;
             }
             {
                 let mut view = friends.view.lock();
@@ -617,7 +637,7 @@ enum End {
     Dropped,
 }
 
-async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
+async fn serve(app: &AppHandle, token: &str, generation: u64) -> Result<End, String> {
     install_crypto();
     let mut request = SOCKET
         .into_client_request()
@@ -634,8 +654,9 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
     let (socket, _) = match dialled {
         Ok(ok) => ok,
         Err(tungstenite::Error::Http(response)) if response.status() == 401 => {
-            log::info!("friends: session no longer valid — signed out");
-            sign_out_locally(app);
+            if sign_out_if_current(app, token) {
+                log::info!("friends: session no longer valid — signed out");
+            }
             return Ok(End::SignedOut);
         }
         Err(err) => return Err(err.to_string()),
@@ -643,7 +664,18 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
     let (mut sink, mut stream) = socket.split();
     let (sender, mut outbox) = mpsc::unbounded_channel::<String>();
     let friends = app.state::<Friends>();
-    *friends.outbox.lock() = Some(sender);
+    {
+        // Checked under the outbox's lock: a sign-out raises the generation
+        // before it takes the outbox away, so either this sees it, or the
+        // sign-out ends this line right after.
+        let mut current = friends.outbox.lock();
+        if friends.generation.load(Ordering::SeqCst) != generation {
+            // A dial of a session signed out meanwhile: the line of the one
+            // signed in since is not this one to take over.
+            return Ok(End::SignedOut);
+        }
+        *current = Some(sender);
+    }
     friends.view.lock().connected = true;
     // A "Retry now" pressed during this dial has done its work: it must not
     // cut short the wait after some later drop.
@@ -675,7 +707,7 @@ async fn serve(app: &AppHandle, token: &str) -> Result<End, String> {
                 Some(Ok(Message::Close(frame))) => {
                     // 4001: the account was deleted elsewhere.
                     if frame.is_some_and(|frame| u16::from(frame.code) == 4001) {
-                        sign_out_locally(app);
+                        sign_out_if_current(app, token);
                         return Ok(End::SignedOut);
                     }
                     return Ok(End::Dropped);
@@ -1074,7 +1106,7 @@ async fn request(
         .await
         .map_err(|_| "The friends server is not reachable right now.".to_string())?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        sign_out_locally(app);
+        sign_out_if_current(app, &token);
     }
     read(response).await
 }
@@ -1203,6 +1235,14 @@ fn save_token(token: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// App layer #4: an answer to the old session leaves the new one alone.
+    #[test]
+    fn only_the_current_session_is_signed_out() {
+        assert!(same_session(Some("new"), "new"));
+        assert!(!same_session(Some("new"), "old"));
+        assert!(!same_session(None, "old"), "signed out already");
+    }
 
     #[test]
     fn an_add_link_carries_a_friend_code() {
