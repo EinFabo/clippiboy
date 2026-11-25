@@ -23,6 +23,7 @@ import {
   deleteSharesOf,
   putPoster,
   reportShare,
+  shareAvatar,
   shareFile,
   sharePage,
   shareQuota,
@@ -129,6 +130,9 @@ async function route(request: Request, env: Env): Promise<Response> {
     const [, id, kind] = shared;
     return kind ? shareFile(request, env, id, kind as "mp4" | "jpg") : sharePage(env, id);
   }
+  // The uploader's picture on that page, without Discord's link (avatar.ts).
+  const pictured = path.match(/^\/c\/([a-z0-9]+)\/avatar$/);
+  if (pictured && (method === "GET" || method === "HEAD")) return shareAvatar(request, env, pictured[1]);
   const reported = path.match(/^\/c\/([a-z0-9]+)\/report$/);
   if (reported && method === "POST") return reportShare(request, env, reported[1]);
 

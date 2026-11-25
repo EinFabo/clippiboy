@@ -6,7 +6,8 @@
 
 import { userByCode } from "./db";
 import { inviteCookie, inviteKey, inviteOpen, ownClick, signInvite } from "./invite";
-import { PAGE_ORIGIN, shareUploader } from "./links";
+import { MEDIA_ORIGIN, PAGE_ORIGIN, shareUploader } from "./links";
+import { avatarRoute, discordAvatar } from "./avatar";
 import { renderInvite, type InviteData } from "./page";
 import { normalizeCode } from "./util";
 
@@ -46,7 +47,8 @@ const INVALID: Omit<InviteData, "site"> = { state: "invalid", inviter: null, add
  * "Open ClippiBoy": its link would carry the friend code, which never changes,
  * to anyone who opens a public share link.
  */
-async function added(request: Request, env: Env, inviter: Inviter, from: string, fromShare: boolean): Promise<Response> {
+async function added(request: Request, env: Env, inviter: Inviter, from: string, share: string | null): Promise<Response> {
+  const fromShare = share !== null;
   const secret = inviteSecret(env);
   if (
     !secret ||
@@ -59,7 +61,10 @@ async function added(request: Request, env: Env, inviter: Inviter, from: string,
   return html(
     {
       state: "added",
-      inviter: fromShare ? { name: inviter.display_name, avatar: inviter.avatar } : null,
+      // The picture through the share's route: Discord's link carries the Discord id.
+      inviter: share
+        ? { name: inviter.display_name, avatar: discordAvatar(inviter.avatar) ? avatarRoute(MEDIA_ORIGIN, share) : null }
+        : null,
       add: null,
       open: fromShare ? null : `clippiboy://add?code=${inviter.friend_code}`,
     },
@@ -79,7 +84,7 @@ export async function invitePage(request: Request, env: Env, rawCode: string, ad
   const user = row ? { allowRequests: row.allow_requests === 1, banned: row.banned_at != null } : null;
   if (!row || !inviteOpen(user, inviteSecret(env) !== null)) return html(INVALID, 404);
   const self = `${PAGE_ORIGIN}/i/${row.friend_code}`;
-  if (add) return added(request, env, row, self, false);
+  if (add) return added(request, env, row, self, null);
   return html({ state: "invite", inviter: null, add: `${self}/add`, open: null });
 }
 
@@ -87,5 +92,5 @@ export async function invitePage(request: Request, env: Env, rawCode: string, ad
 export async function shareInvite(request: Request, env: Env, id: string): Promise<Response> {
   const uploader = await shareUploader(env, id);
   const page = `${PAGE_ORIGIN}/c/${id}`;
-  return uploader ? added(request, env, uploader, page, true) : back(page);
+  return uploader ? added(request, env, uploader, page, id) : back(page);
 }

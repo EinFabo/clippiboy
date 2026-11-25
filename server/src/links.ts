@@ -10,6 +10,7 @@ import { addressKey, readLimited } from "./limits";
 import { renderGone, renderPage } from "./page";
 import { inviteKey } from "./invite";
 import { fingerprint } from "./departed";
+import { avatarRoute, discordAvatar, looksLikePng, MAX_AVATAR_BYTES } from "./avatar";
 import {
   canUpload,
   chunks,
@@ -474,7 +475,10 @@ export async function sharePage(env: Env, id: string): Promise<Response> {
     title: row.title,
     game: row.game,
     tags,
-    uploader: uploader ? { name: uploader.display_name, avatar: uploader.avatar } : null,
+    // Through our route: Discord's link carries the Discord id.
+    uploader: uploader
+      ? { name: uploader.display_name, avatar: discordAvatar(uploader.avatar) ? avatarRoute(MEDIA_ORIGIN, id) : null }
+      : null,
     addFriend:
       uploader && offersFriend(row, uploader.allow_requests) && inviteKey(env.INVITE_SECRET, env.DISCORD_CLIENT_SECRET)
         ? `${PAGE_ORIGIN}/c/${id}/add`
@@ -543,6 +547,72 @@ export async function shareFile(request: Request, env: Env, id: string, kind: "m
   }
   const body = head ? null : (object as R2ObjectBody).body;
   return new Response(body, { status: range.kind === "part" ? 206 : 200, headers });
+}
+
+/**
+ * `/c/<id>/avatar`: the uploader's picture for the share page, fetched from
+ * Discord here so the page never carries the Discord id that Discord's link
+ * has. Only while the link is up and shows the name, only a PNG from
+ * Discord's avatar paths (`discordAvatar`), and only small.
+ */
+export async function shareAvatar(request: Request, env: Env, id: string): Promise<Response> {
+  const row = await live(env, id, Date.now());
+  const source = row ? discordAvatar((await uploaderOf(env, row))?.avatar ?? null) : null;
+  if (!source) return new Response("Not found.", { status: 404 });
+  let bytes: Uint8Array | null = null;
+  try {
+    const upstream = await fetch(source, { cf: { cacheEverything: true, cacheTtl: 86_400 }, redirect: "manual" });
+    const type = upstream.headers.get("Content-Type") ?? "";
+    if (upstream.ok && type.split(";")[0].trim() === "image/png") {
+      const text = await readBytes(upstream, MAX_AVATAR_BYTES);
+      if (text && looksLikePng(text)) bytes = text;
+    } else {
+      await upstream.body?.cancel();
+    }
+  } catch (err) {
+    console.error("avatar", id, err);
+  }
+  if (!bytes) return new Response("Not found.", { status: 404 });
+  return new Response(request.method === "HEAD" ? null : bytes, {
+    headers: {
+      "Content-Type": "image/png",
+      "Content-Length": String(bytes.byteLength),
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'",
+      "X-Robots-Tag": "noindex",
+      // Gone with the link or the name: only the viewer's browser keeps it, briefly.
+      "Cache-Control": "private, max-age=600",
+    },
+  });
+}
+
+/** The body, or null once it is past `max` bytes. */
+async function readBytes(response: Response, max: number): Promise<Uint8Array | null> {
+  const declared = Number(response.headers.get("Content-Length") ?? "");
+  if (!response.body || (Number.isFinite(declared) && declared > max)) {
+    await response.body?.cancel();
+    return null;
+  }
+  const reader = response.body.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      return null;
+    }
+    parts.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.byteLength;
+  }
+  return out;
 }
 
 /** Only the request's If-None-Match, for R2 to check — not its other headers. */
