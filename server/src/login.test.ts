@@ -53,6 +53,9 @@ test("a state is good for the sign-in's ten minutes, and not from far ahead of t
 test("a forged, changed or foreign state is no state", async () => {
   const state = await signState(secret, challenge, now);
   assert.equal(await verifyState("another secret", state, now), null);
+  // Without a key there are no states at all, rather than ones anybody could make.
+  assert.equal(await verifyState("", state, now), null);
+  await assert.rejects(signState("", challenge, now));
   // Another challenge in a state of ours: the app that knows its verifier must not be swapped out.
   const other = "A".repeat(43);
   assert.equal(await verifyState(secret, state.slice(0, 32) + other + state.slice(75), now), null);

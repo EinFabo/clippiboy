@@ -56,6 +56,8 @@ export async function signState(
   now: number,
   random: Uint8Array = crypto.getRandomValues(new Uint8Array(18)),
 ): Promise<string> {
+  // An empty key would let anybody make states.
+  if (!secret) throw new Error("no key to sign sign-in states with");
   const head = new Uint8Array(24);
   const high = Math.floor(now / 2 ** 32);
   const low = now % 2 ** 32;
@@ -68,7 +70,7 @@ export async function signState(
 /**
  * The challenge and start time a state carries, or null for one that is
  * forged, changed, of another key, older than LOGIN_TTL_MS or not a state at
- * all (a random one from before, say). The MAC is compared as text in
+ * all (a random one from before, say) — and for every one without a key. The MAC is compared as text in
  * constant time, so a state has one spelling only.
  */
 export async function verifyState(
@@ -76,7 +78,7 @@ export async function verifyState(
   state: string,
   now: number,
 ): Promise<{ challenge: string; issuedAt: number } | null> {
-  if (!STATE_PATTERN.test(state)) return null;
+  if (!secret || !STATE_PATTERN.test(state)) return null;
   const body = state.slice(0, HEAD_LENGTH + 43);
   if (!sameText(await mac(secret, body), state.slice(HEAD_LENGTH + 43))) return null;
   const head = fromBase64url(state.slice(0, HEAD_LENGTH));
