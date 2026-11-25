@@ -25,6 +25,7 @@ import {
   togglePick,
   type ClipFilter,
 } from "@/lib/sendPicker";
+import { missedLine } from "@/lib/missedSends";
 import { awaitsAnswer, retrying, waitingFor } from "@/lib/sendQueue";
 import {
   isOver,
@@ -653,7 +654,8 @@ function headline(t: Transfer): string {
     case "done":
       return t.unconfirmed ? `Sent to ${who}, not confirmed` : `${who} has your ${what}`;
     case "declined":
-      return `${who} said no`;
+      // As the banner and the console say it: "said no" only for a Decline.
+      return missedLine(t, who);
     case "expired":
       return `${who} didn't answer`;
     case "failed":

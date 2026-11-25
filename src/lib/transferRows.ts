@@ -7,7 +7,8 @@ import type { FriendPresence, Transfer } from "./types";
  * - An offer waits in "Pending" (a card elsewhere) until it is answered.
  * - A running transfer shows its bar.
  * - A failure stays, with Retry where that makes sense, until it is dismissed.
- * - Anything else that ended ("has your clip", "said no") stays in the row until
+ * - Anything else that ended ("has your clip", "said no", "isn't taking clips
+ *   right now") stays in the row until
  *   the friend's state changes; its card goes after a few seconds.
  * - Cancelled, or an offer one declined oneself: nothing left to show.
  */
@@ -250,12 +251,27 @@ export function rowTransfer(
   if (over.length > 0) {
     const newest = over[0];
     const unconfirmed = newest.unconfirmed === true;
+    const byHand = newest.refusal === "manual";
     const same =
       over.filter(
         (t) =>
-          t.direction === newest.direction && t.stage === newest.stage && (t.unconfirmed === true) === unconfirmed,
+          t.direction === newest.direction &&
+          t.stage === newest.stage &&
+          (t.unconfirmed === true) === unconfirmed &&
+          (t.refusal === "manual") === byHand,
       ).length - 1;
     const more = same > 0 ? ` and ${same} more` : "";
+    // A no their app gave on its own — or one from an app that does not say
+    // whose — is no one's: worded like the banner and the console (`missedLine`).
+    if (newest.direction === "out" && newest.stage === "declined" && !byHand)
+      return {
+        kind: "done",
+        ids: over.map((t) => t.id),
+        text: `Isn't taking ${noun(newest)}s right now · ${newest.name}${more}`,
+        tone: "muted",
+        at: ended[newest.id]?.at ?? 0,
+        open: null,
+      };
     const lead =
       newest.direction === "out"
         ? newest.stage === "done"

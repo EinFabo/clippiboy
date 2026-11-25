@@ -167,7 +167,7 @@ test("row: ended — the newest, green for arrived, Open for a received clip", (
   const got = rowTransfer("1", [t({ id: "a", direction: "in", stage: "done", clipId: "mine" })], ended);
   assert.equal(got?.text, "Sent you Ace on Mirage");
   assert.equal(got?.kind === "done" && got.open, "mine");
-  const no = rowTransfer("1", [t({ id: "a", stage: "declined" })], ended);
+  const no = rowTransfer("1", [t({ id: "a", stage: "declined", refusal: "manual" })], ended);
   assert.equal(no?.kind === "done" && `${no.text}|${no.tone}`, "Said no to Ace on Mirage|muted");
   assert.equal(rowTransfer("1", [t({ id: "a", direction: "in", stage: "expired" })], ended)?.text, "Missed Ace on Mirage");
 });
@@ -247,4 +247,23 @@ test("offers: the seconds left to answer count down to 0 and stop there", () => 
   assert.equal(answerLeft(0, 59_001), 1);
   assert.equal(answerLeft(0, 60_000), 0);
   assert.equal(answerLeft(0, 90_000), 0);
+});
+
+test("row: a no their app gave by itself — or an older app's, which doesn't say — is no one's", () => {
+  const ended = { a: { at: 10, sig: "" }, b: { at: 20, sig: "" }, c: { at: 30, sig: "" } };
+  const auto = rowTransfer("1", [t({ id: "a", stage: "declined", refusal: "auto" })], ended);
+  assert.equal(auto?.kind === "done" && `${auto.text}|${auto.tone}`, "Isn't taking clips right now · Ace on Mirage|muted");
+  const old = rowTransfer("1", [t({ id: "a", stage: "declined", screenshot: true, name: "Shot" })], ended);
+  assert.equal(old?.text, "Isn't taking screenshots right now · Shot");
+  // Counted only with nos of the same kind.
+  const mixed = rowTransfer(
+    "1",
+    [
+      t({ id: "a", stage: "declined", refusal: "auto", name: "Ace" }),
+      t({ id: "b", stage: "declined", refusal: "manual", name: "Clutch" }),
+      t({ id: "c", stage: "declined", refusal: "manual", name: "Flick" }),
+    ],
+    ended,
+  );
+  assert.equal(mixed?.text, "Said no to Flick and 1 more");
 });
