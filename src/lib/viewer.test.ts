@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { leaving, menuOwns, sliderOwns, typesText } from "./viewer.ts";
+import { leaving, menuOwns, seekTarget, sliderOwns, typesText } from "./viewer.ts";
 
 test("Escape and the arrows belong to an open menu", () =>
   assert.deepEqual(["Escape", "ArrowUp", "ArrowDown"].map((k) => menuOwns(k, -1)), [true, true, true]));
@@ -28,3 +28,14 @@ test("a focused slider keeps the keys that move it", () => {
 test("unapplied edits are asked about before the player closes", () => assert.equal(leaving(false, true), "ask"));
 test("a running write keeps the player open", () => assert.equal(leaving(true, false), "wait"));
 test("with nothing changed it just closes", () => assert.equal(leaving(false, false), "go"));
+
+test("a jump stays inside the file, and waits for its length", () => {
+  assert.equal(seekTarget(12, 30), 12);
+  assert.equal(seekTarget(-4, 30), 0);
+  assert.equal(seekTarget(45, 30), 30);
+  // Before the metadata the length is NaN, and `currentTime = NaN` throws.
+  assert.equal(seekTarget(5, Number.NaN), null);
+  assert.equal(seekTarget(Number.NaN, 30), null);
+  // A stream without a known end reports Infinity: only the start holds.
+  assert.equal(seekTarget(5, Number.POSITIVE_INFINITY), 5);
+});

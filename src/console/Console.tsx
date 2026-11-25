@@ -9,6 +9,7 @@ import { changedFields, sourceWrite } from "@/lib/sourceWrite";
 import { cn } from "@/lib/cn";
 import { mockClips, mockConfig } from "@/lib/mock";
 import { useGrants } from "@/lib/useGrants";
+import { sliderOwns, typesText } from "@/lib/viewer";
 import {
   IconArrowUpRight,
   IconAudio,
@@ -1416,8 +1417,11 @@ function ClipStage({
   useEffect(() => {
     if (clip.screenshot) return;
     const onKey = (event: KeyboardEvent) => {
-      // Im Namensfeld bleiben Leertaste und Buchstaben, was sie sind.
-      if (event.target instanceof HTMLInputElement) return;
+      // Im Namensfeld bleiben Leertaste und Buchstaben, was sie sind. Ein
+      // Schieberegler ist kein Text: nach dem Ziehen am Lautstärkeregler
+      // behält er den Fokus, und nur die Pfeile bleiben bei ihm.
+      const target = event.target as HTMLInputElement | null;
+      if (typesText(target) || sliderOwns(target, event.key)) return;
       const element = video.current;
       if (!element) return;
       if (event.key === " " || event.key.toLowerCase() === "k") toggle();

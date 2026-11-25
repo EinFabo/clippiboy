@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import { snapTrim } from "@/lib/editRules";
+import { seekTarget } from "@/lib/viewer";
 import type { Trim } from "@/components/ClipEditor";
 
 /**
@@ -19,9 +20,11 @@ export function clock(seconds: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-/** Springt, und bleibt dabei innerhalb der Datei. */
+/** Springt, und bleibt dabei innerhalb der Datei. Vor den Metadaten (Dauer
+ *  NaN) nichts: `currentTime = NaN` wirft. */
 export function jump(element: HTMLVideoElement, seconds: number) {
-  element.currentTime = Math.min(Math.max(seconds, 0), element.duration);
+  const to = seekTarget(seconds, element.duration);
+  if (to !== null) element.currentTime = to;
 }
 
 /**

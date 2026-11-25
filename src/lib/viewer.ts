@@ -30,3 +30,10 @@ export function leaving(writing: boolean, dirty: boolean): "wait" | "ask" | "go"
   if (writing) return "wait";
   return dirty ? "ask" : "go";
 }
+
+/** Where a jump to `seconds` lands inside a file of `duration` — `null` while
+ *  the length is not known yet (NaN before the metadata). */
+export function seekTarget(seconds: number, duration: number): number | null {
+  if (!Number.isFinite(seconds) || Number.isNaN(duration)) return null;
+  return Math.min(Math.max(seconds, 0), duration);
+}
