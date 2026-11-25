@@ -179,7 +179,21 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (path === "/auth/logout" && method === "POST") {
     const token = request.headers.get("Authorization")!.slice(7).trim();
-    await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await tokenHash(token)).run();
+    const [, left] = await env.DB.batch([
+      env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await tokenHash(token)),
+      // A session still able to sign in (`authenticate`), on another device.
+      env.DB.prepare("SELECT 1 FROM sessions WHERE user_id = ? AND last_used >= ? LIMIT 1").bind(
+        me,
+        Date.now() - SESSION_IDLE_MS,
+      ),
+    ]);
+    // The last one: an open connection must not outlive it. The sign-out
+    // itself is done either way.
+    if (left.results.length === 0) {
+      await env.HUB.getByName(me)
+        .signedOut(me)
+        .catch((err) => console.error("sign-out", me, err));
+    }
     return json({ ok: true });
   }
   if (path === "/me" && method === "GET") return json(await loadMe(env, me));

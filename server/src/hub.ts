@@ -258,6 +258,28 @@ export class Hub extends DurableObject<Env> {
    * nothing left to compare against and tell nobody.
    */
   async closeAll(reason = "account deleted", user?: string): Promise<void> {
+    this.closeSockets(reason);
+    if (user) await this.publish(user);
+    this.messages = undefined;
+    this.stored = null;
+    await this.ctx.storage.deleteAll();
+  }
+
+  /**
+   * The user's last session was signed out: a connection still open would
+   * otherwise keep presence and relays going without any sign-in behind it.
+   * Friends hear the user went offline; "last seen" stays. The app takes the
+   * 4001 as signed out, as it does for a deleted account.
+   */
+  async signedOut(user: string): Promise<void> {
+    this.closeSockets("signed out");
+    await this.publish(user);
+    await this.ctx.storage.delete(CONTACTS);
+  }
+
+  // --- Internals ------------------------------------------------------------
+
+  private closeSockets(reason: string): void {
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.close(4001, reason);
@@ -265,13 +287,7 @@ export class Hub extends DurableObject<Env> {
         // Already closed.
       }
     }
-    if (user) await this.publish(user);
-    this.messages = undefined;
-    this.stored = null;
-    await this.ctx.storage.deleteAll();
   }
-
-  // --- Internals ------------------------------------------------------------
 
   private open(exclude?: WebSocket): WebSocket[] {
     return this.ctx
