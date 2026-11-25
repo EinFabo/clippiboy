@@ -140,6 +140,13 @@ export function Scrubber({
     const box = bar.current?.getBoundingClientRect();
     if (!box) return;
     setDragging(which);
+    // Festgehalten, damit das Loslassen auch außerhalb des Fensters ankommt.
+    const handle = event.currentTarget as HTMLElement;
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // Ein Zeiger, der schon weg ist: das Ende kommt dann über die Fälle unten.
+    }
 
     const move = (moved: PointerEvent) => {
       const ratio = Math.min(
@@ -155,13 +162,19 @@ export function Scrubber({
         ),
       );
     };
+    // Loslassen, ein abgebrochener Zeiger (Alt+Tab, Sperrbildschirm) und ein
+    // Fenster, das den Fokus verliert, enden gleich — sonst folgte der Griff
+    // danach der Maus ohne gedrückte Taste.
+    const ends = ["pointerup", "pointercancel", "lostpointercapture"] as const;
     const up = () => {
       setDragging(null);
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      for (const end of ends) window.removeEventListener(end, up);
+      window.removeEventListener("blur", up);
     };
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    for (const end of ends) window.addEventListener(end, up);
+    window.addEventListener("blur", up);
   };
 
   return (

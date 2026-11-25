@@ -208,13 +208,16 @@ function PortraitStage({
       last = next;
       portrait.onChange(next);
     };
+    // A cancelled pointer (Alt+Tab, the lock screen) ends the drag like
+    // letting go, and is stored the same — the layout on screen is the one kept.
+    const ends = ["pointerup", "pointercancel", "lostpointercapture"] as const;
     const up = () => {
       target.removeEventListener("pointermove", move);
-      target.removeEventListener("pointerup", up);
+      for (const end of ends) target.removeEventListener(end, up);
       portrait.onCommit(last);
     };
     target.addEventListener("pointermove", move);
-    target.addEventListener("pointerup", up);
+    for (const end of ends) target.addEventListener(end, up);
   };
 
   const inset = `inset(${c.y * k}px ${(g.gameScaled.width - c.x - c.width) * k}px ${(g.gameScaled.height - c.y - c.height) * k}px ${c.x * k}px)`;
