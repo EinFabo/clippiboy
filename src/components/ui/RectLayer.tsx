@@ -114,9 +114,12 @@ export function RectLayer({
     }
   };
 
+  // Handle, box and layer all listen, and the events bubble through them: the
+  // first one to see an event during a drag takes it.
   const onMove = (event: ReactPointerEvent) => {
     const state = drag.current;
     if (!state) return;
+    event.stopPropagation();
     const point = at(event);
     if (state.kind === "draw") {
       onRect(spanned(state.anchorX, state.anchorY, point.x, point.y));
@@ -129,10 +132,14 @@ export function RectLayer({
     }
   };
 
+  /** Letting go — or a pointer the system took away (Alt+Tab): stored once. */
   const onUp = (event: ReactPointerEvent) => {
-    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-    onRelease?.(rect);
+    if (!drag.current) return;
     drag.current = null;
+    event.stopPropagation();
+    const node = event.currentTarget as HTMLElement;
+    if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId);
+    onRelease?.(rect);
   };
 
   const percent = (value: number, of: number) => `${(value / of) * 100}%`;
@@ -155,6 +162,7 @@ export function RectLayer({
       onPointerDown={crop ? (event) => onDown(event, "draw") : undefined}
       onPointerMove={onMove}
       onPointerUp={onUp}
+      onPointerCancel={onUp}
     >
       {rect && rect.width > 0 && rect.height > 0 && (
         <div
@@ -173,6 +181,7 @@ export function RectLayer({
           onPointerDown={(event) => onDown(event, "move")}
           onPointerMove={onMove}
           onPointerUp={onUp}
+          onPointerCancel={onUp}
         >
           {/* Thirds. They are the reason to crop by eye rather than by number. */}
           <div className={cn("pointer-events-none absolute inset-0 opacity-40", !crop && "hidden")}>
@@ -191,6 +200,7 @@ export function RectLayer({
               onPointerDown={(event) => onDown(event, "draw", opposite(rect))}
               onPointerMove={onMove}
               onPointerUp={onUp}
+              onPointerCancel={onUp}
             />
           ))}
         </div>
