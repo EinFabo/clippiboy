@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use iroh::endpoint::{presets, Connection};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, SecretKey, TransportAddr};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -53,6 +53,14 @@ const IDLE: Duration = Duration::from_secs(30);
 /// between two tries: a stall it notices after the sender does ([`IDLE`]),
 /// its longest back-off, a dial and a handshake.
 const NO_REDIAL: Duration = Duration::from_secs(120);
+/// The iroh endpoint closes once no transfer has been open for this long, and
+/// comes up again for the next. While it is up, whoever knows this PC's
+/// lasting id — a former friend, the friends server — can tell it is online,
+/// "Appear offline" or not, and learn its address. A send waiting for its
+/// receiver to dial again is open ([`NO_REDIAL`]), so this never cuts a resume.
+const CLOSE_IDLE: Duration = Duration::from_secs(120);
+/// How often the endpoint looks whether it is still needed.
+const IDLE_CHECK: Duration = Duration::from_secs(15);
 const CHUNK: usize = 256 * 1024;
 /// Progress reaches the page at most this often.
 const EMIT_EVERY: Duration = Duration::from_millis(250);
@@ -278,13 +286,21 @@ struct Incoming {
 
 #[derive(Default)]
 pub struct Share {
-    router: tokio::sync::OnceCell<Router>,
+    /// The iroh side while a transfer needs it ([`router`], [`CLOSE_IDLE`]).
+    router: tokio::sync::Mutex<Option<Live>>,
     outgoing: Mutex<HashMap<String, Outgoing>>,
     incoming: Mutex<HashMap<String, Incoming>>,
     /// Set for a transfer the user called off, read by the loop moving it.
     cancelled: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Offers that came before the friends lists were ever loaded ([`Held`]).
     held: Mutex<Vec<Held<Offer>>>,
+}
+
+/// The router that is up, and which one it is: each gets a watcher of its own
+/// that closes it once idle ([`close_when_idle`]).
+struct Live {
+    generation: u64,
+    router: Router,
 }
 
 // --- Commands ------------------------------------------------------------------
@@ -814,6 +830,18 @@ fn offer_total(size: u64, tracks: &[TrackOffer]) -> Option<u64> {
         })
 }
 
+/// An offer's address with only the relays this app uses itself: a relay of
+/// the sender's choosing would have this PC dial a server of theirs, telling
+/// it its address. Direct addresses stay — the connection is to the key in
+/// `addr.id` either way.
+fn our_relays_only(mut addr: EndpointAddr, ours: &RelayMap) -> EndpointAddr {
+    addr.addrs.retain(|transport| match transport {
+        TransportAddr::Relay(url) => ours.contains(url),
+        _ => true,
+    });
+    addr
+}
+
 /// What to do with an offer before looking at what it holds.
 #[derive(Debug, PartialEq)]
 enum Verdict {
@@ -949,6 +977,11 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
         meta,
         stable,
     } = offer;
+    let relays = addr.relay_urls().count();
+    let addr = our_relays_only(addr, &iroh::endpoint::default_relay_mode().relay_map());
+    if addr.relay_urls().count() < relays {
+        log::info!("share: the offer {id} from {from} named a relay that is not ours — left out");
+    }
     let config = app.state::<AppState>().config_snapshot().friends;
     let share = app.state::<Share>();
     // Relays come in one after another on the one connection to the server,
@@ -1725,25 +1758,95 @@ fn settle_pin(app: &AppHandle, id: &str) {
 
 // --- Sending -------------------------------------------------------------------
 
-/// The iroh side, started the first time a clip goes either way and kept for
-/// the rest of the run.
+/// The iroh side, started when a clip goes either way and closed again once
+/// no transfer has been open for [`CLOSE_IDLE`]. Callers register their
+/// transfer first, so the watcher never closes one that is about to be used.
 async fn router(app: &AppHandle) -> Result<Router, String> {
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let share = app.state::<Share>();
-    let handler = Serve { app: app.clone() };
-    let router = share
-        .router
-        .get_or_try_init(|| async move {
-            let endpoint = Endpoint::builder(presets::N0)
-                .secret_key(identity(app).key.clone())
-                .bind()
-                .await
-                .map_err(|err| format!("Could not open the connection for sending clips: {err}"))?;
-            Ok::<_, String>(Router::builder(endpoint).accept(ALPN, handler).spawn())
-        })
-        .await?;
+    let router = {
+        let mut slot = share.router.lock().await;
+        match slot.as_ref() {
+            Some(live) if !live.router.is_shutdown() => live.router.clone(),
+            _ => {
+                let endpoint = Endpoint::builder(presets::N0)
+                    .secret_key(identity(app).key.clone())
+                    .bind()
+                    .await
+                    .map_err(|err| {
+                        format!("Could not open the connection for sending clips: {err}")
+                    })?;
+                let router = Router::builder(endpoint)
+                    .accept(ALPN, Serve { app: app.clone() })
+                    .spawn();
+                let generation = GENERATION.fetch_add(1, Ordering::SeqCst);
+                *slot = Some(Live {
+                    generation,
+                    router: router.clone(),
+                });
+                log::info!("share: connection for clips up");
+                tauri::async_runtime::spawn(close_when_idle(app.clone(), generation));
+                router
+            }
+        }
+    };
     // Without a relay or a public address the other side cannot find us yet.
     let _ = tokio::time::timeout(Duration::from_secs(10), router.endpoint().online()).await;
-    Ok(router.clone())
+    Ok(router)
+}
+
+/// Is a transfer open, either way? One that is over does not count; a send
+/// waiting for its receiver to dial again is still moving.
+fn any_open(share: &Share) -> bool {
+    share
+        .outgoing
+        .lock()
+        .values()
+        .any(|o| !o.transfer.stage.over())
+        || share
+            .incoming
+            .lock()
+            .values()
+            .any(|i| !i.transfer.stage.over())
+}
+
+/// Whether to close now: nothing has been open since `idle_since` for
+/// [`CLOSE_IDLE`]. Something open starts the wait over.
+fn idle_long_enough(
+    open: bool,
+    idle_since: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if open {
+        *idle_since = None;
+        return false;
+    }
+    now.saturating_duration_since(*idle_since.get_or_insert(now)) >= CLOSE_IDLE
+}
+
+/// Closes the router `generation` once it has been idle long enough. Checked
+/// and taken under the slot's lock, which [`router`] takes too: a transfer
+/// that registered meanwhile finds the slot empty and brings up a new one.
+async fn close_when_idle(app: AppHandle, generation: u64) {
+    let mut idle_since = None;
+    loop {
+        tokio::time::sleep(IDLE_CHECK).await;
+        let share = app.state::<Share>();
+        let mut slot = share.router.lock().await;
+        if slot.as_ref().map(|live| live.generation) != Some(generation) {
+            return;
+        }
+        if !idle_long_enough(any_open(&share), &mut idle_since, std::time::Instant::now()) {
+            continue;
+        }
+        if let Some(live) = slot.take() {
+            // Closed before the lock goes, so no new one runs beside it.
+            let closed =
+                tokio::time::timeout(Duration::from_secs(10), live.router.shutdown()).await;
+            log::info!("share: connection for clips closed, nothing open ({closed:?})");
+        }
+        return;
+    }
 }
 
 #[derive(Clone)]
@@ -1788,6 +1891,15 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         let open = matches!(entry.transfer.stage, Stage::Asking | Stage::Moving);
         if !same(entry.secret.as_bytes(), ask.secret.as_bytes()) || !open {
             return Err("not allowed".into());
+        }
+        // The secret went through the friends server; once their yes named
+        // the device it came from, only that device may fetch.
+        if !named_device(entry.answered.as_deref(), connection.remote_id()) {
+            log::warn!(
+                "share: {} asked for by a device their yes did not name — refused",
+                ask.id
+            );
+            return Err("not the device that said yes".into());
         }
         entry.transfer.stage = Stage::Moving;
         // The tracks go first, so the clip's bytes count after all of them.
@@ -1906,6 +2018,17 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+/// May a connection from `remote` fetch an offer whose yes named `answered`?
+/// Before the yes is in — their dial can beat it through the server — or
+/// when it named none (an app before 1.0.1, a key not kept), the secret alone
+/// decides, as it did before.
+fn named_device(answered: Option<&str>, remote: EndpointId) -> bool {
+    match answered.and_then(|node| node.parse::<EndpointId>().ok()) {
+        Some(named) => named == remote,
+        None => true,
+    }
 }
 
 /// How long the sender waits for the receiver's "k": the receiver reads the
@@ -2703,6 +2826,104 @@ mod tests {
         ids.sort();
         assert_eq!(ids, ["asking", "moving", "preparing"]);
         assert!(sends_of(&all, "c").is_empty());
+    }
+
+    /// The endpoint goes once nothing has been open for [`CLOSE_IDLE`];
+    /// anything open in between starts the wait over.
+    #[test]
+    fn the_connection_closes_only_after_two_idle_minutes() {
+        let start = std::time::Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut since = None;
+        assert!(!idle_long_enough(true, &mut since, start));
+        assert!(!idle_long_enough(false, &mut since, at(0)));
+        assert!(!idle_long_enough(false, &mut since, at(119)));
+        assert!(
+            !idle_long_enough(true, &mut since, at(120)),
+            "something open starts it over"
+        );
+        assert!(!idle_long_enough(false, &mut since, at(121)));
+        assert!(!idle_long_enough(false, &mut since, at(240)));
+        assert!(idle_long_enough(false, &mut since, at(241)));
+    }
+
+    /// A send whose receiver dropped out stays Moving until [`NO_REDIAL`]
+    /// gives it up: the connection stays for the redial that resumes it.
+    #[test]
+    fn a_send_waiting_for_a_redial_keeps_the_connection() {
+        let share = Share::default();
+        assert!(!any_open(&share));
+        let send = |stage: Stage| Outgoing {
+            transfer: outgoing("f", stage),
+            path: PathBuf::new(),
+            size: 1,
+            secret: String::new(),
+            tracks: Vec::new(),
+            answered: None,
+            reached: None,
+            serving: 0,
+            quiet_since: std::time::Instant::now(),
+        };
+        share
+            .outgoing
+            .lock()
+            .insert("o".into(), send(Stage::Moving));
+        assert!(any_open(&share), "waiting for the redial");
+        share
+            .outgoing
+            .lock()
+            .insert("o".into(), send(Stage::Failed));
+        assert!(!any_open(&share), "given up");
+        let addr = EndpointAddr::new(SecretKey::from_bytes(&[5; 32]).public());
+        share.incoming.lock().insert(
+            "i".into(),
+            Incoming {
+                transfer: Transfer {
+                    direction: Direction::In,
+                    ..outgoing("f", Stage::Asking)
+                },
+                size: 1,
+                sha256: String::new(),
+                secret: String::new(),
+                addr,
+                meta: test_meta(),
+                stable: true,
+            },
+        );
+        assert!(any_open(&share), "an offer waiting for an answer");
+    }
+
+    #[test]
+    fn only_the_device_their_yes_named_may_fetch() {
+        let named = SecretKey::from_bytes(&[3; 32]).public();
+        let other = SecretKey::from_bytes(&[4; 32]).public();
+        assert!(named_device(Some(&named.to_string()), named));
+        assert!(!named_device(Some(&named.to_string()), other));
+        assert!(
+            named_device(None, other),
+            "no yes yet, or one that named none: the secret decides"
+        );
+        assert!(named_device(Some("no key"), other));
+    }
+
+    /// The relays an offer names are dialled: only the ones this app uses
+    /// itself stay, its direct addresses stay too.
+    #[test]
+    fn an_offer_keeps_only_our_relays() {
+        let ours = iroh::endpoint::default_relay_mode().relay_map();
+        let n0 = ours.urls::<Vec<_>>().first().cloned().expect("n0 relays");
+        let theirs: iroh::RelayUrl = "https://relay.example.com".parse().unwrap();
+        let direct: std::net::SocketAddr = "203.0.113.5:4433".parse().unwrap();
+        let addr = EndpointAddr::new(SecretKey::from_bytes(&[6; 32]).public())
+            .with_relay_url(n0.clone())
+            .with_relay_url(theirs)
+            .with_ip_addr(direct);
+        // As it comes: through the friends server, as JSON.
+        let addr: EndpointAddr =
+            serde_json::from_value(serde_json::to_value(&addr).unwrap()).unwrap();
+        let kept = our_relays_only(addr, &ours);
+        assert_eq!(kept.relay_urls().collect::<Vec<_>>(), [&n0]);
+        assert_eq!(kept.ip_addrs().collect::<Vec<_>>(), [&direct]);
     }
 
     /// Their side ignores a second offer while the first still asks — so this
