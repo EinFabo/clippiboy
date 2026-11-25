@@ -53,8 +53,13 @@ The app opens `/auth/start?challenge=…` with the hash of a verifier it keeps.
 Discord returns the browser to `/auth/callback`, which hands the app a one-time
 code through `clippiboy://auth?code=…`. Only the app holding the verifier can
 trade that code for a session at `/auth/exchange`, and a cookie ties the
-callback to the browser that started the login. Sessions are stored as hashes
-and expire after 180 days without use; the hourly cron then deletes them.
+callback to the browser that started the login. The start writes nothing: the
+state it hands Discord carries the challenge and the start time under an
+HMAC (keyed with the Discord client secret), and the sign-in's row is written
+only once Discord has confirmed it. A state signs in once; one Discord turned
+down is dropped from the cookie and noted in the edge cache. Sessions are
+stored as hashes and expire after 180 days without use; the hourly cron then
+deletes them.
 
 ## Limits
 

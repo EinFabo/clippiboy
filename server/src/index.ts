@@ -14,7 +14,7 @@ import {
   type DiscordUser,
   type User,
 } from "./db";
-import { pageCsp, statesIn, withState } from "./login";
+import { CHALLENGE_PATTERN, LOGIN_TTL_MS, pageCsp, signState, statesIn, verifyState, withoutState, withState } from "./login";
 import { base64url, body, escapeHtml, HttpError, json, normalizeCode, randomToken, sameText, sha256 } from "./util";
 import {
   applySuspensions,
@@ -56,7 +56,6 @@ import {
 
 export { Hub } from "./hub";
 
-const LOGIN_TTL_MS = 10 * 60 * 1000;
 const STATE_COOKIE = "cb_login";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -114,7 +113,12 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (!(await underLimit(request, env, "auth"))) return page("Too many sign-ins", "Wait a minute, then try again from ClippiBoy.");
     return authStart(request, url, env);
   }
-  if (path === "/auth/callback" && method === "GET") return authCallback(request, url, env);
+  if (path === "/auth/callback" && method === "GET") {
+    // Each one asks Discord, so it is counted per address like the start.
+    // Nothing is spent yet: the page can be reloaded a minute later.
+    if (!(await underLimit(request, env, "callback"))) return page("Too many sign-ins", "Wait a minute, then reload this page.");
+    return authCallback(request, url, env);
+  }
   // A suspended account can sign in no more, so it is deleted from the page
   // that says it is suspended.
   if (path === "/auth/delete" && method === "POST") {
@@ -268,7 +272,7 @@ async function spend(env: Env, me: string, budget: "share" | "connect" | "friend
 async function underLimit(
   request: Request,
   env: Env,
-  route: "auth" | "ping" | "exchange" | "invite" | "webhook" | "delete",
+  route: "auth" | "callback" | "ping" | "exchange" | "invite" | "webhook" | "delete",
 ): Promise<boolean> {
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   return (await env.ANON_LIMIT.limit({ key: `${route}:${addressKey(address)}` })).success;
@@ -301,16 +305,56 @@ async function withinCeiling(env: Env, route: "ping"): Promise<boolean> {
 // can trade that code for a session — another program that grabs the link
 // cannot. The cookie ties the callback to the browser that started the login,
 // so nobody can send someone a half-finished login of their own to complete.
+//
+// The start writes nothing: the state carries the challenge and the start
+// time, signed (`signState` in login.ts), so a flood of starts costs the
+// database nothing. The sign-in's row is written once Discord has said yes,
+// and stays for the state's ten minutes, so a state signs in once.
+
+/** The cookie holding the browser's sign-in states, or clearing it when there are none. */
+function stateCookie(value: string): string {
+  return value
+    ? `${STATE_COOKIE}=${value}; Path=/auth; Max-Age=600; HttpOnly; Secure; SameSite=Lax`
+    : `${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
+}
+
+/**
+ * A state Discord turned down is spent: noted in this data centre's cache
+ * for the state's lifetime, which writes nothing anywhere. Only best effort —
+ * another data centre, or workers.dev, which has no cache, does not see it —
+ * so the browser's cookie forgets the state too, and the callback's limit per
+ * address holds whatever is left: a fresh state is as cheap to get as a
+ * spent one is to retry. A row per failure would have been a write anybody
+ * could cause, which is what the start no longer does.
+ */
+function spentKey(url: URL, state: string): Request {
+  return new Request(`${url.origin}/auth/spent/${state}`);
+}
+
+async function wasSpent(url: URL, state: string): Promise<boolean> {
+  try {
+    return (await caches.default.match(spentKey(url, state))) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+async function markSpent(url: URL, state: string): Promise<void> {
+  try {
+    await caches.default.put(
+      spentKey(url, state),
+      new Response("spent", { headers: { "Cache-Control": `max-age=${LOGIN_TTL_MS / 1000}` } }),
+    );
+  } catch (err) {
+    console.error("spent state", err);
+  }
+}
 
 async function authStart(request: Request, url: URL, env: Env): Promise<Response> {
   const challenge = url.searchParams.get("challenge") ?? "";
-  if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new HttpError(400, "Missing challenge.");
-  if (!env.DISCORD_CLIENT_ID) throw new HttpError(503, "Discord login is not configured yet.");
-  const now = Date.now();
-  const state = randomToken(24);
-  await env.DB.prepare("INSERT INTO logins (state, challenge, created_at) VALUES (?, ?, ?)")
-    .bind(state, challenge, now)
-    .run();
+  if (!CHALLENGE_PATTERN.test(challenge)) throw new HttpError(400, "Missing challenge.");
+  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) throw new HttpError(503, "Discord login is not configured yet.");
+  const state = await signState(env.DISCORD_CLIENT_SECRET, challenge, Date.now());
   const authorize = new URL("https://discord.com/oauth2/authorize");
   authorize.searchParams.set("client_id", env.DISCORD_CLIENT_ID);
   authorize.searchParams.set("response_type", "code");
@@ -321,7 +365,7 @@ async function authStart(request: Request, url: URL, env: Env): Promise<Response
     status: 302,
     headers: {
       Location: authorize.toString(),
-      "Set-Cookie": `${STATE_COOKIE}=${withState(statesIn(request.headers.get("Cookie"), STATE_COOKIE), state)}; Path=/auth; Max-Age=600; HttpOnly; Secure; SameSite=Lax`,
+      "Set-Cookie": stateCookie(withState(statesIn(request.headers.get("Cookie"), STATE_COOKIE), state)),
     },
   });
 }
@@ -334,41 +378,75 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
   if (!states.some((s) => sameText(s, state))) {
     return page("Sign-in expired", "Start the sign-in again from ClippiBoy, in this browser.");
   }
-  const login = await env.DB.prepare("SELECT created_at FROM logins WHERE state = ? AND code IS NULL")
-    .bind(state)
-    .first<{ created_at: number }>();
-  if (!login || Date.now() - login.created_at > LOGIN_TTL_MS) {
+  const login = await verifyState(env.DISCORD_CLIENT_SECRET, state, Date.now());
+  // Signed in with once already (its row stays for the state's lifetime), or
+  // turned down by Discord.
+  if (
+    !login ||
+    (await wasSpent(url, state)) ||
+    (await env.DB.prepare("SELECT 1 FROM logins WHERE state = ?").bind(state).first()) !== null
+  ) {
     return page("Sign-in expired", "Start the sign-in again from ClippiBoy.");
   }
+  // From here a failure spends the state: Discord's code is used up, and the
+  // same state must not ask Discord again.
+  const failed = async (text: string) => {
+    await markSpent(url, state);
+    return page("Discord said no", text, undefined, [stateCookie(withoutState(states, state))]);
+  };
 
-  const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: `${url.origin}/auth/callback`,
-      client_id: env.DISCORD_CLIENT_ID,
-      client_secret: env.DISCORD_CLIENT_SECRET,
-    }),
-  });
+  let tokenResponse: Response;
+  try {
+    tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: `${url.origin}/auth/callback`,
+        client_id: env.DISCORD_CLIENT_ID,
+        client_secret: env.DISCORD_CLIENT_SECRET,
+      }),
+    });
+  } catch (err) {
+    console.error("discord token", err);
+    return failed("Discord did not confirm the sign-in. Try again from ClippiBoy.");
+  }
   if (!tokenResponse.ok) {
     console.error("discord token", tokenResponse.status, await tokenResponse.text());
-    return page("Discord said no", "Discord did not confirm the sign-in. Try again from ClippiBoy.");
+    return failed("Discord did not confirm the sign-in. Try again from ClippiBoy.");
   }
-  const { access_token } = (await tokenResponse.json()) as { access_token: string };
-  const userResponse = await fetch("https://discord.com/api/users/@me", {
-    headers: { Authorization: `Bearer ${access_token}` },
-  });
-  if (!userResponse.ok) return page("Discord said no", "Could not read your Discord profile.");
+  const { access_token } = (await tokenResponse.json().catch(() => ({}))) as { access_token?: unknown };
+  if (typeof access_token !== "string" || !access_token) {
+    return failed("Discord did not confirm the sign-in. Try again from ClippiBoy.");
+  }
+  let userResponse: Response;
+  try {
+    userResponse = await fetch("https://discord.com/api/users/@me", {
+      headers: { Authorization: `Bearer ${access_token}` },
+    });
+  } catch (err) {
+    console.error("discord profile", err);
+    return failed("Could not read your Discord profile.");
+  }
+  if (!userResponse.ok) return failed("Could not read your Discord profile.");
   const discord = (await userResponse.json()) as DiscordUser;
   const userId = await upsertDiscordUser(env.DB, discord, await departedHash(env, discord.id));
   const banned = await env.DB.prepare("SELECT 1 FROM users WHERE id = ? AND banned_at IS NOT NULL").bind(userId).first();
+
+  // The sign-in's one row, now that Discord has said yes, claimed by its
+  // state: a second callback with it finds it taken. Its ten minutes run from
+  // the start, as the state's do.
+  const oneTime = randomToken(24);
+  const claimed = await env.DB.prepare(
+    "INSERT INTO logins (state, challenge, code, user_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (state) DO NOTHING",
+  )
+    .bind(state, login.challenge, oneTime, userId, login.issuedAt)
+    .run();
+  if (claimed.meta.changes !== 1) return page("Sign-in expired", "Start the sign-in again from ClippiBoy.");
   if (banned) {
     // No session, but the account may still be deleted: the code is good for
     // that alone (`deleteSuspended`), from this browser and within the sign-in's time.
-    const oneTime = randomToken(24);
-    await env.DB.prepare("UPDATE logins SET code = ?, user_id = ? WHERE state = ?").bind(oneTime, userId, state).run();
     return page(
       "Account suspended",
       "This ClippiBoy account has been suspended. You can still delete it, with its friends and links.",
@@ -379,11 +457,8 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
   }
 
   const invited = await inviteAtSignIn(request, env, userId);
-
-  const oneTime = randomToken(24);
-  await env.DB.prepare("UPDATE logins SET code = ?, user_id = ? WHERE state = ?").bind(oneTime, userId, state).run();
   const back = `clippiboy://auth?code=${oneTime}`;
-  const cookies = [`${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax`];
+  const cookies = [stateCookie("")];
   // Spent once read, whatever came of it: one request per invite.
   if (invited.present) cookies.push(clearInviteCookie());
   const friend =
@@ -461,17 +536,16 @@ async function deleteSuspended(request: Request, env: Env): Promise<Response> {
   if (!suspended) return page("Not suspended", "Delete the account in ClippiBoy, under Settings → Friends.");
   // Without the pepper nothing outlives the account, the suspension included.
   if (!env.DEPARTED_PEPPER) return page("Not possible right now", "Try again later, or write to privacy@clippiboy.com.");
-  // Spent once it is used.
-  await env.DB.prepare("DELETE FROM logins WHERE state = ?").bind(login.state).run();
+  // Spent once it is used; the row stays until its time is up, so its state
+  // cannot sign in again meanwhile.
+  await env.DB.prepare("UPDATE logins SET code = NULL, user_id = NULL WHERE state = ?").bind(login.state).run();
   try {
     await deleteAccount(env, login.user_id);
   } catch (err) {
     console.error("delete suspended", login.user_id, err);
     return page("Something went wrong", "The account is not deleted yet. Sign in again from ClippiBoy and try once more.");
   }
-  return page("Account deleted", "Your ClippiBoy account is gone. You can close this tab.", undefined, [
-    `${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
-  ]);
+  return page("Account deleted", "Your ClippiBoy account is gone. You can close this tab.", undefined, [stateCookie("")]);
 }
 
 async function authExchange(request: Request, env: Env): Promise<Response> {
@@ -483,8 +557,11 @@ async function authExchange(request: Request, env: Env): Promise<Response> {
   const login = await env.DB.prepare("SELECT state, challenge, user_id, created_at FROM logins WHERE code = ?")
     .bind(code)
     .first<{ state: string; challenge: string; user_id: string; created_at: number }>();
-  // Spent on the first try, right or wrong.
-  if (login) await env.DB.prepare("DELETE FROM logins WHERE state = ?").bind(login.state).run();
+  // Spent on the first try, right or wrong. The row itself stays until its
+  // time is up (the hourly cron), so its state cannot sign in again meanwhile.
+  if (login) {
+    await env.DB.prepare("UPDATE logins SET code = NULL, user_id = NULL WHERE state = ?").bind(login.state).run();
+  }
   if (!login || Date.now() - login.created_at > LOGIN_TTL_MS) {
     throw new HttpError(400, "That sign-in has expired.");
   }
