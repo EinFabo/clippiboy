@@ -44,6 +44,7 @@ import { favoriteTarget } from "@/lib/clipSelect";
 import { toast } from "@/lib/toastBus";
 import { useFriends } from "@/lib/friends";
 import { useShare } from "@/lib/share";
+import { whenViewerFree } from "@/lib/viewerGuard";
 import {
   NO_FILTER,
   facetLabel,
@@ -417,13 +418,24 @@ export function Clips({
   // A clip handed over from the console. The filter has to go first: the clip
   // may not be in whatever was on screen, and the player counts in the list it
   // is given. The gallery then shows that clip's type, in the current order.
+  // A viewer already open is asked first, as when it is closed: a running save
+  // is waited for, unapplied edits are asked about.
   useEffect(() => {
     if (!focus) return;
-    const clip = clips.find((c) => c.id === focus.id);
+    if (!clips.some((c) => c.id === focus.id)) return;
+    onFocused?.();
+    whenViewerFree(() => handOver(focus));
+    // `handOver` reads the library afresh when it runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, clips, onFocused]);
+
+  const handOver = (focus: FocusClip) => {
+    const all = useEngine.getState().clips;
+    const clip = all.find((c) => c.id === focus.id);
     if (!clip) return;
     const next: ClipFilter = { ...NO_FILTER, kind: kindOf(clip) };
     setFilter(next);
-    const list = sortClips(filterClips(clips, next), useGallery.getState().sort);
+    const list = sortClips(filterClips(all, next), useGallery.getState().sort);
     setPlaylist(list.map((c) => c.id));
     // Wie beim Öffnen aus der Galerie: was angesehen wurde, wird beim Schließen
     // in seinen Spielordner einsortiert. Ohne diese Zeile wäre der Weg über die
@@ -433,8 +445,7 @@ export function Clips({
     // Vor dem Öffnen, damit der Player die Stelle schon beim ersten Bild hat.
     setStartAt(focus.at);
     setOpen(list.findIndex((c) => c.id === focus.id));
-    onFocused?.();
-  }, [focus, clips, onFocused]);
+  };
 
   /** Page on inside the open viewer. Both of them do it the same way. */
   const openIndex = (next: number) => {
@@ -486,6 +497,13 @@ export function Clips({
       shownId.current = coming.current;
       coming.current = null;
       if (at !== open) setOpen(at);
+      return;
+    }
+    // The last clip of the list went, deleted in this player or elsewhere: the
+    // viewer is unmounted already and will never call `onClose`, so the gallery
+    // closes it itself — or it stays `inert` behind a player that is not there.
+    if (playing.length === 0) {
+      closePlayer();
       return;
     }
     const was = shownId.current;

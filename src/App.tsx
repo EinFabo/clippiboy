@@ -27,6 +27,7 @@ import { Friends } from "./routes/Friends";
 import { Settings } from "./routes/settings";
 import { OPEN_SETTINGS_EVENT } from "./lib/settingsLink";
 import { OPEN_CLIP_EVENT } from "./lib/share";
+import { whenViewerFree } from "./lib/viewerGuard";
 import { SOLO_CLEAR_ATTEMPTS, soloToClear } from "./lib/audioRows";
 
 export default function App() {
@@ -66,9 +67,10 @@ export default function App() {
     }
   }, [sources, upsertSource]);
 
-  // `openSettings` from a link anywhere in the window.
+  // `openSettings` from a link anywhere in the window. A page switch drops an
+  // open clip viewer, so it is asked first (unapplied edits, a running save).
   useEffect(() => {
-    const open = () => setRoute("settings");
+    const open = () => whenViewerFree(() => setRoute("settings"));
     window.addEventListener(OPEN_SETTINGS_EVENT, open);
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, open);
   }, []);
@@ -77,7 +79,7 @@ export default function App() {
   // brings the window up, the Friends page opens Add friend with the code in it.
   const addSeq = useFriends((s) => s.add?.seq ?? 0);
   useEffect(() => {
-    if (addSeq > 0) setRoute("friends");
+    if (addSeq > 0) whenViewerFree(() => setRoute("friends"));
   }, [addSeq]);
 
   // "Open" on a clip a friend sent, from the Friends page.

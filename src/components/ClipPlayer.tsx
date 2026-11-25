@@ -30,6 +30,7 @@ import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
+import { guardViewer } from "@/lib/viewerGuard";
 import { useGrants } from "@/lib/useGrants";
 import type { Clip, ClipEdit, FacecamView, PortraitLayout } from "@/lib/types";
 
@@ -135,10 +136,16 @@ export function ClipPlayer({
   const dirtyRef = useRef(false);
   const [askingDiscard, setAskingDiscard] = useState(false);
   /** What follows once the discard question is confirmed: which way to page,
-   *  0 to close, or "mixer" to go set up tracks in the mixer. */
-  const [pendingStep, setPendingStep] = useState<number | "mixer">(0);
+   *  0 to close, "mixer" to go set up tracks in the mixer, or "away" for a way
+   *  out from outside (`away`). */
+  const [pendingStep, setPendingStep] = useState<number | "mixer" | "away">(0);
   /** A step "Discard changes" asked for while a write ran; see `leaveTo`. */
-  const leaveAfterWrite = useRef<number | "mixer" | null>(null);
+  const leaveAfterWrite = useRef<number | "mixer" | "away" | null>(null);
+  /** A way out that started outside the player — the console handing over a
+   *  clip, another page — waiting for the question or a running write. */
+  const away = useRef<(() => void) | null>(null);
+  /** `away` came while a write ran: asked again once it is done. */
+  const awayAfterWrite = useRef(false);
   writing.current = saving || restoring;
   const [writeProgress, setWriteProgress] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
@@ -686,17 +693,45 @@ export function ClipPlayer({
         : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration)));
   dirtyRef.current = dirty;
   /** Where "Discard changes" leads: the mixer, a clip to either side, or out (0). */
-  const leaveTo = (where: number | "mixer") => {
-    if (where === "mixer") onOpenMixer();
+  const leaveTo = (where: number | "mixer" | "away") => {
+    if (where === "away") {
+      const go = away.current;
+      away.current = null;
+      go?.();
+    } else if (where === "mixer") onOpenMixer();
     else if (where) step(where, true);
     else close();
   };
+  /** A way out from outside: the same as the player's own — wait for a write,
+   *  ask about unapplied trim and mix, or go. */
+  const leaveFromOutside = (go: () => void) => {
+    away.current = go;
+    const verdict = closing(writing.current, dirtyRef.current);
+    if (verdict === "wait") awayAfterWrite.current = true;
+    else if (verdict === "ask") {
+      setPendingStep("away");
+      setAskingDiscard(true);
+    } else leaveTo("away");
+  };
+  // Asked about paging or closing instead: that question is the one answered.
+  useEffect(() => {
+    if (pendingStep !== "away") away.current = null;
+  }, [pendingStep]);
+  const outside = useRef(leaveFromOutside);
+  outside.current = leaveFromOutside;
+  useEffect(() => guardViewer((go) => outside.current(go)), []);
   // "Discard changes" confirmed while a save ran: closing, paging and the
   // mixer all wait for a write, and the click used to be dropped. It is
   // carried out once the write is done.
   const writingNow = saving || restoring;
   useEffect(() => {
-    if (writingNow || leaveAfterWrite.current === null) return;
+    if (writingNow) return;
+    if (awayAfterWrite.current && away.current) {
+      awayAfterWrite.current = false;
+      leaveFromOutside(away.current);
+      return;
+    }
+    if (leaveAfterWrite.current === null) return;
     const where = leaveAfterWrite.current;
     leaveAfterWrite.current = null;
     leaveTo(where);
@@ -704,11 +739,15 @@ export function ClipPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [writingNow]);
   // Edits that were applied meanwhile need no question any more.
+  // A way out from outside that was waiting on the question goes ahead then.
   useEffect(() => {
     if (!dirty) {
       setAskingDiscard(false);
       setAskingTrim(false);
+      if (pendingStep === "away" && away.current && !writing.current && !awayAfterWrite.current) leaveTo("away");
     }
+    // Only a change of `dirty` starts it; `leaveTo` is this render's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty]);
 
   /**
@@ -920,7 +959,10 @@ export function ClipPlayer({
               if (writing.current) leaveAfterWrite.current = pendingStep;
               else leaveTo(pendingStep);
             }}
-            onCancel={() => setAskingDiscard(false)}
+            onCancel={() => {
+              setAskingDiscard(false);
+              away.current = null;
+            }}
           />
         ) : (
           <div className="flex shrink-0 items-center gap-3">

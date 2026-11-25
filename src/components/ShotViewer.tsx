@@ -42,6 +42,7 @@ import { formatAgo, formatSize } from "@/lib/format";
 import { EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
 import { sliderOwns, typesText } from "@/lib/viewer";
+import { guardViewer } from "@/lib/viewerGuard";
 import { ShotHistory } from "@/lib/shotHistory";
 import { keyOf, shortcut } from "@/lib/shotKeys";
 import { toast } from "@/lib/toastBus";
@@ -474,6 +475,26 @@ export function ShotViewer({
   // stale answer — which is the very loss this is meant to prevent.
   }, [askingDelete, askingDiscard, busy, close, edit, mode, redo, selected, step, undo, unsaved]);
 
+  /** A way out that started outside the viewer — the console handing over a
+   *  clip, another page — waiting for the question about the marks or a save. */
+  const away = useRef<(() => void) | null>(null);
+  /** `away` came during a save: asked again once it is done. */
+  const awayAfterSave = useRef(false);
+  /** Set further down, where the editor's state is known. */
+  const outside = useRef<(go: () => void) => void>((go) => go());
+  useEffect(() => guardViewer((go) => outside.current(go)), []);
+  useEffect(() => {
+    if (busy || !awayAfterSave.current || !away.current) return;
+    awayAfterSave.current = false;
+    outside.current(away.current);
+  }, [busy]);
+  /** "Discard the marks" or "Keep drawing" answered a way out from outside. */
+  const answerAway = (go: boolean) => {
+    const then = away.current;
+    away.current = null;
+    if (go) then?.();
+  };
+
   if (!clip) return null;
 
 
@@ -792,6 +813,21 @@ export function ShotViewer({
 
   /** The editor is open — the picture underneath must not change now. */
   const editing = mode !== "view";
+
+  // The same as the ✕: wait for a save, ask about unsaved marks, or go.
+  outside.current = (go) => {
+    away.current = go;
+    if (busy) {
+      awayAfterSave.current = true;
+    } else if (editing && unsaved) {
+      // The question stands among the marks, not in the crop.
+      if (mode === "crop") {
+        setSel(null);
+        setMode("draw");
+      }
+      setAskingDiscard(true);
+    } else answerAway(true);
+  };
   /** The stored edit is in — before that, tools would draw on the wrong ground. */
   const ready = !inTauri || edit !== null;
 
@@ -1235,8 +1271,14 @@ export function ShotViewer({
                         confirmTitle="Throw them away"
                         cancelLabel="Keep drawing"
                         cancelTitle="Back to the marks — Escape does the same"
-                        onConfirm={leaveEditing}
-                        onCancel={() => setAskingDiscard(false)}
+                        onConfirm={() => {
+                          leaveEditing();
+                          answerAway(true);
+                        }}
+                        onCancel={() => {
+                          setAskingDiscard(false);
+                          answerAway(false);
+                        }}
                       />
                     ) : (
                       <Button size="sm" variant="ghost" onClick={leaveEditing}>
