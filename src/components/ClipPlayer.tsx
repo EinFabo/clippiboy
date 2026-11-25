@@ -2,7 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
-import { ClipEditor, type Trim } from "@/components/ClipEditor";
+import { CameraSection, ClipEditor, type EditorCam, type Trim } from "@/components/ClipEditor";
+import { FLOATING } from "@/components/ui/Menu";
 import { SaveVeil, type SaveVeilHandle } from "@/components/ui/BusyVeil";
 import { ExportDialog } from "@/components/ExportDialog";
 import { CamStage } from "@/components/CamStage";
@@ -571,7 +572,8 @@ export function ClipPlayer({
     wake();
     return () => clearTimeout(restTimer.current);
   }, [isFull, playing, wake]);
-  /** The pointer is on the bar: resting there is aiming, not leaving it alone. */
+  /** The pointer is on the bar or the cam panel: resting there is aiming, not
+   *  leaving it alone. */
   const [onBar, setOnBar] = useState(false);
   // The bar unmounts with the fullscreen and never reports the pointer leaving.
   useEffect(() => setOnBar(false), [isFull]);
@@ -907,6 +909,30 @@ export function ClipPlayer({
 
   const progress = duration > 0 ? (time / duration) * 100 : 0;
 
+  // The camera's controls: in the editing pane, and in fullscreen over the
+  // picture, where the pane is gone.
+  const editorCam: EditorCam | null =
+    clip.facecam?.state === "baked"
+      ? { baked: true }
+      : camView && camDraft
+        ? {
+            baked: false,
+            draft: camDraft,
+            changed: camChanged,
+            atDefault: sameFacecam(camDraft, {
+              layout: { ...defaultCam.layout, visible: true },
+              delayMs: defaultCam.delayMs,
+            }),
+            canBake: clip.facecam?.state === "ready" && !clip.original,
+            onChange: (patch) => setCamDraft((draft) => draft && { ...draft, ...patch }),
+            onReset: () =>
+              setCamDraft({ layout: { ...defaultCam.layout, visible: true }, delayMs: defaultCam.delayMs }),
+            onBake: () => void bakeCam(),
+            portrait: portraitOn,
+            onPortrait: setPortraitOn,
+          }
+        : null;
+
   // Hung under <body> rather than where it is written. The route wrapper it
   // would otherwise sit in animates a transform, and in Chromium that makes it
   // the frame of reference for every `fixed` descendant — the player would then
@@ -1159,12 +1185,15 @@ export function ClipPlayer({
             label={restoring ? "Restoring" : "Saving"}
           />
 
-          {isFull && (
+          {isFull && editorCam && !editorCam.baked && (
             <div
+              data-cam-panel
+              style={{ background: FLOATING, backdropFilter: "blur(20px)" }}
               className={cn(
-                "absolute inset-x-0 bottom-0 flex items-center gap-4 bg-gradient-to-t",
-                "from-black/85 via-black/40 to-transparent px-8 pt-20 pb-7",
-                "transition-opacity duration-300",
+                "absolute top-6 w-[340px] rounded-[16px] border border-white/10 p-4",
+                "shadow-[0_8px_32px_rgba(0,0,0,0.4)] transition-opacity duration-300",
+                // Across from the camera, so it never lies over what it moves.
+                camDraft && camDraft.layout.x > 0.5 ? "left-6" : "right-6",
                 fullChrome ? "opacity-100" : "pointer-events-none opacity-0",
               )}
               onPointerEnter={() => setOnBar(true)}
@@ -1173,38 +1202,63 @@ export function ClipPlayer({
                 wake();
               }}
             >
-              <PlayButton playing={playing} disabled={broken} onClick={toggle} />
-              <Scrubber
-                progress={progress}
-                fillRef={fullFill}
-                knobRef={fullKnob}
-                duration={duration}
-                trim={trim}
-                waveform={waveform}
-                onSeek={(ratio) => seekTo(ratio * duration)}
-                onTrim={setTrim}
-              />
-              <span className="shrink-0 font-mono text-xs text-ink-muted tabular-nums">
-                <span ref={fullClock}>{clock(time)}</span> / {clock(duration)}
-              </span>
-              <Volume
-                value={muted ? 0 : volume}
-                onChange={(v) => {
-                  setVolume(v);
-                  setMuted(v === 0);
+              <CameraSection cam={editorCam} busy={saving || restoring} />
+            </div>
+          )}
+
+          {isFull && (
+            // Only the row of controls takes the pointer. The shade above it
+            // passes it through: the camera sits in a bottom corner by
+            // default, half under it, and could not be grabbed there.
+            <div
+              className={cn(
+                "pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t",
+                "from-black/85 via-black/40 to-transparent px-8 pt-20 pb-7",
+                "transition-opacity duration-300",
+                fullChrome ? "opacity-100" : "opacity-0",
+              )}
+            >
+              <div
+                className={cn("flex items-center gap-4", fullChrome && "pointer-events-auto")}
+                onPointerEnter={() => setOnBar(true)}
+                onPointerLeave={() => {
+                  setOnBar(false);
+                  wake();
                 }}
-                onToggleMute={() => setMuted((m) => !m)}
-              />
-              <button
-                aria-label="Exit fullscreen"
-                onClick={fullscreen}
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-pill text-ink-muted
-                  transition-colors hover:bg-white/10 hover:text-ink"
               >
-                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
-                </svg>
-              </button>
+                <PlayButton playing={playing} disabled={broken} onClick={toggle} />
+                <Scrubber
+                  progress={progress}
+                  fillRef={fullFill}
+                  knobRef={fullKnob}
+                  duration={duration}
+                  trim={trim}
+                  waveform={waveform}
+                  onSeek={(ratio) => seekTo(ratio * duration)}
+                  onTrim={setTrim}
+                />
+                <span className="shrink-0 font-mono text-xs text-ink-muted tabular-nums">
+                  <span ref={fullClock}>{clock(time)}</span> / {clock(duration)}
+                </span>
+                <Volume
+                  value={muted ? 0 : volume}
+                  onChange={(v) => {
+                    setVolume(v);
+                    setMuted(v === 0);
+                  }}
+                  onToggleMute={() => setMuted((m) => !m)}
+                />
+                <button
+                  aria-label="Exit fullscreen"
+                  onClick={fullscreen}
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-pill text-ink-muted
+                    transition-colors hover:bg-white/10 hover:text-ink"
+                >
+                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+                  </svg>
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1238,28 +1292,7 @@ export function ClipPlayer({
           }}
           onCancelTrim={() => setAskingTrim(false)}
           onOpenMixer={requestMixer}
-          cam={
-            clip.facecam?.state === "baked"
-              ? { baked: true }
-              : camView && camDraft
-                ? {
-                    baked: false,
-                    draft: camDraft,
-                    changed: camChanged,
-                    atDefault: sameFacecam(camDraft, {
-                      layout: { ...defaultCam.layout, visible: true },
-                      delayMs: defaultCam.delayMs,
-                    }),
-                    canBake: clip.facecam?.state === "ready" && !clip.original,
-                    onChange: (patch) => setCamDraft((draft) => draft && { ...draft, ...patch }),
-                    onReset: () =>
-                      setCamDraft({ layout: { ...defaultCam.layout, visible: true }, delayMs: defaultCam.delayMs }),
-                    onBake: () => void bakeCam(),
-                    portrait: portraitOn,
-                    onPortrait: setPortraitOn,
-                  }
-                : null
-          }
+          cam={editorCam}
         />
       </div>
 

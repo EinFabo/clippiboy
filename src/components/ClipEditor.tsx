@@ -374,8 +374,9 @@ function SectionHead({ children }: { children: React.ReactNode }) {
 }
 
 /** Only appears once there is something to take back. */
-/** Where the clip's camera sits, how it looks, and how it lines up with the game. */
-function CameraSection({ cam, busy }: { cam: EditorCam; busy: boolean }) {
+/** Where the clip's camera sits, how it looks, and how it lines up with the game.
+ *  The player shows it again over the picture in fullscreen, where this pane is gone. */
+export function CameraSection({ cam, busy }: { cam: EditorCam; busy: boolean }) {
   const [syncDraft, setSyncDraft] = useState<number | null>(null);
   const [baking, setBaking] = useState(false);
   if (cam.baked) {
