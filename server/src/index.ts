@@ -754,6 +754,12 @@ async function deleteAccount(env: Env, me: string): Promise<Response> {
   const related = await relatedIds(env.DB, me);
   const row = await env.DB.prepare("SELECT discord_id FROM users WHERE id = ?").bind(me).first<{ discord_id: string }>();
   const departed = row ? await departedHash(env, row.discord_id) : null;
+  // The connections and the presence first, while a failure can still be
+  // retried: after the rows below are gone a retry is a 401, and presence and
+  // "last seen" stayed in the hub for good. Friends are still friends here, so
+  // they hear the user went offline; the 4001 signs the app out and keeps it
+  // from dialling back in.
+  await env.HUB.getByName(me).closeAll("account deleted", me);
   await deleteSharesOf(env, me);
   // Cascades to sessions, friendships, blocks and shares. In one batch with
   // what outlives it, read at that moment: a suspension set a second earlier
@@ -761,6 +767,10 @@ async function deleteAccount(env: Env, me: string): Promise<Response> {
   const remove = env.DB.prepare("DELETE FROM users WHERE id = ?").bind(me);
   await env.DB.batch(departed ? [departStatement(env.DB, me, departed, Date.now()), remove] : [remove]);
   await notify(env, ...related);
-  await env.HUB.getByName(me).closeAll();
+  // Whatever an app that got in again meanwhile left. The account is gone
+  // either way, so this must not turn into an error.
+  await env.HUB.getByName(me)
+    .closeAll()
+    .catch((err) => console.error("account deleted, hub", me, err));
   return json({ ok: true });
 }
