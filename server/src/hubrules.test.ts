@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, inOrder, MESSAGES, mayReach, pruned, RELAY, remember, spend, type Bucket, type Contacts } from "./hubrules.ts";
+import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, inOrder, MESSAGES, mayReach, parseMessage, pruned, RELAY, remember, spend, type Bucket, type Contacts } from "./hubrules.ts";
 
 const now = 1_000_000;
 
@@ -129,4 +129,11 @@ test("a publish that fails does not hold up the next, and its caller hears of it
   const next = queue(async () => "sent");
   await assert.rejects(failed, /D1 down/);
   assert.equal(await next, "sent");
+});
+
+test("only a JSON object is a message the hub takes apart", () => {
+  assert.deepEqual(parseMessage('{"t":"hello","game":null}'), { t: "hello", game: null });
+  for (const text of ["null", "[]", '["relay"]', "5", '"hello"', "true", "", "{", "ping"]) {
+    assert.equal(parseMessage(text), null, text);
+  }
 });

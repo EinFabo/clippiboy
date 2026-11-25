@@ -69,6 +69,21 @@ export const HELLO: Rule = { capacity: 5, refillMs: 60_000 };
 export const MESSAGES: Rule = { capacity: 20, refillMs: 500 };
 /** Larger raw messages are dropped before they are parsed. */
 export const RAW_MAX = 8192;
+
+/**
+ * A message from the app as an object to take apart, or null for anything
+ * else: not JSON, or JSON that is no object (`null`, a list, a bare value).
+ * `null` threw on the first field read, in the middle of the hub.
+ */
+export function parseMessage(text: string): Record<string, unknown> | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
 /** Connections per user; the oldest beyond this are closed. */
 export const SOCKET_CAP = 4;
 

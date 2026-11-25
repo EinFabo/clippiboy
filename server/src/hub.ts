@@ -11,6 +11,7 @@ import {
   RELAY,
   SOCKET_CAP,
   mayReach,
+  parseMessage,
   pruned,
   remember,
   spend,
@@ -131,12 +132,9 @@ export class Hub extends DurableObject<Env> {
     }
     this.messages = allowed.bucket;
     if (typeof message !== "string" || message.length > RAW_MAX) return;
-    let data: PresenceInput & { t?: string; invisible?: unknown; to?: unknown; body?: unknown };
-    try {
-      data = JSON.parse(message);
-    } catch {
-      return;
-    }
+    const data: (PresenceInput & { t?: unknown; invisible?: unknown; to?: unknown; body?: unknown }) | null =
+      parseMessage(message);
+    if (!data) return;
     if (data.t === "relay") return this.relayFrom(ws, data.to, data.body);
     if (data.t !== "hello" && data.t !== "presence") return;
     if (data.t === "hello") {
