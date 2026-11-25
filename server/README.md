@@ -116,6 +116,12 @@ npx wrangler dev --port 8799 &
 node scripts/e2e.mjs
 ```
 
+A sign-in's start signs its state with the Discord client secret, so for
+`wrangler dev` `.dev.vars` needs one too — any value will do locally:
+`DISCORD_CLIENT_SECRET="local-dev-not-a-secret"`. Opening the live connection
+is limited to ten a minute per address, and a run opens nine: leave a minute
+between runs.
+
 It goes to `http://127.0.0.1:8799`, or to `FRIENDS_SERVER`. Any server that is
 not this computer, the deployed worker included, it refuses unless run with
 `--production`.

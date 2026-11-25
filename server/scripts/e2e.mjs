@@ -235,7 +235,15 @@ sa3.ws.close();
 
 check("exchange with junk refused", (await fetch(BASE + "/auth/exchange", { method: "POST", body: JSON.stringify({ code: "x", verifier: "y" }) })).status === 400);
 const start = await fetch(BASE + "/auth/start?challenge=" + "a".repeat(43), { redirect: "manual" });
-check("auth/start sends the browser to Discord", start.status === 302 && start.headers.get("location")?.startsWith("https://discord.com/"), start.status);
+check(
+  "auth/start sends the browser to Discord",
+  start.status === 302 && start.headers.get("location")?.startsWith("https://discord.com/"),
+  start.status === 503 ? "503: set DISCORD_CLIENT_SECRET in .dev.vars (see README → Test)" : start.status,
+);
+// The state is signed: one made up here, even in a matching cookie, goes nowhere near Discord.
+const forged = "A".repeat(118);
+const callback = await fetch(`${BASE}/auth/callback?code=x&state=${forged}`, { headers: { Cookie: `cb_login=${forged}` } });
+check("a made-up state is refused", (await callback.text()).includes("Sign-in expired"), callback.status);
 
 sa.ws.close();
 console.log(failures === 0 ? "ALL PASSED" : `${failures} FAILED`);
