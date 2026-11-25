@@ -267,7 +267,7 @@ async function spend(env: Env, me: string, budget: "share" | "connect" | "friend
 /**
  * Within the per-address limit for routes anyone may call? Each route counts on
  * its own, so a flood of pings cannot lock the same address out of signing in.
- * An IPv6 address counts as its /64.
+ * An IPv6 address counts as its /48 (`addressKey`).
  */
 async function underLimit(
   request: Request,

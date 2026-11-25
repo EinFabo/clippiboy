@@ -14,10 +14,13 @@ test("a body over the limit is refused, by its declared length or by what arrive
   assert.equal(await readLimited(req(null), 4096), "");
 });
 
-test("an IPv6 address counts as its /64, an IPv4 address as itself", () => {
-  assert.equal(addressKey("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::/64");
-  assert.equal(addressKey("2001:DB8:1:2::9"), "2001:db8:1:2::/64");
-  assert.equal(addressKey("2001:db8::1"), "2001:db8:0:0::/64");
+test("an IPv6 address counts as its /48, an IPv4 address as itself", () => {
+  assert.equal(addressKey("2001:db8:1:2:3:4:5:6"), "2001:db8:1::/48");
+  assert.equal(addressKey("2001:DB8:1:2::9"), "2001:db8:1::/48");
+  assert.equal(addressKey("2001:db8::1"), "2001:db8:0::/48");
+  // Every /64 of one site is the same key; another site's is not.
+  assert.equal(addressKey("2001:db8:1:ffff::1"), addressKey("2001:db8:1:0::1"));
+  assert.notEqual(addressKey("2001:db8:2::1"), addressKey("2001:db8:1::1"));
   assert.equal(addressKey("203.0.113.7"), "203.0.113.7");
   assert.equal(addressKey("unknown"), "unknown");
   assert.equal(addressKey("::ffff:203.0.113.7"), "203.0.113.7");

@@ -33,8 +33,9 @@ export async function readLimited(request: Pick<Request, "headers" | "body">, ma
 
 /**
  * The key a per-address limit counts against. An IPv6 address counts as its
- * /64 — that is what one connection gets, so cycling through it buys no fresh
- * budget. IPv4 and anything unreadable stay as they are.
+ * /48 — that is what one site may get, and counted per /64 it held 65,536
+ * budgets, enough to spend the database's daily writes through any limit per
+ * address. IPv4 and anything unreadable stay as they are.
  */
 export function addressKey(address: string): string {
   if (!address.includes(":")) return address;
@@ -44,7 +45,7 @@ export function addressKey(address: string): string {
   if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
     return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
   }
-  return `${groups.slice(0, 4).map((g) => g.toString(16)).join(":")}::/64`;
+  return `${groups.slice(0, 3).map((g) => g.toString(16)).join(":")}::/48`;
 }
 
 /** The eight 16-bit groups, or null if it is no IPv6 address. */

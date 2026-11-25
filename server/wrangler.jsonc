@@ -42,7 +42,7 @@
     // Routes anyone may call: the usage ping, the start of a sign-in and the
     // exchange that ends it. Without a limit one script could spend the
     // database's daily writes and take sign-in, friends and links down for
-    // everybody. Counted per address (an IPv6 address per /64) at the edge,
+    // everybody. Counted per address (an IPv6 address per /48) at the edge,
     // the address not stored.
     { "name": "ANON_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } },
     // Signed-in routes that change something, counted per user id.

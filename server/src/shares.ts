@@ -228,7 +228,7 @@ export function cleanTags(raw: string[]): string[] {
 export const REPORT_REASONS = ["nsfw", "violence", "hate", "spam", "other"] as const;
 export type ReportReason = (typeof REPORT_REASONS)[number];
 /** Addresses whose open reports one clip may collect; more say nothing new.
-    Counted per address (an IPv6 address per /64), one open report each: as a
+    Counted per address (an IPv6 address per /48), one open report each: as a
     plain count, one address filled it in four minutes and every report after
     that was dropped. */
 export const MAX_OPEN_REPORTS = 20;

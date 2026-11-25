@@ -392,7 +392,7 @@ export async function deleteSharesOf(env: Env, me: string): Promise<void> {
 /**
  * `POST /c/<id>/report` from the share page, `{reason, note?}` sent as plain
  * text so the browser needs no preflight. Who reported is not kept, nor the
- * address: only a keyed one-way fingerprint of it (its /64 for IPv6) made
+ * address: only a keyed one-way fingerprint of it (its /48 for IPv6) made
  * for this clip alone, so each address counts once against the clip's cap
  * (`takesReport`) and none can be told apart across clips. It goes with the
  * report.

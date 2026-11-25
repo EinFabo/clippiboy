@@ -65,7 +65,7 @@ deletes them.
 
 D1's free plan writes 100,000 rows a day for everybody together, so no single
 caller may come near that. Routes anyone may call count per address (an IPv6
-address per /64): `ANON_LIMIT`, 10 a minute per route, plus a daily ceiling
+address per /48): `ANON_LIMIT`, 10 a minute per route, plus a daily ceiling
 for pings. Signed-in routes that change something count per account:
 `USER_LIMIT`, 30 a minute, and on top of it
 
