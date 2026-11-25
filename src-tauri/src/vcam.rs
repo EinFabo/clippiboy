@@ -345,7 +345,7 @@ mod win {
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+        GetSecurityInfo, SetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
     };
     use windows::Win32::Security::{
         GetLengthSid, GetTokenInformation, IsValidSid, TokenOwner, TokenUser,
@@ -535,10 +535,36 @@ mod win {
             // was set outright).
             if existed {
                 let owner = owner_of(handle);
-                if owner.is_none() || (owner != Some(user) && owner != token_sid(TokenOwner)) {
+                if owner.is_none()
+                    || (owner.as_ref() != Some(&user) && owner != token_sid(TokenOwner))
+                {
                     log::warn!("ClippiBoy Camera's memory is someone else's — not used");
                     let _ = CloseHandle(handle);
                     return None;
+                }
+                // Administrators', from an elevated run before the owner was
+                // set outright: the media source shows a section only to the
+                // user who owns it, so it is handed to the user — else the
+                // camera showed its placeholder for the whole run. The handle
+                // can: opening it asked for WRITE_OWNER with the rest.
+                if owner.as_ref() != Some(&user) {
+                    let set = SetSecurityInfo(
+                        handle,
+                        SE_KERNEL_OBJECT,
+                        OWNER_SECURITY_INFORMATION,
+                        PSID(user.as_ptr() as *mut _),
+                        PSID::default(),
+                        None,
+                        None,
+                    );
+                    if set == ERROR_SUCCESS {
+                        log::info!("ClippiBoy Camera's memory handed over to the user");
+                    } else {
+                        log::warn!(
+                            "ClippiBoy Camera's memory keeps its old owner: error {}",
+                            set.0
+                        );
+                    }
                 }
             }
             let view = MapViewOfFile(
