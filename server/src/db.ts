@@ -225,9 +225,15 @@ export async function authenticate(request: Request, db: D1Database): Promise<st
   if (session.banned_at !== null) {
     throw new HttpError(401, "This account is suspended.");
   }
-  // One write a day is enough to keep a session alive.
+  // One write a day is enough to keep a session alive. Best effort: with the
+  // day's writes spent, a failed touch turned every request of a session idle
+  // for a day into a 500; the next request simply tries again.
   if (now - session.last_used > TOUCH_EVERY_MS) {
-    await db.prepare("UPDATE sessions SET last_used = ? WHERE token_hash = ?").bind(now, hash).run();
+    await db
+      .prepare("UPDATE sessions SET last_used = ? WHERE token_hash = ?")
+      .bind(now, hash)
+      .run()
+      .catch((err) => console.error("session touch", err));
   }
   return session.user_id;
 }
