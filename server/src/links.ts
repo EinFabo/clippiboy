@@ -14,6 +14,7 @@ import { avatarRoute, discordAvatar, looksLikePng, MAX_AVATAR_BYTES } from "./av
 import {
   canUpload,
   chunks,
+  COUNTS,
   cleanReport,
   cleanTags,
   MAX_OPEN_REPORTS,
@@ -21,8 +22,10 @@ import {
   FREE_FAILS,
   friendOffer,
   HELD_MS,
+  HOLD_CLIP,
   ID_PATTERN,
   LIFETIME_MS,
+  LIVE_BYTES,
   looksLikeJpeg,
   MAX_BYTES,
   MAX_POSTER_BYTES,
@@ -67,16 +70,11 @@ interface ShareRow {
 const video = (id: string) => `${id}.mp4`;
 const poster = (id: string) => `${id}.jpg`;
 
-// What counts against the week and the bucket (keep `departStatement` in db.ts,
-// which carries the newest of these over a deleted account, in step with it): finished shares, and uploads
-// still in time to finish. The `?` is when a pending one is given up. The same
-// rule as `countsAgainstWeek` in shares.ts.
-const COUNTS = "(pending = 0 OR created_at > ?)";
-// How many count against the week: every link, and failed uploads past the
-// free ones (`weekTimes` in shares.ts).
+// What counts against the week and the bucket is `COUNTS` in shares.ts, what
+// the bucket holds `LIVE_BYTES` there. How many count against the week: every
+// link, and failed uploads past the free ones (`weekTimes` in shares.ts).
 const RECENT = `SELECT COALESCE(SUM(failed = 0), 0) + MAX(0, COALESCE(SUM(failed), 0) - ${FREE_FAILS})
   FROM shares WHERE owner = ? AND created_at > ? AND ${COUNTS}`;
-const LIVE_BYTES = `SELECT COALESCE(SUM(bytes), 0) FROM shares WHERE deleted_at IS NULL AND ${COUNTS}`;
 
 // For testing: accounts listed in the secret QUICK_LINKS_FOR (ids, comma
 // separated) get links that last five minutes and no weekly limit. Unset, it
@@ -117,7 +115,7 @@ async function recentOf(env: Env, me: string, now: number, standing: Standing): 
 }
 
 async function liveBytes(env: Env, now: number): Promise<number> {
-  const row = await env.DB.prepare(`SELECT COALESCE(SUM(bytes), 0) AS total FROM shares WHERE deleted_at IS NULL AND ${COUNTS}`)
+  const row = await env.DB.prepare(`SELECT (${LIVE_BYTES}) AS total`)
     .bind(now - PENDING_MS)
     .first<{ total: number }>();
   return row?.total ?? 0;
@@ -343,11 +341,11 @@ export async function deleteShare(env: Env, me: string, id: string): Promise<Res
 
 /**
  * Takes these links' clips and posters out of R2 — all but those with an open
- * report: the review needs them, so they are held (`held_clips`) until no
- * report is open, `HELD_MS` at most (the sweep's "held" step). Nobody reaches
- * them meanwhile: the caller takes the link down with its row. Deleting a
- * reported clip used to take the evidence along, and the sweep did so five
- * days after any upload.
+ * report: the review needs them, so they are held (`held_clips`, counting
+ * against the bucket with their size) until no report is open, `HELD_MS` at
+ * most (the sweep's "held" step). Nobody reaches them meanwhile: the caller
+ * takes the link down with its row. Deleting a reported clip used to take the
+ * evidence along, and the sweep did so five days after any upload.
  */
 async function dropClips(env: Env, ids: string[], now: number): Promise<void> {
   if (ids.length === 0) return;
@@ -360,7 +358,7 @@ async function dropClips(env: Env, ids: string[], now: number): Promise<void> {
   if (reported.size > 0) {
     await env.DB.batch(
       [...reported].map((id) =>
-        env.DB.prepare("INSERT OR IGNORE INTO held_clips (share_id, held_at) VALUES (?, ?)").bind(id, now),
+        env.DB.prepare(HOLD_CLIP).bind(id, now),
       ),
     );
   }

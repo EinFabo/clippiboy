@@ -13,8 +13,9 @@ export const WEEK_MS = 7 * DAY_MS;
 /** One clip, after the app has shrunk it. Also well under the 100 MB a Worker
     request on the free plan may carry. */
 export const MAX_BYTES = 50 * 1024 * 1024;
-/** What all live links together may take. A gigabyte under the free 10, for
-    uploads in flight and the odd object the hourly sweep has not reached. */
+/** What all live links together may take, with the clips held for a report
+    (`LIVE_BYTES`). A gigabyte under the free 10, for uploads in flight and the
+    odd object the hourly sweep has not reached. */
 export const TOTAL_BYTES = 9 * 1024 * 1024 * 1024;
 export const LIFETIME_MS = 5 * DAY_MS;
 /** How long an upload may still be on its way. A pending share older than
@@ -147,12 +148,18 @@ export function chunks<T>(items: readonly T[], size: number): T[][] {
 /**
  * Is a share row in the running for its owner's week (and, while not deleted,
  * the bucket)? Finished links are, deleted ones too, and an upload still in
- * time to finish. `COUNTS` in links.ts is the same rule in SQL. Of the failed
- * uploads among them, `weekTimes` then lets a few go free.
+ * time to finish. `COUNTS` is the same rule in SQL. Of the failed uploads
+ * among them, `weekTimes` then lets a few go free.
  */
 export function countsAgainstWeek(row: { pending: number; created_at: number }, now: number): boolean {
   return row.pending === 0 || row.created_at > now - PENDING_MS;
 }
+
+// What counts against the week and the bucket, in SQL (keep `departStatement`
+// in db.ts, which carries the newest of these over a deleted account, in step
+// with it): finished shares, and uploads still in time to finish. The `?` is
+// when a pending one is given up.
+export const COUNTS = "(pending = 0 OR created_at > ?)";
 
 /** Uploads a week that may fail without costing a link. */
 export const FREE_FAILS = 5;
@@ -258,6 +265,18 @@ export function takesReport(open: { reporter: string | null }[], reporter: strin
 export function heldClipGoes(heldAt: number, openReports: number, now: number): boolean {
   return openReports === 0 || heldAt <= now - HELD_MS;
 }
+
+// What the bucket holds, in SQL, against `TOTAL_BYTES`: live links, and clips
+// held for a report — those stay in R2 after their link has gone. One `?`, as
+// in `COUNTS`.
+export const LIVE_BYTES = `SELECT (SELECT COALESCE(SUM(bytes), 0) FROM shares WHERE deleted_at IS NULL AND ${COUNTS})
+  + (SELECT COALESCE(SUM(bytes), 0) FROM held_clips)`;
+
+// Holds a reported clip (`?1`, held from `?2`) whose link goes, with its size,
+// read from the link's row while that is still there. Held once: a second
+// time keeps the first.
+export const HOLD_CLIP = `INSERT OR IGNORE INTO held_clips (share_id, held_at, bytes)
+  VALUES (?1, ?2, COALESCE((SELECT bytes FROM shares WHERE id = ?1), 0))`;
 
 /** A report as the page sent it, or null if it is not one. */
 export function cleanReport(raw: unknown): { reason: ReportReason; note: string | null } | null {
