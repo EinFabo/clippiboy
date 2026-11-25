@@ -42,11 +42,15 @@ export function ConfirmDelete({
   cancel.current = onCancel;
 
   useEffect(() => {
+    // Ahead of everything else, and marked as taken: Escape answers the
+    // question and nothing more — not the gallery's selection behind it.
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") cancel.current();
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      cancel.current();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   return (
