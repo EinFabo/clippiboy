@@ -131,6 +131,39 @@ pub struct Transfer {
     /// Out, done: every byte went out, but the friend's app never confirmed
     /// that it arrived ([`end_quiet`]).
     pub unconfirmed: bool,
+    /// Declined: whether the friend said no themselves or their app did,
+    /// busy or not taking clips from us. `None` from an app before 1.0.2,
+    /// which does not say.
+    pub refusal: Option<Refusal>,
+}
+
+/// Who said no to an offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Refusal {
+    /// Their app, on its own: Do not disturb, or "Who can send me clips".
+    Auto,
+    /// They pressed Decline.
+    Manual,
+}
+
+impl Refusal {
+    fn wire(self) -> String {
+        match self {
+            Refusal::Auto => "auto",
+            Refusal::Manual => "manual",
+        }
+        .to_owned()
+    }
+
+    /// What `ShareAnswer.refusal` says, if it is a word this app knows.
+    fn from_wire(word: Option<&str>) -> Option<Self> {
+        match word {
+            Some("auto") => Some(Refusal::Auto),
+            Some("manual") => Some(Refusal::Manual),
+            _ => None,
+        }
+    }
 }
 
 impl Transfer {
@@ -239,6 +272,10 @@ enum Signal {
         /// cost the answer. Missing before 1.0.1, and for a key not kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<String>,
+        /// On a no: "auto" or "manual" ([`Refusal`]). A string, so a word
+        /// from a later app does not cost the answer. Missing before 1.0.2.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     ShareCancel { id: String },
@@ -396,6 +433,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         screenshot: clip.screenshot,
         recording: clip.recording,
         unconfirmed: false,
+        refusal: None,
     };
     let secret = uuid::Uuid::new_v4().simple().to_string();
     {
@@ -523,6 +561,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         tokio::time::sleep(ANSWER_WITHIN).await;
         if out_stage(&app, &id) == Some(Stage::Asking) {
             set_out(&app, &id, |t| t.stage = Stage::Expired);
+            tell_missed(&app, &id);
             crate::friends::send_relay(&app, &friend_id, &Signal::ShareCancel { id });
         }
     });
@@ -553,6 +592,7 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
             id: id.clone(),
             accept: true,
             node,
+            refusal: None,
         },
     );
     let app = app.clone();
@@ -631,6 +671,7 @@ pub fn share_decline(app: AppHandle, id: String) {
             return;
         }
         entry.transfer.stage = Stage::Declined;
+        entry.transfer.refusal = Some(Refusal::Manual);
         entry.transfer.friend_id.clone()
     };
     emit(&app);
@@ -642,6 +683,7 @@ pub fn share_decline(app: AppHandle, id: String) {
             id,
             accept: false,
             node: None,
+            refusal: Some(Refusal::Manual.wire()),
         },
     );
 }
@@ -760,7 +802,12 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
             };
             offered(app, from, offer, std::time::Instant::now())
         }
-        Signal::ShareAnswer { id, accept, node } => {
+        Signal::ShareAnswer {
+            id,
+            accept,
+            node,
+            refusal,
+        } => {
             let asking = {
                 let share = app.state::<Share>();
                 let mut outgoing = share.outgoing.lock();
@@ -783,12 +830,16 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
             }
             // Accepted: the bytes start moving once they dial in.
             set_out(app, &id, |t| {
-                t.stage = if accept {
-                    Stage::Moving
+                if accept {
+                    t.stage = Stage::Moving;
                 } else {
-                    Stage::Declined
+                    t.stage = Stage::Declined;
+                    t.refusal = Refusal::from_wire(refusal.as_deref());
                 }
             });
+            if !accept {
+                tell_missed(app, &id);
+            }
             if accept {
                 // A yes from an app that closes before it dials is no transfer.
                 if let Some(entry) = app.state::<Share>().outgoing.lock().get_mut(&id) {
@@ -820,13 +871,18 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
                 }
             };
             // Mid-transfer, their end gave up — worth saying, not hiding.
+            let mut failed = false;
             set_out(app, &id, |t| {
                 if t.stage == Stage::Moving {
                     fail(t, "It didn't get through to them.");
+                    failed = true;
                 } else {
                     cancel(t);
                 }
             });
+            if failed {
+                tell_missed(app, &id);
+            }
             set_in(app, &id, cancel);
             crate::friends::clip_settled(app, &id);
         }
@@ -841,11 +897,16 @@ pub fn relay_failed(app: &AppHandle, reference: Option<&str>, reason: &str) {
         "not a friend" => "You are no longer friends.",
         _ => "The friends server did not pass the offer on.",
     };
+    let mut failed = false;
     set_out(app, id, |t| {
         if matches!(t.stage, Stage::Preparing | Stage::Asking) {
             fail(t, message);
+            failed = true;
         }
     });
+    if failed {
+        tell_missed(app, id);
+    }
 }
 
 /// What an offer comes to with its tracks, or `None` when its sizes cannot be
@@ -1073,6 +1134,7 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
                     id,
                     accept: false,
                     node: None,
+                    refusal: Some(Refusal::Auto.wire()),
                 },
             );
             return;
@@ -1095,6 +1157,7 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
                 id,
                 accept: false,
                 node: None,
+                refusal: Some(Refusal::Auto.wire()),
             },
         );
         return;
@@ -1115,6 +1178,7 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
         screenshot: meta.screenshot,
         recording: meta.recording,
         unconfirmed: false,
+        refusal: None,
     };
     crate::peers::note(app, from, &addr.id.to_string(), stable, "an offer");
     app.state::<Share>().incoming.lock().insert(
@@ -2085,6 +2149,7 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
                 "It arrived damaged on their side — try sending it again.",
             )
         });
+        tell_missed(app, &ask.id);
     }
     Ok(())
 }
@@ -2167,6 +2232,7 @@ fn watch_redial(app: &AppHandle, id: &str) {
         match friend {
             Some(friend) => {
                 log::info!("share: {id}: the receiver has not dialled in again — given up");
+                tell_missed(&app, &id);
                 // Should they still be trying, they stop.
                 crate::friends::send_relay(&app, &friend, &Signal::ShareCancel { id });
             }
@@ -2189,6 +2255,79 @@ fn end_quiet(transfer: &mut Transfer, all_out: bool) -> bool {
     } else {
         fail(transfer, "They stopped receiving it.");
         true
+    }
+}
+
+/// Tells the sender that a send did not get there — a no, no answer, or a
+/// failure after the click — the way "has your clip" tells them it did. The
+/// console keeps a Retry for it.
+fn tell_missed(app: &AppHandle, id: &str) {
+    let Some(transfer) = app
+        .state::<Share>()
+        .outgoing
+        .lock()
+        .get(id)
+        .map(|o| o.transfer.clone())
+    else {
+        return;
+    };
+    let hotkey = app
+        .state::<AppState>()
+        .config_snapshot()
+        .console_hotkey_spoken();
+    let Some((title, detail)) = missed_banner(&transfer, &hotkey) else {
+        return;
+    };
+    let toast = match &detail {
+        Some(detail) => format!("{title} · {detail}"),
+        None => title.clone(),
+    };
+    crate::friends::clip_alert(
+        app,
+        crate::friends::ClipNotice {
+            event: crate::friends::ClipEvent::Missed,
+            id: transfer.id.clone(),
+            avatar: crate::friends::friend_avatar(app, &transfer.friend_id),
+            friend: transfer.friend_id.clone(),
+            who: transfer.friend_name.clone(),
+            title,
+            detail,
+            thumb: None,
+            toast,
+            what: transfer.noun(),
+        },
+    );
+}
+
+/// What the banner says about a send that did not get there, or `None` for
+/// one that did or is still on its way. A no their app gave on its own reads
+/// as such, not as theirs.
+fn missed_banner(transfer: &Transfer, hotkey: &str) -> Option<(String, Option<String>)> {
+    let name = &transfer.friend_name;
+    let what = transfer.noun();
+    let retry = |first: &str| match (first.is_empty(), hotkey.is_empty()) {
+        (_, true) => (!first.is_empty()).then(|| first.to_owned()),
+        (true, false) => Some(format!("{hotkey} to retry")),
+        (false, false) => Some(format!("{first} · {hotkey} to retry")),
+    };
+    match transfer.stage {
+        Stage::Declined => Some((
+            match transfer.refusal {
+                Some(Refusal::Manual) => format!("{name} said no"),
+                // Their app, or one before 1.0.2 that does not say whose no.
+                Some(Refusal::Auto) | None => format!("{name} isn't taking {what}s right now"),
+            },
+            Some(transfer.name.clone()),
+        )),
+        Stage::Expired => Some((format!("{name} didn't answer"), retry(""))),
+        Stage::Failed => {
+            let why = transfer.error.as_deref().unwrap_or("").trim();
+            Some((
+                format!("{name} didn't get your {what}"),
+                retry(why.trim_end_matches('.')),
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -2893,6 +3032,7 @@ mod tests {
             screenshot: false,
             recording: false,
             unconfirmed: false,
+            refusal: None,
         }
     }
 
@@ -3319,8 +3459,13 @@ mod tests {
     fn signals_round_trip() {
         let text = r#"{"kind":"shareAnswer","id":"o1","accept":true}"#;
         match serde_json::from_str::<Signal>(text).unwrap() {
-            Signal::ShareAnswer { id, accept, node } => {
-                assert!(id == "o1" && accept && node.is_none())
+            Signal::ShareAnswer {
+                id,
+                accept,
+                node,
+                refusal,
+            } => {
+                assert!(id == "o1" && accept && node.is_none() && refusal.is_none())
             }
             _ => panic!("wrong kind"),
         }
@@ -3389,6 +3534,7 @@ mod tests {
             id: "o1".into(),
             accept: true,
             node: Some(node.clone()),
+            refusal: None,
         };
         let text = serde_json::to_string(&answer).unwrap();
         assert!(text.contains(&format!(r#""node":"{node}""#)));
@@ -3396,14 +3542,112 @@ mod tests {
             OldSignal::ShareAnswer { id, accept } => assert!(id == "o1" && accept),
             other => panic!("wrong kind: {other:?}"),
         }
-        // A no names no device, and leaves the field out.
+        // A no names no device, and leaves the field out. Whose no it was
+        // goes along, and an app before 1.0.2 reads past it.
         let no = serde_json::to_string(&Signal::ShareAnswer {
             id: "o1".into(),
             accept: false,
             node: None,
+            refusal: Some(Refusal::Auto.wire()),
         })
         .unwrap();
         assert!(!no.contains("node"));
+        assert!(no.contains(r#""refusal":"auto""#));
+        match serde_json::from_str::<OldSignal>(&no).unwrap() {
+            OldSignal::ShareAnswer { id, accept } => assert!(id == "o1" && !accept),
+            other => panic!("wrong kind: {other:?}"),
+        }
+        // A yes says nothing of it.
+        assert!(!text.contains("refusal"));
+    }
+
+    #[test]
+    fn a_no_says_whose_it_was_and_an_unknown_word_costs_nothing() {
+        let read = |text: &str| match serde_json::from_str::<Signal>(text) {
+            Ok(Signal::ShareAnswer {
+                accept: false,
+                refusal,
+                ..
+            }) => Refusal::from_wire(refusal.as_deref()),
+            other => panic!("not a no: {other:?}"),
+        };
+        let no = |word: &str| {
+            format!(r#"{{"kind":"shareAnswer","id":"o","accept":false,"refusal":"{word}"}}"#)
+        };
+        assert_eq!(read(&no("auto")), Some(Refusal::Auto));
+        assert_eq!(read(&no("manual")), Some(Refusal::Manual));
+        // From a later app: still a no, only not whose.
+        assert_eq!(read(&no("vacation")), None);
+        // From an app before 1.0.2.
+        assert_eq!(
+            read(r#"{"kind":"shareAnswer","id":"o","accept":false}"#),
+            None
+        );
+        // The page reads it as a word.
+        let mut transfer = outgoing("f", Stage::Declined);
+        transfer.refusal = Some(Refusal::Auto);
+        assert_eq!(serde_json::to_value(&transfer).unwrap()["refusal"], "auto");
+        transfer.refusal = None;
+        assert!(serde_json::to_value(&transfer).unwrap()["refusal"].is_null());
+    }
+
+    #[test]
+    fn a_send_that_did_not_get_there_tells_the_sender() {
+        let mut t = outgoing("Matti", Stage::Declined);
+        t.name = "Ace on Bind".into();
+        t.refusal = Some(Refusal::Manual);
+        assert_eq!(
+            missed_banner(&t, "Alt+C"),
+            Some(("Matti said no".into(), Some("Ace on Bind".into())))
+        );
+        // Their app's no, or one that does not say whose, is no one's.
+        t.refusal = Some(Refusal::Auto);
+        t.screenshot = true;
+        assert_eq!(
+            missed_banner(&t, "Alt+C").unwrap().0,
+            "Matti isn't taking screenshots right now"
+        );
+        t.refusal = None;
+        assert_eq!(
+            missed_banner(&t, "").unwrap().0,
+            "Matti isn't taking screenshots right now"
+        );
+
+        let t = outgoing("Matti", Stage::Expired);
+        assert_eq!(
+            missed_banner(&t, "Alt+C"),
+            Some(("Matti didn't answer".into(), Some("Alt+C to retry".into())))
+        );
+        // Unbound, the console is not named.
+        assert_eq!(
+            missed_banner(&t, ""),
+            Some(("Matti didn't answer".into(), None))
+        );
+
+        let mut t = outgoing("Matti", Stage::Failed);
+        t.error = Some("They went offline.".into());
+        assert_eq!(
+            missed_banner(&t, "Alt+C"),
+            Some((
+                "Matti didn't get your clip".into(),
+                Some("They went offline · Alt+C to retry".into())
+            ))
+        );
+        assert_eq!(
+            missed_banner(&t, "").unwrap().1.as_deref(),
+            Some("They went offline")
+        );
+
+        // What arrived, or is still on its way, is no miss.
+        for stage in [
+            Stage::Preparing,
+            Stage::Asking,
+            Stage::Moving,
+            Stage::Done,
+            Stage::Cancelled,
+        ] {
+            assert_eq!(missed_banner(&outgoing("Matti", stage), "Alt+C"), None);
+        }
     }
 
     #[test]

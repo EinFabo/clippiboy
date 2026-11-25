@@ -543,7 +543,14 @@ export interface Transfer {
   recording: boolean;
   /** Out, done: every byte went out, but their app never confirmed it arrived. */
   unconfirmed?: boolean;
+  /** Declined: "manual" when they pressed Decline, "auto" when their app said
+      no on its own (Do not disturb, "Who can send me clips"); null from an app
+      before 1.0.2, which does not say. */
+  refusal?: Refusal | null;
 }
+
+/** Who said no to an offer (`share::Refusal`). */
+export type Refusal = "auto" | "manual";
 
 /** `pending` while the cam is being added, `ready` once the file shows it, `failed`, or `baked` in for good. */
 export type FacecamState = "pending" | "ready" | "failed" | "baked";
