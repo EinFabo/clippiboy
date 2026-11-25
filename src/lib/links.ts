@@ -114,12 +114,6 @@ export function timeLeft(link: Link): string {
   return "a few minutes left";
 }
 
-/** The weekday a used-up week frees its next link, "Fri". */
-export function freeOn(quota: LinkQuota): string | null {
-  if (quota.resetsAt === null) return null;
-  return new Date(quota.resetsAt).toLocaleDateString("en-US", { weekday: "short" });
-}
-
 if (inTauri) {
   void listen<LinkProgress>("link-progress", (event) =>
     useLinks.setState((s) => ({ uploads: { ...s.uploads, [event.payload.clipId]: event.payload } })),

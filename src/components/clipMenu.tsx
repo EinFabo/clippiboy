@@ -24,7 +24,8 @@ import { discordMb } from "@/lib/discord";
 import { toast } from "@/lib/toastBus";
 import { planExport } from "@/lib/exportPlan";
 import { isDiscordBusy, setDiscordBusy } from "@/lib/discordCopies";
-import { freeOn, timeLeft, useLinks } from "@/lib/links";
+import { timeLeft, useLinks } from "@/lib/links";
+import { linkReason, shareAsLinkLabel } from "@/lib/linkReason";
 import { postLabel, useWebhook, webhookApi } from "@/lib/webhook";
 import type { Clip } from "@/lib/types";
 
@@ -86,15 +87,11 @@ const icon = "h-4 w-4";
  * follow the store while open.
  */
 function linkEntries(clip: Clip): MenuEntry[] {
-  const { links, signedIn, quota: storedQuota, uploads, create, remove, refresh } = useLinks.getState();
-  // The store is only fetched on changes, and the app runs for days in the
-  // tray: a link may have run out and a used-up week reset since. Those count
-  // as gone here, and every opening asks the server again for next time.
-  const now = Date.now();
-  const stored = links[clip.id];
-  const link = stored && stored.expiresAt > now ? stored : undefined;
-  const quotaStale = storedQuota?.resetsAt != null && storedQuota.resetsAt <= now;
-  const quota = quotaStale ? null : storedQuota;
+  const store = useLinks.getState();
+  const { create, remove, refresh } = store;
+  // What the store knows may be old (see `linkReason`): every opening asks
+  // the server again for next time.
+  const { live: link, reason, enabled } = linkReason(clip.id, store, Date.now(), inTauri);
   void refresh();
   if (link) {
     return [
@@ -112,30 +109,13 @@ function linkEntries(clip: Clip): MenuEntry[] {
       },
     ];
   }
-  const running = uploads[clip.id];
-  const busy = running && (running.stage === "shrinking" || running.stage === "uploading");
   // Why it cannot be had, right in the label: a menu has no room for a hint.
-  const reason = !inTauri
-    ? null
-    : busy
-      ? "uploading…"
-      : !signedIn
-        ? "sign in on Friends first"
-        : quota && quota.used >= quota.limit
-          ? `none left until ${freeOn(quota) ?? "next week"}`
-          : quota?.full
-            ? "sharing is full right now"
-            : null;
-  // A used-up week stays clickable: what the store knows may be old, and the
-  // upload asks the server before it shrinks anything. Not while this clip is
-  // on its way up — its own pending upload is what used the week up.
-  const usedUp = !busy && quota !== null && quota.used >= quota.limit;
   return [
     {
       kind: "item",
-      label: reason ? `Share as link · ${reason}` : "Share as link (5 days)",
+      label: shareAsLinkLabel(reason),
       icon: <IconLink className={icon} />,
-      disabled: !inTauri || (reason !== null && !usedUp),
+      disabled: !enabled,
       onSelect: () => void create(clip.id, clip.title ?? "Clip"),
     },
   ];
