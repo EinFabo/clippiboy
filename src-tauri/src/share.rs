@@ -1233,6 +1233,9 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
                 t.stage = Stage::Expired;
             }
         });
+        // A held offer taken up late can run out while its banner still
+        // waits in the bundle over the game: it goes up for nothing then.
+        crate::friends::clip_settled(&app, &id);
     });
 }
 
