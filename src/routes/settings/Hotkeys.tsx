@@ -721,6 +721,11 @@ function HotkeyInput({
           event.stopPropagation();
           if (event.button === 0 && !off) onRecording(!recording);
         }}
+        // Enter or Space on the focused slot: a click without a pointer
+        // (detail 0). A mouse click has started already, on its mousedown.
+        onClick={(event) => {
+          if (event.detail === 0 && !off && !recording) onRecording(true);
+        }}
         className={cn(
           "flex items-center gap-1.5 rounded-pill border transition-colors duration-150",
           second ? "px-1.5 py-1" : "px-2 py-1.5",
