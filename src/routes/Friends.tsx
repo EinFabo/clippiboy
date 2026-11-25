@@ -916,6 +916,7 @@ const ICON_BUTTON =
 
 function RequestRow({ request, incoming, now }: { request: FriendPending; incoming: boolean; now: number }) {
   const [busy, setBusy] = useState(false);
+  const [blocking, setBlocking] = useState(false);
   const run = (action: Promise<void>) => {
     setBusy(true);
     action.catch(report).finally(() => setBusy(false));
@@ -931,8 +932,20 @@ function RequestRow({ request, incoming, now }: { request: FriendPending; incomi
           </p>
         </div>
       </span>
-      {incoming ? (
+      {incoming && blocking ? (
+        <ConfirmBlock
+          name={request.displayName}
+          onConfirm={() => {
+            setBlocking(false);
+            run(friendsApi.block(request.id));
+          }}
+          onCancel={() => setBlocking(false)}
+        />
+      ) : incoming ? (
         <div className="flex gap-2">
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setBlocking(true)}>
+            Block
+          </Button>
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(friendsApi.remove(request.id))}>
             Decline
           </Button>
@@ -952,6 +965,22 @@ function RequestRow({ request, incoming, now }: { request: FriendPending; incomi
         </Button>
       )}
     </div>
+  );
+}
+
+/** Asks once, in the row, before someone is blocked — like Remove friend. */
+function ConfirmBlock({ name, onConfirm, onCancel }: { name: string; onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <ConfirmDelete
+      question={`Block ${name}?`}
+      origin="right"
+      confirmLabel="Block"
+      confirmTitle="Block — no more requests or clips from them"
+      cancelLabel="Don't block"
+      cancelTitle="Don't block — Escape does the same"
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    />
   );
 }
 
@@ -1083,7 +1112,8 @@ function FriendRow({
   const favorite = config.favorites.includes(friend.id);
   const status: Status = friendStatus(presence);
   const duration = presence?.game ? playingFor(presence.since, now) : null;
-  const [removing, setRemoving] = useState(false);
+  /** Remove and Block each ask once, in the row, like Delete on a clip. */
+  const [confirm, setConfirm] = useState<"remove" | "block" | null>(null);
 
   const toggleFavorite = () =>
     void patchConfig({
@@ -1130,14 +1160,13 @@ function FriendRow({
         kind: "item",
         label: "Remove friend",
         icon: <IconClose className="h-4 w-4" />,
-        // Asks once, in the row, like Delete on a clip.
-        onSelect: () => setRemoving(true),
+        onSelect: () => setConfirm("remove"),
       },
       {
         kind: "item",
         label: "Block",
         danger: true,
-        onSelect: () => void friendsApi.block(friend.id).catch(report),
+        onSelect: () => setConfirm("block"),
       },
     ]);
 
@@ -1197,7 +1226,7 @@ function FriendRow({
           )}
         </div>
       </span>
-      {removing ? (
+      {confirm === "remove" ? (
         <ConfirmDelete
           question={`Remove ${friend.displayName}?`}
           origin="right"
@@ -1206,10 +1235,19 @@ function FriendRow({
           cancelLabel="Keep"
           cancelTitle="Keep — Escape does the same"
           onConfirm={() => {
-            setRemoving(false);
+            setConfirm(null);
             void friendsApi.remove(friend.id).catch(report);
           }}
-          onCancel={() => setRemoving(false)}
+          onCancel={() => setConfirm(null)}
+        />
+      ) : confirm === "block" ? (
+        <ConfirmBlock
+          name={friend.displayName}
+          onConfirm={() => {
+            setConfirm(null);
+            void friendsApi.block(friend.id).catch(report);
+          }}
+          onCancel={() => setConfirm(null)}
         />
       ) : (
         <>
