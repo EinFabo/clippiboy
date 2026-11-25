@@ -39,9 +39,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::Mutex;
 
 /// How much audio the ring holds on to. The mixer collects every few
-/// milliseconds; a second is ample slack for a brief stall and costs only a few
-/// hundred kilobytes per source.
-const CAPACITY_MS: usize = 1000;
+/// milliseconds; this is slack for a stall, and costs well under a megabyte
+/// per source. More than the longest window the mixer still mixes in one go
+/// (`pipeline::MAX_WINDOW_100NS`, two seconds): a mixer held up for longer
+/// than the ring is long lost that stretch of live sound — in the buffer and
+/// in a running recording — though its window would still have been mixed.
+const CAPACITY_MS: usize = 2500;
+
+const _: () = assert!(CAPACITY_MS as i64 * 1_000 > crate::buffer::DISCONTINUITY_US);
 
 /// From what deviation a block counts as a jump in the timeline.
 const GAP_TOLERANCE_100NS: i64 = 50 * 10_000;
@@ -346,14 +351,18 @@ mod tests {
 
     #[test]
     fn the_oldest_material_is_dropped_and_the_start_moves_with_it() {
-        // 1000 Hz mono, 1000 ms capacity -> 1000 samples
+        // 1000 Hz mono, 2500 ms capacity -> 2500 samples
         let ring = SampleRing::new(1000, 1);
-        for frame in 0..1500i64 {
+        for frame in 0..4000i64 {
             ring.write(&[0.5], frame * 10_000_000 / 1000);
         }
         let start = ring.start_100ns().unwrap();
         let end = ring.end_100ns().unwrap();
-        assert_eq!((end - start) / 10_000, 1000, "ring does not hold 1000 ms");
+        assert_eq!(
+            (end - start) / 10_000,
+            CAPACITY_MS as i64,
+            "ring does not hold its capacity"
+        );
     }
 
     #[test]

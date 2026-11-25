@@ -323,24 +323,21 @@ impl TrackRing {
         let wanted = frames * CHANNELS;
         let mut data = vec![0i16; wanted];
         {
+            // Copied out in two slices at most, not sample by sample: the
+            // mixer pushes under this lock, and a long clip's window took it
+            // for a second or more — live sound was lost meanwhile.
             let inner = self.inner.lock();
             if inner.primed {
                 let offset_frames =
                     (from_100ns - inner.start_100ns()) * SAMPLE_RATE as i64 / 10_000_000;
                 let offset = offset_frames * CHANNELS as i64;
-                let (mut src, mut dst) = if offset < 0 {
-                    (0usize, (-offset) as usize)
+                let (src, dst) = if offset < 0 {
+                    (0usize, ((-offset) as usize).min(wanted))
                 } else {
                     (offset as usize, 0usize)
                 };
-                while dst < wanted {
-                    let Some(sample) = inner.samples.get(src) else {
-                        break;
-                    };
-                    data[dst] = *sample;
-                    src += 1;
-                    dst += 1;
-                }
+                let (front, back) = inner.samples.as_slices();
+                copy_from_halves(front, back, src, &mut data[dst..]);
             }
         }
 
@@ -355,6 +352,24 @@ impl TrackRing {
         frames: usize,
     ) -> std::io::Result<()> {
         write_wav(path, &self.window(from_100ns, frames))
+    }
+}
+
+/// Copy what lies from `from` on in the two halves of a ring (`front` then
+/// `back`, as `VecDeque::as_slices` gives them) into `out`, as far as either
+/// reaches. What is not there stays as it was.
+fn copy_from_halves(front: &[i16], back: &[i16], from: usize, out: &mut [i16]) {
+    let mut written = 0;
+    let mut take = |src: &[i16]| {
+        let n = src.len().min(out.len() - written);
+        out[written..written + n].copy_from_slice(&src[..n]);
+        written += n;
+    };
+    if from < front.len() {
+        take(&front[from..]);
+        take(back);
+    } else if let Some(rest) = back.get(from - front.len()..) {
+        take(rest);
     }
 }
 
@@ -1482,6 +1497,28 @@ impl Drop for Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Core #5: a window read in one copy per half of the ring, across its
+    /// wrap, and cut where either the ring or the window ends.
+    #[test]
+    fn a_window_is_copied_across_the_rings_wrap() {
+        let (front, back) = ([1, 2, 3], [4, 5]);
+        let read = |from: usize, len: usize| {
+            let mut out = vec![0i16; len];
+            copy_from_halves(&front, &back, from, &mut out);
+            out
+        };
+        assert_eq!(read(0, 5), [1, 2, 3, 4, 5]);
+        assert_eq!(read(2, 2), [3, 4]);
+        assert_eq!(read(3, 3), [4, 5, 0]);
+        assert_eq!(read(1, 6), [2, 3, 4, 5, 0, 0]);
+        assert_eq!(read(5, 2), [0, 0]);
+        assert_eq!(read(9, 2), [0, 0]);
+        assert_eq!(read(0, 0), Vec::<i16>::new());
+        let mut out = vec![0i16; 3];
+        copy_from_halves(&[], &[7, 8], 1, &mut out);
+        assert_eq!(out, [8, 0, 0]);
+    }
 
     #[test]
     fn an_error_after_a_quiet_first_poll_is_still_reported() {
