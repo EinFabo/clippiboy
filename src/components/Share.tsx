@@ -104,9 +104,9 @@ function PresenceLine({
 /**
  * "Send to a friend" from a clip: everyone, in the Friends page's order. The
  * busy and offline ones stand greyed, so nobody seems to have gone missing —
- * and a click on one copies a share link instead. Clips only go across while
- * both are online — like Quick Share, there is no mailbox in between. Signed
- * out or without friends, the way there is right in the picker.
+ * and for a clip, a click on one copies a share link instead. Clips only go
+ * across while both are online — like Quick Share, there is no mailbox in
+ * between. Signed out or without friends, the way there is right in the picker.
  */
 export function SharePicker() {
   const clip = useShare((s) => s.picking);
@@ -155,7 +155,9 @@ export function SharePicker() {
   };
 
   // Offline or busy: the clip can still go as a share link, copied — the
-  // card bottom right shows the upload, as from the clip's menu.
+  // card bottom right shows the upload, as from the clip's menu. Not a
+  // screenshot: the link's page is a player, and there is no link to it.
+  const linkable = !clip.screenshot;
   const copyLink = () => {
     void useLinks.getState().create(clip.id, clip.title ?? "Clip");
     close();
@@ -164,7 +166,7 @@ export function SharePicker() {
   const row = (friend: FriendUser, reachable: boolean) => (
     <button
       key={friend.id}
-      disabled={sending !== null}
+      disabled={sending !== null || (!reachable && !linkable)}
       onClick={() => (reachable ? send(friend.id) : copyLink())}
       className={cn(
         "group flex w-full items-center gap-3 rounded-inner px-2.5 py-2 text-left transition-colors",
@@ -193,13 +195,15 @@ export function SharePicker() {
           <IconSend className="h-[15px] w-[15px]" />
         </span>
       ) : (
-        <span
-          className="flex h-8 shrink-0 items-center gap-1.5 rounded-pill bg-elevated px-3 text-xs font-medium text-ink opacity-0
-            transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
-        >
-          <IconLink className="h-3.5 w-3.5" />
-          Copy link instead
-        </span>
+        linkable && (
+          <span
+            className="flex h-8 shrink-0 items-center gap-1.5 rounded-pill bg-elevated px-3 text-xs font-medium text-ink opacity-0
+              transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+          >
+            <IconLink className="h-3.5 w-3.5" />
+            Copy link instead
+          </span>
+        )
       )}
     </button>
   );
