@@ -268,8 +268,18 @@ pub fn end_capture(app: &AppHandle) {
         return;
     }
     let _ = app.emit("input-captured", CapturedEvent { binding: None });
-    if let Err(err) = crate::register_hotkeys(app) {
-        log::warn!("{err}");
+    // On the main thread, as every other registration: the shortcut plugin
+    // holds its lock while it waits for that thread, so one from the poll
+    // thread (a recording that timed out) deadlocked against one the main
+    // thread ran at the same moment — the window stopped answering.
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        if let Err(err) = crate::register_hotkeys(&handle) {
+            log::warn!("{err}");
+        }
+    });
+    if let Err(err) = queued {
+        log::warn!("hotkeys not registered again: {err}");
     }
 }
 
