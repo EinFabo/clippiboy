@@ -436,12 +436,21 @@ pub enum CamPart {
 const LAYOUT_TOLERANCE: f32 = 0.002;
 
 /// Whether "Free up space" for every clip takes this one's cam store now: not
-/// while its cam is still being added — that one is skipped, not waited for.
+/// while its cam is still being added — that one is skipped, not waited for —
+/// and not for a cam that failed to go in while the file shows none: the store
+/// is all there is of that cam, and the editor can still put it in.
 pub fn bakeable(clip: &Clip) -> bool {
+    bakeable_from(clip, || crate::facecam::file_shows_cam(&clip.id))
+}
+
+/// [`bakeable`], with `file_shows_cam` asked only for a cam that failed.
+pub fn bakeable_from(clip: &Clip, file_shows_cam: impl FnOnce() -> bool) -> bool {
     use crate::model::FacecamState;
-    clip.facecam
-        .as_ref()
-        .is_some_and(|cam| !matches!(cam.state, FacecamState::Pending | FacecamState::Baked))
+    match clip.facecam.as_ref().map(|cam| cam.state) {
+        None | Some(FacecamState::Pending | FacecamState::Baked) => false,
+        Some(FacecamState::Ready) => true,
+        Some(FacecamState::Failed) => file_shows_cam(),
+    }
 }
 
 pub fn same_layout(a: &crate::model::CamLayout, b: &crate::model::CamLayout) -> bool {
@@ -2142,14 +2151,18 @@ pub(crate) mod tests {
             facecam: Some(cam_row(Default::default(), -40, state)),
             ..plain_clip(None, None)
         };
-        assert!(!bakeable(&clip(Pending)));
-        assert!(bakeable(&clip(Ready)));
-        assert!(bakeable(&clip(Failed)));
-        assert!(!bakeable(&clip(Baked)));
+        let never = || -> bool { panic!("only a failed cam asks the file") };
+        assert!(!bakeable_from(&clip(Pending), never));
+        assert!(bakeable_from(&clip(Ready), never));
+        assert!(!bakeable_from(&clip(Baked), never));
         assert!(
-            !bakeable(&plain_clip(None, None)),
+            !bakeable_from(&plain_clip(None, None), never),
             "no cam, nothing to bake"
         );
+        // Facecam #7: a cam that never went in keeps its store; one that
+        // failed on a later save is in the file already.
+        assert!(!bakeable_from(&clip(Failed), || false));
+        assert!(bakeable_from(&clip(Failed), || true));
     }
 
     #[test]
