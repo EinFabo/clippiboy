@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, MESSAGES, mayReach, pruned, RELAY, remember, spend, type Bucket, type Contacts } from "./hubrules.ts";
+import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, inOrder, MESSAGES, mayReach, pruned, RELAY, remember, spend, type Bucket, type Contacts } from "./hubrules.ts";
 
 const now = 1_000_000;
 
@@ -110,4 +110,23 @@ test("relays: thirty at once, then no more than ten a minute", () => {
   }
   // The burst, then one every 6 s; the last of the hour lands just past it.
   assert.ok(passed >= 30 + 599 && passed <= 30 + 600, `${passed}`);
+});
+
+test("publishes reach friends in the order they were made, even when the first waits longer", async () => {
+  const queue = inOrder();
+  const seen: string[] = [];
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  await Promise.all([
+    queue(async () => { await wait(30); seen.push("playing"); }),
+    queue(async () => { await wait(1); seen.push("invisible"); }),
+  ]);
+  assert.deepEqual(seen, ["playing", "invisible"]);
+});
+
+test("a publish that fails does not hold up the next, and its caller hears of it", async () => {
+  const queue = inOrder();
+  const failed = queue(async () => { throw new Error("D1 down"); });
+  const next = queue(async () => "sent");
+  await assert.rejects(failed, /D1 down/);
+  assert.equal(await next, "sent");
 });

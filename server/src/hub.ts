@@ -4,6 +4,7 @@ import {
   beyondCap,
   hidesNow,
   HELLO,
+  inOrder,
   MESSAGES,
   PRESENCE,
   RAW_MAX,
@@ -75,6 +76,8 @@ export class Hub extends DurableObject<Env> {
   private messages: Bucket | undefined;
   /** Presence, hello and relay budgets as stored, read once per wake; see `take`. */
   private stored: Record<string, Bucket> | null = null;
+  /** Publishes one at a time, so friends hear them in order (`inOrder`). */
+  private publishing = inOrder();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -297,8 +300,14 @@ export class Hub extends DurableObject<Env> {
   /**
    * Tells the friends — but only when something they can see has changed.
    * Going offline (or invisible, which must look the same) stamps "last seen".
+   * One after the other: what is current is read when its turn comes, and the
+   * fan-out of the one before has reached every friend by then.
    */
-  private async publish(user: string, exclude?: WebSocket): Promise<void> {
+  private publish(user: string, exclude?: WebSocket): Promise<void> {
+    return this.publishing(() => this.publishNow(user, exclude));
+  }
+
+  private async publishNow(user: string, exclude?: WebSocket): Promise<void> {
     const next = this.current(exclude);
     const { presence: previous, lastSeen: seenBefore } = await this.card();
     if (JSON.stringify(previous) === JSON.stringify(next)) return;

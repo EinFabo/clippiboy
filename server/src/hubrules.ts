@@ -99,3 +99,20 @@ export function beyondCap<T extends { opened?: number }>(sockets: T[], cap: numb
   const oldestFirst = [...sockets].sort((a, b) => (a.opened ?? 0) - (b.opened ?? 0));
   return oldestFirst.slice(0, Math.max(0, sockets.length - cap));
 }
+
+/**
+ * Runs the tasks it is given one after the other, each once the one before has
+ * finished, whether that one worked or not. Each caller gets its own task's
+ * outcome. Presence goes through this: a publish waits on the database for the
+ * friends list, and two publishes side by side could reach a friend in the
+ * wrong order — "Appear offline" first, the game started a moment before it
+ * second, and the friend saw the user online.
+ */
+export function inOrder(): <T>(task: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(task: () => Promise<T>) => {
+    const run = tail.then(task);
+    tail = run.catch(() => {});
+    return run;
+  };
+}
