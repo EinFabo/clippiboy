@@ -481,15 +481,20 @@ export function Transfers({ onFriendsPage: friendsPage = false }: { onFriendsPag
     (t) => cardLeft(t, ended, now) > 0 && !seenInRow.current.has(t.id) && !(friendsPage && onFriendsPage(t, friendIds)),
   );
   const uploads = useLinkUploads();
+  const host = useFullscreenHost();
   if (shown.length === 0 && uploads.length === 0) return null;
   const { cards, failed, more } = cardStack(shown, ended);
 
-  // Above the player and the dialogs (z-50, portals later in the DOM): a link
-  // shared from the player's menu shows its progress there too. Below menus.
-  // Over a full view (player, screenshot, setup) it moves up, clear of the
-  // controls those keep in their bottom-right corner.
-  return (
-    <div data-transfers className="fixed right-6 bottom-6 z-[55] flex w-[340px] flex-col gap-2 [body:has([data-fullview])_&]:bottom-36">
+  // Above the player and the dialogs (z-50): a link shared from the player's
+  // menu shows its progress there too. Below menus. Over a full view (player,
+  // screenshot, setup) it moves up, clear of the controls those keep in their
+  // bottom-right corner — in fullscreen, clear of the player's bar. The
+  // player hides the pointer while its bar rests; not over the cards.
+  return createPortal(
+    <div
+      data-transfers
+      className="fixed right-6 bottom-6 z-[55] flex w-[340px] cursor-auto flex-col gap-2 [body:has([data-fullview])_&]:bottom-36"
+    >
       {uploads.map((upload) => (
         <UploadCard key={`link-${upload.clipId}`} upload={upload} />
       ))}
@@ -510,8 +515,26 @@ export function Transfers({ onFriendsPage: friendsPage = false }: { onFriendsPag
           </Button>
         </div>
       )}
-    </div>
+    </div>,
+    host,
   );
+}
+
+/**
+ * Where the cards go: into the element in fullscreen while there is one — the
+ * player's frame, the only thing drawn then, where an offer would otherwise
+ * wait unseen (the core sends no banner while the window is in front) — and
+ * into the body otherwise.
+ */
+function useFullscreenHost(): Element {
+  const [host, setHost] = useState<Element>(() => document.fullscreenElement ?? document.body);
+  useEffect(() => {
+    const onChange = () => setHost(document.fullscreenElement ?? document.body);
+    onChange();
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  return host;
 }
 
 /** The clock for the cards: renders again when the next ended card is due to go. */
