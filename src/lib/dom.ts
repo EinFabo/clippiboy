@@ -15,6 +15,14 @@ export function isTextField(target: EventTarget | null): target is TextField {
 }
 
 /**
+ * Does Ctrl+A here belong to the browser — a field or editable text, where it
+ * selects what you typed — rather than to the app?
+ */
+export function selectsOwnText(target: EventTarget | null): boolean {
+  return isTextField(target) || (target instanceof HTMLElement && target.isContentEditable);
+}
+
+/**
  * The current frame, drawn into canvases that are only ever shown.
  *
  * Saving means letting go of the file — `src` comes off the video and takes the

@@ -28,6 +28,7 @@ import { Settings } from "./routes/settings";
 import { OPEN_SETTINGS_EVENT } from "./lib/settingsLink";
 import { OPEN_CLIP_EVENT } from "./lib/share";
 import { whenViewerFree } from "./lib/viewerGuard";
+import { selectsOwnText } from "./lib/dom";
 import { SOLO_CLEAR_ATTEMPTS, soloToClear } from "./lib/audioRows";
 
 export default function App() {
@@ -47,6 +48,19 @@ export default function App() {
   useEffect(() => {
     void init();
   }, [init]);
+
+  // Ctrl+A outside a text field never is the browser's select-all: it marked
+  // the whole window blue and stayed that way. The gallery takes it for its
+  // clips on its own page; everywhere else it simply does nothing.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a" && !selectsOwnText(event.target)) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // The Audio page has no Solo any more, and the core still honours it: a
   // source saved with it on would silence the others in every recording. Written

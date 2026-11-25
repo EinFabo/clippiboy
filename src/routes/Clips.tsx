@@ -31,7 +31,7 @@ import { api, fileUrl, inTauri } from "@/lib/ipc";
 import { clipName, fileName, formatAgo, formatDuration, formatSize } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
-import { isTextField } from "@/lib/dom";
+import { isTextField, selectsOwnText } from "@/lib/dom";
 import { useFlip } from "@/lib/useFlip";
 import { useStableHandler } from "@/lib/useStableHandler";
 import { sameData } from "@/lib/same";
@@ -282,13 +282,15 @@ export function Clips({
   useEffect(() => {
     if (open !== null || exporting || picking || inTrash) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isTextField(event.target)) return;
+      if (selectsOwnText(event.target)) return;
       if (event.key === "Escape") {
-        if (!confirmingSelection.current) selection.clear();
+        if (!event.defaultPrevented && !confirmingSelection.current) selection.clear();
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
-        const target = event.target;
-        // Only with the focus in the grid — the page itself is not "the gallery".
-        if (!(target instanceof Node) || !grid.current?.contains(target)) return;
+        // Anywhere on this page outside a text field it means the clips shown —
+        // the focus had to sit in the grid before, and from anywhere else the
+        // browser marked the whole window blue instead. App keeps that browser
+        // select-all off everywhere (and may have prevented it already), so
+        // `defaultPrevented` says nothing here.
         event.preventDefault();
         selection.all();
       }
