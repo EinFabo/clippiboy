@@ -5,4 +5,14 @@ edition = "2021"
 
 [dependencies]
 vcam-protocol = { path = "../protocol" }
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Com", "Win32_Media_MediaFoundation", "Win32_System_SystemInformation"] }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Services",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_UI_Shell",
+] }
