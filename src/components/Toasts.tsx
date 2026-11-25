@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useFullscreenHost } from "@/lib/useFullscreenHost";
 import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "@/lib/ipc";
 import { cn } from "@/lib/cn";
@@ -25,6 +27,7 @@ const LEAVE_MS = 200;
 const MAX_SHOWN = 3;
 
 export function Toasts() {
+  const host = useFullscreenHost();
   const [entries, setEntries] = useState<Entry[]>([]);
   const stack = useRef<HTMLDivElement>(null);
   // Bottom offset that clears the transfer cards (same corner), or null when
@@ -115,8 +118,9 @@ export function Toasts() {
 
   // No early return when the list is empty: it would take the last toast's node
   // away mid-fade, and the one message you were meant to read is exactly the
-  // one that would vanish.
-  return (
+  // one that would vanish. In fullscreen the stack moves into the player's
+  // frame, the only thing drawn then.
+  return createPortal(
     <div
       ref={stack}
       className="pointer-events-none fixed right-6 bottom-6 z-[65] flex flex-col items-end gap-2 [body:has([data-fullview])_&]:bottom-36"
@@ -140,6 +144,7 @@ export function Toasts() {
           {entry.message}
         </div>
       ))}
-    </div>
+    </div>,
+    host,
   );
 }

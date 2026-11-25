@@ -44,6 +44,7 @@ import { cardLeft, cardStack, noun, onFriendsPage, transferKind, type Ended } fr
 import type { Clip, FriendPresence, FriendUser, Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { toast } from "@/lib/toastBus";
+import { useFullscreenHost } from "@/lib/useFullscreenHost";
 import { AddFriendForm, AnswerLeft, Avatar } from "@/routes/Friends";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
@@ -111,6 +112,7 @@ function PresenceLine({
  * is right in the picker.
  */
 export function SharePicker() {
+  const host = useFullscreenHost();
   const clip = useShare((s) => s.picking);
   const pick = useShare((s) => s.pick);
   const transfers = useShare((s) => s.transfers);
@@ -283,7 +285,7 @@ export function SharePicker() {
         </div>
       </div>
     </div>,
-    document.body,
+    host,
   );
 }
 
@@ -321,6 +323,7 @@ function PickerSignIn() {
  * row shows how far they are.
  */
 export function ClipPicker() {
+  const host = useFullscreenHost();
   const friend = useShare((s) => s.choosingFor);
   const chooseFor = useShare((s) => s.chooseFor);
   const clips = useEngine((s) => s.clips);
@@ -427,7 +430,7 @@ export function ClipPicker() {
         </div>
       </div>
     </div>,
-    document.body,
+    host,
   );
 }
 
@@ -536,23 +539,6 @@ export function Transfers({ onFriendsPage: friendsPage = false }: { onFriendsPag
     </div>,
     host,
   );
-}
-
-/**
- * Where the cards go: into the element in fullscreen while there is one — the
- * player's frame, the only thing drawn then, where an offer would otherwise
- * wait unseen (the core sends no banner while the window is in front) — and
- * into the body otherwise.
- */
-function useFullscreenHost(): Element {
-  const [host, setHost] = useState<Element>(() => document.fullscreenElement ?? document.body);
-  useEffect(() => {
-    const onChange = () => setHost(document.fullscreenElement ?? document.body);
-    onChange();
-    document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
-  }, []);
-  return host;
 }
 
 /** The clock for the cards: renders again when the next ended card is due to go. */
