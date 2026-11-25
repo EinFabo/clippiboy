@@ -1460,10 +1460,7 @@ impl AppState {
                 // Running for a recording only: the buffer just gets its
                 // length back, and fills from here. A capture that saw the
                 // lock screen meanwhile starts over at the recording's end.
-                if self
-                    .capture_stale
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if self.capture_stale.load(std::sync::atomic::Ordering::SeqCst) {
                     log::info!(
                         "the buffer takes over the recording's capture for now \u{2014} a fresh one follows when the recording ends"
                     );

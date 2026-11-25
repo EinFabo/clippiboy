@@ -608,7 +608,10 @@ mod tests {
         buf.push(video(50_000, false));
         assert!(!buf.order_known());
         buf.push(video(16_666, false));
-        assert!(buf.order_known() && buf.reorders(), "a B-frame tells at once");
+        assert!(
+            buf.order_known() && buf.reorders(),
+            "a B-frame tells at once"
+        );
         buf.clear();
         assert!(!buf.order_known(), "a clear starts afresh");
         for at in 0..ORDER_SHOWN as i64 {

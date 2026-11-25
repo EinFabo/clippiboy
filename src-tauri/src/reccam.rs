@@ -884,8 +884,7 @@ pub fn recover(library: &parking_lot::Mutex<Option<crate::clips::Library>>) -> u
             }
             // One finished and waiting for its swap is kept, under this run's
             // name: the job looks for its own and would burn in again beside it.
-            let finished =
-                applying.is_some() && crate::composite::file_size(&stale) == applying;
+            let finished = applying.is_some() && crate::composite::file_size(&stale) == applying;
             if !finished || std::fs::rename(&stale, &own).is_err() {
                 let _ = std::fs::remove_file(stale);
             }
