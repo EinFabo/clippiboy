@@ -1382,6 +1382,20 @@ impl Pipeline {
         Ok(recorder)
     }
 
+    /// End the running recording's picture, and give how far the mixer has to
+    /// get for its sound to cover the last frame: that frame's QPC plus one
+    /// frame. With it, the mixer's position to wait on. `None` without a
+    /// recording or a frame in it.
+    pub fn end_recording_video(&self) -> Option<(i64, Arc<MixPosition>)> {
+        let _ring = self.shared.packets.lock();
+        let last_pts_us = self.shared.recorder.lock().as_ref()?.end_video()?;
+        let frame_100ns = 10_000_000 / self.shared.fps.max(1) as i64;
+        Some((
+            self.shared.qpc_of(last_pts_us) + frame_100ns,
+            self.shared.mixed.clone(),
+        ))
+    }
+
     /// Unhook the running recording. Writing it out is the caller's —
     /// `Recorder::finish` and `recorder::finalize`.
     pub fn take_recording(&self) -> Option<Arc<Recorder>> {

@@ -290,6 +290,9 @@ pub struct Recorder {
     /// Bytes handed to the writer and not yet written.
     queued: Arc<AtomicU64>,
     audio: Mutex<AudioSide>,
+    /// The picture has ended ([`Self::end_video`]); the sound runs on until
+    /// the recording is unhooked.
+    video_ended: std::sync::atomic::AtomicBool,
 }
 
 /// A recording made ready but not begun: its folder, its description and the
@@ -439,6 +442,7 @@ impl Recorder {
                 virtual_frames: 0,
                 tracks: Vec::new(),
             }),
+            video_ended: std::sync::atomic::AtomicBool::new(false),
         });
 
         recorder.send(Job::Begin { timestamped });
@@ -493,7 +497,7 @@ impl Recorder {
     /// One packet from the encoder. Called with the replay buffer locked, so
     /// it must not wait on anything — it only queues.
     pub fn video(&self, packet: &EncodedPacket) {
-        if !packet.is_video() {
+        if !packet.is_video() || self.video_ended.load(Ordering::Relaxed) {
             return;
         }
         self.frames.fetch_add(1, Ordering::Relaxed);
@@ -541,6 +545,18 @@ impl Recorder {
         // Sent under the lock, so that descriptions reach the writer in the
         // order they were made and an older one never lands last.
         self.send(Job::Meta(Box::new(meta.clone())));
+    }
+
+    /// End the picture here; the sound goes on until the recording is
+    /// unhooked. Gives the timestamp of the last frame taken, `None` with none
+    /// at all. Called with the replay buffer locked, like [`Self::video`].
+    ///
+    /// The mixer runs 80 ms behind the present: unhooked at once, a recording
+    /// lacked the sound of its last frames, and `finalize` filled that with
+    /// silence — the last 60–90 ms of every recording were mute.
+    pub fn end_video(&self) -> Option<i64> {
+        self.video_ended.store(true, Ordering::Relaxed);
+        Some(self.last_pts_us.load(Ordering::Relaxed)).filter(|&pts| pts != i64::MIN)
     }
 
     /// How long the recording runs so far, by its frames.
@@ -1565,6 +1581,33 @@ mod tests {
             ts::read_pts(&std::fs::read(work.join(VIDEO_TS)).unwrap()),
             vec![63_000]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Core #4: once the picture has ended, no frame joins it while the sound
+    /// catches up.
+    #[test]
+    fn a_frame_after_the_picture_ended_is_left_out() {
+        let dir = scratch("end-video");
+        let recorder = Recorder::start(
+            &dir,
+            Meta {
+                id: "v".into(),
+                fps: 60,
+                ..Meta::default()
+            },
+            &[0, 0, 0, 1],
+            vec![frame(0, true)],
+            0,
+            true,
+        )
+        .unwrap();
+        recorder.video(&frame(16_666, false));
+        assert_eq!(recorder.end_video(), Some(16_666));
+        recorder.video(&frame(33_333, false));
+        assert_eq!(recorder.frames(), 2);
+        assert_eq!(recorder.end_video(), Some(16_666));
+        recorder.finish(Vec::new(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

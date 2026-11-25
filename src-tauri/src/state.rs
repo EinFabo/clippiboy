@@ -2281,6 +2281,18 @@ impl AppState {
                 file.segments.len()
             );
         }
+        // The picture ends now, the sound once the mixer, 80 ms behind, has
+        // caught up with it — without the pipeline's lock held meanwhile.
+        let end = self
+            .pipeline
+            .lock()
+            .as_ref()
+            .and_then(|pipeline| pipeline.end_recording_video());
+        if let Some((end_100ns, mixed)) = end {
+            if !mixed.wait_until(end_100ns, crate::pipeline::MIX_WAIT) {
+                log::info!("audio: the mixer has not reached the recording's end \u{2014} its tail is silent");
+            }
+        }
         if let Some(pipeline) = self.pipeline.lock().as_ref() {
             pipeline.take_recording();
         }
