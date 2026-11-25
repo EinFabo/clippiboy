@@ -20,3 +20,8 @@ test("the sign-in pages run only their own style and script, and refuse frames",
   assert.match(csp, /frame-ancestors 'none'/);
   assert.doesNotMatch(csp, /unsafe-inline/);
 });
+test("a form goes only back to this server, and only on the page that has one", () => {
+  assert.match(pageCsp("n"), /form-action 'none'/);
+  assert.match(pageCsp("n", true), /form-action 'self'(;|$)/);
+  assert.doesNotMatch(pageCsp("n", true), /form-action 'none'/);
+});

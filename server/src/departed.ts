@@ -1,14 +1,17 @@
-// What outlives a deleted account, and only for a week: a keyed one-way hash of
-// its Discord id, the times of its links that still count against the week,
-// and a suspension if one stood. Signing in again with the same Discord
-// account picks them up — otherwise deleting the account and coming back would
-// start the weekly link limit over and drop a suspension not yet carried out.
+// What outlives a deleted account: a keyed one-way hash of its Discord id, the
+// times of its links that still count against the week, and a suspension if
+// one stood. Signing in again with the same Discord account picks them up —
+// otherwise deleting the account and coming back would start the weekly link
+// limit over and drop the suspension. Kept for a week; a suspended account's
+// row is kept for as long as the suspension stands (`departedKept`), since a
+// suspended account may be deleted too and its suspension must not run out
+// with the week.
 //
 // Imports nothing, so it can be tested under plain Node (`npm test`).
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** How long a row is kept after the account went. */
+/** How long a row is kept after the account went, unless it holds a suspension. */
 export const DEPARTED_KEEP_MS = 7 * DAY_MS;
 
 /** Link times kept per row, newest first — more than the weekly limit will
@@ -33,9 +36,16 @@ export async function fingerprint(pepper: string | undefined, discordId: string)
   return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Rows that left before this are done with — the hourly cron deletes them. */
+/** Rows that left before this are done with — the hourly cron deletes them,
+    except those that hold a suspension (`departedKept`). */
 export function departedCutoff(now: number): number {
   return now - DEPARTED_KEEP_MS;
+}
+
+/** Whether the hourly cron keeps a row: within its week, or holding a
+    suspension. The cron's `DELETE FROM departed` is the same rule in SQL. */
+export function departedKept(row: Pick<DepartedRow, "banned_at" | "left_at">, now: number): boolean {
+  return row.banned_at != null || row.left_at > departedCutoff(now);
 }
 
 export interface DepartedRow {
@@ -52,11 +62,14 @@ export interface CarryOver {
 
 /**
  * What a new account for the same Discord id takes over from its departed
- * row: nothing once the row is a week old, even if the cron has not removed it
- * yet; otherwise the suspension and the link times still inside the week.
+ * row: the suspension, however old the row, and the link times still inside
+ * the week — none once the row is a week old, even if the cron has not
+ * removed it yet.
  */
 export function carryOver(row: DepartedRow | null, now: number): CarryOver | null {
-  if (!row || row.left_at <= departedCutoff(now)) return null;
+  if (!row) return null;
+  const bannedAt = row.banned_at ?? null;
+  if (row.left_at <= departedCutoff(now)) return bannedAt === null ? null : { linkTimes: [], bannedAt };
   let parsed: unknown = [];
   try {
     parsed = JSON.parse(row.link_times ?? "[]");
@@ -67,7 +80,6 @@ export function carryOver(row: DepartedRow | null, now: number): CarryOver | nul
     .filter((t): t is number => typeof t === "number" && Number.isFinite(t) && t > now - DEPARTED_KEEP_MS && t <= now)
     .sort((a, b) => a - b)
     .slice(-KEPT_LINKS);
-  const bannedAt = row.banned_at ?? null;
   if (linkTimes.length === 0 && bannedAt === null) return null;
   return { linkTimes, bannedAt };
 }

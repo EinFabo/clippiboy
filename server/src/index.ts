@@ -78,8 +78,11 @@ export default {
         env.DB.prepare("DELETE FROM webhook_logins WHERE created_at < ?").bind(Date.now() - WEBHOOK_TTL_MS).run(),
         // Yesterday's count stays readable a day; older ones are done.
         env.DB.prepare("DELETE FROM anon_budget WHERE day < ?").bind(utcDay(Date.now() - DAY_MS)).run(),
-        // What a deleted account left behind is kept for seven days.
-        env.DB.prepare("DELETE FROM departed WHERE left_at <= ?").bind(departedCutoff(Date.now())).run(),
+        // What a deleted account left behind is kept for seven days, a
+        // suspension for as long as it stands (`departedKept`).
+        env.DB.prepare("DELETE FROM departed WHERE left_at <= ? AND banned_at IS NULL")
+          .bind(departedCutoff(Date.now()))
+          .run(),
         // Sessions unused for that long no longer sign anyone in; their rows go too.
         env.DB.prepare("DELETE FROM sessions WHERE last_used < ?").bind(Date.now() - SESSION_IDLE_MS).run(),
       ]).then((outcomes) => {
@@ -102,6 +105,12 @@ async function route(request: Request, env: Env): Promise<Response> {
     return authStart(request, url, env);
   }
   if (path === "/auth/callback" && method === "GET") return authCallback(request, url, env);
+  // A suspended account can sign in no more, so it is deleted from the page
+  // that says it is suspended.
+  if (path === "/auth/delete" && method === "POST") {
+    if (!(await underLimit(request, env, "delete"))) return page("Slow down", "Wait a minute, then try again.");
+    return deleteSuspended(request, env);
+  }
   if (path === "/auth/exchange" && method === "POST") {
     if (!(await underLimit(request, env, "exchange"))) return json({ error: "Too many sign-ins — wait a minute." }, 429);
     return authExchange(request, env);
@@ -243,7 +252,11 @@ async function spend(env: Env, me: string, budget: "share" | "connect" | "friend
  * its own, so a flood of pings cannot lock the same address out of signing in.
  * An IPv6 address counts as its /64.
  */
-async function underLimit(request: Request, env: Env, route: "auth" | "ping" | "exchange" | "invite" | "webhook"): Promise<boolean> {
+async function underLimit(
+  request: Request,
+  env: Env,
+  route: "auth" | "ping" | "exchange" | "invite" | "webhook" | "delete",
+): Promise<boolean> {
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   return (await env.ANON_LIMIT.limit({ key: `${route}:${addressKey(address)}` })).success;
 }
@@ -338,7 +351,19 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
   const discord = (await userResponse.json()) as DiscordUser;
   const userId = await upsertDiscordUser(env.DB, discord, await departedHash(env, discord.id));
   const banned = await env.DB.prepare("SELECT 1 FROM users WHERE id = ? AND banned_at IS NOT NULL").bind(userId).first();
-  if (banned) return page("Account suspended", "This ClippiBoy account has been suspended.");
+  if (banned) {
+    // No session, but the account may still be deleted: the code is good for
+    // that alone (`deleteSuspended`), from this browser and within the sign-in's time.
+    const oneTime = randomToken(24);
+    await env.DB.prepare("UPDATE logins SET code = ?, user_id = ? WHERE state = ?").bind(oneTime, userId, state).run();
+    return page(
+      "Account suspended",
+      "This ClippiBoy account has been suspended. You can still delete it, with its friends and links.",
+      undefined,
+      [],
+      { action: "/auth/delete", code: oneTime, label: "Delete account" },
+    );
+  }
 
   const invited = await inviteAtSignIn(request, env, userId);
 
@@ -392,6 +417,48 @@ async function inviteAtSignIn(
     console.error("invite", err);
     return none;
   }
+}
+
+/**
+ * "Delete account" on the suspended page. The one-time code from that page,
+ * from the browser that signed in (its state cookie), within the sign-in's
+ * ten minutes, and only while the account is suspended — any other is deleted
+ * in the app. The suspension outlives the account (departed.ts), so deleting
+ * it is no way around it.
+ */
+async function deleteSuspended(request: Request, env: Env): Promise<Response> {
+  const form = new URLSearchParams((await readLimited(request, 1024)) ?? "");
+  const code = form.get("code") ?? "";
+  const login = code
+    ? await env.DB.prepare("SELECT state, user_id, created_at FROM logins WHERE code = ?")
+        .bind(code)
+        .first<{ state: string; user_id: string | null; created_at: number }>()
+    : null;
+  const states = statesIn(request.headers.get("Cookie"), STATE_COOKIE);
+  if (
+    !login?.user_id ||
+    Date.now() - login.created_at > LOGIN_TTL_MS ||
+    !states.some((s) => sameText(s, login.state))
+  ) {
+    return page("Page expired", "Sign in again from ClippiBoy to delete the account.");
+  }
+  const suspended = await env.DB.prepare("SELECT 1 FROM users WHERE id = ? AND banned_at IS NOT NULL")
+    .bind(login.user_id)
+    .first();
+  if (!suspended) return page("Not suspended", "Delete the account in ClippiBoy, under Settings → Friends.");
+  // Without the pepper nothing outlives the account, the suspension included.
+  if (!env.DEPARTED_PEPPER) return page("Not possible right now", "Try again later, or write to privacy@clippiboy.com.");
+  // Spent once it is used.
+  await env.DB.prepare("DELETE FROM logins WHERE state = ?").bind(login.state).run();
+  try {
+    await deleteAccount(env, login.user_id);
+  } catch (err) {
+    console.error("delete suspended", login.user_id, err);
+    return page("Something went wrong", "The account is not deleted yet. Sign in again from ClippiBoy and try once more.");
+  }
+  return page("Account deleted", "Your ClippiBoy account is gone. You can close this tab.", undefined, [
+    `${STATE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
+  ]);
 }
 
 async function authExchange(request: Request, env: Env): Promise<Response> {
@@ -558,20 +625,30 @@ async function webhookCallback(request: Request, url: URL, env: Env): Promise<Re
  * script run (by nonce), nobody may frame them, and no cache keeps them: the
  * one after sign-in carries a one-time code in its link.
  */
-function page(title: string, text: string, redirect?: string, cookies: string[] = []): Response {
+/** A button that posts `code` back to this server — the only form a page has. */
+interface PageForm {
+  action: string;
+  code: string;
+  label: string;
+}
+
+function page(title: string, text: string, redirect?: string, cookies: string[] = [], form?: PageForm): Response {
   const nonce = randomToken(16);
   const link = redirect
     ? `<p><a href="${escapeHtml(redirect)}">Open ClippiBoy</a></p><script nonce="${nonce}">location.href=${JSON.stringify(redirect)}</script>`
-    : "";
+    : form
+      ? `<form method="post" action="${escapeHtml(form.action)}"><input type="hidden" name="code" value="${escapeHtml(form.code)}"><button type="submit">${escapeHtml(form.label)}</button></form>`
+      : "";
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClippiBoy</title>
 <style nonce="${nonce}">body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08080a;color:#f4f4f5;font:16px/1.5 system-ui,sans-serif}
 main{background:#121215;border:1px solid #26262c;border-radius:20px;padding:32px 36px;max-width:360px;text-align:center}
-h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;margin:0}a{display:inline-block;margin-top:20px;background:#fff;color:#08080a;border-radius:999px;padding:10px 20px;text-decoration:none;font-weight:600}</style></head>
+h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;margin:0}a,button{display:inline-block;margin-top:20px;background:#fff;color:#08080a;border-radius:999px;padding:10px 20px;text-decoration:none;font-weight:600}
+button{border:0;font:inherit;font-weight:600;cursor:pointer;background:#f87171}</style></head>
 <body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>${link}</main></body></html>`;
   const headers = new Headers({
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
-    "Content-Security-Policy": pageCsp(nonce),
+    "Content-Security-Policy": pageCsp(nonce, form !== undefined),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
   });

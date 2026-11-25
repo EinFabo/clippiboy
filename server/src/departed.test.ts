@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { carryOver, DEPARTED_KEEP_MS, departedCutoff, fingerprint } from "./departed.ts";
+import { carryOver, DEPARTED_KEEP_MS, departedCutoff, departedKept, fingerprint } from "./departed.ts";
 
 const DAY = 24 * 60 * 60 * 1000;
 const now = 1_800_000_000_000;
@@ -36,10 +36,21 @@ test("a fresh row carries its link times and its suspension", () => {
   assert.deepEqual(carryOver(row, now), { linkTimes: [now - 2 * DAY, now - DAY], bannedAt: now - 3 * DAY });
 });
 
-test("a row seven days old carries nothing, even before the cron removed it", () => {
-  const row = { link_times: JSON.stringify([now - 7 * DAY + 1]), banned_at: now - 8 * DAY, left_at: now - 7 * DAY };
+test("a row seven days old carries no links, even before the cron removed it", () => {
+  const row = { link_times: JSON.stringify([now - 7 * DAY + 1]), banned_at: null, left_at: now - 7 * DAY };
   assert.equal(carryOver(row, now), null);
   assert.notEqual(carryOver({ ...row, left_at: now - 7 * DAY + 1 }, now), null);
+});
+
+test("a suspension outlasts the week: deleting a suspended account does not end it", () => {
+  const row = { link_times: JSON.stringify([now - 7 * DAY + 1]), banned_at: now - 90 * DAY, left_at: now - 60 * DAY };
+  assert.deepEqual(carryOver(row, now), { linkTimes: [], bannedAt: now - 90 * DAY });
+});
+
+test("the cron keeps a row for its week, and for as long as it holds a suspension", () => {
+  assert.equal(departedKept({ banned_at: null, left_at: now - DAY }, now), true);
+  assert.equal(departedKept({ banned_at: null, left_at: now - 7 * DAY }, now), false);
+  assert.equal(departedKept({ banned_at: now - 400 * DAY, left_at: now - 365 * DAY }, now), true);
 });
 
 test("link times past the week, in the future or not numbers are dropped", () => {
