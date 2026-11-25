@@ -2211,6 +2211,13 @@ impl AppState {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        // And a few frames more: whether the stream has B-frames shows only
+        // then, and decides how the recording keeps its pictures (core #3).
+        // A stream that stays this slow records on whatever it showed.
+        let settle = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !shared.packets.lock().order_known() && std::time::Instant::now() < settle {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         let recording = self
             .active_recording

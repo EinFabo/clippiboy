@@ -20,6 +20,12 @@ pub const VIDEO_TRACK: u32 = 0;
 /// 2 s the clock uses to stop counting skipped ticks (`convert::GAP`).
 pub const DISCONTINUITY_US: i64 = 2_000_000;
 
+/// How many pictures a stream shows before its order counts as known
+/// ([`ReplayBuffer::order_known`]): an encoder with B-frames sends its first
+/// picture out of order within the first few after a keyframe (two or three
+/// B-frames between references), eight leave room to spare.
+pub const ORDER_SHOWN: u32 = 8;
+
 /// The longest step between neighbouring frames that a clip still keeps as
 /// time that passed: three keyframe intervals, and at least a second. A hang
 /// up to this long stays in the clip as a held frame, in sync with its sound
@@ -70,6 +76,9 @@ pub struct ReplayBuffer {
     /// An encoder with B-frames does that, and its stream cannot go into a
     /// TS without DTS ([`crate::ts`]).
     reorders: bool,
+    /// Video packets pushed since the last clear, up to [`ORDER_SHOWN`]: how
+    /// sure `reorders` is of a "no".
+    video_seen: u32,
     /// A step forward between neighbouring packets longer than this is a
     /// break in time (BUF-5), not a stall: the PC slept with the buffer
     /// running. `i64::MAX`, the default, never sees one.
@@ -95,6 +104,7 @@ impl ReplayBuffer {
             bytes: 0,
             newest_pts: 0,
             reorders: false,
+            video_seen: 0,
             jump_us: i64::MAX,
             cut_seq: None,
             warned_about_one_keyframe: false,
@@ -114,6 +124,9 @@ impl ReplayBuffer {
     }
 
     pub fn push(&mut self, packet: EncodedPacket) {
+        if packet.is_video() && self.video_seen < ORDER_SHOWN {
+            self.video_seen += 1;
+        }
         // Before `newest_pts` moves: a picture behind the newest one so far.
         if packet.is_video() && packet.pts_us < self.newest_pts && !self.reorders {
             self.reorders = true;
@@ -286,6 +299,7 @@ impl ReplayBuffer {
         self.head_seq = self.next_seq;
         self.newest_pts = 0;
         self.reorders = false;
+        self.video_seen = 0;
         self.cut_seq = None;
     }
 
@@ -293,6 +307,14 @@ impl ReplayBuffer {
     /// recording keeps the raw stream rather than its timestamps.
     pub fn reorders(&self) -> bool {
         self.reorders
+    }
+
+    /// Has the stream shown yet whether it [`reorders`](Self::reorders)? Only
+    /// after a few pictures: with B-frames the first one out of order comes
+    /// some frames after the first keyframe, and a recording begun on a stream
+    /// that had not got there yet took the TS path, its pictures shuffled.
+    pub fn order_known(&self) -> bool {
+        self.reorders || self.video_seen >= ORDER_SHOWN
     }
 
     pub fn bytes(&self) -> u64 {
@@ -571,6 +593,29 @@ mod tests {
             buf.bytes() > 1,
             "the budget was allowed to win over the last group of pictures"
         );
+    }
+
+    /// Core #3: a stream only a keyframe and a picture old says nothing yet
+    /// about its order.
+    #[test]
+    fn the_order_is_known_after_a_few_pictures_or_the_first_reorder() {
+        let mut buf = ReplayBuffer::new(30, NO_LIMIT);
+        let video = |pts: i64, key: bool| EncodedPacket {
+            pts_us: pts,
+            ..packet(VIDEO_TRACK, 0, key, 10)
+        };
+        buf.push(video(0, true));
+        buf.push(video(50_000, false));
+        assert!(!buf.order_known());
+        buf.push(video(16_666, false));
+        assert!(buf.order_known() && buf.reorders(), "a B-frame tells at once");
+        buf.clear();
+        assert!(!buf.order_known(), "a clear starts afresh");
+        for at in 0..ORDER_SHOWN as i64 {
+            assert!(!buf.order_known());
+            buf.push(video(at * 16_666, at == 0));
+        }
+        assert!(buf.order_known() && !buf.reorders());
     }
 
     /// Review Focus, BUF-6: an encoder with B-frames hands out pictures
