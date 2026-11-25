@@ -53,6 +53,9 @@ const COPY_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// older than the start. A crash's leftovers are far older than this.
 const CLOCK_MARGIN: Duration = Duration::from_secs(2 * 60);
 
+/// How often the sweep looks whether the library passes are through.
+const PASSES_POLL: Duration = Duration::from_millis(250);
+
 /// What counts as "before the start" for a file written at `started`.
 fn cutoff(started: SystemTime) -> SystemTime {
     started
@@ -107,6 +110,14 @@ pub fn run(app: &tauri::AppHandle) {
                     Err(err) => log::warn!("could not remove '{}': {err}", dir.display()),
                 }
             }
+        }
+        // The clip folder only once the library passes are through: their
+        // recoveries take a cam composite that finished before the app
+        // stopped over under this run's name, which the sweep leaves alone.
+        // Before that its name is a leftover's, and a sweep that got there
+        // first deleted it — and the cam was burned in again, minutes of it.
+        while crate::clips::PASSES_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(PASSES_POLL);
         }
         for path in leftovers_in(&clip_dir, before_start) {
             remove_file(&path, before_start);

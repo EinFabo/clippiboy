@@ -2223,7 +2223,9 @@ fn allow_existing_clip_dirs(app: &tauri::AppHandle, clips: &[model::Clip]) {
 /// thumbnail move, the game names, the filing. One thread, so none of them
 /// rewrites a file another one is moving; each takes a clip's lock and the
 /// library only for that clip. The sweep, the recovery and the originals store
-/// they sit beside work on scratch names and new ids, not on these clips.
+/// they sit beside work on scratch names and new ids, not on these clips; the
+/// sweep's turn in the clip folder waits for them, as their recoveries take
+/// over scratch files it would otherwise delete.
 /// Emits `clips-changed` right after the clip folders are granted (a player
 /// opened before that retries its file then), after every pass that changed
 /// something, and once more at the end, so a gallery that read the list half
