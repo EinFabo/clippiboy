@@ -852,6 +852,9 @@ fn run(
         VideoSource::CleanWithCam => Some(cam_inputs(clip, plan, &video)?),
         _ => None,
     };
+    // The cam's mask goes when this run ends, whichever way: a save that
+    // failed left it in `data/temp` for good.
+    let _mask = Scratch(cam.as_ref().and_then(|cam| cam.mask.clone()));
 
     // ffmpeg must not write into its own input — so beside it, and over it
     // afterwards. The process id makes the file unique per run.
@@ -964,6 +967,17 @@ fn run(
     ))
 }
 
+/// A scratch file removed when it goes out of scope.
+struct Scratch(Option<PathBuf>);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// The cam's inputs for laying it over `video`, the clean picture.
 fn cam_inputs(clip: &Clip, plan: &RenderPlan, video: &Path) -> Result<CamInputs, String> {
     let cam = clip.facecam.as_ref().ok_or("This clip has no cam.")?;
@@ -1018,9 +1032,6 @@ fn note_cam_hidden(clip_id: &str) {
 }
 
 fn note_cam_applied(clip_id: &str, cam: &CamInputs, plan: &RenderPlan, target: &Path) {
-    if let Some(mask) = &cam.mask {
-        let _ = std::fs::remove_file(mask);
-    }
     let Some(mut facts) = crate::facecam::read_facts(clip_id) else {
         return;
     };
@@ -1915,6 +1926,21 @@ pub fn repair(library: &Mutex<Option<crate::clips::Library>>) -> usize {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Facecam #9: the cam's mask goes however the save ends.
+    #[test]
+    fn a_scratch_file_goes_when_its_run_ends() {
+        let path =
+            std::env::temp_dir().join(format!("clippiboy-mask-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"png").unwrap();
+        let failed = || -> Result<(), String> {
+            let _mask = Scratch(Some(path.clone()));
+            Err("ffmpeg broke off".into())
+        };
+        assert!(failed().is_err());
+        assert!(!path.exists());
+        drop(Scratch(None));
+    }
 
     /// A burn-in of a recording deleted half way is stopped, not waited for.
     #[cfg(windows)]
