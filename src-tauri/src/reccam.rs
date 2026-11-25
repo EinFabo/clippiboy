@@ -875,9 +875,16 @@ pub fn recover(library: &parking_lot::Mutex<Option<crate::clips::Library>>) -> u
         }
         let path = std::path::PathBuf::from(&clip.path);
         let applying = read_stored(&clip.id).and_then(|s| s.applying_bytes);
+        let own = crate::composite::temp_path(&path);
         for stale in crate::composite::stale_temps(&path) {
-            // One finished and waiting for its swap is kept.
-            if applying.is_none() || crate::composite::file_size(&stale) != applying {
+            if stale == own {
+                continue;
+            }
+            // One finished and waiting for its swap is kept, under this run's
+            // name: the job looks for its own and would burn in again beside it.
+            let finished =
+                applying.is_some() && crate::composite::file_size(&stale) == applying;
+            if !finished || std::fs::rename(&stale, &own).is_err() {
                 let _ = std::fs::remove_file(stale);
             }
         }

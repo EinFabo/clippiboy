@@ -818,6 +818,21 @@ pub(crate) fn temp_path(clip: &Path) -> PathBuf {
     clip.with_file_name(name)
 }
 
+/// Removes every composite lying next to `clip` — for a clip whose file moved
+/// away (the bin, its game's folder) while its swap waited: the job looks for
+/// its composite beside the new place, and the old one stayed for good.
+pub(crate) fn drop_temps(clip: &Path) {
+    for temp in stale_temps(clip) {
+        match std::fs::remove_file(&temp) {
+            Ok(()) => log::info!("removed the cam composite '{}'", temp.display()),
+            Err(err) => log::warn!(
+                "could not remove the cam composite '{}': {err}",
+                temp.display()
+            ),
+        }
+    }
+}
+
 /// Composites left by an earlier run of the app.
 pub(crate) fn stale_temps(clip: &Path) -> Vec<PathBuf> {
     let (Some(dir), Some(name)) = (clip.parent(), clip.file_name()) else {

@@ -1581,6 +1581,8 @@ pub(crate) fn trash_clip(
     }
     // Its Discord copies too — they would show what is gone.
     remove_discord_copies(&discord_root(), &clip.id);
+    // And a cam composite that waited for its swap: its job went with the clip.
+    crate::composite::drop_temps(&from);
     // If that was the last clip of its game, an empty folder would otherwise be
     // left standing.
     if let Some(folder) = from.parent() {

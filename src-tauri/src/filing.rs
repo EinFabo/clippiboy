@@ -146,6 +146,9 @@ pub fn place(clip: &Clip, clip_dir: &str) -> Result<Option<PathBuf>, String> {
         .map_err(|err| format!("could not create folder '{}': {err}", dir.display()))?;
     let target = free_name(&dir, name.to_string_lossy().as_ref());
     move_file(&file, &target)?;
+    // A cam composite waiting for its swap beside the old place is made again
+    // beside the new one.
+    crate::composite::drop_temps(&file);
     // If that was the last clip of its game, the folder should not be left
     // standing empty.
     if let Some(parent) = file.parent() {

@@ -8,8 +8,9 @@
 //! - in the clip folder and up to two levels below (`<clip folder>/<game>/Videos`,
 //!   as deep as `filing` ever puts a clip): a save's `<clip id>.part.*` (and
 //!   the `<stem>_<clip id>.part.*` of versions before), an edit's
-//!   `<clip>.<pid>.neu.mp4`, an export's `<name>.<pid>.clippiboy-export.mp4`
-//!   and a copy across drives' `<name>.<pid>.clippiboy-move.part`;
+//!   `<clip>.<pid>.neu.mp4`, an export's `<name>.<pid>.clippiboy-export.mp4`,
+//!   a copy across drives' `<name>.<pid>.clippiboy-move.part` and a cam
+//!   composite's `<clip>.mp4.<pid>.cam.mp4` (`composite::temp_path`);
 //!   and the empty file a screenshot claims its name with
 //!   (`<game or shot>_<stamp>.png`, see `state::claim_file`) when the picture
 //!   never got into it — 0 bytes is never a picture;
@@ -239,12 +240,25 @@ const PID_TAGGED: [&str; 3] = [".neu.mp4", ".clippiboy-export.mp4", ".clippiboy-
 /// up to ten digits, no leading zero — so a "Holiday.2019.neu.mp4" of the
 /// user's has to be very unlucky.
 fn tagged_pid(name: &str) -> Option<&str> {
-    PID_TAGGED.iter().find_map(|suffix| {
-        name.strip_suffix(suffix)
-            .and_then(|rest| rest.rsplit_once('.'))
-            .map(|(_, pid)| pid)
-            .filter(|pid| is_pid(pid))
-    })
+    PID_TAGGED
+        .iter()
+        .find_map(|suffix| {
+            name.strip_suffix(suffix)
+                .and_then(|rest| rest.rsplit_once('.'))
+                .map(|(_, pid)| pid)
+                .filter(|pid| is_pid(pid))
+        })
+        .or_else(|| cam_temp_pid(name))
+}
+
+/// The process id in a cam composite's `<clip>.mp4.<pid>.cam.mp4`. The whole
+/// clip name stands before the pid, its `.mp4` included — a name nobody gives
+/// a file of their own, unlike `<name>.<number>.cam.mp4`.
+fn cam_temp_pid(name: &str) -> Option<&str> {
+    name.strip_suffix(".cam.mp4")
+        .and_then(|rest| rest.rsplit_once('.'))
+        .filter(|(clip, pid)| clip.len() > ".mp4".len() && clip.ends_with(".mp4") && is_pid(pid))
+        .map(|(_, pid)| pid)
 }
 
 /// A scratch file this very process is writing — a copy across drives begun
@@ -450,6 +464,7 @@ mod tests {
             "Valorant_2026-10-22_12-00-00-123.4711.neu.mp4".into(),
             "Valorant_2026-10-22_12-00-00-123.4294967295.neu.mp4".into(),
             "Valorant_2026-10-22_12-00-00-123 (10 MB).4711.clippiboy-export.mp4".into(),
+            "Valorant_2026-10-22_12-00-00-123.mp4.4711.cam.mp4".into(),
             crate::muxer::scratch_name("1b4e28ba-2fa1-11d2-883f-0016d3cca427", "mix.wav"),
         ] {
             assert!(is_scratch_name(&name), "{name}");
@@ -470,6 +485,8 @@ mod tests {
             "x.12345678901.neu.mp4",
             "x..clippiboy-export.mp4",
             "x.4711.clippiboy-export.mkv",
+            ".mp4.4711.cam.mp4",
+            "Valorant.mp4.0471.cam.mp4",
         ] {
             assert!(!is_scratch_name(name), "{name}");
         }
@@ -708,6 +725,8 @@ mod tests {
         assert!(!written_by(name, 471));
         assert!(!written_by(name, 47110));
         assert!(written_by("Valorant.4711.neu.mp4", 4711));
+        let cam = crate::composite::temp_path(Path::new("Valorant.mp4"));
+        assert!(in_use(&cam.file_name().unwrap().to_string_lossy()));
         assert!(!written_by("video.mp4.part", 4711));
         let ours = crate::edit::move_part(Path::new("clip.mp4"));
         assert!(in_use(&ours.file_name().unwrap().to_string_lossy()));
