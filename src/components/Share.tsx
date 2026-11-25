@@ -30,6 +30,7 @@ import {
 import { cardLeft, cardStack, noun, onFriendsPage, transferKind, type Ended } from "@/lib/transferRows";
 import type { Clip, FriendPresence, FriendUser, Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
+import { toast } from "@/lib/toastBus";
 import { Avatar } from "@/routes/Friends";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
@@ -465,7 +466,7 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
   const [busy, setBusy] = useState(false);
   const run = (action: Promise<void>) => {
     setBusy(true);
-    action.finally(() => setBusy(false));
+    action.catch((err) => toast("error", String(err))).finally(() => setBusy(false));
   };
   const incoming = t.direction === "in";
   const share = t.size > 0 ? t.moved / t.size : 0;

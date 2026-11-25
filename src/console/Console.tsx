@@ -907,7 +907,7 @@ export function Console() {
         hint={friendsHint}
         leaving={leaving}
       >
-        <FriendsPanel latest={clips[0] ?? null} onSend={sendTo} />
+        <FriendsPanel latest={clips[0] ?? null} onSend={sendTo} onError={say} />
       </Sheet>
     ) : which === "audio" ? (
       <Sheet
@@ -1008,7 +1008,7 @@ export function Console() {
       <CamTile opened={opened} closing={closing} inCapture={inCapture} />
       {/* Clips von Freunden, oben und außerhalb von `.cb-ui`: mit dem Dock hat
           die Frage nichts zu tun, und sie soll nicht mitzoomen. */}
-      <Offers />
+      <Offers onError={say} />
 
       {/* Everything that is operated. The size setting zooms this and nothing
           else — see the head of console.css. `--inset` hangs off it too, so the

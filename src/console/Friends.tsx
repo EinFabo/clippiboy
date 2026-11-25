@@ -17,10 +17,13 @@ import { IconClose, IconSend } from "@/components/icons";
 export function FriendsPanel({
   latest,
   onSend,
+  onError,
 }: {
   /** The newest clip — what "Letzten Clip senden" sends. */
   latest: Clip | null;
   onSend: (clip: Clip, friend: FriendUser) => void;
+  /** A refused answer to a request, for the console's line. */
+  onError: (text: string) => void;
 }) {
   const { signedIn, lists, presence, lastSeen } = useFriends();
   const [showOffline, setShowOffline] = useState(false);
@@ -39,7 +42,7 @@ export function FriendsPanel({
   return (
     <div className="grid gap-1">
       {lists.incoming.map((request) => (
-        <Request key={request.id} user={request} />
+        <Request key={request.id} user={request} onError={onError} />
       ))}
       {lists.friends.length === 0 && lists.incoming.length === 0 && (
         <p className="text-sm text-ink-muted">No friends yet. Add them under Friends in the main window.</p>
@@ -72,12 +75,12 @@ export function FriendsPanel({
   );
 }
 
-function Request({ user }: { user: FriendUser }) {
+function Request({ user, onError }: { user: FriendUser; onError: (text: string) => void }) {
   const streamer = useStreamer((s) => s.active);
   const [busy, setBusy] = useState(false);
   const run = (action: Promise<void>) => {
     setBusy(true);
-    action.catch(() => {}).finally(() => setBusy(false));
+    action.catch((err) => onError(String(err))).finally(() => setBusy(false));
   };
   return (
     <div className="mb-1 flex items-center gap-3 rounded-[16px] bg-accent/15 px-3 py-2.5">

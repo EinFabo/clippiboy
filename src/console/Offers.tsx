@@ -12,26 +12,26 @@ import type { Transfer } from "@/lib/types";
  * Kostet kein eigenes Backend: `share-state` geht an jedes Fenster, und der
  * Store in `lib/share.ts` hört in diesem hier genauso zu wie im Hauptfenster.
  */
-export function Offers() {
+export function Offers({ onError }: { onError: (text: string) => void }) {
   const transfers = useShare((s) => s.transfers);
   const shown = transfers.filter((t) => t.direction === "in" && (t.stage === "asking" || t.stage === "moving"));
   if (shown.length === 0) return null;
   return (
     <div className="pointer-events-auto absolute top-8 left-1/2 flex w-[380px] -translate-x-1/2 flex-col gap-2">
       {shown.map((t) => (
-        <Offer key={t.id} transfer={t} />
+        <Offer key={t.id} transfer={t} onError={onError} />
       ))}
     </div>
   );
 }
 
-function Offer({ transfer: t }: { transfer: Transfer }) {
+function Offer({ transfer: t, onError }: { transfer: Transfer; onError: (text: string) => void }) {
   const [busy, setBusy] = useState(false);
   const streamer = useStreamer((s) => s.active);
   const who = shownName(t.friendName, streamer);
   const run = (action: Promise<void>) => {
     setBusy(true);
-    action.finally(() => setBusy(false));
+    action.catch((err) => onError(String(err))).finally(() => setBusy(false));
   };
   const share = t.size > 0 ? t.moved / t.size : 0;
   const what = t.screenshot ? "a screenshot" : t.recording ? "a recording" : "a clip";
