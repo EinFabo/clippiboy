@@ -128,6 +128,9 @@ pub struct Transfer {
     pub duration_ms: u64,
     pub screenshot: bool,
     pub recording: bool,
+    /// Out, done: every byte went out, but the friend's app never confirmed
+    /// that it arrived ([`end_quiet`]).
+    pub unconfirmed: bool,
 }
 
 impl Transfer {
@@ -271,6 +274,9 @@ struct Outgoing {
     serving: u32,
     /// Since when none has been — see [`NO_REDIAL`].
     quiet_since: std::time::Instant,
+    /// The clip's last byte went out on the latest connection that asked for
+    /// it ([`end_quiet`]).
+    all_out: bool,
 }
 
 /// An individual track cut for sending — a file of its own in the temp folder.
@@ -389,6 +395,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         duration_ms: clip.duration_ms,
         screenshot: clip.screenshot,
         recording: clip.recording,
+        unconfirmed: false,
     };
     let secret = uuid::Uuid::new_v4().simple().to_string();
     {
@@ -414,6 +421,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
                 reached: None,
                 serving: 0,
                 quiet_since: std::time::Instant::now(),
+                all_out: false,
             },
         );
     }
@@ -1095,6 +1103,7 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
         duration_ms: meta.duration_ms,
         screenshot: meta.screenshot,
         recording: meta.recording,
+        unconfirmed: false,
     };
     crate::peers::note(app, from, &addr.id.to_string(), stable, "an offer");
     app.state::<Share>().incoming.lock().insert(
@@ -1934,6 +1943,11 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
             return Err("not the device that said yes".into());
         }
         entry.transfer.stage = Stage::Moving;
+        // A dial for the clip wants bytes it lacks: whether all of them went
+        // out is this connection's to say now.
+        if ask.track.is_none() {
+            entry.all_out = false;
+        }
         // The tracks go first, so the clip's bytes count after all of them.
         let tracks: u64 = entry.tracks.iter().map(|cut| cut.size).sum();
         let what = match ask.track {
@@ -1985,6 +1999,11 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
     }
     let _ = send.finish();
     set_out(app, &ask.id, |t| t.moved = base + moved);
+    if ask.track.is_none() && moved == size {
+        if let Some(entry) = app.state::<Share>().outgoing.lock().get_mut(&ask.id) {
+            entry.all_out = true;
+        }
+    }
 
     // A track is done once the receiver hangs up — it checks the hash on its
     // own, and a bad one simply means the clip comes without tracks.
@@ -2122,15 +2141,37 @@ fn watch_redial(app: &AppHandle, id: &str) {
             ) {
                 return;
             }
-            fail(&mut entry.transfer, "They stopped receiving it.");
-            entry.transfer.friend_id.clone()
+            let all_out = entry.all_out;
+            end_quiet(&mut entry.transfer, all_out).then(|| entry.transfer.friend_id.clone())
         };
-        log::info!("share: {id}: the receiver has not dialled in again — given up");
         emit(&app);
         drop_cuts(&id);
-        // Should they still be trying, they stop.
-        crate::friends::send_relay(&app, &friend, &Signal::ShareCancel { id });
+        match friend {
+            Some(friend) => {
+                log::info!("share: {id}: the receiver has not dialled in again — given up");
+                // Should they still be trying, they stop.
+                crate::friends::send_relay(&app, &friend, &Signal::ShareCancel { id });
+            }
+            None => log::info!("share: {id}: all of it went out, no word that it arrived"),
+        }
     });
+}
+
+/// Ends a send whose receiver went quiet ([`given_up`]). Once the clip's last
+/// byte went out, only their "k" is missing — lost with a line that dropped
+/// right after, or their app closed while it checked the file — so whether it
+/// arrived is not known: it ends as sent but unconfirmed, not as failed, and
+/// they are left to finish. Returns whether they should be told to stop.
+fn end_quiet(transfer: &mut Transfer, all_out: bool) -> bool {
+    if all_out {
+        transfer.stage = Stage::Done;
+        transfer.unconfirmed = true;
+        transfer.moved = transfer.size;
+        false
+    } else {
+        fail(transfer, "They stopped receiving it.");
+        true
+    }
 }
 
 /// Did the receiver hang up with "bad hash" (code 1)?
@@ -2833,6 +2874,7 @@ mod tests {
             duration_ms: 0,
             screenshot: false,
             recording: false,
+            unconfirmed: false,
         }
     }
 
@@ -2852,6 +2894,7 @@ mod tests {
             reached: None,
             serving: 0,
             quiet_since: std::time::Instant::now(),
+            all_out: false,
         };
         let mut all = HashMap::new();
         all.insert("asking".to_string(), entry(Stage::Asking, "a"));
@@ -2900,6 +2943,7 @@ mod tests {
             reached: None,
             serving: 0,
             quiet_since: std::time::Instant::now(),
+            all_out: false,
         };
         share
             .outgoing
@@ -2928,6 +2972,36 @@ mod tests {
             },
         );
         assert!(any_open(&share), "an offer waiting for an answer");
+    }
+
+    /// A receiver gone quiet: before the clip's last byte the send failed;
+    /// after it only their "k" is missing, and the send ends as sent but
+    /// unconfirmed, without telling them to stop.
+    #[test]
+    fn a_quiet_receiver_after_the_last_byte_leaves_the_send_unconfirmed() {
+        let mut cut_short = Transfer {
+            size: 10,
+            moved: 4,
+            ..outgoing("f", Stage::Moving)
+        };
+        assert!(end_quiet(&mut cut_short, false), "they are told to stop");
+        assert_eq!(cut_short.stage, Stage::Failed);
+        assert_eq!(
+            cut_short.error.as_deref(),
+            Some("They stopped receiving it.")
+        );
+        assert!(!cut_short.unconfirmed);
+
+        let mut all_out = Transfer {
+            size: 10,
+            moved: 9,
+            ..outgoing("f", Stage::Moving)
+        };
+        assert!(!end_quiet(&mut all_out, true), "they are left to finish");
+        assert_eq!(all_out.stage, Stage::Done);
+        assert!(all_out.unconfirmed);
+        assert_eq!(all_out.error, None);
+        assert_eq!(all_out.moved, 10);
     }
 
     #[test]

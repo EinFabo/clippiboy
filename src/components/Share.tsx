@@ -507,7 +507,9 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
             <IconClose className="h-3.5 w-3.5" />
           </button>
         )}
-        {t.stage === "done" && <IconCheck className="h-4 w-4 shrink-0 text-ok" />}
+        {t.stage === "done" && (
+          <IconCheck className={`h-4 w-4 shrink-0 ${t.unconfirmed ? "text-ink-muted" : "text-ok"}`} />
+        )}
       </div>
 
       {t.stage === "moving" && (
@@ -577,7 +579,7 @@ function headline(t: Transfer): string {
     case "moving":
       return `Sending to ${who}…`;
     case "done":
-      return `${who} has your ${what}`;
+      return t.unconfirmed ? `Sent to ${who}, not confirmed` : `${who} has your ${what}`;
     case "declined":
       return `${who} said no`;
     case "expired":

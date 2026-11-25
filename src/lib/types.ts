@@ -536,6 +536,8 @@ export interface Transfer {
   durationMs: number;
   screenshot: boolean;
   recording: boolean;
+  /** Out, done: every byte went out, but their app never confirmed it arrived. */
+  unconfirmed?: boolean;
 }
 
 /** `pending` while the cam is being added, `ready` once the file shows it, `failed`, or `baked` in for good. */

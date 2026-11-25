@@ -222,12 +222,19 @@ export function rowTransfer(
   const over = by("ended").sort((a, b) => (ended[b.id]?.at ?? 0) - (ended[a.id]?.at ?? 0));
   if (over.length > 0) {
     const newest = over[0];
-    const same = over.filter((t) => t.direction === newest.direction && t.stage === newest.stage).length - 1;
+    const unconfirmed = newest.unconfirmed === true;
+    const same =
+      over.filter(
+        (t) =>
+          t.direction === newest.direction && t.stage === newest.stage && (t.unconfirmed === true) === unconfirmed,
+      ).length - 1;
     const more = same > 0 ? ` and ${same} more` : "";
     const lead =
       newest.direction === "out"
         ? newest.stage === "done"
-          ? "Has your"
+          ? unconfirmed
+            ? "Sent"
+            : "Has your"
           : "Said no to"
         : newest.stage === "done"
           ? "Sent you"
@@ -235,8 +242,9 @@ export function rowTransfer(
     return {
       kind: "done",
       ids: over.map((t) => t.id),
-      text: `${lead} ${newest.name}${more}`,
-      tone: newest.stage === "done" ? "ok" : "muted",
+      // Every byte went, but their app never said it arrived.
+      text: `${lead} ${newest.name}${more}${unconfirmed ? " · not confirmed" : ""}`,
+      tone: newest.stage === "done" && !unconfirmed ? "ok" : "muted",
       at: ended[newest.id]?.at ?? 0,
       open: newest.direction === "in" && newest.stage === "done" ? newest.clipId : null,
     };

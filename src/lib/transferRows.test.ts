@@ -169,6 +169,18 @@ test("row: ended — the newest, green for arrived, Open for a received clip", (
   assert.equal(rowTransfer("1", [t({ id: "a", direction: "in", stage: "expired" })], ended)?.text, "Missed Ace on Mirage");
 });
 
+test("row: a send that went out whole but was never confirmed says so, muted", () => {
+  const ended = { a: { at: 10, sig: "" }, b: { at: 20, sig: "" } };
+  const sent = rowTransfer("1", [t({ id: "b", stage: "done", unconfirmed: true })], ended);
+  assert.equal(sent?.kind === "done" && `${sent.text}|${sent.tone}`, "Sent Ace on Mirage · not confirmed|muted");
+  const mixed = rowTransfer(
+    "1",
+    [t({ id: "a", stage: "done", name: "Ace" }), t({ id: "b", stage: "done", unconfirmed: true, name: "Clutch" })],
+    ended,
+  );
+  assert.equal(mixed?.text, "Sent Clutch · not confirmed", "a confirmed one is not counted in with it");
+});
+
 test("reason reads on after a dot", () => {
   assert.equal(reason(t({ stage: "failed", error: "They are busy right now." })), "they are busy right now");
   assert.equal(reason(t({ stage: "failed", error: "ClippiBoy could not read the file." })), "ClippiBoy could not read the file");
