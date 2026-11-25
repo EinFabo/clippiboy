@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LOGIN_TTL_MS, pageCsp, signState, statesIn, verifyState, withoutState, withState } from "./login.ts";
+import { createHash } from "node:crypto";
+import {
+  DELETE_ONLY,
+  LOGIN_TTL_MS,
+  pageCsp,
+  signState,
+  signsIn,
+  statesIn,
+  verifyState,
+  withoutState,
+  withState,
+} from "./login.ts";
 
 test("a second sign-in start keeps the first tab's state", () => {
   const first = withState(statesIn("x=1", "cb_login"), "aaa");
@@ -76,4 +87,13 @@ test("a spent state leaves the cookie, the browser's other starts stay", () => {
   assert.equal(withoutState(["a", "b", "c"], "b"), "a.c");
   assert.equal(withoutState(["a"], "a"), "");
   assert.equal(withoutState(["a", "b"], "z"), "a.b");
+});
+
+test("a suspended account's code deletes it and never signs in", () => {
+  // What the app sends as its challenge: the hash of its verifier.
+  const challenge = createHash("sha256").update("some verifier").digest("base64url");
+  assert.equal(signsIn(challenge), true);
+  assert.equal(signsIn(DELETE_ONLY), false);
+  // No verifier hashes to it.
+  assert.notEqual(challenge.length, DELETE_ONLY.length);
 });

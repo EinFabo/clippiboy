@@ -10,6 +10,18 @@ const CLOCK_SLACK_MS = 60 * 1000;
 
 /** The hash of the app's verifier, as `/auth/start` takes it: base64url of 32 bytes. */
 export const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+/**
+ * What a suspended account's sign-in is stored with in place of the app's
+ * challenge. Its one-time code is on the suspended page, for "Delete account"
+ * (`/auth/delete`) alone: no verifier hashes to this, and `/auth/exchange`
+ * takes only a code stored with a challenge (`signsIn`).
+ */
+export const DELETE_ONLY = "";
+
+/** Whether a sign-in stored with this challenge may be traded for a session. */
+export function signsIn(challenge: string): boolean {
+  return CHALLENGE_PATTERN.test(challenge);
+}
 /** Domain separation: the key is the Discord client secret, which has other uses. */
 const STATE_LABEL = "clippiboy-login-state:v1:";
 /** base64url of six bytes of start time (ms) and 18 random ones. */

@@ -14,7 +14,18 @@ import {
   type DiscordUser,
   type User,
 } from "./db";
-import { CHALLENGE_PATTERN, LOGIN_TTL_MS, pageCsp, signState, statesIn, verifyState, withoutState, withState } from "./login";
+import {
+  CHALLENGE_PATTERN,
+  DELETE_ONLY,
+  LOGIN_TTL_MS,
+  pageCsp,
+  signState,
+  signsIn,
+  statesIn,
+  verifyState,
+  withoutState,
+  withState,
+} from "./login";
 import { base64url, body, escapeHtml, HttpError, json, normalizeCode, randomToken, sameText, sha256 } from "./util";
 import {
   applySuspensions,
@@ -460,12 +471,14 @@ async function authCallback(request: Request, url: URL, env: Env): Promise<Respo
 
   // The sign-in's one row, now that Discord has said yes, claimed by its
   // state: a second callback with it finds it taken. Its ten minutes run from
-  // the start, as the state's do.
+  // the start, as the state's do. A suspended account's is stored without the
+  // app's challenge: the page below shows its code, and that must never be
+  // traded for a session (`authExchange`).
   const oneTime = randomToken(24);
   const claimed = await env.DB.prepare(
     "INSERT INTO logins (state, challenge, code, user_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (state) DO NOTHING",
   )
-    .bind(state, login.challenge, oneTime, userId, login.issuedAt)
+    .bind(state, banned ? DELETE_ONLY : login.challenge, oneTime, userId, login.issuedAt)
     .run();
   if (claimed.meta.changes !== 1) return page("Sign-in expired", "Start the sign-in again from ClippiBoy.");
   if (banned) {
@@ -581,6 +594,9 @@ async function authExchange(request: Request, env: Env): Promise<Response> {
   const login = await env.DB.prepare("SELECT state, challenge, user_id, created_at FROM logins WHERE code = ?")
     .bind(code)
     .first<{ state: string; challenge: string; user_id: string; created_at: number }>();
+  // The code from the suspended page: it deletes the account and never signs
+  // in. Not spent here, so the page's "Delete account" still works.
+  if (login && !signsIn(login.challenge)) throw new HttpError(403, "This account is suspended.");
   // Spent on the first try, right or wrong. The row itself stays until its
   // time is up (the hourly cron), so its state cannot sign in again meanwhile.
   if (login) {
