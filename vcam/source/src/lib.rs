@@ -30,6 +30,7 @@ use windows::Win32::Security::{
     PSID, SID_NAME_USE, SidTypeUser, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::System::Memory::{MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS};
+use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSFreeMemory, WTSQuerySessionInformationW, WTSDomainName, WTSUserName, WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS,
 };
@@ -43,7 +44,6 @@ pub const CLSID: GUID = GUID::from_u128(0x23b5c234_8158_430a_b8f3_681b7e370ec6);
 const CLIENT_PID: GUID = GUID::from_u128(0x5f8d322e_0fe4_43e4_9e50_d83ecd9fc2b8);
 /// Reading a section's owner; LocalService's generic read on it includes it.
 const READ_CONTROL: u32 = 0x0002_0000;
-const LOG: &str = r"C:\ProgramData\ClippiBoy\vcam.log";
 /// The log starts over beyond this.
 const LOG_LIMIT: u64 = 1024 * 1024;
 const FRAME: Duration = Duration::from_nanos(33_333_333);
@@ -96,12 +96,39 @@ fn log(msg: impl AsRef<str>) {
     let line = format!("{ms} pid={} s={session} {exe}: {}\r\n", std::process::id(), msg.as_ref());
     let wide: Vec<u16> = line.encode_utf16().chain(Some(0)).collect();
     unsafe { OutputDebugStringW(PCWSTR(wide.as_ptr())) };
-    if std::fs::metadata(LOG).is_ok_and(|m| m.len() > LOG_LIMIT) {
-        let _ = std::fs::remove_file(LOG);
+    let Some(file) = log_file() else { return };
+    if std::fs::metadata(file).is_ok_and(|m| m.len() > LOG_LIMIT) {
+        let _ = std::fs::remove_file(file);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(LOG) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+/// LocalService, S-1-5-19: the account Frame Server runs as.
+const LOCAL_SERVICE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0];
+
+/// The log file: in Frame Server, its own profile (`vcam_protocol::LOG_DIR`),
+/// which nobody but LocalService, SYSTEM and administrators may change — a
+/// folder other users could change would let a link of theirs have the
+/// service write or delete a file elsewhere. Anywhere else, such as an app
+/// that tries the source, the debugger output only.
+fn log_file() -> Option<&'static std::path::Path> {
+    static FILE: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    FILE.get_or_init(|| unsafe {
+        if process_user(GetCurrentProcessId())? != LOCAL_SERVICE {
+            return None;
+        }
+        let mut buf = [0u16; 260];
+        let len = GetSystemWindowsDirectoryW(Some(&mut buf)) as usize;
+        if len == 0 || len >= buf.len() {
+            return None;
+        }
+        let dir = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])).join(vcam_protocol::LOG_DIR);
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir.join(vcam_protocol::LOG_FILE))
+    })
+    .as_deref()
 }
 
 /// No panic may leave a COM method: inside Frame Server it would take every camera down.
@@ -1349,6 +1376,14 @@ mod tests {
             let _ = CloseHandle(h);
             assert_eq!(open_section(&name, Some(&me)).err(), Some("not there"));
         }
+    }
+
+    /// Only Frame Server's LocalService keeps a log file, in its own profile.
+    #[test]
+    fn an_app_logs_to_the_debugger_only() {
+        assert_eq!(log_file(), None);
+        log("a test line");
+        assert_eq!(&LOCAL_SERVICE[..], &[1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0]);
     }
 
     #[test]

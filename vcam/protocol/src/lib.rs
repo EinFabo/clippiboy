@@ -24,6 +24,11 @@ pub const FRIENDLY_NAME: &str = "ClippiBoy Camera";
 /// The DLL version the setup carries; the app compares it with the installed one.
 pub const DLL_VERSION: &str = "1.0.5";
 pub const REGISTRY_KEY: &str = r"SOFTWARE\ClippiBoy\VirtualCamera";
+/// Where the media source keeps its log, below the Windows folder: Frame
+/// Server's own LocalService profile, which other users cannot change.
+/// Reading it takes an elevated prompt.
+pub const LOG_DIR: &str = r"ServiceProfiles\LocalService\AppData\Local\ClippiBoy";
+pub const LOG_FILE: &str = "vcam.log";
 pub const MAGIC: u32 = u32::from_le_bytes(*b"CBVC");
 pub const MAJOR: u32 = 1;
 pub const MINOR: u32 = 0;

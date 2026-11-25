@@ -16,7 +16,6 @@ const FOLDER: &str = "ClippiBoy Virtual Camera";
 const DLL_NAME: &str = "clippiboy_vcam.dll";
 /// LocalService: Frame Server runs as it and loads the DLL.
 const LOCAL_SERVICE: &str = "*S-1-5-19";
-const USERS: &str = "*S-1-5-32-545";
 const DLL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dll.bin"));
 
 /// One thing the installer does; pure, so install and uninstall can be checked
@@ -30,6 +29,8 @@ enum Step {
     RegistryDelete { key: String },
     RemoveFolder { path: PathBuf },
     RemoveOldVersions { root: PathBuf, keep: String },
+    /// A log folder; one that cannot go now is no reason to fail.
+    RemoveLogs { path: PathBuf },
     /// Frame Server loads the DLL once and keeps it while any camera is held;
     /// restarted, it loads the one just registered. Apps using a camera lose
     /// its picture for a moment.
@@ -44,7 +45,18 @@ fn version_key() -> String {
     format!(r"HKLM\{}", vcam_protocol::REGISTRY_KEY)
 }
 
+/// Where the media source logs now, in Frame Server's own profile.
 fn log_folder() -> PathBuf {
+    let mut buf = [0u16; 260];
+    let len = unsafe { windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    let windows = if len == 0 || len >= buf.len() { r"C:\Windows".into() } else { String::from_utf16_lossy(&buf[..len]) };
+    PathBuf::from(windows).join(vcam_protocol::LOG_DIR)
+}
+
+/// Where the media source logged before DLL 1.0.5, open to every user for
+/// that — and so to a link of theirs that would have Frame Server write or
+/// delete a file elsewhere. It logs into its own profile now; the folder goes.
+fn old_log_folder() -> PathBuf {
     PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into())).join("ClippiBoy")
 }
 
@@ -71,10 +83,9 @@ fn install_plan(program_files: &Path, version: &str) -> Result<Vec<Step>, String
         Step::RegistryValue { key: server, name: "ThreadingModel".into(), value: "Both".into() },
         Step::RegistryValue { key: version_key(), name: "Version".into(), value: version.into() },
         Step::RegistryValue { key: version_key(), name: "Path".into(), value: dll.to_string_lossy().into_owned() },
-        Step::Grant { path: log_folder(), account: LOCAL_SERVICE.into(), rights: "(OI)(CI)M".into() },
-        Step::Grant { path: log_folder(), account: USERS.into(), rights: "(OI)(CI)M".into() },
         Step::RestartFrameServer,
         Step::RemoveOldVersions { root, keep: version.into() },
+        Step::RemoveLogs { path: old_log_folder() },
     ])
 }
 
@@ -83,6 +94,8 @@ fn uninstall_plan(program_files: &Path) -> Vec<Step> {
         Step::RegistryDelete { key: clsid_key() },
         Step::RegistryDelete { key: version_key() },
         Step::RemoveFolder { path: program_files.join(FOLDER) },
+        Step::RemoveLogs { path: old_log_folder() },
+        Step::RemoveLogs { path: log_folder() },
     ]
 }
 
@@ -139,6 +152,15 @@ fn run(step: &Step) -> Result<(), Failure> {
                 run_tool("powershell", &["-NoProfile", "-NonInteractive", "-Command", script])
             {
                 eprintln!("Frame Server not restarted: {why}");
+            }
+            Ok(())
+        }
+        Step::RemoveLogs { path } => {
+            // Links inside, or the folder itself one, go as links: nothing
+            // they point at is touched.
+            match std::fs::remove_dir_all(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!("{} not removed: {e}", path.display()),
+                _ => {}
             }
             Ok(())
         }
@@ -293,6 +315,18 @@ mod tests {
     fn install_refuses_a_path_outside_program_files() {
         assert!(install_plan(Path::new(r"C:\Users\fabia\AppData\Local"), "1.0.0").is_err());
         assert!(install_plan(pf(), "../evil").is_err());
+    }
+
+    /// The old log folder was open to every user; nothing is granted to them
+    /// any more, and the folder goes on install and uninstall alike.
+    #[test]
+    fn no_folder_is_left_open_to_every_user() {
+        let install = install_plan(pf(), "1.0.5").unwrap();
+        assert!(install.iter().all(|s| !matches!(s, Step::Grant { account, .. } if account != LOCAL_SERVICE)), "{install:?}");
+        assert!(install.iter().all(|s| !matches!(s, Step::Grant { rights, .. } if rights.contains('M') || rights.contains('F') || rights.contains('W'))));
+        for plan in [install, uninstall_plan(pf())] {
+            assert!(plan.iter().any(|s| matches!(s, Step::RemoveLogs { path } if *path == old_log_folder())), "{plan:?}");
+        }
     }
 
     #[test]
