@@ -30,6 +30,7 @@ import {
   sweep,
 } from "./links";
 import { addressKey, readLimited, writeBudget } from "./limits";
+import { CLOSE_DELETING } from "./hubrules";
 import { departedCutoff, fingerprint } from "./departed";
 import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
 import {
@@ -967,9 +968,11 @@ async function deleteAccount(env: Env, me: string): Promise<Response> {
   // The connections and the presence first, while a failure can still be
   // retried: after the rows below are gone a retry is a 401, and presence and
   // "last seen" stayed in the hub for good. Friends are still friends here, so
-  // they hear the user went offline; the 4001 signs the app out and keeps it
-  // from dialling back in.
-  await env.HUB.getByName(me).closeAll("account deleted", me);
+  // they hear the user went offline. Not yet with the 4001 that signs the app
+  // out: should anything below fail, the app is still signed in to an account
+  // that is still there, and dials back in. Once the account is gone that dial
+  // is a 401, and an app that got in before it hears the 4001 below.
+  await env.HUB.getByName(me).closeAll("account being deleted", me, CLOSE_DELETING);
   await deleteSharesOf(env, me);
   // Cascades to sessions, friendships, blocks and shares. In one batch with
   // what outlives it, read at that moment: a suspension set a second earlier
@@ -981,8 +984,8 @@ async function deleteAccount(env: Env, me: string): Promise<Response> {
     notify(env, noticeFor("accepted", null), ...others.filter((row) => row.status === "accepted").map((row) => row.id)),
     notify(env, noticeFor("pending", null), ...others.filter((row) => row.status === "pending").map((row) => row.id)),
   ]);
-  // Whatever an app that got in again meanwhile left. The account is gone
-  // either way, so this must not turn into an error.
+  // Whatever an app that got in again meanwhile left, now with the 4001. The
+  // account is gone either way, so this must not turn into an error.
   await env.HUB.getByName(me)
     .closeAll()
     .catch((err) => console.error("account deleted, hub", me, err));

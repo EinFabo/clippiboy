@@ -705,7 +705,10 @@ async fn serve(app: &AppHandle, token: &str, generation: u64) -> Result<End, Str
                     }
                 }
                 Some(Ok(Message::Close(frame))) => {
-                    // 4001: the account was deleted elsewhere.
+                    // 4001: signed out, suspended or deleted elsewhere. Any
+                    // other code is a drop to dial again — 4004 too, which an
+                    // account's deletion sends before anything is deleted, so
+                    // one that fails leaves the app signed in.
                     if frame.is_some_and(|frame| u16::from(frame.code) == 4001) {
                         sign_out_if_current(app, token);
                         return Ok(End::SignedOut);

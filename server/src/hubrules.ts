@@ -87,6 +87,14 @@ export function parseMessage(text: string): Record<string, unknown> | null {
 /** Connections per user; the oldest beyond this are closed. */
 export const SOCKET_CAP = 4;
 
+/** The app signs out on this close: the session or the account is gone. */
+export const CLOSE_SIGNED_OUT = 4001;
+/**
+ * A drop the app dials again after, as after any code but 4001: the account's
+ * deletion is under way, and should it fail the app must still be signed in.
+ */
+export const CLOSE_DELETING = 4004;
+
 /**
  * Takes one token from a budget; `undefined` is a full one. Tokens come back
  * continuously, never above `capacity`. `nextAt` is when a token is there.

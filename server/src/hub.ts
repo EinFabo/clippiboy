@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { areFriends, friendIds } from "./db";
 import {
   beyondCap,
+  CLOSE_SIGNED_OUT,
   hidesNow,
   HELLO,
   inOrder,
@@ -266,8 +267,8 @@ export class Hub extends DurableObject<Env> {
    * its friends, and once the presence is forgotten the closing sockets have
    * nothing left to compare against and tell nobody.
    */
-  async closeAll(reason = "account deleted", user?: string): Promise<void> {
-    this.closeSockets(reason);
+  async closeAll(reason = "account deleted", user?: string, code = CLOSE_SIGNED_OUT): Promise<void> {
+    this.closeSockets(reason, code);
     if (user) await this.publish(user);
     this.messages = undefined;
     this.stored = null;
@@ -281,17 +282,17 @@ export class Hub extends DurableObject<Env> {
    * 4001 as signed out, as it does for a deleted account.
    */
   async signedOut(user: string): Promise<void> {
-    this.closeSockets("signed out");
+    this.closeSockets("signed out", CLOSE_SIGNED_OUT);
     await this.publish(user);
     await this.ctx.storage.delete(CONTACTS);
   }
 
   // --- Internals ------------------------------------------------------------
 
-  private closeSockets(reason: string): void {
+  private closeSockets(reason: string, code: number): void {
     for (const ws of this.ctx.getWebSockets()) {
       try {
-        ws.close(4001, reason);
+        ws.close(code, reason);
       } catch {
         // Already closed.
       }
