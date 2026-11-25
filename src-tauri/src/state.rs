@@ -385,6 +385,9 @@ pub struct StopTicket<'a> {
     /// How applying the video settings that waited for the recording went,
     /// if any waited — for the caller to report, off the lock.
     pub restarted: Option<Result<bool, String>>,
+    /// That restart was onto a fresh capture ([`AfterRecording::FreshCapture`]),
+    /// not for the settings.
+    pub fresh_capture: bool,
 }
 
 /// What one turn of the game tick found.
@@ -2383,6 +2386,7 @@ impl AppState {
             folder,
             _finalizing: finalizing,
             restarted,
+            fresh_capture: step == AfterRecording::FreshCapture,
         })
     }
 

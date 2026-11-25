@@ -424,7 +424,7 @@ pub fn stop_recording_and_notify(app: &tauri::AppHandle) -> Result<model::Clip, 
     overlay::set_recording(app, false);
     overlay::show(app, BannerKind::Recording, "Saving recording…", None);
     if let Some(restarted) = ticket.restarted.take() {
-        settings_restarted(app, restarted);
+        settings_restarted(app, restarted, ticket.fresh_capture);
     }
     let outcome = state.finish_stop(ticket, &|share| recording_progress(app, share));
     // Always the closing 1, success or not — the window takes it as "done"
@@ -603,7 +603,7 @@ pub fn restart_buffer_for_settings(app: &tauri::AppHandle) {
             // stays away: this pass brings a fresh capture too. One running
             // already keeps the flag; this pass still has to apply the change.
             let _restarting = state::FlagGuard::try_raise(&CAPTURE_RESTARTING);
-            settings_restarted(&app, state.restart_if_buffering());
+            settings_restarted(&app, state.restart_if_buffering(), false);
         }
     });
 }
@@ -612,12 +612,19 @@ pub fn restart_buffer_for_settings(app: &tauri::AppHandle) {
 /// user's own, and was answered when it was made; a banner here would
 /// replace a "Recording saved" just shown. Only a buffer that did not come
 /// back is worth a word, and it gets the whole of a failed start — banner and
-/// sound too: over a game a toast goes unseen, and the buffer is gone.
-fn settings_restarted(app: &tauri::AppHandle, outcome: Result<bool, String>) {
+/// sound too: over a game a toast goes unseen, and the buffer is gone. The
+/// same goes for the fresh capture the end of a recording can bring
+/// (`fresh_capture`), which the log names as such.
+fn settings_restarted(app: &tauri::AppHandle, outcome: Result<bool, String>, fresh_capture: bool) {
+    let onto = if fresh_capture {
+        "a fresh capture"
+    } else {
+        "the new video settings"
+    };
     match &outcome {
         Ok(false) => return,
-        Ok(true) => log::info!("buffer restarted on the new video settings"),
-        Err(err) => log::warn!("buffer did not restart on the new video settings: {err}"),
+        Ok(true) => log::info!("buffer restarted on {onto}"),
+        Err(err) => log::warn!("buffer did not restart on {onto}: {err}"),
     }
     // Right away, not with the next tick: the window and the tray show the
     // buffer as it now is.
