@@ -935,7 +935,11 @@ function FriendRow({
         kind: "item",
         label: "Copy Discord name",
         icon: <IconCopy className="h-4 w-4" />,
-        onSelect: () => void navigator.clipboard.writeText(friend.username),
+        onSelect: () =>
+          void navigator.clipboard
+            .writeText(friend.username)
+            .then(() => toast("ok", "Discord name copied"))
+            .catch(() => toast("error", "Could not copy to the clipboard.")),
       },
       { kind: "separator" },
       {
@@ -965,7 +969,9 @@ function FriendRow({
       <IconSend className="h-[15px] w-[15px]" />
     </button>
   );
-  const moreButton = !running && !failed && (
+  // Also while a clip is on its way: favorite, remove and block stay in reach
+  // without knowing about the right click.
+  const moreButton = (
     <button
       aria-label={`More for ${friend.displayName}`}
       onClick={openMenu}
