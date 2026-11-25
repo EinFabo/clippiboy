@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useEngine } from "@/store";
 import { friendsApi, useFriends } from "@/lib/friends";
@@ -17,14 +17,16 @@ export function FriendsTab() {
   const { signedIn, me, blocked } = useFriends(
     useShallow((s) => ({ signedIn: s.signedIn, me: s.me, blocked: s.lists.blocked })),
   );
-  const [error, setError] = useState<string | null>(null);
+  /** The last refusal, and which control it answers — it stands next to that one. */
+  const [error, setError] = useState<{ at: string; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const patch = (change: Partial<FriendsConfig>) => patchConfig({ friends: { ...friends, ...change } });
-  const run = (action: Promise<void>) => {
+  const run = (at: string, action: Promise<void>) => {
     setError(null);
-    action.catch((err) => setError(String(err)));
+    action.catch((err) => setError({ at, text: String(err) }));
   };
+  const errorAt = (at: string) => (error?.at === at ? error.text : null);
 
   return (
     <div className="space-y-8">
@@ -40,6 +42,9 @@ export function FriendsTab() {
               onChange={(discordStatus) => patch({ discordStatus })}
             />
           </Row>
+          <Row label="My name on share links">
+            <Toggle checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
+          </Row>
         </Card>
       </section>
 
@@ -47,14 +52,14 @@ export function FriendsTab() {
         <SectionTitle title="Requests" />
         <Card className="divide-y divide-line">
           <Row label="Accept friend requests">
-            <Toggle
-              checked={me?.allowRequests ?? true}
-              disabled={!signedIn}
-              onChange={(allow) => run(friendsApi.setAllowRequests(allow))}
-            />
-          </Row>
-          <Row label="My name on share links">
-            <Toggle checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
+            {/* Signed out, nobody can send one: off, not on and greyed. */}
+            <WithError text={errorAt("allow")}>
+              <Toggle
+                checked={signedIn && (me?.allowRequests ?? true)}
+                disabled={!signedIn || !me}
+                onChange={(allow) => run("allow", friendsApi.setAllowRequests(allow))}
+              />
+            </WithError>
           </Row>
           <Row label="Requests from my share links">
             <Toggle
@@ -95,9 +100,11 @@ export function FriendsTab() {
               ) : (
                 blocked.map((user) => (
                   <Row key={user.id} label={user.displayName} hint={`@${user.username}`}>
-                    <Button size="sm" variant="ghost" onClick={() => run(friendsApi.unblock(user.id))}>
-                      Unblock
-                    </Button>
+                    <WithError text={errorAt(`unblock:${user.id}`)}>
+                      <Button size="sm" variant="ghost" onClick={() => run(`unblock:${user.id}`, friendsApi.unblock(user.id))}>
+                        Unblock
+                      </Button>
+                    </WithError>
                   </Row>
                 ))
               )}
@@ -105,9 +112,11 @@ export function FriendsTab() {
             {me && (
               <SettingsGroup title="Account" storageKey="friends.account" summary={`Signed in as ${me.displayName}`}>
                 <Row label={`Signed in as ${me.displayName}`} hint={`With Discord, @${me.username}`}>
-                  <Button size="sm" onClick={() => run(friendsApi.signOut())}>
-                    Sign out
-                  </Button>
+                  <WithError text={errorAt("signOut")}>
+                    <Button size="sm" onClick={() => run("signOut", friendsApi.signOut())}>
+                      Sign out
+                    </Button>
+                  </WithError>
                 </Row>
                 <Row label="Delete account" hint="Removes you, your friends list and your requests from the server">
                   {confirmDelete ? (
@@ -119,14 +128,16 @@ export function FriendsTab() {
                       cancelTitle="Keep it — Escape does the same"
                       onConfirm={() => {
                         setConfirmDelete(false);
-                        run(friendsApi.deleteAccount());
+                        run("delete", friendsApi.deleteAccount());
                       }}
                       onCancel={() => setConfirmDelete(false)}
                     />
                   ) : (
-                    <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)}>
-                      Delete
-                    </Button>
+                    <WithError text={errorAt("delete")}>
+                      <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)}>
+                        Delete
+                      </Button>
+                    </WithError>
                   )}
                 </Row>
               </SettingsGroup>
@@ -134,8 +145,19 @@ export function FriendsTab() {
           </Card>
         </section>
       )}
+    </div>
+  );
+}
 
-      {error && <Card className="border-live/40 bg-live/8 p-4 text-sm text-live">{error}</Card>}
+/** A control with the reason it was just refused, right beside it. */
+function WithError({ text, children }: { text: string | null; children: ReactNode }) {
+  if (!text) return children;
+  return (
+    <div className="flex items-center gap-3">
+      <p role="alert" className="max-w-[280px] text-right text-xs text-live">
+        {text}
+      </p>
+      {children}
     </div>
   );
 }

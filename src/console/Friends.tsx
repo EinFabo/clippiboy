@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
-import { canReceive, friendsApi, playingFor, useFriends } from "@/lib/friends";
+import { canReceive, friendsApi, lastSeenText, playingFor, useFriends } from "@/lib/friends";
+import { groupFriends } from "@/lib/friendsList";
 import { clipName } from "@/lib/format";
+import { api, inTauri } from "@/lib/ipc";
 import { shownName, useStreamer } from "@/lib/streamer";
 import type { Clip, FriendPresence, FriendUser } from "@/lib/types";
 import { IconClose, IconSend } from "@/components/icons";
@@ -28,16 +30,14 @@ export function FriendsPanel({
   const { signedIn, lists, presence, lastSeen } = useFriends();
   const [showOffline, setShowOffline] = useState(false);
   const now = useNow();
+  const favorites = useFavorites();
 
   if (!signedIn) {
     return <p className="text-sm text-ink-muted">Sign in with Discord under Friends in the main window.</p>;
   }
 
-  const playing = lists.friends.filter((f) => presence[f.id]?.game);
-  const online = lists.friends.filter((f) => presence[f.id] && !presence[f.id].game);
-  const offline = lists.friends
-    .filter((f) => !presence[f.id])
-    .sort((a, b) => (lastSeen[b.id] ?? 0) - (lastSeen[a.id] ?? 0));
+  // The main page's order: favorites first in each group, offline by last seen.
+  const { playing, online, offline } = groupFriends(lists.friends, presence, lastSeen, favorites);
 
   return (
     <div className="grid gap-1">
@@ -132,7 +132,7 @@ function Row({
   const streamer = useStreamer((s) => s.active);
   const duration = presence?.game ? playingFor(presence.since, now) : null;
   const line = !presence
-    ? zuletzt(lastSeen, now)
+    ? lastSeenText(lastSeen, now)
     : presence.game
       ? `${presence.game}${duration ? ` · ${duration}` : ""}`
       : presence.busy
@@ -250,16 +250,27 @@ function Face({
   );
 }
 
-/** „zuletzt vor 5 min", „… gestern", „… vor 3 Tagen" — `lastSeenText` auf Deutsch. */
-function zuletzt(at: number | undefined, now: number): string {
-  if (at === undefined) return "Offline";
-  const minutes = Math.max(0, Math.floor((now - at) / 60_000));
-  if (minutes < 1) return "just left";
-  if (minutes < 60) return `seen ${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `seen ${hours} h ago`;
-  const days = Math.floor(hours / 24);
-  return days === 1 ? "seen yesterday" : `seen ${days} days ago`;
+/**
+ * The friends marked as favorites, for the order. The settings are read when
+ * the panel opens — the console gets no word of changes made meanwhile, and a
+ * favorite is set in the main window anyway.
+ */
+function useFavorites(): string[] {
+  const [favorites, setFavorites] = useState<string[]>([]);
+  useEffect(() => {
+    if (!inTauri) return;
+    let live = true;
+    api
+      .getConfig()
+      .then((config) => {
+        if (live) setFavorites(config.friends.favorites);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  return favorites;
 }
 
 /** Die Uhr für „42 min" — eine halbe Minute genügt. */

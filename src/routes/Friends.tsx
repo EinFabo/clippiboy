@@ -137,7 +137,7 @@ function SignedOut() {
             <>
               <div className="space-y-1">
                 <p className="text-lg font-semibold">See who is playing</p>
-                <p className="text-[13px] text-ink-muted">ClippiBoy only reads your Discord name and picture.</p>
+                <p className="text-[13px] text-ink-muted">Send clips straight to friends</p>
               </div>
               <Button
                 variant="primary"
@@ -147,6 +147,7 @@ function SignedOut() {
                 {error ? "Try again" : "Sign in with Discord"}
               </Button>
               {error && <p className="text-[13px] text-live">{error}</p>}
+              <p className="text-xs text-ink-faint">ClippiBoy only reads your Discord name and picture.</p>
             </>
           )}
         </Card>
@@ -372,7 +373,10 @@ function EmptyCard({ me, streamer, onAdd }: { me: FriendMe | null; streamer: boo
       <span className="grid h-14 w-14 place-items-center rounded-pill bg-accent/15 text-accent-bright">
         <IconFriends className="h-7 w-7" />
       </span>
-      <p className="text-lg font-semibold">No friends yet</p>
+      <div className="space-y-1">
+        <p className="text-lg font-semibold">No friends yet</p>
+        <p className="text-[13px] text-ink-muted">Send clips straight to friends</p>
+      </div>
       {me && (
         <button
           onClick={() => copy("code", formatCode(me.friendCode))}

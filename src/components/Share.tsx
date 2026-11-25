@@ -29,6 +29,7 @@ import { awaitsAnswer, retrying, waitingFor } from "@/lib/sendQueue";
 import {
   isOver,
   megabytes,
+  openClip,
   retryTransfers,
   sendClips,
   shareApi,
@@ -570,6 +571,12 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
           >
             <IconClose className="h-3.5 w-3.5" />
           </button>
+        )}
+        {/* Like the friend's row: a clip that came in opens from here. */}
+        {incoming && t.stage === "done" && t.clipId && (
+          <Button size="sm" variant="ghost" className="-my-1 shrink-0" onClick={() => openClip(t.clipId!)}>
+            Open
+          </Button>
         )}
         {t.stage === "done" && (
           <IconCheck className={`h-4 w-4 shrink-0 ${t.unconfirmed ? "text-ink-muted" : "text-ok"}`} />
