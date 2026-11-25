@@ -132,6 +132,35 @@ pub fn settings_step(
     }
 }
 
+/// What the end of a recording does for the buffer behind it.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum AfterRecording {
+    Nothing,
+    /// Video settings changed during the recording (`settings_waiting`).
+    Settings,
+    /// The capture saw the lock screen, a sleep or the display going dark
+    /// while the recording held it, and may be delivering nothing since: the
+    /// buffer goes on on a fresh one (`capture_stale`).
+    FreshCapture,
+}
+
+/// The rule for [`AfterRecording`]. A fresh capture brings the new settings
+/// too; a buffer that is off had its pipeline taken down with the recording.
+pub fn after_recording(
+    capture_stale: bool,
+    settings_waiting: bool,
+    buffering: bool,
+    quitting: bool,
+) -> AfterRecording {
+    if capture_stale && buffering && !quitting {
+        AfterRecording::FreshCapture
+    } else if settings_waiting {
+        AfterRecording::Settings
+    } else {
+        AfterRecording::Nothing
+    }
+}
+
 /// What a save hands on for the facecam's cut.
 #[derive(Debug, Clone, Copy)]
 pub struct CamSave {
@@ -261,6 +290,12 @@ pub struct AppState {
     /// Video settings changed while a recording held the buffer: it restarts
     /// with them once the recording has stopped.
     pub settings_waiting: std::sync::atomic::AtomicBool,
+    /// A recording held the capture through the lock screen, a sleep or the
+    /// display going dark — events a capture has been seen to deliver nothing
+    /// after, without a word. It could not start over then (the recording
+    /// would be cut in two), so a buffer that goes on behind the recording
+    /// does on a fresh one. Lowered by every launch of the pipeline.
+    capture_stale: std::sync::atomic::AtomicBool,
 }
 
 /// Keeps a flag raised for as long as it lives and lowers it when dropped —
@@ -990,6 +1025,7 @@ impl AppState {
             drift_seen: std::sync::atomic::AtomicU8::new(0),
             restarts: RestartQueue::default(),
             settings_waiting: std::sync::atomic::AtomicBool::new(false),
+            capture_stale: std::sync::atomic::AtomicBool::new(false),
             camera: crate::camtrack::CamTrack::new(),
             recording_cam: Mutex::new(None),
             vcam: crate::vcam::Vcam::new(),
@@ -1367,19 +1403,46 @@ impl AppState {
         let _lifecycle = self.lifecycle.lock();
         // Quit takes the pipeline down; one brought up behind it would hold
         // the capture until the process ends.
-        if self.quitting.load(std::sync::atomic::Ordering::SeqCst)
-            || !self.is_buffering()
-            || self.is_recording()
-            || !still()
-        {
+        if self.quitting.load(std::sync::atomic::Ordering::SeqCst) || !self.is_buffering() {
             return Ok(false);
         }
+        if self.is_recording() {
+            // Owed to the buffer once the recording has ended.
+            self.note_capture_at_risk();
+            return Ok(false);
+        }
+        if !still() {
+            return Ok(false);
+        }
+        self.relaunch_held()
+    }
+
+    /// Take the capture stack down and bring it straight back up as the
+    /// buffer, shown as on throughout. The caller holds `lifecycle`.
+    fn relaunch_held(&self) -> Result<bool, String> {
         self.take_down(true);
         if let Err(err) = self.launch_pipeline(true) {
             self.status.lock().buffer_active = false;
             return Err(err);
         }
         Ok(true)
+    }
+
+    /// The lock screen, a sleep or the display going dark came while the
+    /// pipeline may be running: a recording that holds the capture keeps it,
+    /// and the buffer gets a fresh one at its end (see `capture_stale`).
+    /// Without a recording the lock stops the buffer and the others restart
+    /// it, so nothing is owed.
+    pub fn note_capture_at_risk(&self) {
+        if self.is_recording()
+            && !self
+                .capture_stale
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            log::info!(
+                "the recording keeps its capture through this; the buffer starts over on a fresh one once it has ended"
+            );
+        }
     }
 
     /// Starts recording into the replay buffer; the caller holds `lifecycle`.
@@ -1395,7 +1458,16 @@ impl AppState {
             StartStep::Launch => self.launch_pipeline(true)?,
             StartStep::Promote => {
                 // Running for a recording only: the buffer just gets its
-                // length back, and fills from here.
+                // length back, and fills from here. A capture that saw the
+                // lock screen meanwhile starts over at the recording's end.
+                if self
+                    .capture_stale
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    log::info!(
+                        "the buffer takes over the recording's capture for now \u{2014} a fresh one follows when the recording ends"
+                    );
+                }
                 self.buffer_wanted
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 let config = self.config_snapshot();
@@ -1437,6 +1509,9 @@ impl AppState {
         )?;
         self.buffer_wanted
             .store(for_buffer, std::sync::atomic::Ordering::SeqCst);
+        // A capture of its own: nothing the last one saw is owed any more.
+        self.capture_stale
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         // Before `shared`: a config change that finds the pipeline registered
         // sizes the ring from the recording it really runs.
         *self.active_recording.lock() = Some(config.recording.clone());
@@ -2268,10 +2343,24 @@ impl AppState {
         // from the close on, this one is never on its list.
         let folder = Finalizing::claim(&recorder.dir)
             .ok_or_else(|| "The recording is already being written out.".to_string())?;
-        let restarted = self
-            .settings_waiting
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-            .then(|| self.restart_for_settings());
+        let step = after_recording(
+            self.capture_stale
+                .swap(false, std::sync::atomic::Ordering::SeqCst),
+            self.settings_waiting
+                .swap(false, std::sync::atomic::Ordering::SeqCst),
+            self.is_buffering(),
+            self.quitting.load(std::sync::atomic::Ordering::SeqCst),
+        );
+        let restarted = match step {
+            AfterRecording::Nothing => None,
+            AfterRecording::Settings => Some(self.restart_for_settings()),
+            AfterRecording::FreshCapture => {
+                log::info!(
+                    "the recording has ended \u{2014} the buffer starts over on a fresh capture"
+                );
+                Some(self.relaunch_held())
+            }
+        };
         Ok(StopTicket {
             recorder,
             meta,
@@ -2847,6 +2936,45 @@ mod tests {
         assert_eq!(settings_step(true, false, false, never), Nothing);
         assert_eq!(settings_step(true, false, true, || false), Nothing);
         assert_eq!(settings_step(true, false, true, || true), Restart);
+    }
+
+    /// Core #1: a capture a recording kept through the lock screen, a sleep
+    /// or a dark display is not handed on to the buffer behind it.
+    #[test]
+    fn a_buffer_behind_a_recording_gets_a_fresh_capture_when_owed() {
+        use AfterRecording::*;
+        assert_eq!(after_recording(true, false, true, false), FreshCapture);
+        assert_eq!(
+            after_recording(true, true, true, false),
+            FreshCapture,
+            "a fresh capture brings the new settings too"
+        );
+        assert_eq!(
+            after_recording(true, false, false, false),
+            Nothing,
+            "a buffer that is off went down with the recording"
+        );
+        assert_eq!(after_recording(true, true, false, false), Settings);
+        assert_eq!(
+            after_recording(true, false, true, true),
+            Nothing,
+            "quit takes the pipeline down"
+        );
+        assert_eq!(after_recording(false, true, true, false), Settings);
+        assert_eq!(after_recording(false, false, true, false), Nothing);
+    }
+
+    #[test]
+    fn a_capture_is_owed_only_while_a_recording_holds_it() {
+        let state = AppState::new(false);
+        state.note_capture_at_risk();
+        assert!(
+            !state
+                .capture_stale
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "without a recording the lock stops the buffer and the rest restart it"
+        );
+        assert_eq!(state.restart_capture(|| true), Ok(false));
     }
 
     #[test]

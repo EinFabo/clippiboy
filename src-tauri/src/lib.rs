@@ -1390,7 +1390,13 @@ fn apply_auto_buffer(app: &tauri::AppHandle, playing: bool, game_alive: bool) {
         }
     }
     let mut stop_origin = state::BufferOrigin::Auto(seen);
-    let action = match state.auto.poll_lock(signals, active) {
+    let lock_action = state.auto.poll_lock(signals, active);
+    // A recording keeps its capture through these; the buffer behind it is
+    // owed a fresh one at its end.
+    if state.auto.screen_locked() || signals.woke || signals.display_back {
+        state.note_capture_at_risk();
+    }
+    let action = match lock_action {
         state::AutoAction::Nothing if locked => return,
         state::AutoAction::Nothing => {
             if !config.buffer.auto_start {
