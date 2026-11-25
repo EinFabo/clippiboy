@@ -251,12 +251,15 @@ export const api = {
     targetBytes: number,
     suggestedName: string,
     orientation: "landscape" | "portrait" = "landscape",
+    /** The editor's unsaved cam, which a 9:16 export lays out as previewed. */
+    facecam: FacecamEdit | null = null,
   ) =>
     invoke<string | null>("export_clip", {
       id,
       targetBytes: Math.floor(targetBytes),
       suggestedName,
       orientation,
+      facecam,
     }),
 };
 

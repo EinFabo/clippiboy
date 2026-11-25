@@ -547,6 +547,7 @@ async fn upload(
                     &temp,
                     &progress,
                     crate::export::Orientation::Landscape,
+                    None,
                     mute_discord,
                 )
             })

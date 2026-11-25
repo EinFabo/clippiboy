@@ -1395,7 +1395,11 @@ export function ClipPlayer({
       )}
 
       {exporting && clip && (
-        <ExportDialog clip={clip} onClose={() => setExporting(false)} />
+        <ExportDialog
+          clip={clip}
+          camDraft={camChanged && camDraft ? camDraft : null}
+          onClose={() => setExporting(false)}
+        />
       )}
     </div>,
     document.body,

@@ -2108,6 +2108,7 @@ pub(crate) fn discord_copy_of(
                 target_bytes,
                 &output,
                 landscape,
+                None,
                 mute_discord,
             )?;
         } else {
@@ -2118,6 +2119,7 @@ pub(crate) fn discord_copy_of(
                 &output,
                 &|_: f32| {},
                 landscape,
+                None,
                 mute_discord,
             )?;
             if shrunk.discord_kept {
@@ -2685,10 +2687,14 @@ pub(crate) struct Shrunk {
 /// `mute_discord`: a separate Discord track is left out of the copy
 /// (`stems::without_discord`) — for what is shared, never for an export.
 ///
+/// `cam`: the cam as the editor has it, not yet saved — a 9:16 export lays it
+/// out as the editor's 9:16 preview shows it ([`with_cam_draft`]).
+///
 /// ffmpeg writes beside `output` under a name of its own ([`export_part`]) and
 /// the result is renamed in only when whole: a run cut short leaves no file
 /// that looks finished, and a target the identity check below missed would be
 /// replaced, not truncated while it is being read.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn shrink(
     state: &State<'_, AppState>,
     id: &str,
@@ -2696,6 +2702,7 @@ pub(crate) fn shrink(
     output: &std::path::Path,
     on_progress: &impl Fn(f32),
     orientation: crate::export::Orientation,
+    cam: Option<&crate::model::FacecamEdit>,
     mute_discord: bool,
 ) -> Result<Shrunk> {
     if !crate::composite::wait_settled(id, std::time::Duration::from_secs(300)) {
@@ -2801,7 +2808,13 @@ pub(crate) fn shrink(
         height,
         source_kbps,
     });
-    let job = portrait.then(|| portrait_job(&clip, duration_ms, (recipe.width, recipe.height)));
+    let job = portrait.then(|| {
+        portrait_job(
+            &with_cam_draft(&clip, cam),
+            duration_ms,
+            (recipe.width, recipe.height),
+        )
+    });
     let build = |encoder| match &job {
         Some(job) => crate::export::portrait_arguments(
             &job.inputs(),
@@ -2883,6 +2896,18 @@ impl PortraitJob {
             mark: self.mark.as_deref(),
         }
     }
+}
+
+/// `clip` with the cam's place and delay as the editor has them, unsaved: the
+/// 9:16 preview shows that cam, and its export must not bring the saved one.
+/// A clip without a cam row gets none from it.
+pub fn with_cam_draft(clip: &Clip, draft: Option<&crate::model::FacecamEdit>) -> Clip {
+    let mut clip = clip.clone();
+    if let (Some(row), Some(draft)) = (clip.facecam.as_mut(), draft) {
+        row.layout = draft.layout;
+        row.delay_ms = draft.delay_ms;
+    }
+    clip
 }
 
 /// The 9:16 export of `clip`: from the clean picture and the camera when it
@@ -3004,6 +3029,7 @@ pub async fn export_clip(
     target_bytes: u64,
     suggested_name: String,
     orientation: Option<crate::export::Orientation>,
+    facecam: Option<crate::model::FacecamEdit>,
 ) -> Result<Option<String>> {
     blocking(move || -> Result<Option<String>> {
         let state = app.state::<AppState>();
@@ -3050,7 +3076,16 @@ pub async fn export_clip(
         let Some(output) = chosen else {
             return Ok(None);
         };
-        export_to(&state, &app, &id, target_bytes, &output, orientation, false)?;
+        export_to(
+            &state,
+            &app,
+            &id,
+            target_bytes,
+            &output,
+            orientation,
+            facecam.as_ref(),
+            false,
+        )?;
         Ok(Some(output.to_string_lossy().to_string()))
     })
     .await
@@ -3059,6 +3094,7 @@ pub async fn export_clip(
 /// Shrink a clip into `output` and say how it went — the part of an export
 /// that comes after the target is settled. Every failure is raised as a
 /// notice here, once.
+#[allow(clippy::too_many_arguments)]
 fn export_to(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
@@ -3066,6 +3102,7 @@ fn export_to(
     target_bytes: u64,
     output: &Path,
     orientation: crate::export::Orientation,
+    cam: Option<&crate::model::FacecamEdit>,
     mute_discord: bool,
 ) -> Result<()> {
     // The target is settled: the window can show the copy being written.
@@ -3077,6 +3114,7 @@ fn export_to(
         output,
         &progress(app, id),
         orientation,
+        cam,
         mute_discord,
     )
     .inspect_err(|err| crate::notify(app, "error", err.clone()))?;
@@ -3579,6 +3617,42 @@ mod tests {
         );
         assert!(baked_after(false, &baked, false), "a cut forgot the bake");
         assert!(!baked_after(false, &saved_clip("plain", 1_000), false));
+    }
+
+    /// Facecam #6: the 9:16 export takes the cam the preview shows.
+    #[test]
+    fn a_portrait_export_lays_the_unsaved_cam_out() {
+        use crate::model::{CamLayout, ClipFacecam, FacecamEdit, FacecamState};
+        let saved = CamLayout::default();
+        let clip = Clip {
+            facecam: Some(ClipFacecam {
+                layout: saved,
+                portrait: Default::default(),
+                delay_ms: 0,
+                state: FacecamState::Ready,
+            }),
+            ..saved_clip("cam-draft", 1_000)
+        };
+        let moved = CamLayout {
+            x: 0.1,
+            visible: false,
+            ..saved
+        };
+        let draft = FacecamEdit {
+            layout: moved,
+            delay_ms: -120,
+        };
+        let row = with_cam_draft(&clip, Some(&draft)).facecam.unwrap();
+        assert_eq!((row.layout, row.delay_ms), (moved, -120));
+        assert_eq!(row.state, FacecamState::Ready);
+        let row = with_cam_draft(&clip, None).facecam.unwrap();
+        assert_eq!((row.layout, row.delay_ms), (saved, 0));
+        assert!(
+            with_cam_draft(&saved_clip("no-cam", 1_000), Some(&draft))
+                .facecam
+                .is_none(),
+            "no cam to move"
+        );
     }
 
     fn saved_clip(id: &str, duration_ms: u64) -> Clip {

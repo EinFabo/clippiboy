@@ -10,7 +10,7 @@ import { planExport, roundMb } from "@/lib/exportPlan";
 import { cn } from "@/lib/cn";
 import { DISCORD_LIMITS, discordMb } from "@/lib/discord";
 import { useEngine } from "@/store";
-import type { Clip, DiscordLimit } from "@/lib/types";
+import type { Clip, DiscordLimit, FacecamEdit } from "@/lib/types";
 
 const MB = 1024 * 1024;
 
@@ -36,7 +36,16 @@ const PRESETS: Array<{ mb: number; label: string; hint: string }> = [
  * different question from "how good is it" — and a clip refused at the door is
  * no use however good it looks.
  */
-export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => void }) {
+export function ExportDialog({
+  clip,
+  camDraft = null,
+  onClose,
+}: {
+  clip: Clip;
+  /** The editor's cam when it differs from the saved one: the 9:16 preview shows it. */
+  camDraft?: FacecamEdit | null;
+  onClose: () => void;
+}) {
   const [targetMb, setTargetMb] = useState(() => discordMb(useEngine.getState().config.discordLimit));
   const [custom, setCustom] = useState("");
   // "choosing" while the core's save dialog is open, "writing" from the
@@ -90,7 +99,13 @@ export function ExportDialog({ clip, onClose }: { clip: Clip; onClose: () => voi
     try {
       // The core opens the save dialog itself and only takes the name as a
       // suggestion; `null` means it was cancelled, which leaves this open.
-      const written = await api.exportClip(clip.id, Math.floor(targetMb * MB), suggested, orientation);
+      const written = await api.exportClip(
+        clip.id,
+        Math.floor(targetMb * MB),
+        suggested,
+        orientation,
+        portrait ? camDraft : null,
+      );
       if (written === null) setStage("idle");
       else onClose();
     } catch (failure) {
