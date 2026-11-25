@@ -5,6 +5,8 @@ import {
   chunks,
   countsAgainstWeek,
   FREE_FAILS,
+  givenUp,
+  posterRefusal,
   cleanReport,
   cleanTags,
   expiresIn,
@@ -212,4 +214,29 @@ test("the friend button needs the name, the link's offer and open requests", () 
   assert.equal(offersFriend({ show_name: 1, offer_friend: 0 }, 1), false);
   assert.equal(offersFriend({ show_name: 0, offer_friend: 1 }, 1), false);
   assert.equal(offersFriend({ show_name: 1, offer_friend: 1 }, 0), false);
+});
+
+test("an upload that broke off without a word counts like a failed one once the sweep gives it up", () => {
+  const start = 1_000_000_000;
+  const now = start + PENDING_MS + 1;
+  const pending = { pending: 1, failed: 0, bytes: MAX_BYTES, created_at: start, deleted_at: null };
+  // Stale and still pending, it no longer counts — the sweep must not leave it so.
+  assert.equal(countsAgainstWeek(pending, now), false);
+  const gone = givenUp(pending, now);
+  assert.deepEqual(gone, { pending: 0, failed: 1, bytes: 0, created_at: start, deleted_at: now });
+  assert.equal(countsAgainstWeek(gone, now), true);
+  // Past the free ones, each takes a link.
+  const rows = Array.from({ length: FREE_FAILS + 2 }, (_, i) => givenUp({ ...pending, created_at: start + i }, now));
+  assert.deepEqual(weekTimes(rows), [start, start + 1]);
+});
+
+test("giving up leaves a finished link alone", () => {
+  const link = { pending: 0, failed: 0, bytes: 10, created_at: 1, deleted_at: null };
+  assert.equal(givenUp(link, 5), link);
+});
+
+test("a poster goes only on a finished link that is still up", () => {
+  assert.equal(posterRefusal({ pending: 0, deleted_at: null }), null);
+  assert.equal(posterRefusal({ pending: 1, deleted_at: null }), "uploading");
+  assert.equal(posterRefusal({ pending: 0, deleted_at: 5 }), "gone");
 });

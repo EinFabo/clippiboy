@@ -18,8 +18,8 @@ export const MAX_BYTES = 50 * 1024 * 1024;
 export const TOTAL_BYTES = 9 * 1024 * 1024 * 1024;
 export const LIFETIME_MS = 5 * DAY_MS;
 /** How long an upload may still be on its way. A pending share older than
-    this broke off: it stops counting and the sweep removes it. The app gives
-    up after 20 minutes. */
+    this broke off: the sweep gives it up like a failed upload (`givenUp`). The
+    app gives up after 20 minutes. */
 export const PENDING_MS = 30 * 60 * 1000;
 /** A preview picture for Discord and the page. */
 export const MAX_POSTER_BYTES = 1024 * 1024;
@@ -156,6 +156,38 @@ export function countsAgainstWeek(row: { pending: number; created_at: number }, 
 
 /** Uploads a week that may fail without costing a link. */
 export const FREE_FAILS = 5;
+
+export interface ShareState {
+  pending: number;
+  failed: number;
+  bytes: number;
+  created_at: number;
+  deleted_at: number | null;
+}
+
+/**
+ * An upload that will not finish, as `GAVE_UP` in links.ts leaves it: done,
+ * empty, deleted and failed — out of the bucket, but in the week like any
+ * failed upload. Also what the hourly sweep does to one that broke off without
+ * its own error path running (the request cut off, say). It used to delete
+ * those, and an upload abandoned on purpose cost nothing: three 50 MB of the
+ * bucket held for half an hour, again and again.
+ */
+export function givenUp<T extends ShareState>(row: T, now: number): T {
+  if (row.pending !== 1) return row;
+  return { ...row, pending: 0, failed: 1, bytes: 0, deleted_at: now };
+}
+
+/**
+ * Why a share may not take its poster now, or null when it may. A deleted or
+ * failed one is gone; one still uploading is no link yet, and a poster put
+ * then was left behind in R2 when the upload failed.
+ */
+export function posterRefusal(row: { pending: number; deleted_at: number | null }): "gone" | "uploading" | null {
+  if (row.deleted_at !== null) return "gone";
+  if (row.pending === 1) return "uploading";
+  return null;
+}
 
 /**
  * The creation times that count against the week, from the rows in it:

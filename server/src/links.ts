@@ -28,6 +28,7 @@ import {
   offersFriend,
   parseRange,
   PENDING_MS,
+  posterRefusal,
   quota,
   REPORT_KEEP_MS,
   TOTAL_BYTES,
@@ -181,7 +182,8 @@ const TOMBSTONE = "UPDATE shares SET deleted_at = ?, title = '', game = NULL, ta
 // An upload that failed: the same, finished, empty and marked failed. A few
 // a week are free, past that each counts like a link (`weekTimes`). Removed
 // instead, a failing upload cost nothing and could be tried over and over,
-// every try a row written and deleted and two R2 writes.
+// every try a row written and deleted and two R2 writes. `givenUp` in
+// shares.ts is the same in code.
 const GAVE_UP =
   "UPDATE shares SET pending = 0, failed = 1, bytes = 0, deleted_at = ?, title = '', game = NULL, tags = '[]', show_name = 0, offer_friend = 0 WHERE id = ? AND pending = 1";
 
@@ -277,7 +279,7 @@ export async function createShare(request: Request, env: Env, me: string): Promi
       request.body.pipeThrough(mp4.stream).pipeTo(sized.writable),
     ]);
   } catch (err) {
-    await env.CLIPS.delete(video(id)).catch(() => {});
+    await env.CLIPS.delete([video(id), poster(id)]).catch(() => {});
     await env.DB.prepare(GAVE_UP).bind(Date.now(), id).run();
     if (mp4.refused()) throw new HttpError(415, "Only clips can be shared as links.");
     console.error("upload", id, err);
@@ -293,7 +295,7 @@ export async function createShare(request: Request, env: Env, me: string): Promi
     .bind(id, Date.now() - PENDING_MS)
     .run();
   if (!finished.meta.changes) {
-    await env.CLIPS.delete(video(id)).catch(() => {});
+    await env.CLIPS.delete([video(id), poster(id)]).catch(() => {});
     // Still there and pending (too slow, not deleted): it counts like any failed upload.
     await env.DB.prepare(GAVE_UP).bind(Date.now(), id).run();
     throw new HttpError(410, "The upload took too long. Try again.");
@@ -303,7 +305,11 @@ export async function createShare(request: Request, env: Env, me: string): Promi
 
 export async function putPoster(request: Request, env: Env, me: string, id: string): Promise<Response> {
   const row = await owned(env, me, id);
-  if (row.deleted_at !== null) throw new HttpError(404, "That link is gone.");
+  // Only once the clip is up: a poster put while it was still uploading stayed
+  // in R2 when the upload failed.
+  const refusal = posterRefusal(row);
+  if (refusal === "gone") throw new HttpError(404, "That link is gone.");
+  if (refusal === "uploading") throw new HttpError(409, "The clip is still uploading.");
   // The length before the body: reading first would hold whatever was sent
   // in memory, and a big enough one takes the Worker down for everyone.
   const length = Number(request.headers.get("Content-Length"));
@@ -588,14 +594,15 @@ export async function sweep(env: Env): Promise<void> {
     }
   });
   // Uploads that broke off without their catch running: whatever reached R2
-  // goes, and the row with it — it never was a link.
+  // goes, and the row is given up like any failed upload (`givenUp`). Deleted
+  // instead, an upload cut off on purpose cost nothing against the week.
   await step("stale", async () => {
     const { results: stale } = await env.DB.prepare("SELECT id FROM shares WHERE pending = 1 AND created_at <= ? LIMIT 400")
       .bind(now - PENDING_MS)
       .all<{ id: string }>();
     if (stale.length > 0) {
       await env.CLIPS.delete(stale.flatMap((row) => [video(row.id), poster(row.id)]));
-      await env.DB.batch(stale.map((row) => env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(row.id)));
+      await env.DB.batch(stale.map((row) => env.DB.prepare(GAVE_UP).bind(now, row.id)));
     }
   });
   // A week to count against, plus a margin.
