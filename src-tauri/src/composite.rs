@@ -576,6 +576,19 @@ impl Queue {
         before != self.waiting.len() + self.later.len()
     }
 
+    /// A swap waiting for its next try is due at `now` instead: someone wants
+    /// the file, and a player that held it has most likely let go.
+    pub fn nudge(&mut self, id: &str, now: Instant) -> bool {
+        let mut nudged = false;
+        for (later, at) in &mut self.later {
+            if later == id && *at > now {
+                *at = now;
+                nudged = true;
+            }
+        }
+        nudged
+    }
+
     fn earliest_later(&self) -> Option<Instant> {
         self.later.iter().map(|(_, at)| *at).min()
     }
@@ -708,10 +721,20 @@ pub fn cancel(clip_id: &str) -> bool {
 
 /// Waits until the clip has no job queued or running, up to `limit`. Called
 /// before taking the clip's lock, never while holding it.
+///
+/// A swap put off for [`SWAP_RETRY_EVERY`] because a player held the file is
+/// tried at once: whoever waits here is about to use the file, and the player
+/// has let go of it. Waiting out the five minutes instead stood a save at
+/// "Saving… 0 %" and could end it in `CAM_ON_ITS_WAY`.
 pub fn wait_settled(clip_id: &str, limit: Duration) -> bool {
     let (queue, changed) = &*QUEUE;
     let deadline = Instant::now() + limit;
     let mut q = queue.lock();
+    let now = Instant::now();
+    if q.clips.nudge(clip_id, now) | q.recordings.nudge(clip_id, now) {
+        log::info!("cam for clip {clip_id}: the file is wanted \u{2014} trying the swap again now");
+        changed.notify_all();
+    }
     while q.busy(clip_id) {
         if changed.wait_until(&mut q, deadline).timed_out() {
             return !q.busy(clip_id);
@@ -1486,6 +1509,19 @@ mod tests {
         q.done("b");
         assert_eq!(q.next(now), None);
         assert_eq!(q.next(now + SWAP_RETRY_EVERY).as_deref(), Some("a"));
+    }
+
+    /// Facecam #2: whoever waits for the clip brings its put-off swap forward.
+    #[test]
+    fn a_put_off_swap_is_tried_at_once_when_the_file_is_wanted() {
+        let mut q = Queue::default();
+        let now = Instant::now();
+        assert!(q.push_later("a", now + SWAP_RETRY_EVERY));
+        assert!(!q.nudge("b", now), "another clip's swap stays put");
+        assert_eq!(q.next(now), None);
+        assert!(q.nudge("a", now));
+        assert!(!q.nudge("a", now), "due already");
+        assert_eq!(q.next(now).as_deref(), Some("a"));
     }
 
     #[test]
