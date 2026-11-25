@@ -8,6 +8,7 @@ import {
   myStatus,
   newcomer,
   nextDrop,
+  requestsSummary,
   seenWhileAway,
   shortLink,
   SIGN_IN_REASON_MS,
@@ -115,4 +116,12 @@ test("the error notice right after a failed sign-in is its reason, nothing else 
   assert.equal(isSignInReason(error, 0, 1200, false), false);
   assert.equal(isSignInReason(error, 1000, 1200, true), false);
   assert.equal(isSignInReason({ kind: "ok" }, 1000, 1200, false), false);
+});
+
+test("status menu: the Requests row counts its switches, Off while requests are refused", () => {
+  assert.equal(requestsSummary(true, true, true), "3 of 3 on");
+  assert.equal(requestsSummary(true, true, false), "2 of 3 on");
+  // Requests from links do nothing without the name on them.
+  assert.equal(requestsSummary(true, false, true), "1 of 3 on");
+  assert.equal(requestsSummary(false, true, true), "Off");
 });

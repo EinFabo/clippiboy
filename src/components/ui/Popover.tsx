@@ -20,6 +20,7 @@ export function Popover({
   anchor,
   label,
   onClose,
+  anchorEdge = "left",
   className,
   children,
 }: {
@@ -27,11 +28,22 @@ export function Popover({
   anchor: RefObject<HTMLElement | null>;
   label: string;
   onClose: () => void;
+  /**
+   * Which edge holds it in place. Either way its right edge starts on the
+   * button's; "left" places it by its left edge, measured again once the
+   * content has changed size. "right" holds the right edge itself, so content
+   * that widens (a menu folding out) grows to the left in the same frame —
+   * placed by the left edge, it first grew a frame to the right and jumped
+   * back. A window too narrow for it still pushes it inside.
+   */
+  anchorEdge?: "left" | "right";
   className?: string;
   children: ReactNode;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const [place, setPlace] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
+  const [place, setPlace] = useState<{ left: number; right: number; top: number; maxHeight: number } | null>(
+    null,
+  );
 
   // Measured at its natural size; an answer line appearing places it again.
   useLayoutEffect(() => {
@@ -52,10 +64,11 @@ export function Popover({
       });
       const height = el.offsetHeight;
       el.style.maxHeight = kept;
+      const right = window.innerWidth - (p.x + el.offsetWidth);
       setPlace((old) =>
-        old && old.left === p.x && old.top === p.y && old.maxHeight === Math.min(height, p.maxHeight)
+        old && old.left === p.x && old.right === right && old.top === p.y && old.maxHeight === Math.min(height, p.maxHeight)
           ? old
-          : { left: p.x, top: p.y, maxHeight: Math.min(height, p.maxHeight) },
+          : { left: p.x, right, top: p.y, maxHeight: Math.min(height, p.maxHeight) },
       );
     };
     measure();
@@ -114,7 +127,10 @@ export function Popover({
       role="dialog"
       aria-label={label}
       style={{
-        left: place?.left ?? 0,
+        ...(anchorEdge === "right"
+          ? // Its natural width, never squeezed by the edge it is held from.
+            { right: place?.right ?? 0, width: "max-content", maxWidth: `calc(100vw - ${2 * EDGE}px)` }
+          : { left: place?.left ?? 0 }),
         top: place?.top ?? 0,
         maxHeight: place?.maxHeight,
         background: FLOATING,

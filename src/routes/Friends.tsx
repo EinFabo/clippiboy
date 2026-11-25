@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { cn } from "@/lib/cn";
 import {
   canReceive,
@@ -20,6 +20,7 @@ import {
   maskedCode,
   myStatus,
   newcomer,
+  requestsSummary,
   seenWhileAway,
   shortLink,
   statusChoice,
@@ -47,11 +48,12 @@ import { noun, rowTransfer, type Ended, type RowTransfer } from "@/lib/transferR
 import { readOpen, writeOpen } from "@/lib/groupState";
 import { formatDuration } from "@/lib/format";
 import { toast } from "@/lib/toastBus";
-import type { FriendMe, FriendPending, FriendPresence, FriendUser, Transfer } from "@/lib/types";
+import type { FriendMe, FriendPending, FriendPresence, FriendsConfig, FriendUser, Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { ConfirmDelete } from "@/components/ui/ConfirmDelete";
+import { Toggle } from "@/components/ui/Controls";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { useMenu } from "@/components/ui/Menu";
 import { Popover } from "@/components/ui/Popover";
@@ -443,7 +445,7 @@ function StatusChip({ me, connected }: { me: FriendMe | null; connected: boolean
         </button>
       </span>
       {open && (
-        <Popover anchor={anchor} label="Your status" onClose={() => setOpen(false)} className="w-[280px]">
+        <Popover anchor={anchor} label="Your status" onClose={() => setOpen(false)} anchorEdge="right">
           <StatusMenu
             current={statusChoice(config)}
             status={config.status}
@@ -464,6 +466,14 @@ function StatusChip({ me, connected }: { me: FriendMe | null; connected: boolean
     </>
   );
 }
+
+/** The status menu's column, and the Requests card that folds out beside it. */
+const MENU_COLUMN = 268;
+const MENU_CARD = 292;
+/** `p-1.5` around, and the gap between the two. */
+const MENU_PAD = 6;
+const MENU_ITEM = "flex h-9 w-full items-center gap-2.5 rounded-[10px] px-3 text-left text-[13px] font-medium transition-colors";
+const MENU_DIVIDER = "mx-2 my-1.5 border-t border-white/8";
 
 function StatusMenu({
   current,
@@ -492,44 +502,176 @@ function StatusMenu({
   };
   useEffect(() => save, []);
 
-  const item = "flex h-9 w-full items-center gap-2.5 rounded-[10px] px-3 text-left text-[13px] font-medium transition-colors";
+  const { friends, patchConfig } = useEngine(useShallow((s) => ({ friends: s.config.friends, patchConfig: s.patchConfig })));
+  const me = useFriends((s) => s.me);
+  // From the latest settings: a switch flipped right after another must not undo it.
+  const patch = (change: Partial<FriendsConfig>) =>
+    void patchConfig({ friends: { ...useEngine.getState().config.friends, ...change } });
+  const allow = me?.allowRequests ?? true;
+  const friendOnLinks = friends.friendOnLinks ?? true;
+
+  // Always opens folded; Requests folds the card out to the left.
+  const [requests, setRequests] = useState(false);
+  const cardId = useId();
+  const requestsRow = useRef<HTMLButtonElement>(null);
+  const card = useRef<HTMLDivElement>(null);
+  const focusCard = useRef(false);
+  useEffect(() => {
+    if (!requests || !focusCard.current) return;
+    focusCard.current = false;
+    card.current?.querySelector<HTMLElement>("button:not([disabled])")?.focus({ preventScroll: true });
+  }, [requests]);
+
   return (
-    <div className="p-1.5">
-      {CHOICES.map((choice) => (
-        <button
-          key={choice}
-          aria-pressed={current === choice}
-          data-autofocus={current === choice || undefined}
-          onClick={() => {
-            picked.current = true;
-            onPick(choice, text);
+    <div
+      style={{ width: requests ? MENU_COLUMN + MENU_CARD + 3 * MENU_PAD : MENU_COLUMN + 2 * MENU_PAD }}
+      className="flex overflow-hidden p-1.5 transition-[width] duration-[280ms] ease-[var(--ease-out-soft)] motion-reduce:transition-none"
+    >
+      <div className="shrink-0" style={{ width: MENU_COLUMN }}>
+        {CHOICES.map((choice) => (
+          <button
+            key={choice}
+            aria-pressed={current === choice}
+            data-autofocus={current === choice || undefined}
+            onClick={() => {
+              picked.current = true;
+              onPick(choice, text);
+            }}
+            className={cn(MENU_ITEM, current === choice ? "bg-white/8" : "hover:bg-hover")}
+          >
+            <StatusDot status={choice} />
+            <span className="flex-1">{STATUS_LABEL[choice]}</span>
+            {current === choice && <IconCheck className="h-4 w-4 text-ink-muted" />}
+          </button>
+        ))}
+        <div className={MENU_DIVIDER} />
+        <input
+          value={text}
+          maxLength={60}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={save}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
-          className={cn(item, current === choice ? "bg-white/8" : "hover:bg-hover")}
+          placeholder="What are you up to?"
+          aria-label="Your status text"
+          className="h-[34px] w-full rounded-pill border border-line bg-surface px-3 text-[13px] outline-none
+            transition-colors placeholder:text-ink-faint focus:border-line-strong"
+        />
+        <div className={MENU_DIVIDER} />
+        <MenuSwitch
+          icon={<IconGamepad className="h-4 w-4 text-ink-muted" />}
+          label="Show what I'm playing"
+          checked={friends.shareGame}
+          onChange={(shareGame) => patch({ shareGame })}
+        />
+        <button
+          ref={requestsRow}
+          aria-expanded={requests}
+          aria-controls={cardId}
+          onClick={() => setRequests((v) => !v)}
+          // Right goes into the card, left folds it away again.
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") {
+              e.preventDefault();
+              focusCard.current = true;
+              if (requests) card.current?.querySelector<HTMLElement>("button:not([disabled])")?.focus();
+              else setRequests(true);
+            } else if (e.key === "ArrowLeft" && requests) {
+              e.preventDefault();
+              setRequests(false);
+            }
+          }}
+          className={cn(MENU_ITEM, requests ? "bg-white/8" : "hover:bg-hover")}
         >
-          <StatusDot status={choice} />
-          <span className="flex-1">{STATUS_LABEL[choice]}</span>
-          {current === choice && <IconCheck className="h-4 w-4 text-ink-muted" />}
+          <IconFriends className="h-4 w-4 text-ink-muted" />
+          <span className="flex-1">Requests</span>
+          <span className="text-ink-muted">{requestsSummary(allow, friends.nameOnLinks, friendOnLinks)}</span>
+          <svg
+            viewBox="0 0 12 12"
+            aria-hidden
+            className={cn(
+              "size-2.5 text-ink-muted transition-transform duration-[280ms] ease-[var(--ease-out-soft)] motion-reduce:transition-none",
+              requests && "rotate-180",
+            )}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M4.5 2.5 8 6l-3.5 3.5" />
+          </svg>
         </button>
-      ))}
-      <div className="mx-2 my-1.5 border-t border-white/8" />
-      <input
-        value={text}
-        maxLength={60}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={save}
+        <div className={MENU_DIVIDER} />
+        <button onClick={onSettings} className={cn(MENU_ITEM, "hover:bg-hover")}>
+          <IconSettings className="h-4 w-4 text-ink-muted" />
+          Friends settings
+        </button>
+      </div>
+      {/* Folded, it is out of reach — inert, not only out of sight. */}
+      <div
+        ref={card}
+        id={cardId}
+        role="group"
+        aria-label="Requests"
+        inert={!requests}
         onKeyDown={(e) => {
-          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key !== "ArrowLeft") return;
+          e.preventDefault();
+          setRequests(false);
+          requestsRow.current?.focus();
         }}
-        placeholder="What are you up to?"
-        aria-label="Your status text"
-        className="h-[34px] w-full rounded-pill border border-line bg-surface px-3 text-[13px] outline-none
-          transition-colors placeholder:text-ink-faint focus:border-line-strong"
-      />
-      <div className="mx-2 my-1.5 border-t border-white/8" />
-      <button onClick={onSettings} className={cn(item, "hover:bg-hover")}>
-        <IconSettings className="h-4 w-4 text-ink-muted" />
-        Friends settings
-      </button>
+        style={{ width: MENU_CARD, marginLeft: MENU_PAD }}
+        className={cn(
+          "shrink-0 self-stretch rounded-[12px] bg-white/4 p-1",
+          "transition-[opacity,transform] duration-[280ms] ease-[var(--ease-out-soft)] motion-reduce:transition-none",
+          requests ? "translate-x-0 opacity-100 delay-[60ms]" : "-translate-x-3 opacity-0",
+        )}
+      >
+        <p className="px-3 pt-1.5 pb-0.5 text-[11px] font-medium tracking-wide text-ink-faint uppercase">Requests</p>
+        <MenuSwitch
+          label="Accept friend requests"
+          checked={allow}
+          disabled={!me}
+          onChange={(on) => void friendsApi.setAllowRequests(on).catch(report)}
+        />
+        <MenuSwitch label="My name on share links" checked={friends.nameOnLinks} onChange={(nameOnLinks) => patch({ nameOnLinks })} />
+        <MenuSwitch
+          label="Requests from my share links"
+          checked={friendOnLinks}
+          disabled={!friends.nameOnLinks}
+          onChange={(friendOnLinks) => patch({ friendOnLinks })}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** A switch row sized for a menu: the label left, the app's own Toggle right. */
+function MenuSwitch({
+  icon,
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  icon?: ReactNode;
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex min-h-10 items-center gap-2.5 rounded-[10px] px-3 text-[13px] font-medium",
+        disabled && "text-ink-muted",
+      )}
+    >
+      {icon}
+      <span className="flex-1">{label}</span>
+      <Toggle checked={checked} disabled={disabled} onChange={onChange} label={label} />
     </div>
   );
 }

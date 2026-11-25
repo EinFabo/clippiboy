@@ -49,6 +49,17 @@ export function statusPatch(choice: StatusChoice, text?: string) {
   return text === undefined ? patch : { ...patch, status: statusText(text) };
 }
 
+/**
+ * The Requests row in the status menu: how many of the three switches behind
+ * it are on, or "Off" while requests are not accepted at all. The last one
+ * counts only with the name on the links — without it, it does nothing.
+ */
+export function requestsSummary(allow: boolean, nameOnLinks: boolean, friendOnLinks: boolean): string {
+  if (!allow) return "Off";
+  const on = 1 + Number(nameOnLinks) + Number(nameOnLinks && friendOnLinks);
+  return `${on} of 3 on`;
+}
+
 /** What the server answers when there is nothing to do — said calmly, not in red. */
 const ALREADY = ["You are already friends.", "Request already sent."];
 
