@@ -30,7 +30,9 @@
     }
   ],
   // Share links: the clips themselves, five days each. The hourly sweep
-  // deletes them; a lifecycle rule on the bucket (6 days) is the safety net.
+  // deletes them; a lifecycle rule on the bucket is the safety net. It must
+  // allow 36 days, not 6: a reported clip is held up to 30 days after its
+  // link went (held_clips, migration 0015), and a 6-day rule deleted it first.
   "r2_buckets": [{ "binding": "CLIPS", "bucket_name": "clippiboy-clips" }],
   "triggers": { "crons": ["17 * * * *"] },
   // Reports from the share page: a few a minute per address, counted at the
