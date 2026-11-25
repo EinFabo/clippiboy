@@ -337,17 +337,26 @@ pub fn run_setup(
 
 #[cfg(windows)]
 mod win {
-    use windows::core::{implement, Interface, Result as WinResult, HSTRING, PCWSTR};
-    use windows::Win32::Foundation::{BOOL, E_NOTIMPL, INVALID_HANDLE_VALUE};
+    use windows::core::{implement, Interface, Result as WinResult, HSTRING, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, BOOL, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_NOTIMPL,
+        HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+    };
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
     };
-    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Security::{
+        GetLengthSid, GetTokenInformation, IsValidSid, TokenOwner, TokenUser,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+        TOKEN_INFORMATION_CLASS, TOKEN_QUERY,
+    };
     use windows::Win32::System::Memory::{
         CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
     };
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     use crate::gpu::SendPtr;
 
@@ -357,7 +366,7 @@ mod win {
         verb: &str,
         owner: Option<isize>,
     ) -> Result<u32, String> {
-        use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_OBJECT_0};
+        use windows::Win32::Foundation::{HWND, WAIT_OBJECT_0};
         use windows::Win32::System::Threading::{
             GetExitCodeProcess, WaitForSingleObject, INFINITE,
         };
@@ -424,13 +433,78 @@ mod win {
         Some(String::from_utf16_lossy(&buf[..len]))
     }
 
+    /// A SID of this process's token, as bytes: its user (`TokenUser`), or
+    /// the owner it gives what it makes (`TokenOwner`; Administrators when
+    /// elevated). Both structs start with the SID's pointer.
+    unsafe fn token_sid(class: TOKEN_INFORMATION_CLASS) -> Option<Vec<u8>> {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, class, None, 0, &mut len);
+        let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+        let read = GetTokenInformation(
+            token,
+            class,
+            Some(buf.as_mut_ptr().cast()),
+            (buf.len() * 8) as u32,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        read.ok()?;
+        sid_bytes(*(buf.as_ptr() as *const PSID))
+    }
+
+    unsafe fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
+        if sid.0.is_null() || !IsValidSid(sid).as_bool() {
+            return None;
+        }
+        let len = GetLengthSid(sid) as usize;
+        Some(std::slice::from_raw_parts(sid.0 as *const u8, len).to_vec())
+    }
+
+    unsafe fn owner_of(handle: HANDLE) -> Option<Vec<u8>> {
+        let mut owner = PSID::default();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let read = GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            Some(&mut sd),
+        );
+        if read != ERROR_SUCCESS {
+            return None;
+        }
+        let out = sid_bytes(owner);
+        let _ = LocalFree(HLOCAL(sd.0));
+        out
+    }
+
     /// The section the media source reads: the user and SYSTEM full rights,
     /// Frame Server's LocalService read only. Lives as long as the app.
+    ///
+    /// Owned by the user, said outright: elevated, Windows would hand it to
+    /// Administrators, and the media source shows a section only to the user
+    /// who owns it. One that is there already and someone else's (made in
+    /// this session before ClippiBoy started) is not written to — the frames
+    /// would go to them.
     pub fn create_section() -> Option<vcam_protocol::Writer> {
         unsafe {
+            let user = token_sid(TokenUser)?;
+            let mut text = PWSTR::null();
+            ConvertSidToStringSidW(PSID(user.as_ptr() as *mut _), &mut text).ok()?;
+            let sid = text.to_string();
+            let _ = LocalFree(HLOCAL(text.0.cast()));
+            let sddl = HSTRING::from(format!(
+                "O:{}D:(A;;GA;;;SY)(A;;GA;;;OW)(A;;GR;;;LS)",
+                sid.ok()?
+            ));
             let mut sd = PSECURITY_DESCRIPTOR::default();
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                windows::core::w!("D:(A;;GA;;;SY)(A;;GA;;;OW)(A;;GR;;;LS)"),
+                &sddl,
                 SDDL_REVISION_1,
                 &mut sd,
                 None,
@@ -442,16 +516,31 @@ mod win {
                 bInheritHandle: BOOL(0),
             };
             let name = HSTRING::from(format!("Local\\{}", vcam_protocol::NAME));
-            let handle = CreateFileMappingW(
+            let created = CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
                 Some(&sa),
                 PAGE_READWRITE,
                 0,
                 vcam_protocol::TOTAL_BYTES as u32,
                 &name,
-            )
-            .map_err(|err| log::warn!("ClippiBoy Camera's memory: {err}"))
-            .ok()?;
+            );
+            let existed = GetLastError() == ERROR_ALREADY_EXISTS;
+            let _ = LocalFree(HLOCAL(sd.0));
+            let handle = created
+                .map_err(|err| log::warn!("ClippiBoy Camera's memory: {err}"))
+                .ok()?;
+            // Usually ClippiBoy's own from its last run, which Frame Server
+            // still holds: owned by this user, or by this token's default
+            // owner (Administrators, from an elevated run before the owner
+            // was set outright).
+            if existed {
+                let owner = owner_of(handle);
+                if owner.is_none() || (owner != Some(user) && owner != token_sid(TokenOwner)) {
+                    log::warn!("ClippiBoy Camera's memory is someone else's — not used");
+                    let _ = CloseHandle(handle);
+                    return None;
+                }
+            }
             let view = MapViewOfFile(
                 handle,
                 FILE_MAP_ALL_ACCESS,

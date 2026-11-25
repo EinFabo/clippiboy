@@ -22,13 +22,27 @@ use windows::Win32::Media::KernelStreaming::{IKsControl, IKsControl_Impl, KSIDEN
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
+use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
+use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL, STATUS_INFO_LENGTH_MISMATCH};
+use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+use windows::Win32::Security::{
+    GetLengthSid, GetTokenInformation, IsValidSid, LookupAccountNameW, TokenUser, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    PSID, SID_NAME_USE, SidTypeUser, TOKEN_QUERY, TOKEN_USER,
+};
 use windows::Win32::System::Memory::{MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS};
-use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId};
-use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTSFreeMemory, WTSQuerySessionInformationW, WTSDomainName, WTSUserName, WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS,
+};
+use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::WindowsProgramming::SYSTEM_PROCESS_INFORMATION;
 
 /// Fixed for good: Windows keys the camera on it.
 pub const CLSID: GUID = GUID::from_u128(0x23b5c234_8158_430a_b8f3_681b7e370ec6);
+/// The process Frame Server activates the source for: the app that streams
+/// the camera.
 const CLIENT_PID: GUID = GUID::from_u128(0x5f8d322e_0fe4_43e4_9e50_d83ecd9fc2b8);
+/// Reading a section's owner; LocalService's generic read on it includes it.
+const READ_CONTROL: u32 = 0x0002_0000;
 const LOG: &str = r"C:\ProgramData\ClippiBoy\vcam.log";
 /// The log starts over beyond this.
 const LOG_LIMIT: u64 = 1024 * 1024;
@@ -303,11 +317,174 @@ impl Drop for Mapping {
     }
 }
 
-/// Opens ClippiBoy's section. Frame Server lives in session 0, ClippiBoy in
-/// the user's, so the name carries the session.
+/// Who the frames go to: the app streaming the camera runs in `session` as
+/// `user`. Only ClippiBoy's section in that session is read, and only while
+/// that user owns it — the class is registered for the whole machine, so any
+/// user signed in alongside can list a camera of their own with it, and
+/// Frame Server then loads this source for them.
+#[derive(Debug, Clone, PartialEq)]
+struct Viewer {
+    session: u32,
+    /// Their SID, when it can be read: the app's own token where that opens
+    /// (never from Frame Server's LocalService for another user's process),
+    /// else the user signed in to the session.
+    user: Option<Vec<u8>>,
+}
+
+/// The viewer the activator names. In Frame Server (session 0) that is the
+/// client process it hands over; loaded into an app of the user's (Windows
+/// tries the source in the app that lists the camera), that app. `None` —
+/// nobody to tell — shows the placeholder only.
+unsafe fn viewer(attrs: &IMFAttributes) -> Option<Viewer> {
+    let own = GetCurrentProcessId();
+    let pid = if session_of(own)? != 0 { own } else { attrs.GetUINT32(&CLIENT_PID).unwrap_or(0) };
+    if pid == 0 {
+        return None;
+    }
+    let session = session_of(pid)?;
+    // A service is nobody's viewer, and ClippiBoy never runs in session 0.
+    if session == 0 {
+        return None;
+    }
+    let user = process_user(pid).or_else(|| session_user(session));
+    Some(Viewer { session, user })
+}
+
+/// A process's session. Asking the process itself needs a handle to it, which
+/// Frame Server's LocalService does not get to another user's app; the
+/// system's process list says it to anyone.
+unsafe fn session_of(pid: u32) -> Option<u32> {
+    let mut session = 0u32;
+    if ProcessIdToSessionId(pid, &mut session).is_ok() {
+        return Some(session);
+    }
+    listed_session(pid)
+}
+
+unsafe fn listed_session(pid: u32) -> Option<u32> {
+    let mut bytes = 512 * 1024usize;
+    for _ in 0..4 {
+        // u64s, for the entries' alignment.
+        let mut buf = vec![0u64; bytes / 8];
+        let mut needed = 0u32;
+        let status = NtQuerySystemInformation(SystemProcessInformation, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut needed);
+        if status == STATUS_INFO_LENGTH_MISMATCH {
+            bytes = (needed as usize).max(bytes) + 64 * 1024;
+            continue;
+        }
+        if status.is_err() {
+            return None;
+        }
+        let len = buf.len() * 8;
+        let base = buf.as_ptr() as *const u8;
+        let mut at = 0usize;
+        while at + std::mem::size_of::<SYSTEM_PROCESS_INFORMATION>() <= len {
+            let entry = &*(base.add(at) as *const SYSTEM_PROCESS_INFORMATION);
+            if entry.UniqueProcessId.0 as usize == pid as usize {
+                return Some(entry.SessionId);
+            }
+            if entry.NextEntryOffset == 0 {
+                break;
+            }
+            at += entry.NextEntryOffset as usize;
+        }
+        return None;
+    }
+    None
+}
+
+/// A SID's bytes, to compare.
+unsafe fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
+    if sid.0.is_null() || !IsValidSid(sid).as_bool() {
+        return None;
+    }
+    let len = GetLengthSid(sid) as usize;
+    Some(std::slice::from_raw_parts(sid.0 as *const u8, len).to_vec())
+}
+
+/// The user a process runs as, when its token may be read.
+unsafe fn process_user(pid: u32) -> Option<Vec<u8>> {
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, BOOL(0), pid).ok()?;
+    let mut token = HANDLE::default();
+    let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token);
+    let _ = CloseHandle(process);
+    opened.ok()?;
+    let mut len = 0u32;
+    let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+    let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+    let read = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr().cast()), (buf.len() * 8) as u32, &mut len);
+    let _ = CloseHandle(token);
+    read.ok()?;
+    sid_bytes((*(buf.as_ptr() as *const TOKEN_USER)).User.Sid)
+}
+
+unsafe fn session_text(session: u32, class: WTS_INFO_CLASS) -> Option<String> {
+    let mut text = PWSTR::null();
+    let mut bytes = 0u32;
+    WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, class, &mut text, &mut bytes).ok()?;
+    let out = text.to_string().ok();
+    WTSFreeMemory(text.0.cast());
+    out.filter(|t| !t.is_empty())
+}
+
+/// The user signed in to a session, as Windows' session manager names them.
+unsafe fn session_user(session: u32) -> Option<Vec<u8>> {
+    let name = session_text(session, WTSUserName)?;
+    let account = match session_text(session, WTSDomainName) {
+        Some(domain) => format!("{domain}\\{name}"),
+        None => name,
+    };
+    let account: Vec<u16> = account.encode_utf16().chain(Some(0)).collect();
+    let (mut sid_len, mut domain_len, mut kind) = (0u32, 0u32, SID_NAME_USE::default());
+    let _ = LookupAccountNameW(PCWSTR::null(), PCWSTR(account.as_ptr()), PSID::default(), &mut sid_len, PWSTR::null(), &mut domain_len, &mut kind);
+    if sid_len == 0 {
+        return None;
+    }
+    let mut sid = vec![0u64; (sid_len as usize).div_ceil(8)];
+    let mut domain = vec![0u16; domain_len.max(1) as usize];
+    LookupAccountNameW(
+        PCWSTR::null(),
+        PCWSTR(account.as_ptr()),
+        PSID(sid.as_mut_ptr().cast()),
+        &mut sid_len,
+        PWSTR(domain.as_mut_ptr()),
+        &mut domain_len,
+        &mut kind,
+    )
+    .ok()?;
+    if kind != SidTypeUser {
+        return None;
+    }
+    sid_bytes(PSID(sid.as_mut_ptr().cast()))
+}
+
+/// The SID that owns a kernel object.
+unsafe fn owner_of(handle: HANDLE) -> Option<Vec<u8>> {
+    let mut owner = PSID::default();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    if GetSecurityInfo(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, Some(&mut sd)) != ERROR_SUCCESS {
+        return None;
+    }
+    let out = sid_bytes(owner);
+    let _ = LocalFree(HLOCAL(sd.0));
+    out
+}
+
+/// Whether a section owned by `owner` may go to a viewer who is `user`.
+fn owner_fits(owner: Option<&[u8]>, user: Option<&[u8]>) -> std::result::Result<(), &'static str> {
+    match (owner, user) {
+        (None, _) => Err("its owner cannot be read"),
+        (Some(owner), Some(user)) if owner == user => Ok(()),
+        (Some(_), Some(_)) => Err("it belongs to another user"),
+        // Neither the app's token nor the session's user could be read: the
+        // session alone decides, as it is the viewer's own.
+        (Some(_), None) => Ok(()),
+    }
+}
+
 /// The size of the frames ClippiBoy sends right now, if it sends any.
-unsafe fn live_size() -> Option<(u32, u32)> {
-    let map = open_mapping()?;
+unsafe fn live_size(viewer: Option<&Viewer>) -> Option<(u32, u32)> {
+    let map = open_mapping(viewer?).ok()?;
     let mut buf = Vec::new();
     match map.reader.read_latest(&mut buf, MFGetSystemTime()) {
         vcam_protocol::ReadResult::Frame { width, height, .. } => Some((width, height)),
@@ -315,32 +492,36 @@ unsafe fn live_size() -> Option<(u32, u32)> {
     }
 }
 
-unsafe fn open_mapping() -> Option<Mapping> {
-    let mut sessions = vec![WTSGetActiveConsoleSessionId()];
-    sessions.extend(1..=8);
-    for s in sessions {
-        if s == u32::MAX || s == 0 {
-            continue;
+/// Opens ClippiBoy's section in the viewer's session. Frame Server lives in
+/// session 0, ClippiBoy in the user's, so the name carries the session.
+unsafe fn open_mapping(viewer: &Viewer) -> std::result::Result<Mapping, &'static str> {
+    open_section(&format!("Session\\{}\\{}", viewer.session, vcam_protocol::NAME), viewer.user.as_deref())
+}
+
+/// A section, read-only, when its owner fits `user` ([`owner_fits`]); why
+/// not, when not.
+unsafe fn open_section(name: &str, user: Option<&[u8]>) -> std::result::Result<Mapping, &'static str> {
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let h = OpenFileMappingW(FILE_MAP_READ.0 | READ_CONTROL, BOOL(0), PCWSTR(wide.as_ptr())).map_err(|_| "not there")?;
+    if let Err(why) = owner_fits(owner_of(h).as_deref(), user) {
+        let _ = CloseHandle(h);
+        return Err(why);
+    }
+    let view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, vcam_protocol::TOTAL_BYTES);
+    let _ = CloseHandle(h);
+    if view.Value.is_null() {
+        return Err("it does not map");
+    }
+    match vcam_protocol::Reader::new(view.Value as *const u8, vcam_protocol::TOTAL_BYTES) {
+        Some(reader) => {
+            log(format!("opened {name}{}", if user.is_some() { "" } else { " (owner not checked: the viewer's user is unknown)" }));
+            Ok(Mapping { view: view.Value as *const u8, reader })
         }
-        let name: Vec<u16> = format!("Session\\{s}\\{}", vcam_protocol::NAME).encode_utf16().chain(Some(0)).collect();
-        if let Ok(h) = OpenFileMappingW(FILE_MAP_READ.0, BOOL(0), PCWSTR(name.as_ptr())) {
-            let view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, vcam_protocol::TOTAL_BYTES);
-            let _ = CloseHandle(h);
-            if view.Value.is_null() {
-                continue;
-            }
-            match vcam_protocol::Reader::new(view.Value as *const u8, vcam_protocol::TOTAL_BYTES) {
-                Some(reader) => {
-                    log(format!("opened Session\\{s}\\{}", vcam_protocol::NAME));
-                    return Some(Mapping { view: view.Value as *const u8, reader });
-                }
-                None => {
-                    let _ = UnmapViewOfFile(view);
-                }
-            }
+        None => {
+            let _ = UnmapViewOfFile(view);
+            Err("it is no section of this version")
         }
     }
-    None
 }
 
 /// What the camera shows.
@@ -360,8 +541,12 @@ fn picture_for(read: &vcam_protocol::ReadResult) -> Picture {
 
 #[derive(Default)]
 struct Feed {
+    /// Whose frames to show; without, only the placeholder.
+    viewer: Option<Viewer>,
     map: Option<Mapping>,
     last_try: Option<Instant>,
+    /// Why the section was last not opened, so that is logged once.
+    refused: Option<&'static str>,
     /// The last good frame from ClippiBoy and its size.
     live: Vec<u8>,
     dims: Option<(usize, usize)>,
@@ -420,17 +605,37 @@ impl Stats {
 }
 
 impl Feed {
+    fn for_viewer(viewer: Option<Viewer>) -> Feed {
+        Feed { viewer, ..Feed::default() }
+    }
+
+    /// Opens the viewer's section, trying again at most once a second.
+    unsafe fn try_open(&mut self) {
+        if self.map.is_some() || self.last_try.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.last_try = Some(Instant::now());
+        let Some(viewer) = &self.viewer else { return };
+        match open_mapping(viewer) {
+            Ok(map) => {
+                self.map = Some(map);
+                self.refused = None;
+            }
+            Err(why) => {
+                // ClippiBoy not running is no news.
+                if self.refused != Some(why) && why != "not there" {
+                    log(format!("ClippiBoy's section in session {} not used: {why}", viewer.session));
+                }
+                self.refused = Some(why);
+            }
+        }
+    }
+
     /// Is a live frame waiting that was not sent yet? `None` when ClippiBoy
     /// sends none (not running, camera off): then the placeholder runs on
     /// the clock. A stamp half a second old counts as none.
     unsafe fn fresh(&mut self) -> Option<bool> {
-        if self.map.is_none() {
-            if self.last_try.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
-                return None;
-            }
-            self.last_try = Some(Instant::now());
-            self.map = open_mapping();
-        }
+        self.try_open();
         let stamp = self.map.as_ref()?.reader.latest_stamp()?;
         if MFGetSystemTime() - stamp > 5_000_000 {
             return None;
@@ -441,13 +646,7 @@ impl Feed {
     /// ClippiBoy's newest frame, or its previous one when a read met a write
     /// half-way. `None` while there is none to show.
     unsafe fn read_live(&mut self) -> Option<(usize, usize)> {
-        if self.map.is_none() {
-            if self.last_try.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
-                return None;
-            }
-            self.last_try = Some(Instant::now());
-            self.map = open_mapping();
-        }
+        self.try_open();
         let read = self.map.as_ref()?.reader.read_latest(&mut self.scratch, MFGetSystemTime());
         match (picture_for(&read), read) {
             (Picture::Live, vcam_protocol::ReadResult::Frame { width, height, qpc_100ns }) => {
@@ -683,13 +882,13 @@ struct MediaStream {
 }
 
 impl MediaStream {
-    unsafe fn create() -> Result<ComObject<MediaStream>> {
+    unsafe fn create(viewer: Option<Viewer>) -> Result<ComObject<MediaStream>> {
         let attrs = new_attributes(8)?;
         attrs.SetGUID(&MF_DEVICESTREAM_STREAM_CATEGORY, &PINNAME_VIDEO_CAPTURE)?;
         attrs.SetUINT32(&MF_DEVICESTREAM_STREAM_ID, 0)?;
         attrs.SetUINT32(&MF_DEVICESTREAM_FRAMESERVER_SHARED, 1)?;
         attrs.SetUINT32(&MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES, MFFrameSourceTypes_Color.0 as u32)?;
-        let offered = formats(live_size());
+        let offered = formats(live_size(viewer.as_ref()));
         let mut types = Vec::new();
         for &(sub, w, h) in &offered {
             types.push(Some(video_type(sub, w, h)?));
@@ -710,7 +909,7 @@ impl MediaStream {
                 width: offered[0].1 as usize,
                 height: offered[0].2 as usize,
                 next_due: None,
-                feed: Feed::default(),
+                feed: Feed::for_viewer(viewer),
             }),
         }))
     }
@@ -865,10 +1064,10 @@ impl MediaSource {
     }
 }
 
-unsafe fn create_source(activator: &IMFAttributes) -> Result<IMFMediaSource> {
+unsafe fn create_source(activator: &IMFAttributes, viewer: Option<Viewer>) -> Result<IMFMediaSource> {
     let attrs = new_attributes(8)?;
     activator.CopyAllItems(&attrs)?;
-    let stream = MediaStream::create()?;
+    let stream = MediaStream::create(viewer)?;
     let sd = lock(&stream.inner).descriptor.clone().ok_or_else(shut)?;
     let pd = MFCreatePresentationDescriptor(Some(&[Some(sd)]))?;
     let source = ComObject::new(MediaSource {
@@ -1015,10 +1214,19 @@ impl IMFActivate_Impl for Activator_Impl {
             }
             *ppv = null_mut();
             let mut slot = lock(&self.source);
-            if slot.is_none() {
-                *slot = Some(create_source(&self.attrs)?);
-            }
             let pid = self.attrs.GetUINT32(&CLIENT_PID).unwrap_or(0);
+            if slot.is_none() {
+                let viewer = viewer(&self.attrs);
+                match &viewer {
+                    Some(v) => log(format!(
+                        "client pid {pid}: session {}, user {}",
+                        v.session,
+                        if v.user.is_some() { "known" } else { "unknown" }
+                    )),
+                    None => log(format!("client pid {pid}: no session to show — placeholder only")),
+                }
+                *slot = Some(create_source(&self.attrs, viewer)?);
+            }
             log(format!("ActivateObject {:?} client pid {pid}", *riid));
             match slot.as_ref() {
                 Some(s) => s.query(riid, ppv).ok(),
@@ -1095,6 +1303,90 @@ mod tests {
             *b = (i % 251) as u8;
         }
         v
+    }
+
+    /// A section named for this test alone, as ClippiBoy makes its own:
+    /// owned by the user explicitly, LocalService's read standing in as the
+    /// owner's only right — so opening it proves that read includes the
+    /// owner.
+    unsafe fn test_section(tag: &str) -> (HANDLE, String) {
+        use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+        use windows::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_ALL_ACCESS, PAGE_READWRITE};
+        let me = process_user(GetCurrentProcessId()).expect("own user");
+        let mut text = PWSTR::null();
+        ConvertSidToStringSidW(PSID(me.as_ptr() as *mut c_void), &mut text).expect("sid text");
+        let sid = text.to_string().expect("sid text");
+        let _ = LocalFree(HLOCAL(text.0.cast()));
+        let sddl: Vec<u16> = format!("O:{sid}D:(A;;GR;;;OW)").encode_utf16().chain(Some(0)).collect();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(sddl.as_ptr()), SDDL_REVISION_1, &mut sd, None).expect("sd");
+        let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: BOOL(0) };
+        let name = format!("ClippiBoy.VCam.test.{tag}.{}", std::process::id());
+        let local: Vec<u16> = format!("Local\\{name}").encode_utf16().chain(Some(0)).collect();
+        let h = CreateFileMappingW(windows::Win32::Foundation::INVALID_HANDLE_VALUE, Some(&sa), PAGE_READWRITE, 0, vcam_protocol::TOTAL_BYTES as u32, PCWSTR(local.as_ptr()))
+            .expect("section");
+        let _ = LocalFree(HLOCAL(sd.0));
+        let view = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, vcam_protocol::TOTAL_BYTES);
+        let writer = vcam_protocol::Writer::new(view.Value as *mut u8, vcam_protocol::TOTAL_BYTES).expect("writer");
+        let session = session_of(GetCurrentProcessId()).expect("session");
+        writer.init(std::process::id(), session);
+        // The section lives on through the handle.
+        let _ = UnmapViewOfFile(view);
+        (h, format!("Session\\{session}\\{name}"))
+    }
+
+    #[test]
+    fn a_section_opens_for_the_user_who_owns_it_only() {
+        unsafe {
+            let me = process_user(GetCurrentProcessId()).expect("own user");
+            let (h, name) = test_section("owner");
+            assert!(open_section(&name, Some(&me)).is_ok(), "LocalService's read covers reading the owner");
+            // SYSTEM, S-1-5-18, standing in for another user.
+            let other = [1u8, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+            assert_eq!(open_section(&name, Some(&other)).err(), Some("it belongs to another user"));
+            assert!(open_section(&name, None).is_ok(), "an unknown viewer user leaves the session to decide");
+            let _ = CloseHandle(h);
+            assert_eq!(open_section(&name, Some(&me)).err(), Some("not there"));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_owner_is_no_one_s() {
+        assert_eq!(owner_fits(None, Some(&[1])), Err("its owner cannot be read"));
+        assert_eq!(owner_fits(None, None), Err("its owner cannot be read"));
+        assert_eq!(owner_fits(Some(&[1, 2]), Some(&[1, 2])), Ok(()));
+        assert_eq!(owner_fits(Some(&[1, 2]), Some(&[1, 3])), Err("it belongs to another user"));
+    }
+
+    /// Frame Server's LocalService may not open another user's app, so its
+    /// session comes from the process list. The System process stands in: a
+    /// user may not open it either.
+    #[test]
+    fn a_session_is_found_without_opening_the_process() {
+        unsafe {
+            let own = GetCurrentProcessId();
+            let mut session = u32::MAX;
+            ProcessIdToSessionId(own, &mut session).expect("own session");
+            assert_eq!(listed_session(own), Some(session));
+            assert_eq!(session_of(4), Some(0), "the System process");
+            assert_eq!(listed_session(4), Some(0));
+            assert_eq!(listed_session(u32::MAX - 3), None, "no such process");
+        }
+    }
+
+    /// The session's user, as the session manager names them, is the user
+    /// running the tests. Needs a signed-in session of one's own:
+    /// `cargo test -p clippiboy-vcam -- --ignored session_user`
+    #[test]
+    #[ignore]
+    fn the_session_user_is_the_signed_in_user() {
+        unsafe {
+            let own = GetCurrentProcessId();
+            let session = session_of(own).expect("session");
+            assert_ne!(session, 0, "run it in a signed-in session");
+            assert_eq!(session_user(session), process_user(own));
+        }
     }
 
     #[test]

@@ -2,8 +2,10 @@
 
 //!
 //! ClippiBoy (the producer, in the user's session) creates the section
-//! `Local\ClippiBoy.VCam.v1`; the media source in Frame Server (session 0)
-//! opens it read-only as `Session\<n>\ClippiBoy.VCam.v1`. A 4 KiB header, then
+//! `Local\ClippiBoy.VCam.v1`, owned by the user; the media source in Frame
+//! Server (session 0) opens it read-only as `Session\<n>\ClippiBoy.VCam.v1`,
+//! `n` being the session of the app that streams the camera, and shows it
+//! only while that app's user owns it. A 4 KiB header, then
 //! four slots of up to 1920×1080 NV12. Each slot has a seqlock: the writer makes
 //! its sequence odd, writes, makes it even; the reader copies and keeps the copy
 //! only if the sequence was even and did not move. A frame half-written is never
@@ -20,7 +22,7 @@ pub const CLSID: &str = "{23b5c234-8158-430a-b8f3-681b7e370ec6}";
 pub const FRIENDLY_NAME: &str = "ClippiBoy Camera";
 /// Where the installer notes what it installed.
 /// The DLL version the setup carries; the app compares it with the installed one.
-pub const DLL_VERSION: &str = "1.0.4";
+pub const DLL_VERSION: &str = "1.0.5";
 pub const REGISTRY_KEY: &str = r"SOFTWARE\ClippiBoy\VirtualCamera";
 pub const MAGIC: u32 = u32::from_le_bytes(*b"CBVC");
 pub const MAJOR: u32 = 1;
