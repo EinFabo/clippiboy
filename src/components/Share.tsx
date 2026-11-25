@@ -41,7 +41,7 @@ import { cardLeft, cardStack, noun, onFriendsPage, transferKind, type Ended } fr
 import type { Clip, FriendPresence, FriendUser, Transfer } from "@/lib/types";
 import { useEngine } from "@/store";
 import { toast } from "@/lib/toastBus";
-import { AddFriendForm, Avatar } from "@/routes/Friends";
+import { AddFriendForm, AnswerLeft, Avatar } from "@/routes/Friends";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Card";
 import { ProgressBar } from "@/components/ui/ProgressBar";
@@ -600,7 +600,8 @@ function TransferCard({ transfer: t }: { transfer: Transfer }) {
         </div>
       )}
       {incoming && t.stage === "asking" && (
-        <div className="mt-3 flex justify-end gap-2">
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <AnswerLeft id={t.id} className="mr-auto" />
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(shareApi.decline(t.id))}>
             Decline
           </Button>

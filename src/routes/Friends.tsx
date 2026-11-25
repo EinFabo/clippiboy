@@ -46,6 +46,7 @@ import { retrying, waitingFor } from "@/lib/sendQueue";
 import { ago, foldedRows, friendStatus, groupFriends, pendingRows, type FriendStatus } from "@/lib/friendsList";
 import { noun, rowTransfer, type Ended, type RowTransfer } from "@/lib/transferRows";
 import { readOpen, writeOpen } from "@/lib/groupState";
+import { useAnswerLeft } from "@/lib/offerClock";
 import { formatDuration } from "@/lib/format";
 import { toast } from "@/lib/toastBus";
 import type { FriendMe, FriendPending, FriendPresence, FriendsConfig, FriendUser, Transfer } from "@/lib/types";
@@ -982,6 +983,7 @@ function OfferRow({ transfer: t, presence }: { transfer: Transfer; presence: Rec
       >
         {!t.screenshot && t.durationMs > 0 ? formatDuration(t.durationMs) : null}
       </span>
+      <AnswerLeft id={t.id} />
       <div className="flex gap-2">
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(shareApi.decline(t.id))}>
           Decline
@@ -991,6 +993,16 @@ function OfferRow({ transfer: t, presence }: { transfer: Transfer; presence: Rec
         </Button>
       </div>
     </div>
+  );
+}
+
+/** The seconds an offer has left before it is missed — red for the last ten. */
+export function AnswerLeft({ id, className }: { id: string; className?: string }) {
+  const left = useAnswerLeft(id);
+  return (
+    <span className={cn("shrink-0 text-xs tabular-nums", left <= 10 ? "text-live" : "text-ink-muted", className)}>
+      {left} s left
+    </span>
   );
 }
 

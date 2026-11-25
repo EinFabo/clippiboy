@@ -84,6 +84,33 @@ export function toDismiss(
     .map((t) => t.id);
 }
 
+/** How long one has to answer an offer — `ANSWER_WITHIN` in `share.rs`. */
+export const ANSWER_WITHIN_MS = 60_000;
+
+/**
+ * Notes when each offer waiting for an answer was first seen here, and forgets
+ * the ones no longer waiting. The core does not say when an offer came; it
+ * shows up at once, so first seen is when it came — or, for one already
+ * waiting when the window started, a little later. Returns `seen` itself when
+ * nothing changed.
+ */
+export function noteOffers(transfers: Transfer[], seen: Record<string, number>, now: number): Record<string, number> {
+  const next: Record<string, number> = {};
+  let changed = false;
+  for (const t of transfers) {
+    if (transferKind(t) !== "offer") continue;
+    next[t.id] = seen[t.id] ?? now;
+    if (seen[t.id] === undefined) changed = true;
+  }
+  if (Object.keys(seen).length !== Object.keys(next).length) changed = true;
+  return changed ? next : seen;
+}
+
+/** Whole seconds left to answer an offer first seen at `seenAt`, never below 0. */
+export function answerLeft(seenAt: number, now: number): number {
+  return Math.max(0, Math.ceil((seenAt + ANSWER_WITHIN_MS - now) / 1000));
+}
+
 /** How long a card for an ended transfer stays on the other pages. */
 export const CARD_ENDED_MS = 6_000;
 

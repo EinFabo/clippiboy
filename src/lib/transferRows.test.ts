@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ANSWER_WITHIN_MS,
+  answerLeft,
   CARD_ENDED_MS,
   cardLeft,
   cardStack,
   noteEnded,
+  noteOffers,
   onFriendsPage,
   presenceSig,
   reason,
@@ -224,4 +227,24 @@ test("cards: at most three failures, the newest; the rest counted for Dismiss al
   assert.equal(few.more, 0);
   // Not noted yet means just now: newest.
   assert.ok(cardStack([...list, failed("f")], ended).cards.some((x) => x.id === "f"));
+});
+
+test("offers: first seen is noted once, forgotten once answered or gone", () => {
+  const offer = t({ id: "o", direction: "in", stage: "asking" });
+  const seen = noteOffers([offer, t({ id: "x" })], {}, 1_000);
+  assert.deepEqual(seen, { o: 1_000 });
+  // Seen again later: the first sighting stays, and nothing changed.
+  assert.equal(noteOffers([offer], seen, 5_000), seen);
+  // Accepted (moving) or gone: forgotten.
+  assert.deepEqual(noteOffers([{ ...offer, stage: "moving" }], seen, 6_000), {});
+  assert.deepEqual(noteOffers([], seen, 6_000), {});
+});
+
+test("offers: the seconds left to answer count down to 0 and stop there", () => {
+  assert.equal(answerLeft(0, 0), ANSWER_WITHIN_MS / 1000);
+  assert.equal(answerLeft(0, 400), 60);
+  assert.equal(answerLeft(0, 18_000), 42);
+  assert.equal(answerLeft(0, 59_001), 1);
+  assert.equal(answerLeft(0, 60_000), 0);
+  assert.equal(answerLeft(0, 90_000), 0);
 });
