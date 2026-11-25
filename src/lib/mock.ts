@@ -186,6 +186,8 @@ export const mockConfig: AppConfig = {
     notifyRequests: true,
     notifyOnline: false,
     notifyGames: true,
+    notifyGamesFavoritesOnly: false,
+    notifyClips: true,
     notifyWhilePlaying: false,
     status: "",
     busy: false,

@@ -544,6 +544,7 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
         entry.transfer.friend_id.clone()
     };
     emit(&app);
+    crate::friends::clip_settled(&app, &id);
     let node = identity(&app).node();
     crate::friends::send_relay(
         &app,
@@ -559,23 +560,31 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
         match receive(&app, &id).await {
             Ok(clip) => {
                 let name = in_friend_name(&app, &id);
-                let what = capital(noun(clip.screenshot, clip.recording));
+                let thing = noun(clip.screenshot, clip.recording);
+                let what = capital(thing);
                 set_in(&app, &id, |t| {
                     t.stage = Stage::Done;
                     t.moved = t.size;
                     t.clip_id = Some(clip.id.clone());
                 });
-                crate::overlay::show_friend(
+                // No toast besides: the window shows it as a card, or in the
+                // friend's row.
+                crate::friends::clip_alert(
                     &app,
-                    crate::overlay::BannerKind::Friend,
-                    &name,
-                    format!("{what} from {name}"),
-                    Some("In your clips".into()),
-                    clip.thumb_path.clone(),
-                    None,
+                    crate::friends::ClipNotice {
+                        event: crate::friends::ClipEvent::Arrived,
+                        id: id.clone(),
+                        friend,
+                        who: name.clone(),
+                        title: format!("{what} from {name}"),
+                        detail: Some("In your clips".into()),
+                        thumb: clip.thumb_path.clone(),
+                        avatar: None,
+                        toast: format!("{what} from {name} received"),
+                        what: thing,
+                    },
                 );
                 let _ = app.emit("clip-saved", clip);
-                crate::notify(&app, "ok", format!("{what} from {name} received"));
                 crate::sounds::play(&app, crate::model::SoundKind::ClipReceived);
             }
             Err(err) if cancel_flag(&app, &id).load(Ordering::SeqCst) => {
@@ -625,6 +634,7 @@ pub fn share_decline(app: AppHandle, id: String) {
         entry.transfer.friend_id.clone()
     };
     emit(&app);
+    crate::friends::clip_settled(&app, &id);
     crate::friends::send_relay(
         &app,
         &friend,
@@ -818,6 +828,7 @@ pub fn handle_relay(app: &AppHandle, from: &str, body: serde_json::Value) {
                 }
             });
             set_in(app, &id, cancel);
+            crate::friends::clip_settled(app, &id);
         }
     }
 }
@@ -1119,14 +1130,6 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
         },
     );
     emit(app);
-    crate::friends::announce_clip(
-        app,
-        &friend_name,
-        &format!(
-            "{friend_name} wants to send you {name} ({})",
-            megabytes(total)
-        ),
-    );
     // Over the game too: the banner cannot be clicked, so it says where the
     // answer goes — the console has the buttons.
     let hotkey = app
@@ -1134,18 +1137,27 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
         .config_snapshot()
         .console_hotkey_spoken();
     crate::sounds::play(app, crate::model::SoundKind::ClipReceived);
-    crate::overlay::show_friend(
+    crate::friends::clip_alert(
         app,
-        crate::overlay::BannerKind::Friend,
-        &friend_name,
-        format!("{friend_name} wants to send you a {what}"),
-        Some(if hotkey.is_empty() {
-            megabytes(total)
-        } else {
-            format!("{} · {hotkey} to answer", megabytes(total))
-        }),
-        None,
-        crate::friends::friend_avatar(app, from),
+        crate::friends::ClipNotice {
+            event: crate::friends::ClipEvent::Offer,
+            id: id.clone(),
+            friend: from.to_owned(),
+            who: friend_name.clone(),
+            title: format!("{friend_name} wants to send you a {what}"),
+            detail: Some(if hotkey.is_empty() {
+                megabytes(total)
+            } else {
+                format!("{} · {hotkey} to answer", megabytes(total))
+            }),
+            thumb: None,
+            avatar: crate::friends::friend_avatar(app, from),
+            toast: format!(
+                "{friend_name} wants to send you {name} ({})",
+                megabytes(total)
+            ),
+            what,
+        },
     );
 
     let left = open_for(arrived, std::time::Instant::now()).unwrap_or_default();
@@ -2049,14 +2061,20 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
         // The cut tracks have done their job.
         drop_cuts(&ask.id);
         let avatar = crate::friends::friend_avatar(app, &friend);
-        crate::overlay::show_friend(
+        crate::friends::clip_alert(
             app,
-            crate::overlay::BannerKind::Friend,
-            &name,
-            format!("{name} has your {what}"),
-            None,
-            None,
-            avatar,
+            crate::friends::ClipNotice {
+                event: crate::friends::ClipEvent::Delivered,
+                id: ask.id.clone(),
+                friend,
+                who: name.clone(),
+                title: format!("{name} has your {what}"),
+                detail: None,
+                thumb: None,
+                avatar,
+                toast: format!("{name} has your {what}"),
+                what,
+            },
         );
     } else if bad_hash(connection) {
         // Every byte went out, and what arrived did not match. A line that

@@ -126,6 +126,11 @@ pub struct Friends {
     verifier: Mutex<Option<String>>,
     /// The own game and since when, as `track_game` reports it.
     game: Mutex<Option<(String, i64)>>,
+    /// The user is at that game right now — its window in front, or one of
+    /// ours over it ([`set_game`]).
+    playing: AtomicBool,
+    /// Clip banners waiting to go up as one while playing ([`clip_alert`]).
+    bundle: Mutex<Vec<ClipNotice>>,
     /// Messages for the open connection, if one stands.
     outbox: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Bumped on sign-out: a connection loop from before gives up.
@@ -216,11 +221,13 @@ pub fn handle_url(app: &AppHandle, url: &str) {
     });
 }
 
-/// Every two seconds from the status tick: the game as the core holds it.
-pub fn set_game(app: &AppHandle, game: Option<&str>) {
+/// Every two seconds from the status tick: the game as the core holds it,
+/// and whether the user is at it right now.
+pub fn set_game(app: &AppHandle, game: Option<&str>, playing: bool) {
     let Some(friends) = app.try_state::<Friends>() else {
         return;
     };
+    friends.playing.store(playing, Ordering::SeqCst);
     {
         let mut current = friends.game.lock();
         if current.as_ref().map(|(name, _)| name.as_str()) == game {
@@ -495,6 +502,7 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
             alert(
                 app,
                 Alert::Request,
+                &request.user.id,
                 &request.user.display_name,
                 &format!("{} sent you a friend request", request.user.display_name),
                 request.user.avatar.clone(),
@@ -513,6 +521,7 @@ async fn refresh(app: &AppHandle, announce: bool) -> Result<(), String> {
             alert(
                 app,
                 Alert::Accepted,
+                &friend.id,
                 &friend.display_name,
                 &format!("{} accepted your friend request", friend.display_name),
                 friend.avatar.clone(),
@@ -810,7 +819,7 @@ async fn handle_message(app: &AppHandle, text: &str) {
                     .find(|user| user.id == id)
                     .map(|user| (user.display_name.clone(), user.avatar.clone()));
                 let before = match &presence {
-                    Some(presence) => view.presence.insert(id, presence.clone()),
+                    Some(presence) => view.presence.insert(id.clone(), presence.clone()),
                     None => view.presence.remove(&id),
                 };
                 (name, before)
@@ -821,6 +830,7 @@ async fn handle_message(app: &AppHandle, text: &str) {
                     (None, Some(game)) => alert(
                         app,
                         Alert::Game,
+                        &id,
                         &name,
                         &format!("{name} is playing {game}"),
                         avatar,
@@ -828,6 +838,7 @@ async fn handle_message(app: &AppHandle, text: &str) {
                     (None, None) => alert(
                         app,
                         Alert::Online,
+                        &id,
                         &name,
                         &format!("{name} is online"),
                         avatar,
@@ -836,6 +847,7 @@ async fn handle_message(app: &AppHandle, text: &str) {
                         alert(
                             app,
                             Alert::Game,
+                            &id,
                             &name,
                             &format!("{name} started {game}"),
                             avatar,
@@ -938,11 +950,6 @@ pub fn send_relay(app: &AppHandle, to: &str, body: &impl Serialize) -> bool {
     outbox.send(text).is_ok()
 }
 
-/// Someone (`who`, as named in `text`) wants to send a clip.
-pub fn announce_clip(app: &AppHandle, who: &str, text: &str) {
-    alert(app, Alert::Clip, who, text, None);
-}
-
 fn send_presence(app: &AppHandle, kind: &str) {
     let Some(friends) = app.try_state::<Friends>() else {
         return;
@@ -955,98 +962,148 @@ fn send_presence(app: &AppHandle, kind: &str) {
 
 // --- Notices -------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Alert {
     Request,
     /// One of ours was answered — nothing left to do, so no hint to the console.
     Accepted,
     Online,
     Game,
+    /// A clip between friends, either way ([`clip_alert`]).
     Clip,
 }
 
-/// In the app while its window is in front; as a Windows notification while it
-/// is not — but never over one's own game unless that is wanted. `who` is the
-/// friend's name in `text`, for streamer mode to hide.
-fn alert(app: &AppHandle, kind: Alert, who: &str, text: &str, avatar: Option<String>) {
-    let config = app.state::<AppState>().config_snapshot().friends;
+/// Where a notice about a friend goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// Nowhere: not wanted, do not disturb, over one's own game — or a clip,
+    /// which the window in front shows as a card or in the friend's row already.
+    Nowhere,
+    /// A toast in the main window, which is in front.
+    InApp,
+    /// Our own banner, in game and on the desktop alike.
+    Banner,
+    /// Windows' notification: banners are switched off altogether.
+    Windows,
+}
+
+/// What the moment adds to the settings when a notice comes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Moment {
+    /// The main window is visible and has the focus.
+    in_front: bool,
+    /// One's own game runs ([`set_game`]).
+    in_game: bool,
+    /// The banner over the game is switched on at all.
+    banners: bool,
+}
+
+impl Moment {
+    fn now(app: &AppHandle, config: &crate::model::AppConfig) -> Self {
+        Moment {
+            in_front: app.get_webview_window("main").is_some_and(|window| {
+                window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+            }),
+            in_game: app
+                .try_state::<Friends>()
+                .is_some_and(|friends| friends.game.lock().is_some()),
+            banners: config.overlay.enabled,
+        }
+    }
+
+    /// "Friend banners while I'm playing" says "Clips only", and one is playing.
+    fn hushed(self, config: &crate::model::FriendsConfig) -> bool {
+        self.in_game && !config.notify_while_playing
+    }
+}
+
+/// Where a notice of `kind` goes — about a friend who is a favourite or not.
+fn route(
+    config: &crate::model::FriendsConfig,
+    kind: Alert,
+    favorite: bool,
+    moment: Moment,
+) -> Route {
     let wanted = match kind {
         Alert::Request | Alert::Accepted => config.notify_requests,
         Alert::Online => config.notify_online,
-        Alert::Game => config.notify_games,
-        // An offer waits for an answer — it has to be seen.
-        Alert::Clip => true,
+        Alert::Game => config.notify_games && (favorite || !config.notify_games_favorites_only),
+        Alert::Clip => config.notify_clips,
     };
     if !wanted || config.busy {
+        return Route::Nowhere;
+    }
+    if moment.in_front {
+        // An offer, a clip that came or went: the window shows it as a card,
+        // or in the friend's row. A toast on top said it once more.
+        return if kind == Alert::Clip {
+            Route::Nowhere
+        } else {
+            Route::InApp
+        };
+    }
+    if moment.hushed(config) {
+        // "Clips only": a clip keeps its banner over the game — an offer
+        // waits for an answer, and the clip banners have a switch of their
+        // own. Windows' notification never: it steals the focus in some games.
+        return if kind == Alert::Clip && moment.banners {
+            Route::Banner
+        } else {
+            Route::Nowhere
+        };
+    }
+    if moment.banners {
+        Route::Banner
+    } else {
+        Route::Windows
+    }
+}
+
+/// In the app while its window is in front; as our banner while it is not —
+/// but never over one's own game unless that is wanted. `id` is the friend's,
+/// `who` their name in `text`, for streamer mode to hide.
+fn alert(app: &AppHandle, kind: Alert, id: &str, who: &str, text: &str, avatar: Option<String>) {
+    let config = app.state::<AppState>().config_snapshot();
+    let favorite = config.friends.favorites.iter().any(|fav| fav == id);
+    let moment = Moment::now(app, &config);
+    let route = route(&config.friends, kind, favorite, moment);
+    if route == Route::Nowhere {
         return;
     }
-    let in_front = app.get_webview_window("main").is_some_and(|window| {
-        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
-    });
-    let hushed_in_game =
-        !config.notify_while_playing && app.state::<Friends>().game.lock().is_some();
-    if matches!(kind, Alert::Online) && !hushed_in_game {
+    if kind == Alert::Online && !moment.hushed(&config.friends) {
         crate::sounds::play(app, crate::model::SoundKind::FriendOnline);
     }
-    if in_front {
-        crate::notify(app, "ok", text);
-        return;
-    }
-    if hushed_in_game {
-        return;
-    }
-    // Our own banner, in game and on the desktop alike — not Windows'. A toast
-    // steals focus in some games, sits in the wrong corner in all of them, and
-    // from a build without installer it even says "Windows PowerShell".
-    let overlay = app.state::<AppState>().config_snapshot();
-    if overlay.overlay.enabled {
-        use crate::overlay::BannerKind;
-        match kind {
-            Alert::Online => crate::overlay::show_friend(
-                app,
-                BannerKind::FriendOnline,
-                who,
-                text.to_owned(),
-                None,
-                None,
-                avatar,
-            ),
-            Alert::Game => crate::overlay::show_friend(
-                app,
-                BannerKind::FriendGame,
-                who,
-                text.to_owned(),
-                None,
-                None,
-                avatar,
-            ),
-            Alert::Request => crate::overlay::show_friend(
-                app,
-                BannerKind::Friend,
-                who,
-                text.to_owned(),
+    match route {
+        Route::Nowhere => {}
+        Route::InApp => crate::notify(app, "ok", text),
+        Route::Windows => windows_notice(app, who, text),
+        // Our own banner, in game and on the desktop alike — not Windows'. A
+        // toast steals focus in some games, sits in the wrong corner in all of
+        // them, and from a build without installer it even says "Windows
+        // PowerShell".
+        Route::Banner => {
+            use crate::overlay::BannerKind;
+            let (kind, detail) = match kind {
+                Alert::Online => (BannerKind::FriendOnline, None),
+                Alert::Game => (BannerKind::FriendGame, None),
                 // Unbound, the console cannot be reached over the game either.
-                (!overlay.console_hotkey_shown().is_empty())
-                    .then(|| format!("{} to answer", overlay.console_hotkey_spoken())),
-                None,
-                avatar,
-            ),
-            Alert::Accepted => crate::overlay::show_friend(
-                app,
-                BannerKind::Friend,
-                who,
-                text.to_owned(),
-                None,
-                None,
-                avatar,
-            ),
-            // `share.rs` has put its banner up already.
-            Alert::Clip => {}
+                Alert::Request => (
+                    BannerKind::Friend,
+                    (!config.console_hotkey_shown().is_empty())
+                        .then(|| format!("{} to answer", config.console_hotkey_spoken())),
+                ),
+                Alert::Accepted => (BannerKind::Friend, None),
+                // Clips come through `clip_alert`.
+                Alert::Clip => return,
+            };
+            crate::overlay::show_friend(app, kind, who, text.to_owned(), detail, None, avatar);
         }
-        return;
     }
-    // Banners switched off altogether: then Windows' notice is the only way
-    // left to hear of it.
+}
+
+/// Windows' own notification — the only way left to hear of something with
+/// the banners switched off altogether.
+fn windows_notice(app: &AppHandle, who: &str, text: &str) {
     use tauri_plugin_notification::NotificationExt;
     let text = if crate::streamer::active() {
         crate::streamer::mask_name(text, who)
@@ -1061,6 +1118,220 @@ fn alert(app: &AppHandle, kind: Alert, who: &str, text: &str, avatar: Option<Str
         .show()
     {
         log::info!("friends: notification failed: {err}");
+    }
+}
+
+/// What a notice about a clip between friends is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipEvent {
+    /// A friend wants to send one.
+    Offer,
+    /// One from a friend is in.
+    Arrived,
+    /// One of ours reached them.
+    Delivered,
+    /// One of ours did not: a no, no answer, or a failure.
+    Missed,
+}
+
+impl ClipEvent {
+    /// Coming in, and so worth folding into one banner while playing
+    /// ([`BUNDLE_WINDOW`]). What one sent oneself is answered one by one.
+    fn bundles(self) -> bool {
+        matches!(self, ClipEvent::Offer | ClipEvent::Arrived)
+    }
+}
+
+/// A notice about a clip going to or coming from a friend (`share.rs`).
+#[derive(Debug, Clone)]
+pub struct ClipNotice {
+    pub event: ClipEvent,
+    /// The transfer it is about.
+    pub id: String,
+    /// The friend's id.
+    pub friend: String,
+    /// Their name as it stands in `title` and `detail`, for streamer mode.
+    pub who: String,
+    pub title: String,
+    pub detail: Option<String>,
+    /// A frame of a clip that arrived — it stands where the face would.
+    pub thumb: Option<String>,
+    pub avatar: Option<String>,
+    /// What Windows' notification says when the banners are off altogether.
+    pub toast: String,
+    /// "clip", "screenshot" or "recording", for the line of a bundle.
+    pub what: &'static str,
+}
+
+/// How long clip banners from friends wait while a game is in front, so that
+/// several in a row become one ("3 clips arrived") instead of a banner each.
+const BUNDLE_WINDOW: Duration = Duration::from_millis(2500);
+
+/// A clip offered, arrived, delivered or missed: a banner, a Windows
+/// notification with the banners off — or nothing, when the window in front
+/// shows it already or the settings say so.
+pub fn clip_alert(app: &AppHandle, notice: ClipNotice) {
+    let config = app.state::<AppState>().config_snapshot();
+    match route(
+        &config.friends,
+        Alert::Clip,
+        false,
+        Moment::now(app, &config),
+    ) {
+        Route::Nowhere | Route::InApp => {}
+        Route::Windows => windows_notice(app, &notice.who, &notice.toast),
+        Route::Banner => {
+            let Some(friends) = app.try_state::<Friends>() else {
+                return;
+            };
+            if !(notice.event.bundles() && friends.playing.load(Ordering::SeqCst)) {
+                show_clip(app, notice);
+                return;
+            }
+            let first = {
+                let mut bundle = friends.bundle.lock();
+                gather(&mut bundle, notice);
+                bundle.len() == 1
+            };
+            if first {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(BUNDLE_WINDOW).await;
+                    flush_bundle(&app);
+                });
+            }
+        }
+    }
+}
+
+/// An offer was answered or called off before its banner went up: it stays
+/// out of the bundle.
+pub fn clip_settled(app: &AppHandle, id: &str) {
+    if let Some(friends) = app.try_state::<Friends>() {
+        friends
+            .bundle
+            .lock()
+            .retain(|notice| !(notice.event == ClipEvent::Offer && notice.id == id));
+    }
+}
+
+/// Puts a notice into the bundle; one about the same transfer — its offer,
+/// when it has arrived meanwhile — makes way for it.
+fn gather(bundle: &mut Vec<ClipNotice>, notice: ClipNotice) {
+    bundle.retain(|waiting| waiting.id != notice.id);
+    bundle.push(notice);
+}
+
+fn show_clip(app: &AppHandle, notice: ClipNotice) {
+    crate::overlay::show_friend(
+        app,
+        crate::overlay::BannerKind::Friend,
+        &notice.who,
+        notice.title,
+        notice.detail,
+        notice.thumb,
+        notice.avatar,
+    );
+}
+
+fn flush_bundle(app: &AppHandle) {
+    let Some(friends) = app.try_state::<Friends>() else {
+        return;
+    };
+    let mut gathered = std::mem::take(&mut *friends.bundle.lock());
+    if gathered.len() <= 1 {
+        if let Some(one) = gathered.pop() {
+            show_clip(app, one);
+        }
+        return;
+    }
+    let hotkey = app
+        .state::<AppState>()
+        .config_snapshot()
+        .console_hotkey_spoken();
+    let one = bundled(&gathered, &hotkey);
+    let avatar = one.friend.as_deref().and_then(|id| friend_avatar(app, id));
+    crate::overlay::show_friend(
+        app,
+        crate::overlay::BannerKind::Friend,
+        &one.who,
+        one.title,
+        one.detail,
+        None,
+        avatar,
+    );
+}
+
+/// The one banner for several clip notices.
+#[derive(Debug, PartialEq)]
+struct Bundle {
+    title: String,
+    detail: Option<String>,
+    /// The friend's name when they all came from one, for streamer mode.
+    who: String,
+    /// That friend's id, for their picture.
+    friend: Option<String>,
+}
+
+/// "3 clips arrived", "2 clips waiting for you", "3 clips from Luca".
+fn bundled(notices: &[ClipNotice], hotkey: &str) -> Bundle {
+    let Some(first) = notices.first() else {
+        return Bundle {
+            title: String::new(),
+            detail: None,
+            who: String::new(),
+            friend: None,
+        };
+    };
+    let count = notices.len();
+    let thing = if notices.iter().all(|notice| notice.what == first.what) {
+        first.what
+    } else {
+        "clip"
+    };
+    let things = if count == 1 {
+        thing.to_owned()
+    } else {
+        format!("{thing}s")
+    };
+    let mut friends: Vec<&str> = notices.iter().map(|n| n.friend.as_str()).collect();
+    friends.sort_unstable();
+    friends.dedup();
+    let one_friend = friends.len() == 1;
+    let from = if one_friend {
+        first.who.clone()
+    } else {
+        format!("{} friends", friends.len())
+    };
+    let offers = notices
+        .iter()
+        .filter(|notice| notice.event == ClipEvent::Offer)
+        .count();
+    let (title, from_said) = if offers == 0 {
+        (format!("{count} {things} arrived"), false)
+    } else if offers == count {
+        (format!("{count} {things} waiting for you"), false)
+    } else if one_friend {
+        (format!("{count} {things} from {from}"), true)
+    } else {
+        (format!("{count} {things} from friends"), true)
+    };
+    let mut detail = Vec::new();
+    if !from_said {
+        detail.push(format!("From {from}"));
+    }
+    if offers > 0 && !hotkey.is_empty() {
+        detail.push(format!("{hotkey} to answer"));
+    }
+    Bundle {
+        title,
+        detail: (!detail.is_empty()).then(|| detail.join(" · ")),
+        who: if one_friend {
+            first.who.clone()
+        } else {
+            String::new()
+        },
+        friend: one_friend.then(|| first.friend.clone()),
     }
 }
 
@@ -1333,5 +1604,171 @@ mod tests {
     fn ids_are_checked() {
         assert!(checked_id("00000000-0000-4000-8000-00000000000a").is_ok());
         assert!(checked_id("../me").is_err());
+    }
+
+    const DESKTOP: Moment = Moment {
+        in_front: false,
+        in_game: false,
+        banners: true,
+    };
+
+    #[test]
+    fn a_clip_has_a_banner_switch_of_its_own() {
+        let mut config = crate::model::FriendsConfig::default();
+        assert_eq!(route(&config, Alert::Clip, false, DESKTOP), Route::Banner);
+        config.notify_clips = false;
+        assert_eq!(route(&config, Alert::Clip, false, DESKTOP), Route::Nowhere);
+        // Without banners at all, not even Windows' notification.
+        let bare = Moment {
+            banners: false,
+            ..DESKTOP
+        };
+        assert_eq!(route(&config, Alert::Clip, false, bare), Route::Nowhere);
+        config.notify_clips = true;
+        assert_eq!(route(&config, Alert::Clip, false, bare), Route::Windows);
+        // Do not disturb holds for clips too.
+        config.busy = true;
+        assert_eq!(route(&config, Alert::Clip, false, DESKTOP), Route::Nowhere);
+    }
+
+    #[test]
+    fn friend_banners_while_playing_can_be_kept_to_clips() {
+        let config = crate::model::FriendsConfig {
+            notify_online: true,
+            notify_while_playing: false,
+            ..Default::default()
+        };
+        let in_game = Moment {
+            in_game: true,
+            ..DESKTOP
+        };
+        for kind in [Alert::Request, Alert::Accepted, Alert::Online, Alert::Game] {
+            assert_eq!(
+                route(&config, kind, true, in_game),
+                Route::Nowhere,
+                "{kind:?}"
+            );
+            assert_eq!(
+                route(&config, kind, true, DESKTOP),
+                Route::Banner,
+                "{kind:?}"
+            );
+        }
+        // An offer waits for an answer: its banner comes over the game too,
+        // unless the clip banners are off.
+        assert_eq!(route(&config, Alert::Clip, false, in_game), Route::Banner);
+        let no_clips = crate::model::FriendsConfig {
+            notify_clips: false,
+            ..config.clone()
+        };
+        assert_eq!(
+            route(&no_clips, Alert::Clip, false, in_game),
+            Route::Nowhere
+        );
+        // Never Windows' notification over the game: it steals the focus.
+        let bare = Moment {
+            banners: false,
+            ..in_game
+        };
+        assert_eq!(route(&config, Alert::Clip, false, bare), Route::Nowhere);
+        let all = crate::model::FriendsConfig {
+            notify_while_playing: true,
+            ..config
+        };
+        assert_eq!(route(&all, Alert::Game, false, in_game), Route::Banner);
+    }
+
+    #[test]
+    fn with_the_window_in_front_a_clip_needs_no_toast() {
+        let config = crate::model::FriendsConfig::default();
+        let front = Moment {
+            in_front: true,
+            ..DESKTOP
+        };
+        // Its card or row says it already.
+        assert_eq!(route(&config, Alert::Clip, false, front), Route::Nowhere);
+        // A request has no card on every page: the toast stays.
+        assert_eq!(route(&config, Alert::Request, false, front), Route::InApp);
+    }
+
+    #[test]
+    fn game_notices_can_be_kept_for_favourites() {
+        let mut config = crate::model::FriendsConfig::default();
+        assert_eq!(route(&config, Alert::Game, false, DESKTOP), Route::Banner);
+        config.notify_games_favorites_only = true;
+        assert_eq!(route(&config, Alert::Game, false, DESKTOP), Route::Nowhere);
+        assert_eq!(route(&config, Alert::Game, true, DESKTOP), Route::Banner);
+        // Only the game notice — coming online is its own switch.
+        config.notify_online = true;
+        assert_eq!(route(&config, Alert::Online, false, DESKTOP), Route::Banner);
+    }
+
+    fn notice(event: ClipEvent, id: &str, friend: &str, what: &'static str) -> ClipNotice {
+        let who = friend.to_uppercase();
+        ClipNotice {
+            event,
+            id: id.into(),
+            friend: friend.into(),
+            who: who.clone(),
+            title: format!("{who} …"),
+            detail: None,
+            thumb: None,
+            avatar: None,
+            toast: String::new(),
+            what,
+        }
+    }
+
+    #[test]
+    fn clips_from_friends_while_playing_go_up_as_one_banner() {
+        let arrived = [
+            notice(ClipEvent::Arrived, "1", "luca", "clip"),
+            notice(ClipEvent::Arrived, "2", "luca", "clip"),
+            notice(ClipEvent::Arrived, "3", "matti", "clip"),
+        ];
+        let one = bundled(&arrived, "Alt+C");
+        assert_eq!(one.title, "3 clips arrived");
+        assert_eq!(one.detail.as_deref(), Some("From 2 friends"));
+        assert_eq!((one.who.as_str(), one.friend), ("", None));
+
+        let offers = [
+            notice(ClipEvent::Offer, "1", "luca", "screenshot"),
+            notice(ClipEvent::Offer, "2", "matti", "screenshot"),
+        ];
+        let one = bundled(&offers, "Alt+C");
+        assert_eq!(one.title, "2 screenshots waiting for you");
+        assert_eq!(
+            one.detail.as_deref(),
+            Some("From 2 friends · Alt+C to answer")
+        );
+        // Unbound, the console is not named.
+        assert_eq!(
+            bundled(&offers, "").detail.as_deref(),
+            Some("From 2 friends")
+        );
+
+        let mixed = [
+            notice(ClipEvent::Arrived, "1", "luca", "clip"),
+            notice(ClipEvent::Offer, "2", "luca", "recording"),
+        ];
+        let one = bundled(&mixed, "Alt+C");
+        assert_eq!(one.title, "2 clips from LUCA");
+        assert_eq!(one.detail.as_deref(), Some("Alt+C to answer"));
+        // One friend: their name, for streamer mode, and their picture.
+        assert_eq!(one.who, "LUCA");
+        assert_eq!(one.friend.as_deref(), Some("luca"));
+    }
+
+    #[test]
+    fn a_clip_that_arrives_takes_the_place_of_its_offer() {
+        let mut bundle = Vec::new();
+        gather(&mut bundle, notice(ClipEvent::Offer, "1", "luca", "clip"));
+        gather(&mut bundle, notice(ClipEvent::Offer, "2", "matti", "clip"));
+        gather(&mut bundle, notice(ClipEvent::Arrived, "1", "luca", "clip"));
+        let events: Vec<_> = bundle.iter().map(|n| (n.id.as_str(), n.event)).collect();
+        assert_eq!(events, [("2", ClipEvent::Offer), ("1", ClipEvent::Arrived)]);
+        // Only incoming clips wait; one's own sends are answered one by one.
+        assert!(ClipEvent::Offer.bundles() && ClipEvent::Arrived.bundles());
+        assert!(!ClipEvent::Delivered.bundles() && !ClipEvent::Missed.bundles());
     }
 }

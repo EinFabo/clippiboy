@@ -369,8 +369,16 @@ pub struct FriendsConfig {
     pub notify_requests: bool,
     pub notify_online: bool,
     pub notify_games: bool,
-    /// Windows notifications while one's own game runs. Off: nothing pops up
-    /// over the game.
+    /// "A friend starts a game" only for the friends pinned to the top.
+    pub notify_games_favorites_only: bool,
+    /// Banners about clips between friends: an offer, one that arrived, one
+    /// that reached them or did not. The console and the window still show
+    /// them all.
+    pub notify_clips: bool,
+    /// All friend banners while one's own game runs. Off ("Clips only"):
+    /// over the game only the clip banners come, which an offer needs to be
+    /// answered in time — no one coming online, no game, no request, and no
+    /// Windows notification at all. One's own banners ("Clip saved") stay.
     pub notify_while_playing: bool,
     /// A line of one's own under the name, empty for none. The server cuts it
     /// to 60 characters.
@@ -403,6 +411,8 @@ impl Default for FriendsConfig {
             notify_requests: true,
             notify_online: false,
             notify_games: true,
+            notify_games_favorites_only: false,
+            notify_clips: true,
             notify_while_playing: false,
             status: String::new(),
             busy: false,
@@ -1566,5 +1576,32 @@ mod tests {
         // `config::migrate_sources`.
         let back: SourceKind = serde_json::from_str(r#"{"type":"leftovers"}"#).unwrap();
         assert_eq!(back, SourceKind::Leftovers);
+    }
+
+    /// Friend settings written before the clip banner switch and the
+    /// favourites-only game notices keep loading, with clip banners on and
+    /// game notices for everyone — what they got until then.
+    #[test]
+    fn friend_settings_from_before_1_0_2_still_load() {
+        let old = r#"{
+            "invisible": false,
+            "shareGame": true,
+            "notifyRequests": true,
+            "notifyOnline": false,
+            "notifyGames": true,
+            "notifyWhilePlaying": false,
+            "status": "",
+            "busy": false,
+            "favorites": ["f1"],
+            "acceptClips": "all"
+        }"#;
+        let parsed: FriendsConfig = serde_json::from_str(old).expect("old settings no longer load");
+        assert!(parsed.notify_clips);
+        assert!(parsed.notify_games);
+        assert!(!parsed.notify_games_favorites_only);
+        assert_eq!(parsed.favorites, vec!["f1".to_owned()]);
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(json["notifyClips"], true);
+        assert_eq!(json["notifyGamesFavoritesOnly"], false);
     }
 }

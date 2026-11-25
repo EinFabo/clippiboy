@@ -46,4 +46,12 @@ test("only the friend-online sound hangs on its banner, and the friend rows bind
   assert.equal(key("A friend comes online"), "notifyOnline");
   assert.equal(key("A friend starts a game"), "notifyGames");
   assert.equal(key("Friend requests"), "notifyRequests");
+  assert.equal(key("Clips with friends"), "notifyClips");
+});
+
+test("only game notices can be narrowed to favorites", () => {
+  assert.deepEqual(
+    NOTIFY_EVENTS.filter((e) => e.favoritesOnly).map((e) => [e.label, e.favoritesOnly]),
+    [["A friend starts a game", "notifyGamesFavoritesOnly"]],
+  );
 });

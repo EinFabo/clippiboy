@@ -1972,7 +1972,7 @@ fn spawn_ui_updates(app: &tauri::AppHandle) {
             // Every 2 s, look which game is running in the foreground.
             if tick.is_multiple_of(40) {
                 let tick_game = state.track_game();
-                friends::set_game(&handle, tick_game.held.as_deref());
+                friends::set_game(&handle, tick_game.held.as_deref(), tick_game.playing);
                 // Whatever moved — the game to a new process, an application
                 // that started playing and now belongs in the leftovers — the
                 // streams follow. The enumerating and rebuilding happens on a

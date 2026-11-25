@@ -457,6 +457,11 @@ export interface FriendsConfig {
   notifyRequests: boolean;
   notifyOnline: boolean;
   notifyGames: boolean;
+  /** "A friend starts a game" only for favorites. */
+  notifyGamesFavoritesOnly: boolean;
+  /** Banners about clips between friends: offered, arrived, delivered, missed. */
+  notifyClips: boolean;
+  /** All friend banners while one's own game runs; off keeps only the clip banners there. */
   notifyWhilePlaying: boolean;
   /** A line of one's own under the name; empty for none. */
   status: string;

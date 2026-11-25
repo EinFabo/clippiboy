@@ -191,13 +191,14 @@ export function NotificationsTab() {
               </div>
             </Row>
           </SettingsGroup>
-          <Row
-            label="Notify me while I'm playing"
-            hint="On: a small ClippiBoy banner over the game. Off: nothing pops up — the console (Alt+C) still shows it all"
-          >
-            <Toggle
-              checked={friends.notifyWhilePlaying}
-              onChange={(notifyWhilePlaying) => patchConfig({ friends: { ...friends, notifyWhilePlaying } })}
+          <Row label="Friend banners while I'm playing">
+            <Segmented
+              value={friends.notifyWhilePlaying ? "all" : "clips"}
+              options={[
+                { key: "all", label: "All" },
+                { key: "clips", label: "Clips only" },
+              ]}
+              onChange={(key) => patchConfig({ friends: { ...friends, notifyWhilePlaying: key === "all" } })}
             />
           </Row>
         </Card>
@@ -219,7 +220,7 @@ export function NotificationsTab() {
             <span className="text-center">Banner</span>
             <span className="text-center">Sound</span>
           </div>
-          {NOTIFY_EVENTS.map(({ label, banner: field, sound, soundNeedsBanner }) => {
+          {NOTIFY_EVENTS.map(({ label, banner: field, sound, soundNeedsBanner, favoritesOnly }) => {
             const setting = sound ? sounds[sound] : null;
             const gated = !!soundNeedsBanner && !!field && !bannerOn(field);
             const locked = !sounds.enabled || gated;
@@ -260,6 +261,22 @@ export function NotificationsTab() {
                     <span className="text-right font-mono text-sm text-ink-muted tabular-nums">
                       {percent(setting.volume)}
                     </span>
+                  </>
+                ) : favoritesOnly && field ? (
+                  <>
+                    <Segmented
+                      className="justify-self-start"
+                      value={friends[favoritesOnly] ? "favorites" : "everyone"}
+                      options={[
+                        { key: "everyone", label: "Everyone" },
+                        { key: "favorites", label: "Favorites" },
+                      ]}
+                      disabled={!bannerOn(field)}
+                      onChange={(key) =>
+                        patchConfig({ friends: { ...friends, [favoritesOnly]: key === "favorites" } })
+                      }
+                    />
+                    <span />
                   </>
                 ) : (
                   <>
