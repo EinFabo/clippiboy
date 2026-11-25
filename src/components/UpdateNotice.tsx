@@ -38,7 +38,7 @@ export function UpdateNotice() {
   };
 
   return (
-    <Card className="mb-6 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
+    <Card className="flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
       {pager}
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink">

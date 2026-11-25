@@ -77,7 +77,7 @@ export function DiscordNotice({ onNavigate }: { onNavigate: (route: Route) => vo
   };
 
   return (
-    <Card className="mb-6 flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
+    <Card className="flex items-center gap-4 border-accent/40 bg-accent/10 p-4">
       {pager}
       <p className="min-w-0 flex-1 text-sm font-medium text-ink">
         {hint.kind === "add"

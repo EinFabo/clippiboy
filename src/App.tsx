@@ -136,8 +136,12 @@ export default function App() {
 
         <main ref={scroller} className="relative h-full overflow-y-auto pt-24 pb-16">
           {/* Outside the keyed wrapper: it belongs to no page and should not
-              replay its entrance on every tab switch. */}
-          <div className="mx-auto w-full max-w-[1180px] px-8">
+              replay its entrance on every tab switch. A card stands where the
+              page's title would, as far below the pill, and the title follows
+              a section gap under it: the page's header gives up the top
+              padding that kept it off the pill. Without a card the wrapper is
+              empty and hidden, and nothing moves. */}
+          <div data-notices className="mx-auto w-full max-w-[1180px] px-8 pt-10 empty:hidden">
             <FfmpegNotice />
             <UpdateNotice />
             <UsageNotice />
@@ -146,7 +150,11 @@ export default function App() {
           {/* Keyed on the route so the rise plays again on every change — the
               same trick the overlay uses to replay its card animation. The
               routes already unmount on a switch, so nothing is lost by it. */}
-          <div key={route} className="cb-rise mx-auto w-full max-w-[1180px] px-8">
+          <div
+            key={route}
+            className="cb-rise mx-auto w-full max-w-[1180px] px-8
+              [[data-notices]:not(:empty)+&>*>header:first-child]:pt-6"
+          >
             <ErrorBoundary key={route} onBack={() => setRoute("dashboard")}>
               {route === "dashboard" && <Dashboard onNavigate={setRoute} />}
               {route === "clips" && (

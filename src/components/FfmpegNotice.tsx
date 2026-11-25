@@ -37,8 +37,8 @@ export function FfmpegNotice() {
     <Card
       className={
         ffmpeg.state === "failed"
-          ? "mb-6 flex items-center gap-4 border-live/40 bg-live/10 p-4"
-          : "mb-6 flex items-center gap-4 border-accent/40 bg-accent/10 p-4"
+          ? "flex items-center gap-4 border-live/40 bg-live/10 p-4"
+          : "flex items-center gap-4 border-accent/40 bg-accent/10 p-4"
       }
     >
       {pager}
