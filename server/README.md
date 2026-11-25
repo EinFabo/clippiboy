@@ -85,6 +85,11 @@ An upload that fails stays behind as a deleted share marked `failed`. Five a
 week are free; past that each counts against the week like a link, so
 failing on purpose runs out after eight tries. A link takes one poster. An account has at most 20 requests waiting for an answer.
 
+Opening the live connection (`GET /ws`) counts against `ANON_LIMIT` twice:
+per address before the session is looked up, and per account after — ten a
+minute each, since every connection wakes the user's hub. The app dials once
+after a drop and backs off from a second to a minute.
+
 The hub (one Durable Object per user) has budgets of its own, per user across
 all connections (`hubrules.ts`): 20 messages at once and then two a second
 before anything is read or written — past that the socket is closed with 4008;

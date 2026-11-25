@@ -169,6 +169,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     return handlePing(text, env);
   }
 
+  // Each connection wakes the user's hub, a Durable Object request on the
+  // free plan's daily 100,000 for everybody: counted per address before the
+  // session is even looked up, and per account below. Ten a minute each —
+  // the app dials once after a drop and backs off from 1 s to a minute.
+  const socket = path === "/ws" && method === "GET";
+  if (socket && !(await underLimit(request, env, "ws"))) throw new HttpError(429, "Too many connections — wait a minute.");
+
   const me = await authenticate(request, env.DB);
 
   // Everything that changes something is counted per user; reads and the
@@ -198,7 +205,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (!isPoster && method === "DELETE") return deleteShare(env, me, id);
   }
 
-  if (path === "/ws" && method === "GET") {
+  if (socket) {
+    // Same binding as the routes anyone may call, under a key of the account's own.
+    if (!(await env.ANON_LIMIT.limit({ key: `ws-user:${me}` })).success) {
+      throw new HttpError(429, "Too many connections — wait a minute.");
+    }
     const headers = new Headers(request.headers);
     headers.set("X-User", me);
     return env.HUB.getByName(me).fetch(new Request(request, { headers }));
@@ -272,7 +283,7 @@ async function spend(env: Env, me: string, budget: "share" | "connect" | "friend
 async function underLimit(
   request: Request,
   env: Env,
-  route: "auth" | "callback" | "ping" | "exchange" | "invite" | "webhook" | "delete",
+  route: "auth" | "callback" | "ping" | "exchange" | "invite" | "webhook" | "delete" | "ws",
 ): Promise<boolean> {
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   return (await env.ANON_LIMIT.limit({ key: `${route}:${addressKey(address)}` })).success;
