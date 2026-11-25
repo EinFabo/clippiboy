@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DOWNLOADS, rewriteLocation, SITE_CSP, validRelease, withSecurityHeaders } from "../site-proxy/rules.ts";
+import { downloadCeiling, DOWNLOADS, DOWNLOADS_PER_DAY, rewriteLocation, SITE_CSP, validRelease, withSecurityHeaders } from "../site-proxy/rules.ts";
 
 const setup = `${DOWNLOADS}v1.0.0/ClippiBoy_1.0.0_x64-setup.exe`;
 
@@ -60,4 +60,10 @@ test("pages get a policy, nosniff and a referrer policy", () => {
   assert.doesNotMatch(SITE_CSP, /unsafe-inline|unsafe-eval/);
   // What main.js asks for.
   assert.match(SITE_CSP, /connect-src 'self' https:\/\/api\.github\.com/);
+});
+
+test("downloads are counted up to a ceiling a day, set by the var or the default", () => {
+  assert.equal(downloadCeiling("500"), 500);
+  for (const junk of [undefined, "", "0", "-3", "1.5", "lots"]) assert.equal(downloadCeiling(junk), DOWNLOADS_PER_DAY, String(junk));
+  assert.equal(DOWNLOADS_PER_DAY, 2000);
 });

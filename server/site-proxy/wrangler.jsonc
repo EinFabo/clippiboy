@@ -17,7 +17,11 @@
     // setup's file name — so a made-up link cannot add rows of its own.
     // "invite": the download on the page after "Add <name> as friend".
     // "clip": the download under a share link's clip and on its expired page.
-    "DOWNLOAD_REFS": "site,invite,clip"
+    "DOWNLOAD_REFS": "site,invite,clip",
+    // Downloads counted a day, all links together; past it the setup is still
+    // served, only not counted, so many addresses together cannot spend the
+    // database's daily writes through the count. Keep it above a real day.
+    "DOWNLOADS_PER_DAY": "2000"
   },
   // Share links (clippiboy.com/c/<id>) are pages of the friends server. A
   // service binding, because one Worker cannot fetch another on the same zone.

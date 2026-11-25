@@ -1,6 +1,6 @@
 import { addressKey } from "../src/limits";
 import { downloadName, isBot, refFromPath, utcDay } from "../src/telemetry";
-import { HOME, ORIGIN, rewriteLocation, validRelease, withSecurityHeaders } from "./rules";
+import { downloadCeiling, HOME, ORIGIN, rewriteLocation, validRelease, withSecurityHeaders } from "./rules";
 
 const RELEASES = "https://github.com/EinFabo/clippiboy/releases/latest";
 
@@ -10,6 +10,8 @@ interface Env {
   DOWNLOAD_LIMIT: RateLimit;
   /** The refs campaign links use, comma-separated; any other counts as the site. */
   DOWNLOAD_REFS: string;
+  /** Downloads counted a day, all links together (`downloadCeiling`). */
+  DOWNLOADS_PER_DAY?: string;
 }
 
 export default {
@@ -80,16 +82,7 @@ async function download(request: Request, env: Env, ctx: ExecutionContext, ref: 
     !isBot(request.headers.get("User-Agent")) &&
     (await env.DOWNLOAD_LIMIT.limit({ key: addressKey(address) })).success
   ) {
-    ctx.waitUntil(
-      env.DB.batch([
-        env.DB.prepare(
-          "INSERT INTO downloads (day, ref, count) VALUES (?, ?, 1) ON CONFLICT(day, ref) DO UPDATE SET count = count + 1",
-        ).bind(utcDay(Date.now()), ref),
-        env.DB.prepare(
-          "INSERT INTO download_totals (ref, count) VALUES (?, 1) ON CONFLICT(ref) DO UPDATE SET count = count + 1",
-        ).bind(ref),
-      ]),
-    );
+    ctx.waitUntil(count(env, ref).catch((err) => console.error("download count", err)));
   }
   const headers = new Headers({
     "Content-Type": "application/octet-stream",
@@ -99,6 +92,25 @@ async function download(request: Request, env: Env, ctx: ExecutionContext, ref: 
   const length = file.headers.get("Content-Length");
   if (length) headers.set("Content-Length", length);
   return new Response(request.method === "HEAD" ? null : file.body, { headers });
+}
+
+/**
+ * One more download of `ref` today — while the day's counted downloads, all
+ * links together, are under the ceiling (`downloadCeiling`). Past it nothing
+ * is written, and the day's total stays where it stopped.
+ */
+async function count(env: Env, ref: string): Promise<void> {
+  const counted = await env.DB.prepare(
+    `INSERT INTO downloads (day, ref, count)
+     SELECT ?1, ?2, 1 WHERE (SELECT COALESCE(SUM(count), 0) FROM downloads WHERE day = ?1) < ?3
+     ON CONFLICT (day, ref) DO UPDATE SET count = count + 1`,
+  )
+    .bind(utcDay(Date.now()), ref, downloadCeiling(env.DOWNLOADS_PER_DAY))
+    .run();
+  if (counted.meta.changes !== 1) return;
+  await env.DB.prepare("INSERT INTO download_totals (ref, count) VALUES (?, 1) ON CONFLICT(ref) DO UPDATE SET count = count + 1")
+    .bind(ref)
+    .run();
 }
 
 /**

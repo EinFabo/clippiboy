@@ -8,6 +8,20 @@ export const HOME = "https://clippiboy.com";
 export const DOWNLOADS = "https://github.com/EinFabo/clippiboy/releases/download/";
 
 /**
+ * Downloads counted in a day, all links together, unless the `DOWNLOADS_PER_DAY`
+ * var says otherwise. The per-address limit keeps one address from filling
+ * the counts; this keeps many together from spending the database's daily
+ * writes through them. Past it the setup is still served, only not counted.
+ */
+export const DOWNLOADS_PER_DAY = 2000;
+
+/** The day's ceiling: the var when it is a whole number above zero, else the default. */
+export function downloadCeiling(configured: string | undefined): number {
+  const value = Number(configured);
+  return Number.isInteger(value) && value > 0 ? value : DOWNLOADS_PER_DAY;
+}
+
+/**
  * The release the page's release.json names, or null when it is not one of
  * ours: the setup must be a download of this repository's releases, and the
  * version plain numbers, since it goes into the file name of the answer.
