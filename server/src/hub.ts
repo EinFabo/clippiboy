@@ -4,6 +4,7 @@ import {
   beyondCap,
   hidesNow,
   HELLO,
+  MESSAGES,
   PRESENCE,
   RAW_MAX,
   RELAY,
@@ -56,7 +57,7 @@ const PUBLISHED = "published";
 const LAST_SEEN = "lastSeen";
 /** Friends an invisible user wrote to lately; kept in storage, memory is lost on hibernation. */
 const CONTACTS = "contacts";
-/** Presence and hello budgets, so they survive the hub going to sleep. */
+/** Presence, hello and relay budgets, so they survive the hub going to sleep. */
 const BUCKETS = "buckets";
 /** A relayed message is a handshake, never a file: a few KB are plenty. */
 const RELAY_MAX = 4096;
@@ -69,9 +70,11 @@ const NO_PRESENCE: Presence = { game: null, since: null, status: null, busy: fal
  * their own connections. Hibernates between messages.
  */
 export class Hub extends DurableObject<Env> {
-  /** One budget per user across all connections. Relay lives in memory only (it refills within the
-      ~10 s before hibernation anyway); presence and hello are kept in storage, see `take`. */
-  private buckets = new Map<"relay" | "presence" | "hello", Bucket>();
+  /** The message budget, one per user across all connections. Memory only: a
+      hub flooded with messages never hibernates, and one that does has had a rest. */
+  private messages: Bucket | undefined;
+  /** Presence, hello and relay budgets as stored, read once per wake; see `take`. */
+  private stored: Record<string, Bucket> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -112,6 +115,18 @@ export class Hub extends DurableObject<Env> {
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // Before anything is read or written: a script sending a hundred messages a
+    // second spent the free plan's daily storage writes for every hub in minutes.
+    const allowed = spend(this.messages, MESSAGES, Date.now());
+    if (!allowed.ok) {
+      try {
+        ws.close(4008, "too many messages");
+      } catch {
+        // Already closed.
+      }
+      return;
+    }
+    this.messages = allowed.bucket;
     if (typeof message !== "string" || message.length > RAW_MAX) return;
     let data: PresenceInput & { t?: string; invisible?: unknown; to?: unknown; body?: unknown };
     try {
@@ -131,8 +146,11 @@ export class Hub extends DurableObject<Env> {
     attachment.at = Date.now();
     ws.serializeAttachment(attachment);
     if (data.t === "hello") await this.sendSnapshot(ws, attachment.user);
-    // Visible again: who the user wrote to while hidden is no longer kept.
-    if (this.current() !== null) await this.ctx.storage.delete(CONTACTS);
+    // Visible again: who the user wrote to while hidden is no longer kept. Read
+    // first — a delete is a write, and this runs on every message.
+    if (this.current() !== null && (await this.ctx.storage.get(CONTACTS)) !== undefined) {
+      await this.ctx.storage.delete(CONTACTS);
+    }
     await this.publishSoon(attachment.user);
   }
 
@@ -245,7 +263,8 @@ export class Hub extends DurableObject<Env> {
       }
     }
     if (user) await this.publish(user);
-    this.buckets.clear();
+    this.messages = undefined;
+    this.stored = null;
     await this.ctx.storage.deleteAll();
   }
 
@@ -301,16 +320,18 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
-   * Spends from the presence or hello budget. These are slower than the ~10 s a
-   * hub stays awake, so their state is kept in storage and read again after a wake.
+   * Spends from the presence, hello or relay budget. These refill slower than
+   * the ~10 s a hub stays awake, so their state is kept in storage and read
+   * again after a wake. Written only when a token was taken: a refusal leaves
+   * the budget as it was (`spend`), so a flood that is turned away writes nothing.
    */
-  private async take(name: "presence" | "hello", rule: Rule, now: number): Promise<{ ok: boolean; nextAt: number }> {
-    let bucket = this.buckets.get(name);
-    if (!bucket) bucket = (await this.ctx.storage.get<Record<string, Bucket>>(BUCKETS))?.[name];
-    const result = spend(bucket, rule, now);
-    this.buckets.set(name, result.bucket);
-    const stored = (await this.ctx.storage.get<Record<string, Bucket>>(BUCKETS)) ?? {};
-    await this.ctx.storage.put(BUCKETS, { ...stored, [name]: result.bucket });
+  private async take(name: "presence" | "hello" | "relay", rule: Rule, now: number): Promise<{ ok: boolean; nextAt: number }> {
+    this.stored ??= (await this.ctx.storage.get<Record<string, Bucket>>(BUCKETS)) ?? {};
+    const result = spend(this.stored[name], rule, now);
+    if (result.ok) {
+      this.stored = { ...this.stored, [name]: result.bucket };
+      await this.ctx.storage.put(BUCKETS, this.stored);
+    }
     return result;
   }
 
@@ -336,10 +357,8 @@ export class Hub extends DurableObject<Env> {
     const fail = (reason: string) => ws.send(JSON.stringify({ t: "relayFailed", to, ref, reason }));
 
     const now = Date.now();
-    const budget = spend(this.buckets.get("relay"), RELAY, now);
-    this.buckets.set("relay", budget.bucket);
-    if (!budget.ok) return fail("slow down");
     if (JSON.stringify(body).length > RELAY_MAX) return fail("too big");
+    if (!(await this.take("relay", RELAY, now)).ok) return fail("slow down");
     // Blocking ends a friendship, so a friend is never someone who blocked.
     if (!(await areFriends(this.env.DB, attachment.user, to))) return fail("not a friend");
     // A ready socket just sent this, so no current presence means invisible.

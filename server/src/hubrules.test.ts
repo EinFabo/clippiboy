@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, mayReach, pruned, remember, spend, type Contacts } from "./hubrules.ts";
+import { beyondCap, CONTACT_MAX, CONTACT_MS, hidesNow, MESSAGES, mayReach, pruned, RELAY, remember, spend, type Bucket, type Contacts } from "./hubrules.ts";
 
 const now = 1_000_000;
 
@@ -68,4 +68,46 @@ test("other changes wait for the presence budget", () => {
   assert.equal(hidesNow(null, { game: "Valorant" }), false);
   assert.equal(hidesNow({ game: null }, { game: "Valorant" }), false);
   assert.equal(hidesNow(null, null), false);
+});
+
+test("a refused spend need not be stored: the old bucket refills to the same", () => {
+  const low: Bucket = { tokens: 0.2, at: now };
+  const refused = spend(low, rule, now + 100);
+  assert.equal(refused.ok, false);
+  for (const later of [now + 500, now + 800, now + 900, now + 5_000]) {
+    const fromOld = spend(low, rule, later);
+    const fromRefused = spend(refused.bucket, rule, later);
+    assert.equal(fromOld.ok, fromRefused.ok);
+    assert.ok(Math.abs(fromOld.bucket.tokens - fromRefused.bucket.tokens) < 1e-9);
+  }
+});
+
+test("a flood of messages is cut off after twenty, and a steady two a second gets through", () => {
+  let bucket: Bucket | undefined;
+  let passed = 0;
+  for (let i = 0; i < 100; i++) {
+    const r = spend(bucket, MESSAGES, now);
+    bucket = r.bucket;
+    if (r.ok) passed++;
+  }
+  assert.equal(passed, 20);
+  let steady: Bucket | undefined = { tokens: 0, at: now };
+  for (let t = now + 500; t <= now + 60_000; t += 500) {
+    const r = spend(steady, MESSAGES, t);
+    assert.equal(r.ok, true);
+    steady = r.bucket;
+  }
+});
+
+test("relays: thirty at once, then no more than ten a minute", () => {
+  let bucket: Bucket | undefined;
+  let passed = 0;
+  // Two a second for an hour, the old budget's pace and more.
+  for (let t = now; t < now + 3_600_000; t += 500) {
+    const r = spend(bucket, RELAY, t);
+    bucket = r.bucket;
+    if (r.ok) passed++;
+  }
+  // The burst, then one every 6 s; the last of the hour lands just past it.
+  assert.ok(passed >= 30 + 599 && passed <= 30 + 600, `${passed}`);
 });

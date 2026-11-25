@@ -52,12 +52,21 @@ export type Bucket = { tokens: number; at: number };
 /** A budget's size and how long one token takes to come back. */
 export type Rule = { capacity: number; refillMs: number };
 
-/** Relayed messages per user: 30 per 10 s, as before, but shared by all connections. */
-export const RELAY: Rule = { capacity: 30, refillMs: 333 };
+/** Relayed messages per user, shared by all connections: 30 at once, then ten a
+    minute. Each one wakes a friend's hub, and the free plan has 100,000 Durable
+    Object requests a day for everybody: at the old three a second, one account
+    relaying to a second of its own spent more than that on its own. A clip
+    takes two or three (offer, answer, maybe a cancel). */
+export const RELAY: Rule = { capacity: 30, refillMs: 6_000 };
 /** Presence published to friends: ten at once, then one per 30 s. */
 export const PRESENCE: Rule = { capacity: 10, refillMs: 30_000 };
 /** Hellos per user, so a reconnect loop cannot ask for a snapshot every second. */
 export const HELLO: Rule = { capacity: 5, refillMs: 60_000 };
+/** Messages from the app per user, all kinds together, before anything is read
+    or written: 20 at once, then two a second. Kept in memory only — a hub that
+    gets this many never hibernates. Past it the socket is closed with 4008.
+    Pings do not count; the runtime answers them without waking the hub. */
+export const MESSAGES: Rule = { capacity: 20, refillMs: 500 };
 /** Larger raw messages are dropped before they are parsed. */
 export const RAW_MAX = 8192;
 /** Connections per user; the oldest beyond this are closed. */
@@ -66,6 +75,8 @@ export const SOCKET_CAP = 4;
 /**
  * Takes one token from a budget; `undefined` is a full one. Tokens come back
  * continuously, never above `capacity`. `nextAt` is when a token is there.
+ * A refusal changes nothing that matters: the bucket it returns refills to the
+ * same as the one passed in, so a caller need not store it.
  */
 export function spend(
   bucket: Bucket | undefined,

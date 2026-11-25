@@ -74,6 +74,14 @@ An upload that fails stays behind as a deleted share marked `failed`. Five a
 week are free; past that each counts against the week like a link, so
 failing on purpose runs out after eight tries. A link takes one poster. An account has at most 20 requests waiting for an answer.
 
+The hub (one Durable Object per user) has budgets of its own, per user across
+all connections (`hubrules.ts`): 20 messages at once and then two a second
+before anything is read or written — past that the socket is closed with 4008;
+presence to friends ten at once and then one per 30 s; five hellos and then one
+a minute; relays 30 at once and then ten a minute, since each one wakes a
+friend's hub and the free plan has 100,000 Durable Object requests a day. A
+budget is written to storage only when a token is taken.
+
 What one account can still write is about 55,000 rows a day: some 43,000 from
 friend changes and 12,000 from channel starts, each at its full limit around
 the clock. That is half the free writes — one account cannot take the rest
