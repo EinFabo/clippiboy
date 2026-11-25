@@ -92,6 +92,8 @@ const SORTS: Array<{ key: ClipSort; label: string }> = [
 
 /** Has to match the length of `cb-tile-out` in styles/motion.css. */
 const LEAVE_MS = 200;
+/** Up to this many clips deleted together still leave with an animation. */
+const BULK_ANIMATED = 12;
 /** The gallery's columns — the arrow keys count rows in them. */
 const GRID_COLUMNS = 3;
 
@@ -168,12 +170,13 @@ export function Clips({
   // Galerie — über hundert Kacheln — zwanzigmal die Sekunde neu, weil die
   // Audiopegel durch denselben Store laufen. Das war der teuerste Posten.
   const bakeClipCam = useEngine((s) => s.bakeClipCam);
-  const { clips, trash, deleteClip, discardClipOriginal, clearGame, setFavorite, fileClip } =
+  const { clips, trash, deleteClip, deleteClips, discardClipOriginal, clearGame, setFavorite, fileClip } =
     useEngine(
       useShallow((s) => ({
         clips: s.clips,
         trash: s.trash,
         deleteClip: s.deleteClip,
+        deleteClips: s.deleteClips,
         discardClipOriginal: s.discardClipOriginal,
         clearGame: s.clearGame,
         setFavorite: s.setFavorite,
@@ -302,7 +305,16 @@ export function Clips({
    * goes at once, or every keystroke in the search field would drag a trail of
    * ghosts behind it.
    */
-  const tiles = usePresence(visible, (clip) => clip.id, LEAVE_MS, (id) => !clipIds.has(id));
+  // A bulk delete of many goes without exits and without the others
+  // travelling: a fading ghost and an animation per tile cost more there than
+  // they show.
+  const bulk = useRef(false);
+  const tiles = usePresence(
+    visible,
+    (clip) => clip.id,
+    LEAVE_MS,
+    (id) => !bulk.current && !clipIds.has(id),
+  );
 
   /** The tiles under their day headings — one group without a heading for the
       sorts that have no days. */
@@ -369,7 +381,7 @@ export function Clips({
 
   // Deleting one tile and filtering the rest are the same thing to the grid:
   // whatever stays has to travel to its new place instead of appearing there.
-  useFlip(grid, tileOrder);
+  useFlip(grid, tileOrder, undefined, bulk);
 
   // Which tiles arrive with an animation, and how long each waits, decided
   // once and then left alone — recomputing it every render would cut the
@@ -717,7 +729,12 @@ export function Clips({
           }}
           onDelete={async (clips) => {
             selection.clear();
-            for (const clip of clips) await deleteClip(clip.id);
+            bulk.current = clips.length > BULK_ANIMATED;
+            try {
+              await deleteClips(clips.map((clip) => clip.id));
+            } finally {
+              bulk.current = false;
+            }
             // The store swallows a refused delete and puts the clip back, so
             // count what is really gone.
             const left = new Set(useEngine.getState().clips.map((c) => c.id));

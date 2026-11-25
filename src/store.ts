@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { useStorageInfo } from "./lib/storageInfo";
 import { changedPart } from "./lib/same";
 import { coalesce } from "./lib/coalesce";
+import { settleInPool } from "./lib/pool";
 import { Outbox } from "./lib/outbox";
 import { removeSourceWrite, sourceWrite } from "./lib/sourceWrite";
 import { simulatedLevel } from "./lib/meter";
@@ -153,6 +154,9 @@ export interface EngineState {
   takeScreenshot: () => Promise<void>;
   toggleRecording: () => Promise<void>;
   deleteClip: (id: string) => Promise<void>;
+  /** Several at once: the gallery drops them in one go, the core moves a few at
+   *  a time. A refused one comes back, like with `deleteClip`. */
+  deleteClips: (ids: string[]) => Promise<void>;
   /** Back from Recently deleted into the gallery. */
   restoreClip: (id: string) => Promise<void>;
   /** One clip out of Recently deleted, for good. */
@@ -273,6 +277,18 @@ function fail(what: string, err: unknown): string {
 }
 
 let camerasPending: Promise<void> | null = null;
+
+/**
+ * Clips a delete from this window is still moving into Recently deleted. A
+ * re-read of the library in the meantime (every delete announces a change)
+ * still lists them, and without this they would come back for a moment and go
+ * again — across the whole gallery, for every clip of a bulk delete.
+ */
+const deleting = new Set<string>();
+const notDeleting = (clips: Clip[]) =>
+  deleting.size === 0 ? clips : clips.filter((clip) => !deleting.has(clip.id));
+/** How many clip moves a bulk delete keeps going at once. */
+const DELETE_POOL = 4;
 
 export const useEngine = create<EngineState>((set, get) => ({
   ready: false,
@@ -502,7 +518,7 @@ export const useEngine = create<EngineState>((set, get) => ({
         coalesce(async () => {
           useStorageInfo.getState().invalidate();
           const [clips, trash] = await Promise.all([api.listClips(), api.listTrash()]);
-          set({ clips, trash });
+          set({ clips: notDeleting(clips), trash });
         }),
       );
       // Cheap and synchronous in the core; About shows it without a flash of a placeholder.
@@ -757,18 +773,25 @@ export const useEngine = create<EngineState>((set, get) => ({
   },
 
   async deleteClip(id) {
-    set((st) => ({ clips: st.clips.filter((c) => c.id !== id) }));
+    await get().deleteClips([id]);
+  },
+
+  async deleteClips(ids) {
+    if (ids.length === 0) return;
+    const gone = new Set(ids);
+    set((st) => ({ clips: st.clips.filter((c) => !gone.has(c.id)) }));
     if (!inTauri) return;
+    for (const id of ids) deleting.add(id);
+    const results = await settleInPool(ids, DELETE_POOL, (id) => api.deleteClip(id));
+    for (const id of ids) deleting.delete(id);
+    const refused = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (!refused) return;
+    // Refused (a player holds the file): the clip is still there, so show it.
+    set({ lastError: String(refused.reason) });
     try {
-      await api.deleteClip(id);
-    } catch (err) {
-      // Refused (a player holds the file): the clip is still there, so show it.
-      set({ lastError: String(err) });
-      try {
-        set({ clips: await api.listClips() });
-      } catch {
-        // The error above already says it failed.
-      }
+      set({ clips: notDeleting(await api.listClips()) });
+    } catch {
+      // The error above already says it failed.
     }
   },
 
