@@ -344,25 +344,39 @@ impl Worker {
         true
     }
 
+    /// A stopped cam starts on `plan`: the track gets its size.
+    fn begin(&mut self, plan: &CamPlan) {
+        self.stopped = false;
+        self.state = CamState::Starting;
+        self.track = plan.resolution.size();
+        *self.shared.track.lock() = self.track;
+        self.backoff.reset();
+        self.retry_at = None;
+        let bytes = crate::config::effective_cam_memory_bytes(
+            plan.ring_seconds,
+            crate::config::cam_bitrate_kbps(plan.resolution),
+        );
+        self.shared
+            .ring
+            .lock()
+            .ring
+            .set_capacity(plan.ring_seconds, bytes);
+    }
+
     fn on_plan(&mut self, plan: CamPlan) {
         if plan.run {
             self.stop_at = None;
             if self.stopped {
-                self.stopped = false;
-                self.state = CamState::Starting;
-                self.track = plan.resolution.size();
-                *self.shared.track.lock() = self.track;
-                self.backoff.reset();
-                self.retry_at = None;
-                let bytes = crate::config::effective_cam_memory_bytes(
-                    plan.ring_seconds,
-                    crate::config::cam_bitrate_kbps(plan.resolution),
-                );
-                self.shared
-                    .ring
-                    .lock()
-                    .ring
-                    .set_capacity(plan.ring_seconds, bytes);
+                self.begin(&plan);
+            } else if plan.resolution.size() != self.track {
+                // Another resolution while it runs: the track, its encoder and
+                // the ring are of the old size — the camera alone opened anew
+                // at the new one, and the encoder took the new bitrate on the
+                // old size. Started over, as a fresh cam.
+                let (w, h) = plan.resolution.size();
+                log::info!("cam: the resolution changed to {w}x{h} \u{2014} starting over");
+                self.stop_all();
+                self.begin(&plan);
             } else {
                 // Another camera chosen while one runs: let go of it.
                 let other = self.device.as_ref().is_some_and(|d| {
@@ -505,6 +519,10 @@ impl Worker {
                     if let Ok((source, _)) = result {
                         let _ = self.ask.send(Ask::Close(source));
                     }
+                    // The one open in flight came back: the next can go out.
+                    // Left set, a camera closed while it opened never opened
+                    // again.
+                    self.opening = false;
                     return;
                 }
                 self.opening = false;
