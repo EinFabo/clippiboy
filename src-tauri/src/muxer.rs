@@ -241,15 +241,16 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
         }
         out.flush()
     };
-    if let Err(err) = write_video() {
-        let _ = std::fs::remove_file(&video_path);
-        return Err(err.to_string());
-    }
-
+    // The sound before the picture: the audio rings keep moving while this
+    // writes, and they hold only a few seconds beyond the clip
+    // ([`pipeline::ring_seconds`]). Written after a video that took longer than
+    // that — a long clip on a slow drive or a network folder — every track
+    // began with silence (core #2). The WAVs are a fraction of the video's
+    // size; the video sits in the snapshot and waits.
+    //
     // The mixer runs 80 ms behind the present: read at once, the clip's last
     // few dozen milliseconds would be windows it has not mixed yet, and so
-    // zeros. Writing the video usually took longer than that and this returns
-    // at once. Bounded, and no lock is held here: a stalled mixer costs the
+    // zeros. Bounded, and no lock is held here: a stalled mixer costs the
     // tail, never the save.
     if !snapshot
         .mixed
@@ -316,6 +317,14 @@ pub fn build(request: ClipRequest) -> Result<ClipResult, String> {
                 log::error!("could not write audio track '{}': {err}", track.label());
             }
         }
+    }
+
+    if let Err(err) = write_video() {
+        let _ = std::fs::remove_file(&video_path);
+        for input in &wavs {
+            let _ = std::fs::remove_file(&input.path);
+        }
+        return Err(err.to_string());
     }
 
     let video = if snapshot.timestamped {

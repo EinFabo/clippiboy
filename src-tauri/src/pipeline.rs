@@ -46,10 +46,12 @@ const MIX_INTERVAL: Duration = Duration::from_millis(10);
 
 /// What an audio ring keeps beyond the buffer and one keyframe interval.
 ///
-/// A save reads its audio only after the whole `.h264` is written, and the
-/// rings keep moving meanwhile. Ten seconds cover a slow write — an HDD, a
-/// network folder — at ~2 MB per source, where copying every window out under
-/// the lock would cost a buffer's worth of memory per track and save.
+/// A save reads its audio straight from the rings, before the video, while
+/// they keep moving: the mixer's wait and the WAVs before it (a few hundred
+/// megabytes for a long clip on a slow drive or a network folder) must not
+/// let the clip's first seconds go. Ten seconds cover that at ~2 MB per
+/// source, where copying every window out under the lock would cost a
+/// buffer's worth of memory per track and save.
 pub(crate) const AUDIO_SLACK_SECONDS: u32 = 10;
 
 /// How long an audio ring is for a buffer of `buffer_seconds`.
