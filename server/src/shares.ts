@@ -269,10 +269,37 @@ export function cleanReport(raw: unknown): { reason: ReportReason; note: string 
 }
 
 /**
- * Follows an MP4's top-level boxes as the upload streams past: `ftyp` first,
- * every box with a sane length and a readable name, a `moov` somewhere, and
- * the last box ending exactly where the file does. A file with a few bytes of
- * `ftyp` glued in front, or anything hung on behind, fails.
+ * The boxes an MP4 may have at its top level: those of a whole file as the
+ * app's ffmpeg writes it (`ftyp`, `moov`, `free`, `mdat` — `+faststart` puts
+ * `moov` in front, a copy without it has it last), those of a fragmented one
+ * (`moof`, `mfra`, `sidx`, `styp`, `emsg`), and the few other ISO ones a
+ * player passes over. Any other name is no MP4 of ours.
+ */
+export const TOP_LEVEL_BOXES: ReadonlySet<string> = new Set([
+  "ftyp",
+  "moov",
+  "mdat",
+  "free",
+  "skip",
+  "wide",
+  "uuid",
+  "moof",
+  "mfra",
+  "sidx",
+  "styp",
+  "emsg",
+  "meta",
+  "udta",
+]);
+
+/**
+ * Follows an MP4's top-level boxes as the upload streams past: `ftyp` first
+ * and only there, every box of a known kind (`TOP_LEVEL_BOXES`) with a stated
+ * length, a `moov` somewhere, and the last box ending exactly where the file
+ * does. A file with a few bytes of `ftyp` glued in front, anything hung on
+ * behind, or a box that claims to run to the end of the file (size 0, which
+ * let anything at all follow a `moov`) fails — ffmpeg writes no such box in a
+ * finished file.
  *
  * What it cannot rule out is a payload inside a box — only re-encoding could.
  * The page and the file are served as video with `nosniff`, which is what
@@ -282,8 +309,6 @@ export class Mp4Boxes {
   private header: number[] = [];
   /** Bytes still to pass in the current box's body. */
   private skip = 0;
-  /** The current box runs to the end of the file (size 0). */
-  private toEnd = false;
   private boxes = 0;
   private moov = false;
   private bad = false;
@@ -292,7 +317,6 @@ export class Mp4Boxes {
   push(chunk: Uint8Array): boolean {
     let i = 0;
     while (!this.bad && i < chunk.length) {
-      if (this.toEnd) return true;
       if (this.skip > 0) {
         const step = Math.min(this.skip, chunk.length - i);
         this.skip -= step;
@@ -307,7 +331,7 @@ export class Mp4Boxes {
 
   /** At the end of the upload: was it a whole MP4? */
   end(): boolean {
-    return !this.bad && this.header.length === 0 && (this.skip === 0 || this.toEnd) && this.moov;
+    return !this.bad && this.header.length === 0 && this.skip === 0 && this.moov;
   }
 
   private readHeader(): void {
@@ -319,18 +343,17 @@ export class Mp4Boxes {
     const size = size32 === 1 ? (h[8] * 2 ** 24 + (h[9] << 16) + (h[10] << 8) + h[11]) * 2 ** 32 + ((h[12] << 24) >>> 0) + (h[13] << 16) + (h[14] << 8) + h[15] : size32;
     const first = this.boxes === 0;
     this.boxes++;
-    if (!/^[\x20-\x7e]{4}$/.test(type) || (first && (type !== "ftyp" || size < 16 || size > 1024))) {
+    if (!TOP_LEVEL_BOXES.has(type) || (type === "ftyp") !== first || (first && (size < 16 || size > 1024))) {
       this.bad = true;
       return;
     }
     if (type === "moov") this.moov = true;
-    if (size === 0) {
-      this.toEnd = true;
-    } else if (size < h.length || size > MAX_BYTES) {
+    // Size 0 is "to the end of the file", and a size short of its own header no size at all.
+    if (size < h.length || size > MAX_BYTES) {
       this.bad = true;
-    } else {
-      this.skip = size - h.length;
+      return;
     }
+    this.skip = size - h.length;
     this.header = [];
   }
 }

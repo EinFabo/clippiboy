@@ -18,6 +18,7 @@ import {
   ID_PATTERN,
   looksLikeJpeg,
   Mp4Boxes,
+  TOP_LEVEL_BOXES,
   MAX_BYTES,
   newId,
   offersFriend,
@@ -183,6 +184,46 @@ test("an MP4 with something hung on behind, or without moov, fails", () => {
   assert.equal(walk([...ftyp, ...box("moov"), ...box("mdat", [1]), 0x50, 0x4b]), false);
   assert.equal(walk([...ftyp, ...box("mdat", [1, 2])]), false);
   assert.equal(walk([0x4d, 0x5a, 0x90, 0, 3, 0, 0, 0]), false);
+});
+
+// The ftyp ffmpeg's mp4 muxer writes: isom, minor version 512, isom iso2 avc1 mp41.
+const ffmpegFtyp = box("ftyp", [..."isom"].map((c) => c.charCodeAt(0)).concat([0, 0, 2, 0], [..."isomiso2avc1mp41"].map((c) => c.charCodeAt(0))));
+const mdat = box("mdat", new Array(64).fill(0x42));
+
+test("a clip as the app's ffmpeg writes it passes, with its index in front or last", () => {
+  // `-movflags +faststart`, as every link copy is made: ftyp, moov, the free
+  // box kept for a 64-bit mdat size, mdat.
+  assert.equal(walk([...ffmpegFtyp, ...box("moov", [1, 2, 3, 4]), ...box("free"), ...mdat], 7), true);
+  // Without it, moov comes last.
+  assert.equal(walk([...ffmpegFtyp, ...box("free"), ...mdat, ...box("moov", [1, 2])], 5), true);
+});
+
+test("a fragmented MP4 passes", () => {
+  const fragment = [...box("moof", [9, 9, 9]), ...box("mdat", [1, 2, 3, 4])];
+  const file = [...ffmpegFtyp, ...box("moov", [1]), ...box("sidx", [0, 0]), ...fragment, ...fragment, ...box("mfra", [5])];
+  assert.equal(walk(file, 1), true);
+  assert.equal(walk(file, 4096), true);
+});
+
+test("a box that runs to the end of the file lets nothing through behind a moov", () => {
+  // The bypass: ftyp, then a moov of size 0, then anything at all.
+  const anything = [..."<html><script>alert(1)</script>"].map((c) => c.charCodeAt(0));
+  assert.equal(walk([...ftyp, 0, 0, 0, 0, ...[..."moov"].map((c) => c.charCodeAt(0)), ...anything]), false);
+  // A last mdat of size 0 is refused just the same.
+  assert.equal(walk([...ffmpegFtyp, ...box("moov", [1]), 0, 0, 0, 0, ...[..."mdat"].map((c) => c.charCodeAt(0)), 1, 2, 3]), false);
+});
+
+test("a box of a kind no MP4 has at its top, or a second ftyp, fails", () => {
+  assert.equal(walk([...ftyp, ...box("moov"), ...box("zzzz", [1, 2]), ...mdat]), false);
+  assert.equal(walk([...ftyp, ...box("moov"), ...box("html", [1, 2])]), false);
+  assert.equal(walk([...ftyp, ...box("moov"), ...ftyp, ...mdat]), false);
+  // A box shorter than its own header.
+  assert.equal(walk([...ftyp, ...box("moov"), 0, 0, 0, 4, ...[..."free"].map((c) => c.charCodeAt(0))]), false);
+  // And every name the list keeps is one an MP4 may have.
+  for (const type of TOP_LEVEL_BOXES) {
+    if (type === "ftyp") continue;
+    assert.equal(walk([...ftyp, ...box("moov"), ...box(type, [0, 0, 0, 0])]), true, type);
+  }
 });
 
 test("only a JPEG passes as a poster", () => {
