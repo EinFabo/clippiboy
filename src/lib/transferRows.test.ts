@@ -8,6 +8,7 @@ import {
   cardStack,
   noteEnded,
   noteOffers,
+  offerDeadline,
   onFriendsPage,
   presenceSig,
   reason,
@@ -241,12 +242,25 @@ test("offers: first seen is noted once, forgotten once answered or gone", () => 
 });
 
 test("offers: the seconds left to answer count down to 0 and stop there", () => {
-  assert.equal(answerLeft(0, 0), ANSWER_WITHIN_MS / 1000);
-  assert.equal(answerLeft(0, 400), 60);
-  assert.equal(answerLeft(0, 18_000), 42);
-  assert.equal(answerLeft(0, 59_001), 1);
-  assert.equal(answerLeft(0, 60_000), 0);
-  assert.equal(answerLeft(0, 90_000), 0);
+  const deadline = offerDeadline(undefined, 0);
+  assert.equal(answerLeft(deadline, 0), ANSWER_WITHIN_MS / 1000);
+  assert.equal(answerLeft(deadline, 400), 60);
+  assert.equal(answerLeft(deadline, 18_000), 42);
+  assert.equal(answerLeft(deadline, 59_001), 1);
+  assert.equal(answerLeft(deadline, 60_000), 0);
+  assert.equal(answerLeft(deadline, 90_000), 0);
+});
+
+test("offers: the countdown runs to when the core says, not a minute from first seen", () => {
+  // Held until the lists were loaded: first seen 40 s after it came.
+  const came = 100_000;
+  const seen = came + 40_000;
+  const deadline = offerDeadline(came + ANSWER_WITHIN_MS, seen);
+  assert.equal(answerLeft(deadline, seen), 20);
+  assert.equal(answerLeft(deadline, seen + 20_000), 0);
+  // Without it, a minute from first seen.
+  assert.equal(offerDeadline(null, seen), seen + ANSWER_WITHIN_MS);
+  assert.equal(offerDeadline(undefined, seen), seen + ANSWER_WITHIN_MS);
 });
 
 test("row: a no their app gave by itself — or an older app's, which doesn't say — is no one's", () => {

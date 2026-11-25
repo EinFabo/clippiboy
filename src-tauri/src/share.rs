@@ -135,6 +135,10 @@ pub struct Transfer {
     /// busy or not taking clips from us. `None` from an app before 1.0.2,
     /// which does not say.
     pub refusal: Option<Refusal>,
+    /// In, asking: when the offer runs out, in ms since the epoch — for the
+    /// countdown, which would otherwise start when the page first saw it, late
+    /// for an offer held until the friends lists were loaded. `None` out.
+    pub expires_at: Option<i64>,
 }
 
 /// Who said no to an offer.
@@ -434,6 +438,7 @@ pub async fn share_send(app: AppHandle, clip_id: String, friend_id: String) -> R
         recording: clip.recording,
         unconfirmed: false,
         refusal: None,
+        expires_at: None,
     };
     let secret = uuid::Uuid::new_v4().simple().to_string();
     {
@@ -1022,6 +1027,13 @@ fn open_for(arrived: std::time::Instant, now: std::time::Instant) -> Option<Dura
         .filter(|left| !left.is_zero())
 }
 
+/// When an offer that came at `arrived` runs out, in ms since the epoch,
+/// with the clock reading `now_ms` at `now`.
+fn deadline_ms(now_ms: i64, arrived: std::time::Instant, now: std::time::Instant) -> i64 {
+    let left = open_for(arrived, now).unwrap_or_default();
+    now_ms.saturating_add(i64::try_from(left.as_millis()).unwrap_or(i64::MAX))
+}
+
 /// Puts an offer aside. Offers that have run out go first; an id held
 /// already is not held twice. False when this one was not held.
 fn hold<T>(held: &mut Vec<Held<T>>, offer: Held<T>, now: std::time::Instant) -> bool {
@@ -1179,6 +1191,7 @@ fn offered(app: &AppHandle, from: &str, offer: Offer, arrived: std::time::Instan
         recording: meta.recording,
         unconfirmed: false,
         refusal: None,
+        expires_at: Some(deadline_ms(now_ms(), arrived, std::time::Instant::now())),
     };
     crate::peers::note(app, from, &addr.id.to_string(), stable, "an offer");
     app.state::<Share>().incoming.lock().insert(
@@ -2978,6 +2991,10 @@ mod tests {
         assert_eq!(open_for(at(0), at(45)), Some(Duration::from_secs(15)));
         assert_eq!(open_for(at(0), at(60)), None);
         assert_eq!(open_for(at(0), at(600)), None);
+        // The page counts down to when it runs out, counted from when it came.
+        assert_eq!(deadline_ms(1_000_000, at(0), at(0)), 1_060_000);
+        assert_eq!(deadline_ms(1_000_000, at(0), at(45)), 1_015_000);
+        assert_eq!(deadline_ms(1_000_000, at(0), at(90)), 1_000_000);
 
         let held_at = |id: &str, s: u64| Held {
             from: "f".into(),
@@ -3036,6 +3053,7 @@ mod tests {
             recording: false,
             unconfirmed: false,
             refusal: None,
+            expires_at: None,
         }
     }
 

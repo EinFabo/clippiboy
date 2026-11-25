@@ -547,6 +547,8 @@ export interface Transfer {
       no on its own (Do not disturb, "Who can send me clips"); null from an app
       before 1.0.2, which does not say. */
   refusal?: Refusal | null;
+  /** In, asking: when the offer runs out, ms since the epoch. */
+  expiresAt?: number | null;
 }
 
 /** Who said no to an offer (`share::Refusal`). */

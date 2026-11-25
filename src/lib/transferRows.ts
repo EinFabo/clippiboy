@@ -90,10 +90,10 @@ export const ANSWER_WITHIN_MS = 60_000;
 
 /**
  * Notes when each offer waiting for an answer was first seen here, and forgets
- * the ones no longer waiting. The core does not say when an offer came; it
- * shows up at once, so first seen is when it came — or, for one already
- * waiting when the window started, a little later. Returns `seen` itself when
- * nothing changed.
+ * the ones no longer waiting — the countdown for an offer that does not say
+ * when it runs out (`offerDeadline`). One shows up at once, so first seen is
+ * when it came — or, for one already waiting when the window started, a
+ * little later. Returns `seen` itself when nothing changed.
  */
 export function noteOffers(transfers: Transfer[], seen: Record<string, number>, now: number): Record<string, number> {
   const next: Record<string, number> = {};
@@ -107,9 +107,18 @@ export function noteOffers(transfers: Transfer[], seen: Record<string, number>, 
   return changed ? next : seen;
 }
 
-/** Whole seconds left to answer an offer first seen at `seenAt`, never below 0. */
-export function answerLeft(seenAt: number, now: number): number {
-  return Math.max(0, Math.ceil((seenAt + ANSWER_WITHIN_MS - now) / 1000));
+/**
+ * When an offer runs out: when the core says (`expiresAt`) — an offer held
+ * until the friends lists were loaded shows up late, with less than a minute
+ * left — else a minute after it was first seen here.
+ */
+export function offerDeadline(expiresAt: number | null | undefined, seenAt: number): number {
+  return expiresAt ?? seenAt + ANSWER_WITHIN_MS;
+}
+
+/** Whole seconds left to answer an offer that runs out at `deadline`, never below 0. */
+export function answerLeft(deadline: number, now: number): number {
+  return Math.max(0, Math.ceil((deadline - now) / 1000));
 }
 
 /** How long a card for an ended transfer stays on the other pages. */
