@@ -82,11 +82,24 @@ export default function App() {
     if (addSeq > 0) whenViewerFree(() => setRoute("friends"));
   }, [addSeq]);
 
+  // A clip to show in the gallery. On the gallery its own viewer is asked when
+  // the hand-over arrives; from any other page the switch itself drops a viewer
+  // open there (the Dashboard's), so that one is asked before the page goes.
+  const routeNow = useRef(route);
+  routeNow.current = route;
+  const focusRef = useRef((clip: FocusClip) => {
+    if (routeNow.current === "clips") setFocusClip(clip);
+    else
+      whenViewerFree(() => {
+        setRoute("clips");
+        setFocusClip(clip);
+      });
+  });
+
   // "Open" on a clip a friend sent, from the Friends page.
   useEffect(() => {
     const open = (event: Event) => {
-      setRoute("clips");
-      setFocusClip({ id: (event as CustomEvent<string>).detail, at: 0 });
+      focusRef.current({ id: (event as CustomEvent<string>).detail, at: 0 });
     };
     window.addEventListener(OPEN_CLIP_EVENT, open);
     return () => window.removeEventListener(OPEN_CLIP_EVENT, open);
@@ -99,8 +112,7 @@ export default function App() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen<FocusClip>("focus-clip", (event) => {
-      setRoute("clips");
-      setFocusClip(event.payload);
+      focusRef.current(event.payload);
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
