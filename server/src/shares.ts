@@ -227,10 +227,37 @@ export function cleanTags(raw: string[]): string[] {
 /** Why someone may report a clip — the same list the page offers. */
 export const REPORT_REASONS = ["nsfw", "violence", "hate", "spam", "other"] as const;
 export type ReportReason = (typeof REPORT_REASONS)[number];
-/** Open reports one clip may collect; more say nothing new. */
+/** Addresses whose open reports one clip may collect; more say nothing new.
+    Counted per address (an IPv6 address per /64), one open report each: as a
+    plain count, one address filled it in four minutes and every report after
+    that was dropped. */
 export const MAX_OPEN_REPORTS = 20;
 /** Reports go after this, handled or not — a clip lives five days anyway. */
 export const REPORT_KEEP_MS = 30 * DAY_MS;
+/** How long a reported clip is held at most once its link is gone. */
+export const HELD_MS = 30 * DAY_MS;
+
+/**
+ * Whether a report from `reporter` (the fingerprint of an address, see
+ * `reportShare`) is taken, given the clip's open reports. `reportShare` in
+ * links.ts is the same rule in SQL. Reports from before the fingerprint have
+ * none and count for nobody.
+ */
+export function takesReport(open: { reporter: string | null }[], reporter: string): boolean {
+  const reporters = new Set(open.map((row) => row.reporter).filter((r): r is string => r !== null));
+  return !reporters.has(reporter) && reporters.size < MAX_OPEN_REPORTS;
+}
+
+/**
+ * A clip whose link went (deleted, run out, its account deleted or
+ * suspended) while a report on it was open is held in R2 for the review,
+ * reachable by nobody — the row that made it a link is gone. It goes once no
+ * report on it is open any more, and after `HELD_MS` in any case. The hourly
+ * sweep's "held" step is the same rule in SQL.
+ */
+export function heldClipGoes(heldAt: number, openReports: number, now: number): boolean {
+  return openReports === 0 || heldAt <= now - HELD_MS;
+}
 
 /** A report as the page sent it, or null if it is not one. */
 export function cleanReport(raw: unknown): { reason: ReportReason; note: string | null } | null {

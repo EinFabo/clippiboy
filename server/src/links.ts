@@ -9,6 +9,7 @@ import { HttpError, json } from "./util";
 import { addressKey, readLimited } from "./limits";
 import { renderGone, renderPage } from "./page";
 import { inviteKey } from "./invite";
+import { fingerprint } from "./departed";
 import {
   canUpload,
   chunks,
@@ -18,6 +19,7 @@ import {
   expiresIn,
   FREE_FAILS,
   friendOffer,
+  HELD_MS,
   ID_PATTERN,
   LIFETIME_MS,
   looksLikeJpeg,
@@ -332,10 +334,40 @@ export async function putPoster(request: Request, env: Env, me: string, id: stri
 export async function deleteShare(env: Env, me: string, id: string): Promise<Response> {
   const row = await owned(env, me, id);
   if (row.deleted_at === null) {
-    await env.CLIPS.delete([video(id), poster(id)]);
+    await dropClips(env, [id], Date.now());
     await env.DB.prepare(TOMBSTONE).bind(Date.now(), id).run();
   }
   return json({ ok: true });
+}
+
+/**
+ * Takes these links' clips and posters out of R2 — all but those with an open
+ * report: the review needs them, so they are held (`held_clips`) until no
+ * report is open, `HELD_MS` at most (the sweep's "held" step). Nobody reaches
+ * them meanwhile: the caller takes the link down with its row. Deleting a
+ * reported clip used to take the evidence along, and the sweep did so five
+ * days after any upload.
+ */
+async function dropClips(env: Env, ids: string[], now: number): Promise<void> {
+  if (ids.length === 0) return;
+  const { results } = await env.DB.prepare(
+    "SELECT DISTINCT share_id FROM reports WHERE status = 'open' AND share_id IN (SELECT value FROM json_each(?))",
+  )
+    .bind(JSON.stringify(ids))
+    .all<{ share_id: string }>();
+  const reported = new Set(results.map((row) => row.share_id));
+  if (reported.size > 0) {
+    await env.DB.batch(
+      [...reported].map((id) =>
+        env.DB.prepare("INSERT OR IGNORE INTO held_clips (share_id, held_at) VALUES (?, ?)").bind(id, now),
+      ),
+    );
+  }
+  const gone = ids.filter((id) => !reported.has(id));
+  // R2 deletes at most a thousand keys at once; two per clip.
+  for (const run of chunks(gone, SUSPEND_BATCH)) {
+    await env.CLIPS.delete(run.flatMap((id) => [video(id), poster(id)]));
+  }
 }
 
 /**
@@ -347,17 +379,22 @@ export async function deleteSharesOf(env: Env, me: string): Promise<void> {
   const { results } = await env.DB.prepare("SELECT id FROM shares WHERE owner = ? AND deleted_at IS NULL")
     .bind(me)
     .all<{ id: string }>();
-  for (const run of chunks(results, SUSPEND_BATCH)) {
-    await env.CLIPS.delete(run.flatMap((row) => [video(row.id), poster(row.id)]));
-  }
+  await dropClips(
+    env,
+    results.map((row) => row.id),
+    Date.now(),
+  );
 }
 
 // --- For everyone ---------------------------------------------------------------
 
 /**
  * `POST /c/<id>/report` from the share page, `{reason, note?}` sent as plain
- * text so the browser needs no preflight. Who reported is not kept; the rate
- * limit goes by address without storing it.
+ * text so the browser needs no preflight. Who reported is not kept, nor the
+ * address: only a keyed one-way fingerprint of it (its /64 for IPv6) made
+ * for this clip alone, so each address counts once against the clip's cap
+ * (`takesReport`) and none can be told apart across clips. It goes with the
+ * report.
  */
 export async function reportShare(request: Request, env: Env, id: string): Promise<Response> {
   const cors = { "Access-Control-Allow-Origin": PAGE_ORIGIN };
@@ -376,12 +413,18 @@ export async function reportShare(request: Request, env: Env, id: string): Promi
   const report = cleanReport(raw);
   if (!report) return answer({ error: "Pick a reason." }, 400);
   if (!(await live(env, id, Date.now()))) return answer({ error: "That clip is gone." }, 404);
+  const reporter = await fingerprint(env.DEPARTED_PEPPER || env.DISCORD_CLIENT_SECRET, `report\n${id}\n${addressKey(address)}`);
+  // `takesReport` in shares.ts; without a key to make the fingerprint with,
+  // the cap counts reports as it did before.
+  const takes = reporter
+    ? `NOT EXISTS (SELECT 1 FROM reports WHERE share_id = ?2 AND status = 'open' AND reporter = ?6)
+       AND (SELECT COUNT(DISTINCT reporter) FROM reports WHERE share_id = ?2 AND status = 'open') < ?7`
+    : "(SELECT COUNT(*) FROM reports WHERE share_id = ?2 AND status = 'open') < ?7";
   await env.DB.prepare(
-    `INSERT INTO reports (id, share_id, reason, note, created_at)
-     SELECT ?, ?, ?, ?, ?
-     WHERE (SELECT COUNT(*) FROM reports WHERE share_id = ? AND status = 'open') < ?`,
+    `INSERT INTO reports (id, share_id, reason, note, created_at, reporter)
+     SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE ${takes}`,
   )
-    .bind(newId(), id, report.reason, report.note, Date.now(), id, MAX_OPEN_REPORTS)
+    .bind(newId(), id, report.reason, report.note, Date.now(), reporter, MAX_OPEN_REPORTS)
     .run();
   // Over the cap it is quietly dropped: the clip is waiting for review anyway.
   return answer({ ok: true });
@@ -555,8 +598,12 @@ async function suspend(env: Env, id: string, bannedAt: number): Promise<void> {
       .bind(id, SUSPEND_BATCH)
       .all<{ id: string }>();
     if (shares.length === 0) break;
-    await env.CLIPS.delete(shares.flatMap((row) => [video(row.id), poster(row.id)]));
     const now = Date.now();
+    await dropClips(
+      env,
+      shares.map((row) => row.id),
+      now,
+    );
     await env.DB.batch(shares.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)));
   }
   await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
@@ -586,8 +633,11 @@ export async function sweep(env: Env): Promise<void> {
       .bind(now)
       .all<{ id: string }>();
     if (results.length > 0) {
-      // R2 takes up to a thousand keys at once; two per clip.
-      await env.CLIPS.delete(results.flatMap((row) => [video(row.id), poster(row.id)]));
+      await dropClips(
+        env,
+        results.map((row) => row.id),
+        now,
+      );
       await env.DB.batch(
         results.map((row) => env.DB.prepare(TOMBSTONE).bind(now, row.id)),
       );
@@ -613,4 +663,21 @@ export async function sweep(env: Env): Promise<void> {
   );
   // Reports are for reviewing, not for keeping.
   await step("reports", () => env.DB.prepare("DELETE FROM reports WHERE created_at < ?").bind(now - REPORT_KEEP_MS).run());
+  // Clips held for a report (`dropClips`): gone once no report on them is
+  // open, and after HELD_MS in any case (`heldClipGoes`).
+  await step("held", async () => {
+    const { results: done } = await env.DB.prepare(
+      `SELECT share_id FROM held_clips h
+        WHERE h.held_at <= ? OR NOT EXISTS (SELECT 1 FROM reports r WHERE r.share_id = h.share_id AND r.status = 'open')
+        LIMIT 400`,
+    )
+      .bind(now - HELD_MS)
+      .all<{ share_id: string }>();
+    if (done.length > 0) {
+      await env.CLIPS.delete(done.flatMap((row) => [video(row.share_id), poster(row.share_id)]));
+      await env.DB.prepare("DELETE FROM held_clips WHERE share_id IN (SELECT value FROM json_each(?))")
+        .bind(JSON.stringify(done.map((row) => row.share_id)))
+        .run();
+    }
+  });
 }

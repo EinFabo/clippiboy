@@ -6,7 +6,11 @@ import {
   countsAgainstWeek,
   FREE_FAILS,
   givenUp,
+  heldClipGoes,
+  HELD_MS,
+  MAX_OPEN_REPORTS,
   posterRefusal,
+  takesReport,
   cleanReport,
   cleanTags,
   expiresIn,
@@ -239,4 +243,25 @@ test("a poster goes only on a finished link that is still up", () => {
   assert.equal(posterRefusal({ pending: 0, deleted_at: null }), null);
   assert.equal(posterRefusal({ pending: 1, deleted_at: null }), "uploading");
   assert.equal(posterRefusal({ pending: 0, deleted_at: 5 }), "gone");
+});
+
+test("one address reports a clip once, however often it sends", () => {
+  const open = [{ reporter: "a" }];
+  assert.equal(takesReport(open, "a"), false);
+  assert.equal(takesReport(open, "b"), true);
+});
+
+test("the cap counts addresses, and reports from before the fingerprint count for nobody", () => {
+  const full = Array.from({ length: MAX_OPEN_REPORTS }, (_, i) => ({ reporter: `r${i}` }));
+  assert.equal(takesReport(full, "new"), false);
+  const legacy = [...full.slice(1), ...Array.from({ length: 30 }, () => ({ reporter: null }))];
+  assert.equal(takesReport(legacy, "new"), true);
+});
+
+test("a held clip stays while a report is open, and never past its time", () => {
+  const now = 10 * HELD_MS;
+  assert.equal(heldClipGoes(now - 1000, 2, now), false);
+  assert.equal(heldClipGoes(now - 1000, 0, now), true);
+  assert.equal(heldClipGoes(now - HELD_MS, 2, now), true);
+  assert.equal(heldClipGoes(now - HELD_MS + 1, 1, now), false);
 });
