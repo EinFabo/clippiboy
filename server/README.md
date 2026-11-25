@@ -85,9 +85,11 @@ An upload that fails stays behind as a deleted share marked `failed`. Five a
 week are free; past that each counts against the week like a link, so
 failing on purpose runs out after eight tries. A link takes one poster. An account has at most 20 requests waiting for an answer.
 
-Opening the live connection (`GET /ws`) counts against `ANON_LIMIT` twice:
-per address before the session is looked up, and per account after — ten a
-minute each, since every connection wakes the user's hub. The app dials once
+Opening the live connection (`GET /ws`) counts against `ANON_LIMIT` per
+account, ten a minute, since every connection wakes the user's hub. A dial
+that fails to sign in wakes none; only those count per address, ten a minute,
+so a shared address (a carrier's NAT, an IPv6 /48) or everybody behind one
+dialling back after a deploy keeps nobody signed in out. The app dials once
 after a drop and backs off from a second to a minute.
 
 The hub (one Durable Object per user) has budgets of its own, per user across
@@ -119,8 +121,8 @@ node scripts/e2e.mjs
 A sign-in's start signs its state with the Discord client secret, so for
 `wrangler dev` `.dev.vars` needs one too — any value will do locally:
 `DISCORD_CLIENT_SECRET="local-dev-not-a-secret"`. Opening the live connection
-is limited to ten a minute per address, and a run opens nine: leave a minute
-between runs.
+is limited to ten a minute per account, and a run opens seven for the first
+one: leave a minute between runs.
 
 It goes to `http://127.0.0.1:8799`, or to `FRIENDS_SERVER`. Any server that is
 not this computer, the deployed worker included, it refuses unless run with

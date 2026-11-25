@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addressKey, isJsonObject, readLimited, writeBudget } from "./limits.ts";
+import { addressKey, dialAs, isJsonObject, readLimited, writeBudget } from "./limits.ts";
 
 const req = (body: string | ReadableStream | null, headers: Record<string, string> = {}) =>
   ({ headers: new Headers(headers), body: typeof body === "string" ? new Response(body).body : body });
@@ -55,4 +55,48 @@ test("the routes that write most count against a tighter limit", () => {
   assert.equal(writeBudget("DELETE", "/shares/abcdefghjk"), null);
   assert.equal(writeBudget("POST", "/auth/logout"), null);
   assert.equal(writeBudget("POST", "/webhook/cancel"), null);
+});
+
+// A dial as index.ts makes it: the sign-in, the address's limit, the 429.
+class Refused extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+function dial(signIn: () => Promise<string>, left: number) {
+  let counted = 0;
+  const result = dialAs(
+    signIn,
+    async () => ++counted <= left,
+    () => new Refused(429, "Too many connections — wait a minute."),
+  );
+  return { result, counted: () => counted };
+}
+
+test("a dial that signs in never counts against its address, however many there were", async () => {
+  const d = dial(async () => "user-a", 0);
+  assert.equal(await d.result, "user-a");
+  assert.equal(d.counted(), 0);
+});
+
+test("a dial that fails to sign in counts against its address, and past the limit it is a 429", async () => {
+  const signedOut = async (): Promise<string> => {
+    throw new Refused(401, "Signed out — please sign in again.");
+  };
+  const under = dial(signedOut, 1);
+  await assert.rejects(under.result, (err: Refused) => err.status === 401);
+  assert.equal(under.counted(), 1);
+  const over = dial(signedOut, 0);
+  await assert.rejects(over.result, (err: Refused) => err.status === 429 && /wait a minute/.test(err.message));
+  assert.equal(over.counted(), 1);
+});
+
+test("a dial that fails for any other reason is passed on uncounted", async () => {
+  const d = dial(async () => {
+    throw new Error("D1 is having a bad moment");
+  }, 0);
+  await assert.rejects(d.result, /bad moment/);
+  assert.equal(d.counted(), 0);
 });

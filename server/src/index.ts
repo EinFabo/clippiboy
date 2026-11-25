@@ -29,7 +29,7 @@ import {
   shareQuota,
   sweep,
 } from "./links";
-import { addressKey, readLimited, writeBudget } from "./limits";
+import { addressKey, dialAs, readLimited, writeBudget } from "./limits";
 import { CLOSE_DELETING } from "./hubrules";
 import { departedCutoff, fingerprint } from "./departed";
 import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
@@ -178,13 +178,18 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
 
   // Each connection wakes the user's hub, a Durable Object request on the
-  // free plan's daily 100,000 for everybody: counted per address before the
-  // session is even looked up, and per account below. Ten a minute each —
-  // the app dials once after a drop and backs off from 1 s to a minute.
+  // free plan's daily 100,000 for everybody: counted per account below, ten
+  // a minute — the app dials once after a drop and backs off from 1 s to a
+  // minute. Per address only a dial that fails to sign in (`dialAs`), so
+  // others behind the same address are never kept out.
   const socket = path === "/ws" && method === "GET";
-  if (socket && !(await underLimit(request, env, "ws"))) throw new HttpError(429, "Too many connections — wait a minute.");
-
-  const me = await authenticate(request, env.DB);
+  const me = socket
+    ? await dialAs(
+        () => authenticate(request, env.DB),
+        () => underLimit(request, env, "ws"),
+        () => new HttpError(429, "Too many connections — wait a minute."),
+      )
+    : await authenticate(request, env.DB);
 
   // Everything that changes something is counted per user; reads and the
   // sign-out are not. That keeps a script holding one session from flooding

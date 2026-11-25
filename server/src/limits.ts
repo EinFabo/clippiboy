@@ -1,6 +1,7 @@
 // Bounds on requests: how much of a body is read and what it must be, which
-// address a rate limit counts against, and which signed-in routes count
-// against a tighter limit of their own.
+// address a rate limit counts against, which dials of the live connection
+// count against it, and which signed-in routes count against a tighter limit
+// of their own.
 //
 // No imports, so `node --test` can load this file as it is and the site proxy
 // can share it.
@@ -78,6 +79,30 @@ function expandIpv6(address: string): number[] | null {
   const missing = 8 - head.length - tail.length;
   if (missing < 1) return null;
   return [...head, ...new Array<number>(missing).fill(0), ...tail];
+}
+
+/**
+ * The account a dial of the live connection (`GET /ws`) signs in as. Only a
+ * dial that fails to sign in (a 401) counts against its address, and past the
+ * limit it is answered with `tooMany()` instead. Counted before the sign-in,
+ * ten dials a minute from one shared address — a carrier's NAT, an IPv6 /48 —
+ * kept everybody behind it offline, and after a deploy everybody behind one
+ * address dials back at once. A signed-in dial counts per account (index.ts);
+ * one that is not wakes no hub. Any other failure, the database having a bad
+ * moment, is passed on uncounted.
+ */
+export async function dialAs<T>(
+  signIn: () => Promise<T>,
+  underLimit: () => Promise<boolean>,
+  tooMany: () => Error,
+): Promise<T> {
+  try {
+    return await signIn();
+  } catch (err) {
+    const signedOut = typeof err === "object" && err !== null && (err as { status?: unknown }).status === 401;
+    if (signedOut && !(await underLimit())) throw tooMany();
+    throw err;
+  }
 }
 
 /**
