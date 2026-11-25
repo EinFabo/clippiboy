@@ -237,14 +237,25 @@ export class Hub extends DurableObject<Env> {
     return sockets.length > 0;
   }
 
-  /** A request, an acceptance, a removal or a block touched this user. */
-  async friendsChanged(): Promise<void> {
+  /**
+   * A request, an acceptance, a removal or a block touched this user: the
+   * apps fetch their lists again. With `presence` — a friendship began or
+   * ended (`noticeFor`) — they also get a fresh snapshot, which asks the hub
+   * of every friend; a request sent, withdrawn or declined changes nobody's
+   * presence and costs no more than the notice.
+   */
+  async friendsChanged(presence = true): Promise<void> {
     const sockets = this.open().filter((ws) => (ws.deserializeAttachment() as Attachment).ready);
     if (sockets.length === 0) return;
+    const notice = JSON.stringify({ t: "friends" });
+    if (!presence) {
+      for (const ws of sockets) ws.send(notice);
+      return;
+    }
     const { user } = sockets[0].deserializeAttachment() as Attachment;
     const snapshot = await this.snapshot(user);
     for (const ws of sockets) {
-      ws.send(JSON.stringify({ t: "friends" }));
+      ws.send(notice);
       ws.send(snapshot);
     }
   }

@@ -8,6 +8,16 @@ export const NOBODY = "Nobody with that name or code uses ClippiBoy.";
 /** Requests one account may have waiting for an answer at once. */
 export const MAX_PENDING_OUT = 20;
 
+/**
+ * How long a pair rests once a request between them was withdrawn or
+ * declined: neither may ask the other again before. Asking and taking it back
+ * in a loop sent the other side a new request every few seconds, and woke
+ * both sides' hubs each time.
+ */
+export const REQUEST_COOLDOWN_MS = 10 * 60 * 1000;
+
+export type PairStatus = "pending" | "accepted";
+
 export interface RequestFacts {
   me: string;
   target: { id: string; allowRequests: boolean };
@@ -21,6 +31,9 @@ export interface RequestFacts {
   handedOut: boolean;
   /** My requests still waiting for an answer, to anyone. */
   pendingOut: number;
+  /** When the pair's rest after a withdrawn or declined request ends, if it has one. */
+  cooldownUntil: number | null;
+  now: number;
 }
 
 export type RequestOutcome =
@@ -45,6 +58,12 @@ export function requestRule(f: RequestFacts): RequestOutcome {
       ? { kind: "refuse", status: 403, message: "They don't take friend requests right now." }
       : { kind: "refuse", status: 404, message: NOBODY };
   }
+  // After the checks above, so it tells nothing they would not: someone who
+  // is nobody by name stays nobody. A pair that rests has no row, so saying
+  // yes is never held up by it.
+  if (f.cooldownUntil !== null && f.cooldownUntil > f.now) {
+    return { kind: "refuse", status: 429, message: "Wait a few minutes before asking them again." };
+  }
   // Last, so it tells nothing a sent request would not: past the cap only a
   // new request is refused, never saying yes to one that came in.
   if (f.pendingOut >= MAX_PENDING_OUT) {
@@ -55,4 +74,27 @@ export function requestRule(f: RequestFacts): RequestOutcome {
     };
   }
   return { kind: "send" };
+}
+
+/**
+ * Does removing this row rest the pair (`REQUEST_COOLDOWN_MS`)? A request
+ * withdrawn or declined does, whichever side removed it, by hand or with a
+ * block; an ended friendship does not — asking again needs the other's yes —
+ * nor a removal that found nothing. `removeFriend` and `blockUser` in
+ * index.ts say the same in SQL (`status = 'pending'`).
+ */
+export function coolsDown(removed: { status: PairStatus } | null): boolean {
+  return removed?.status === "pending";
+}
+
+/**
+ * What a change to a pair's row tells both sides' apps, as `before` and
+ * `after` the change (null: no row): their lists, or their lists and a fresh
+ * snapshot of their friends' presence — the latter only when who is a friend
+ * changed, since a snapshot asks the hub of every friend. A request sent,
+ * withdrawn or declined changes nobody's presence. Nothing when nothing changed.
+ */
+export function noticeFor(before: PairStatus | null, after: PairStatus | null): "lists" | "presence" | null {
+  if (before === after) return null;
+  return before === "accepted" || after === "accepted" ? "presence" : "lists";
 }

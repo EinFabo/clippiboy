@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_PENDING_OUT, NOBODY, requestRule, type RequestFacts } from "./friendrules.ts";
+import { coolsDown, MAX_PENDING_OUT, noticeFor, NOBODY, REQUEST_COOLDOWN_MS, requestRule, type RequestFacts } from "./friendrules.ts";
 
 const base: RequestFacts = {
   me: "me",
@@ -10,6 +10,8 @@ const base: RequestFacts = {
   existing: null,
   handedOut: true,
   pendingOut: 0,
+  cooldownUntil: null,
+  now: 1_000_000,
 };
 
 test("a new pair gets a request", () => assert.deepEqual(requestRule(base), { kind: "send" }));
@@ -52,4 +54,41 @@ test("past the cap of waiting requests a new one is refused, saying yes still wo
     status: 404,
     message: NOBODY,
   });
+});
+
+test("a pair whose request was withdrawn or declined rests ten minutes before either asks again", () => {
+  const removedAt = base.now;
+  const resting = { ...base, cooldownUntil: removedAt + REQUEST_COOLDOWN_MS };
+  assert.equal(REQUEST_COOLDOWN_MS, 10 * 60 * 1000);
+  assert.equal((requestRule(resting) as { status: number }).status, 429);
+  assert.equal((requestRule({ ...resting, now: removedAt + REQUEST_COOLDOWN_MS - 1 }) as { status: number }).status, 429);
+  assert.deepEqual(requestRule({ ...resting, now: removedAt + REQUEST_COOLDOWN_MS }), { kind: "send" });
+  // Tells nothing new: nobody stays nobody, a block stays a block, and their
+  // own request is still a yes.
+  assert.deepEqual(requestRule({ ...resting, blockedByTarget: true }), { kind: "refuse", status: 404, message: NOBODY });
+  assert.deepEqual(requestRule({ ...resting, target: { id: "them", allowRequests: false }, handedOut: false }), {
+    kind: "refuse",
+    status: 404,
+    message: NOBODY,
+  });
+  assert.deepEqual(requestRule({ ...resting, existing: { status: "pending", requester: "them" } }), { kind: "accept" });
+  assert.equal((requestRule({ ...resting, existing: { status: "accepted", requester: "them" } }) as { status: number }).status, 409);
+});
+
+test("only a request withdrawn or declined rests the pair, not an ended friendship", () => {
+  assert.equal(coolsDown({ status: "pending" }), true);
+  assert.equal(coolsDown({ status: "accepted" }), false);
+  assert.equal(coolsDown(null), false);
+});
+
+test("a snapshot only when who is a friend changed, the lists alone for requests", () => {
+  // Sent, withdrawn or declined: nobody's presence changes.
+  assert.equal(noticeFor(null, "pending"), "lists");
+  assert.equal(noticeFor("pending", null), "lists");
+  // Accepted, unfriended (or blocked, or deleted while friends).
+  assert.equal(noticeFor("pending", "accepted"), "presence");
+  assert.equal(noticeFor("accepted", null), "presence");
+  // Nothing changed, nobody hears of it.
+  assert.equal(noticeFor(null, null), null);
+  assert.equal(noticeFor("accepted", "accepted"), null);
 });

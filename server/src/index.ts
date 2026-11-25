@@ -2,7 +2,7 @@ import {
   authenticate,
   departStatement,
   pair,
-  relatedIds,
+  related,
   toMe,
   toUser,
   SESSION_IDLE_MS,
@@ -32,7 +32,14 @@ import {
 import { addressKey, readLimited, writeBudget } from "./limits";
 import { departedCutoff, fingerprint } from "./departed";
 import { handlePing, MAX_PING_BYTES, sweepUsage, utcDay } from "./telemetry";
-import { NOBODY, requestRule, type RequestOutcome } from "./friendrules";
+import {
+  NOBODY,
+  noticeFor,
+  REQUEST_COOLDOWN_MS,
+  requestRule,
+  type PairStatus,
+  type RequestOutcome,
+} from "./friendrules";
 import { clearInviteCookie, cookieValue, INVITE_COOKIE, inviteTarget, verifyInvite } from "./invite";
 import { invitePage, inviteSecret, shareInvite } from "./invitepages";
 import {
@@ -86,6 +93,8 @@ export default {
           .run(),
         // Sessions unused for that long no longer sign anyone in; their rows go too.
         env.DB.prepare("DELETE FROM sessions WHERE last_used < ?").bind(Date.now() - SESSION_IDLE_MS).run(),
+        // A pair's rest after a withdrawn or declined request, once it is over.
+        env.DB.prepare("DELETE FROM request_cooldowns WHERE ends_at <= ?").bind(Date.now()).run(),
       ]).then((outcomes) => {
         for (const outcome of outcomes) {
           if (outcome.status === "rejected") console.error("cron", outcome.reason);
@@ -705,15 +714,32 @@ async function listFriends(env: Env, me: string) {
   return { friends, incoming, outgoing, blocked: blocked.results.map(toUser) };
 }
 
-/** Both sides' apps refetch their lists and presence. */
-async function notify(env: Env, ...users: string[]): Promise<void> {
+/**
+ * The users' apps refetch their lists — and, for "presence", get a fresh
+ * snapshot of their friends' presence too (`noticeFor`). Null tells nobody.
+ */
+async function notify(env: Env, notice: "lists" | "presence" | null, ...users: string[]): Promise<void> {
+  if (!notice) return;
   await Promise.all(
     users.map((id) =>
       env.HUB.getByName(id)
-        .friendsChanged()
+        .friendsChanged(notice === "presence")
         .catch((err) => console.error("friendsChanged", id, err)),
     ),
   );
+}
+
+/**
+ * Before a pair's row is deleted, in the same batch: rests the pair
+ * (`REQUEST_COOLDOWN_MS`) when the row is a request — `coolsDown` in SQL.
+ * Read from the row itself, so it is never written for a row that is not there.
+ */
+function coolDownStatement(env: Env, a: string, b: string, now: number): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO request_cooldowns (user_a, user_b, ends_at)
+     SELECT user_a, user_b, ?3 FROM friendships WHERE user_a = ?1 AND user_b = ?2 AND status = 'pending'
+     ON CONFLICT (user_a, user_b) DO UPDATE SET ends_at = excluded.ends_at`,
+  ).bind(a, b, now + REQUEST_COOLDOWN_MS);
 }
 
 async function isBlocked(env: Env, blocker: string, blocked: string): Promise<boolean> {
@@ -746,7 +772,7 @@ async function requestTo(
   handedOut: boolean,
 ): Promise<RequestOutcome> {
   const [a, b] = pair(me, target.id);
-  const [blockedByTarget, blockedByMe, existing, waiting] = await Promise.all([
+  const [blockedByTarget, blockedByMe, existing, waiting, cooldown] = await Promise.all([
     isBlocked(env, target.id, me),
     isBlocked(env, me, target.id),
     env.DB.prepare("SELECT status, requester FROM friendships WHERE user_a = ? AND user_b = ?")
@@ -757,6 +783,9 @@ async function requestTo(
     )
       .bind(me)
       .first<{ n: number }>(),
+    env.DB.prepare("SELECT ends_at FROM request_cooldowns WHERE user_a = ? AND user_b = ?")
+      .bind(a, b)
+      .first<{ ends_at: number }>(),
   ]);
   const outcome = requestRule({
     me,
@@ -766,6 +795,8 @@ async function requestTo(
     existing,
     handedOut,
     pendingOut: waiting?.n ?? 0,
+    cooldownUntil: cooldown?.ends_at ?? null,
+    now: Date.now(),
   });
   // Only a request that writes counts against the friend limit: a refusal
   // writes nothing, and a few mistyped names must not lock the field.
@@ -780,7 +811,10 @@ async function requestTo(
       .bind(a, b, me, Date.now())
       .run();
   }
-  if (outcome.kind !== "refuse") await notify(env, me, target.id);
+  // A request sent tells both sides' lists; a yes makes them friends, which
+  // their presence follows.
+  if (outcome.kind === "accept") await notify(env, noticeFor("pending", "accepted"), me, target.id);
+  else if (outcome.kind === "send") await notify(env, noticeFor(null, "pending"), me, target.id);
   return outcome;
 }
 
@@ -792,15 +826,22 @@ async function acceptRequest(env: Env, me: string, other: string) {
     .bind(a, b, other)
     .run();
   if (result.meta.changes !== 1) throw new HttpError(404, "That request is gone.");
-  await notify(env, me, other);
+  await notify(env, noticeFor("pending", "accepted"), me, other);
   return { ok: true };
 }
 
-/** Declines, withdraws or unfriends — whatever the pair had, it is gone. */
+/**
+ * Declines, withdraws or unfriends — whatever the pair had, it is gone. A
+ * request withdrawn or declined rests the pair (`coolsDown`); a friendship
+ * ended changes who sees whose presence, a request only the lists.
+ */
 async function removeFriend(env: Env, me: string, other: string) {
   const [a, b] = pair(me, other);
-  const result = await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
-  if (result.meta.changes > 0) await notify(env, me, other);
+  const [, removed] = await env.DB.batch<{ status: PairStatus }>([
+    coolDownStatement(env, a, b, Date.now()),
+    env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ? RETURNING status").bind(a, b),
+  ]);
+  await notify(env, noticeFor(removed.results[0]?.status ?? null, null), me, other);
   return { ok: true };
 }
 
@@ -808,17 +849,17 @@ async function blockUser(env: Env, me: string, other: string) {
   if (other === me) throw new HttpError(400, "That's you.");
   if (!(await userById(env.DB, other))) throw new HttpError(404, "Not found.");
   const [a, b] = pair(me, other);
-  const [unfriended, blocked] = await env.DB.batch([
-    env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b),
-    env.DB.prepare("INSERT OR IGNORE INTO blocks (blocker, blocked, created_at) VALUES (?, ?, ?)").bind(
-      me,
-      other,
-      Date.now(),
-    ),
+  const now = Date.now();
+  const [, unfriended, blocked] = await env.DB.batch<{ status: PairStatus }>([
+    // A request blocked is a request declined: the pair rests (`coolsDown`).
+    coolDownStatement(env, a, b, now),
+    env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ? RETURNING status").bind(a, b),
+    env.DB.prepare("INSERT OR IGNORE INTO blocks (blocker, blocked, created_at) VALUES (?, ?, ?)").bind(me, other, now),
   ]);
-  // The other side learns only of a friendship that went; a repeat tells nobody.
-  if (unfriended.meta.changes > 0) await notify(env, me, other);
-  else if (blocked.meta.changes > 0) await notify(env, me);
+  // The other side learns only of a row that went; a repeat tells nobody.
+  const removed = unfriended.results[0]?.status ?? null;
+  if (removed) await notify(env, noticeFor(removed, null), me, other);
+  else if (blocked.meta.changes > 0) await notify(env, "lists", me);
   return { ok: true };
 }
 
@@ -832,7 +873,7 @@ async function departedHash(env: Env, discordId: string): Promise<string | null>
 }
 
 async function deleteAccount(env: Env, me: string): Promise<Response> {
-  const related = await relatedIds(env.DB, me);
+  const others = await related(env.DB, me);
   const row = await env.DB.prepare("SELECT discord_id FROM users WHERE id = ?").bind(me).first<{ discord_id: string }>();
   const departed = row ? await departedHash(env, row.discord_id) : null;
   // The connections and the presence first, while a failure can still be
@@ -847,7 +888,11 @@ async function deleteAccount(env: Env, me: string): Promise<Response> {
   // still goes along.
   const remove = env.DB.prepare("DELETE FROM users WHERE id = ?").bind(me);
   await env.DB.batch(departed ? [departStatement(env.DB, me, departed, Date.now()), remove] : [remove]);
-  await notify(env, ...related);
+  // Friends lose a friend, and with it a presence; those with a request only a list entry.
+  await Promise.all([
+    notify(env, noticeFor("accepted", null), ...others.filter((row) => row.status === "accepted").map((row) => row.id)),
+    notify(env, noticeFor("pending", null), ...others.filter((row) => row.status === "pending").map((row) => row.id)),
+  ]);
   // Whatever an app that got in again meanwhile left. The account is gone
   // either way, so this must not turn into an error.
   await env.HUB.getByName(me)

@@ -86,7 +86,7 @@
         <ul>
           <li><strong>Account</strong>: Discord ID, username, display name, avatar link, your friend code, whether you accept requests, time of your first sign-in.</li>
           <li><strong>Sign-ins</strong>: one session key per device, of which only a hash is kept, plus when it was created and last used. Signing out deletes it, and so do 180 days without use.</li>
-          <li><strong>Friends</strong>: friendships, pending requests and who you have blocked.</li>
+          <li><strong>Friends</strong>: friendships, pending requests and who you have blocked. When a request is withdrawn or declined, we note for ten minutes that neither of the two accounts may send the other a new one.</li>
           <li><strong>Online status</strong>: while the app is running, it reports whether you are online or busy, your status text and, if “Show what I'm playing” is on, which game you are playing and since when. This only goes to friends you have accepted. What is stored is the last status and when you were last online. With “Appear offline”, friends see you as offline.</li>
         </ul>
         <p>The app loads your friends' avatars directly from Discord (cdn.discordapp.com). Discord sees your IP address when this happens.</p>

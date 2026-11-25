@@ -51,15 +51,15 @@ export async function userByName(db: D1Database, name: string): Promise<UserRow 
   return db.prepare("SELECT * FROM users WHERE username = ? AND username != ''").bind(name).first<UserRow>();
 }
 
-/** Everyone the user has a row with, whatever its status. */
-export async function relatedIds(db: D1Database, me: string): Promise<string[]> {
+/** Everyone the user has a row with, whatever its status, and that status. */
+export async function related(db: D1Database, me: string): Promise<{ id: string; status: "pending" | "accepted" }[]> {
   const { results } = await db
     .prepare(
-      "SELECT CASE WHEN user_a = ?1 THEN user_b ELSE user_a END AS id FROM friendships WHERE user_a = ?1 OR user_b = ?1",
+      "SELECT CASE WHEN user_a = ?1 THEN user_b ELSE user_a END AS id, status FROM friendships WHERE user_a = ?1 OR user_b = ?1",
     )
     .bind(me)
-    .all<{ id: string }>();
-  return results.map((row) => row.id);
+    .all<{ id: string; status: "pending" | "accepted" }>();
+  return results;
 }
 
 /** Accepted friends only — the ones who may see the user's presence. */
