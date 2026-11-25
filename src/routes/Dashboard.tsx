@@ -28,16 +28,6 @@ import { encoderShown } from "@/lib/videoPlan";
 import { fit } from "@/lib/fit";
 import type { Clip } from "@/lib/types";
 
-/** A hotkey as a small key chip; nothing when none is bound. */
-function Key({ binding }: { binding: ReturnType<typeof shownHotkey> }) {
-  if (!binding.value) return null;
-  return (
-    <kbd className="ml-0.5 rounded-[6px] border border-current px-1.5 py-px font-mono text-[11px] font-normal opacity-70">
-      {hotkeyLabel(binding.value, binding.family)}
-    </kbd>
-  );
-}
-
 export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   // `useShallow`, siehe `SourceTrouble`.
   const {
@@ -88,7 +78,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const saving = recordingSaving || recordingProgress !== null;
   // Named as the pad last used goes, else the keyboard's.
   const saveKey = shownHotkey(config, "saveClip");
-  const screenshotKey = shownHotkey(config, "screenshot");
   const recordKey = shownHotkey(config, "record");
   const status = bufferStatus({
     bufferActive,
@@ -210,7 +199,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 onClick={saveClip}
               >
                 Save clip
-                <Key binding={saveKey} />
               </Button>
               <Button onClick={toggleBuffer}>Stop</Button>
             </>
@@ -243,7 +231,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
               session and does not care whether the buffer is running. */}
           <Button icon={<IconCamera className="h-4 w-4" />} onClick={takeScreenshot}>
             Screenshot
-            <Key binding={screenshotKey} />
           </Button>
           {/* Works without the buffer too: it brings the capture up itself. */}
           <Button
@@ -256,7 +243,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
               : recording
                 ? `Stop · ${formatDuration(recordingSeconds * 1000)}`
                 : "Record"}
-            {!saving && !recording && <Key binding={recordKey} />}
           </Button>
           <p className="ml-auto text-[13px] text-ink-muted">
             <button className="hover:text-ink" onClick={() => onNavigate("recording")}>
