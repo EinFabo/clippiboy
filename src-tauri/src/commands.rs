@@ -1543,13 +1543,7 @@ pub(crate) fn trash_clip(
         // keeps the clip, record and all, and the notice says why.
         let folder = crate::trash::folder_for(&from, Path::new(&clip_dir));
         let target = crate::trash::ensure_folder(&folder)
-            .map(|()| {
-                crate::filing::free_name(
-                    &folder,
-                    &from.file_name().unwrap_or_default().to_string_lossy(),
-                )
-            })
-            .and_then(|target| move_patiently(&from, &target, 10).map(|()| target));
+            .and_then(|()| move_to_trash_patiently(&from, &folder, 10));
         let target = match target {
             Ok(target) => target,
             Err(err) => {
@@ -1604,6 +1598,41 @@ fn move_patiently(from: &Path, to: &Path, attempts: u32) -> std::io::Result<()> 
     for attempt in 0..attempts.max(1) {
         match edit::move_across(from, to) {
             Ok(()) => return Ok(()),
+            Err(err) => {
+                last = Some(err);
+                if attempt + 1 < attempts {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+                }
+            }
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
+}
+
+/// Held while a free name in a trash folder is picked and taken. Deletes run
+/// four at a time, and two files of the same name (the same received clip
+/// twice) picked the same free name — the second rename replaced the first
+/// one's file, which was then gone from Recently deleted for good. Held for
+/// one rename at a time, never across the waits between tries.
+static TRASH_NAMES: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Moves a clip's file into its trash folder under a name nothing there has,
+/// trying again for a while like [`move_patiently`]. Returns where it went.
+fn move_to_trash_patiently(from: &Path, folder: &Path, attempts: u32) -> std::io::Result<PathBuf> {
+    let name = from
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let mut last = None;
+    for attempt in 0..attempts.max(1) {
+        let moved = {
+            let _names = TRASH_NAMES.lock();
+            let target = crate::filing::free_name(folder, &name);
+            edit::move_across(from, &target).map(|()| target)
+        };
+        match moved {
+            Ok(target) => return Ok(target),
             Err(err) => {
                 last = Some(err);
                 if attempt + 1 < attempts {
@@ -3846,6 +3875,39 @@ mod tests {
         );
         assert!(discord_dir(&root, "../../up").starts_with(&root));
         assert!(discord_root().starts_with(crate::config::data_dir()));
+    }
+
+    /// Many deletes at once of files with one name: each keeps a name of its
+    /// own in the trash, none replaces another.
+    #[test]
+    fn files_of_one_name_deleted_at_once_all_keep_their_place_in_the_trash() {
+        let dir = std::env::temp_dir().join(format!("clippiboy-trash-{}", uuid::Uuid::new_v4()));
+        let trash = dir.join(crate::trash::DIR);
+        std::fs::create_dir_all(&trash).unwrap();
+        let sources: Vec<PathBuf> = (0..8)
+            .map(|n| {
+                let folder = dir.join(format!("game-{n}"));
+                std::fs::create_dir_all(&folder).unwrap();
+                let file = folder.join("Clip.mp4");
+                std::fs::write(&file, n.to_string()).unwrap();
+                file
+            })
+            .collect();
+        let moved: Vec<PathBuf> = std::thread::scope(|scope| {
+            let runs: Vec<_> = sources
+                .iter()
+                .map(|from| scope.spawn(|| move_to_trash_patiently(from, &trash, 3).unwrap()))
+                .collect();
+            runs.into_iter().map(|run| run.join().unwrap()).collect()
+        });
+        let mut contents: Vec<String> = moved
+            .iter()
+            .map(|file| std::fs::read_to_string(file).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, (0..8).map(|n| n.to_string()).collect::<Vec<_>>());
+        assert_eq!(std::fs::read_dir(&trash).unwrap().count(), 8);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
