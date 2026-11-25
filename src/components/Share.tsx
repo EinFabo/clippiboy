@@ -40,15 +40,18 @@ import { IconCheck, IconClose, IconGamepad, IconHeart, IconRetry, IconSend } fro
 const DIM = "fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm";
 const PANEL = "rounded-card border border-line bg-surface px-6 py-[22px] shadow-2xl";
 
-/** Escape closes a picker while it is open. */
+/** Escape closes a picker while it is open — and only the picker: it is taken
+ *  before the player or the gallery underneath get to it. */
 function useEscape(open: boolean, close: () => void) {
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [open, close]);
 }
 

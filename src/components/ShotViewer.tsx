@@ -43,6 +43,7 @@ import { EASE_EXIT, prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/cn";
 import { sliderOwns, typesText } from "@/lib/viewer";
 import { guardViewer } from "@/lib/viewerGuard";
+import { useShare } from "@/lib/share";
 import { ShotHistory } from "@/lib/shotHistory";
 import { keyOf, shortcut } from "@/lib/shotKeys";
 import { toast } from "@/lib/toastBus";
@@ -416,6 +417,8 @@ export function ShotViewer({
     const onKey = (event: KeyboardEvent) => {
       // An open menu took this key.
       if (event.defaultPrevented) return;
+      // The friend picker over the viewer has the keys.
+      if (useShare.getState().picking) return;
       // While a name is being typed the keys belong to the field (a slider is not one).
       if (typesText(event.target as HTMLElement | null)) return;
       if (sliderOwns(event.target as HTMLInputElement | null, event.key)) return;

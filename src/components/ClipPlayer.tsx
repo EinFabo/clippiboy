@@ -31,6 +31,7 @@ import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
 import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
 import { guardViewer } from "@/lib/viewerGuard";
+import { useShare } from "@/lib/share";
 import { useGrants } from "@/lib/useGrants";
 import type { Clip, ClipEdit, FacecamView, PortraitLayout } from "@/lib/types";
 
@@ -595,6 +596,8 @@ export function ClipPlayer({
     function onKey(event: KeyboardEvent) {
       // An open menu took this key.
       if (event.defaultPrevented) return;
+      // The export dialog and the friend picker over the player have the keys.
+      if (exporting || useShare.getState().picking) return;
       // In text fields, space and letters stay what they are.
       // Sliders are not text: the volume keeps the focus after a drag, and
       // would otherwise swallow every shortcut.
