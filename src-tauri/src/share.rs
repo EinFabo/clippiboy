@@ -46,6 +46,14 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(60);
 const ATTEMPTS: u32 = 6;
 /// How long a peer may take to open the stream or send the header or the ask.
 const HANDSHAKE: Duration = Duration::from_secs(10);
+/// The sender's close for a device of the friend's other than the one whose
+/// yes it took — they said yes on two PCs. That one stops at once instead of
+/// trying again and then calling off the send, which would have cut off the
+/// transfer to the device that does get it.
+const CLOSE_OTHER_DEVICE: u32 = 3;
+/// What [`fetch`] answers then; the receive ends on it without telling the
+/// sender to stop.
+const TAKEN_ELSEWHERE: &str = "You accepted it on another device first.";
 /// How long a peer may go without sending or taking a chunk before it is given up on.
 const IDLE: Duration = Duration::from_secs(30);
 /// How long a send under way may go without the receiver dialling in before
@@ -564,6 +572,12 @@ pub fn share_accept(app: AppHandle, id: String) -> Result<(), String> {
             }
             Err(err) if cancel_flag(&app, &id).load(Ordering::SeqCst) => {
                 log::info!("share: receive of {id} called off: {err}");
+            }
+            // Their yes from another device of this account came first: that
+            // one is getting it, and a cancel from here would call it off.
+            Err(err) if err == TAKEN_ELSEWHERE => {
+                log::info!("share: {id} goes to another device of this account");
+                set_in(&app, &id, |t| fail(t, &err));
             }
             Err(err) => {
                 log::warn!("share: receive of {id} failed: {err}");
@@ -1312,6 +1326,11 @@ async fn receive(app: &AppHandle, id: &str) -> Result<Clip, String> {
                 .await
                 .map_err(|err| err.to_string())?;
             }
+            Err(err) if err == TAKEN_ELSEWHERE => {
+                let _ = std::fs::remove_file(&part);
+                crate::stems::remove(&clip_id);
+                return Err(err);
+            }
             Err(err) => {
                 log::info!("share: attempt {} for {id}: {err}", attempt + 1);
                 last_error = err;
@@ -1440,6 +1459,8 @@ async fn fetch_tracks(
                         && std::fs::rename(&part, &target).is_ok();
                     break;
                 }
+                // Not this device's to fetch: the clip's own dial says so.
+                Err(err) if err == TAKEN_ELSEWHERE => break,
                 Err(err) => log::info!(
                     "share: track {index} of {id}, attempt {}: {err}",
                     attempt + 1
@@ -1491,61 +1512,70 @@ async fn fetch(
     .await
     .map_err(|_| "could not reach them".to_string())?
     .map_err(net)?;
-    let (mut send, mut recv) =
-        within(HANDSHAKE, "opening the stream", connection.open_bi()).await?;
-    let ask = serde_json::to_vec(&Ask {
-        id: id.into(),
-        secret: secret.into(),
-        offset,
-        track,
-    })
-    .map_err(net)?;
-    send.write_all(&(ask.len() as u32).to_be_bytes())
-        .await
+    let fetched: Result<(), String> = async {
+        let (mut send, mut recv) =
+            within(HANDSHAKE, "opening the stream", connection.open_bi()).await?;
+        let ask = serde_json::to_vec(&Ask {
+            id: id.into(),
+            secret: secret.into(),
+            offset,
+            track,
+        })
         .map_err(net)?;
-    send.write_all(&ask).await.map_err(net)?;
-    let _ = send.finish();
+        send.write_all(&(ask.len() as u32).to_be_bytes())
+            .await
+            .map_err(net)?;
+        send.write_all(&ask).await.map_err(net)?;
+        let _ = send.finish();
 
-    let mut header = [0u8; 8];
-    within(
-        HANDSHAKE,
-        "reading the header",
-        recv.read_exact(&mut header),
-    )
-    .await?;
-    let rest = u64::from_be_bytes(header);
-    if offset.checked_add(rest) != Some(size) {
-        return Err("they offered a different file".into());
-    }
-    let mut file =
-        open_part(part, offset).map_err(|err| format!("Could not write the file: {err}"))?;
-    let mut moved = offset;
-    let mut buf = vec![0u8; CHUNK];
-    let mut last_emit = std::time::Instant::now();
-    while moved < size {
-        if cancelled.load(Ordering::SeqCst) {
-            connection.close(2u32.into(), b"cancelled");
-            return Err("cancelled".into());
+        let mut header = [0u8; 8];
+        within(
+            HANDSHAKE,
+            "reading the header",
+            recv.read_exact(&mut header),
+        )
+        .await?;
+        let rest = u64::from_be_bytes(header);
+        if offset.checked_add(rest) != Some(size) {
+            return Err("they offered a different file".into());
         }
-        let n = match within(IDLE, "they stopped sending", recv.read(&mut buf)).await? {
-            Some(n) => n,
-            None => break,
-        };
-        // Never past the size that was agreed on, whatever the other side sends.
-        let n = n.min((size - moved) as usize);
-        file.write_all(&buf[..n])
-            .map_err(|err| format!("Could not write the file: {err}"))?;
-        moved += n as u64;
-        if last_emit.elapsed() >= EMIT_EVERY {
-            last_emit = std::time::Instant::now();
-            set_in(app, id, |t| t.moved = base + moved);
+        let mut file =
+            open_part(part, offset).map_err(|err| format!("Could not write the file: {err}"))?;
+        let mut moved = offset;
+        let mut buf = vec![0u8; CHUNK];
+        let mut last_emit = std::time::Instant::now();
+        while moved < size {
+            if cancelled.load(Ordering::SeqCst) {
+                connection.close(2u32.into(), b"cancelled");
+                return Err("cancelled".into());
+            }
+            let n = match within(IDLE, "they stopped sending", recv.read(&mut buf)).await? {
+                Some(n) => n,
+                None => break,
+            };
+            // Never past the size that was agreed on, whatever the other side sends.
+            let n = n.min((size - moved) as usize);
+            file.write_all(&buf[..n])
+                .map_err(|err| format!("Could not write the file: {err}"))?;
+            moved += n as u64;
+            if last_emit.elapsed() >= EMIT_EVERY {
+                last_emit = std::time::Instant::now();
+                set_in(app, id, |t| t.moved = base + moved);
+            }
         }
+        file.flush().map_err(net)?;
+        if moved != size {
+            return Err("the line dropped".into());
+        }
+        Ok(())
     }
-    file.flush().map_err(net)?;
-    if moved != size {
-        return Err("the line dropped".into());
+    .await;
+    match fetched {
+        Ok(()) => Ok(connection),
+        // Whatever failed first, the sender's refusal is the reason.
+        Err(_) if closed_with(&connection, CLOSE_OTHER_DEVICE) => Err(TAKEN_ELSEWHERE.into()),
+        Err(err) => Err(err),
     }
-    Ok(connection)
 }
 
 /// Into the library, tagged with who sent it.
@@ -1899,6 +1929,8 @@ async fn serve(app: &AppHandle, connection: &Connection) -> Result<(), String> {
                 "share: {} asked for by a device their yes did not name — refused",
                 ask.id
             );
+            // Said so, so that device stops without calling the send off.
+            connection.close(CLOSE_OTHER_DEVICE.into(), b"another device");
             return Err("not the device that said yes".into());
         }
         entry.transfer.stage = Stage::Moving;
@@ -2103,9 +2135,14 @@ fn watch_redial(app: &AppHandle, id: &str) {
 
 /// Did the receiver hang up with "bad hash" (code 1)?
 fn bad_hash(connection: &Connection) -> bool {
+    closed_with(connection, 1)
+}
+
+/// Did the other side hang up with `code`?
+fn closed_with(connection: &Connection, code: u32) -> bool {
     matches!(
         connection.close_reason(),
-        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) if close.error_code == 1u32.into()
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) if close.error_code == code.into()
     )
 }
 
