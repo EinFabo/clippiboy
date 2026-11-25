@@ -616,6 +616,28 @@ pub fn share_cancel(app: AppHandle, id: String) {
     }
 }
 
+/// The clip went to the bin: its sends still on their way are called off, as
+/// if each had been cancelled by hand. A friend could otherwise still say yes
+/// to an offer of a deleted clip and get it, or watch it fail after minutes
+/// of retries once its file was gone.
+pub fn clip_deleted(app: &AppHandle, clip_id: &str) {
+    let ids = sends_of(&app.state::<Share>().outgoing.lock(), clip_id);
+    for id in ids {
+        log::info!("share: {id} called off, its clip was deleted");
+        share_cancel(app.clone(), id.clone());
+        drop_cuts(&id);
+    }
+}
+
+/// The sends of `clip_id` not over yet.
+fn sends_of(outgoing: &HashMap<String, Outgoing>, clip_id: &str) -> Vec<String> {
+    outgoing
+        .iter()
+        .filter(|(_, o)| !o.transfer.stage.over() && o.transfer.clip_id.as_deref() == Some(clip_id))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 /// Takes one finished transfer off the list — the page does it a few seconds
 /// after the end, so the cards do not pile up.
 #[tauri::command]
@@ -2652,6 +2674,35 @@ mod tests {
             screenshot: false,
             recording: false,
         }
+    }
+
+    /// App layer #2: deleting a clip reaches every send of it still open.
+    #[test]
+    fn a_deleted_clip_calls_off_its_open_sends_only() {
+        let entry = |stage: Stage, clip: &str| Outgoing {
+            transfer: Transfer {
+                clip_id: Some(clip.into()),
+                ..outgoing("f", stage)
+            },
+            path: PathBuf::new(),
+            size: 1,
+            secret: String::new(),
+            tracks: Vec::new(),
+            answered: None,
+            reached: None,
+            serving: 0,
+            quiet_since: std::time::Instant::now(),
+        };
+        let mut all = HashMap::new();
+        all.insert("asking".to_string(), entry(Stage::Asking, "a"));
+        all.insert("moving".to_string(), entry(Stage::Moving, "a"));
+        all.insert("preparing".to_string(), entry(Stage::Preparing, "a"));
+        all.insert("done".to_string(), entry(Stage::Done, "a"));
+        all.insert("other".to_string(), entry(Stage::Moving, "b"));
+        let mut ids = sends_of(&all, "a");
+        ids.sort();
+        assert_eq!(ids, ["asking", "moving", "preparing"]);
+        assert!(sends_of(&all, "c").is_empty());
     }
 
     /// Their side ignores a second offer while the first still asks — so this

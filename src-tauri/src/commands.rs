@@ -1593,6 +1593,7 @@ pub(crate) fn trash_clip(
     let _ = app.emit("clip-deleted", id);
     crate::links::clip_deleted(app, id);
     crate::webhook::clip_deleted(app, id);
+    crate::share::clip_deleted(app, id);
     Ok(true)
 }
 
