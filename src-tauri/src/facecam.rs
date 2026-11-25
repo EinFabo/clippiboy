@@ -75,7 +75,8 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
         return None;
     }
     let length_ms = window.length_us / 1000;
-    let gaps_ms = ring
+    let offset_us = (at(&packets[0]) - g0) / 10;
+    let mut gaps_ms: Vec<(u64, u64)> = ring
         .gaps
         .iter()
         .filter(|g| g.from_100ns < end && g.to_100ns.is_none_or(|t| t > g0))
@@ -87,7 +88,13 @@ pub fn cam_cut(ring: &CamRing, window: &CamWindow) -> Option<CamCut> {
             (from.min(length_ms), to)
         })
         .collect();
-    let offset_us = (at(&packets[0]) - g0) / 10;
+    // A cam that came up after the clip's start has nothing before it: a gap,
+    // as in the file, where the overlay begins only with its first frame. The
+    // editor held the first frame there instead.
+    let late_ms = (offset_us / 1000).max(0) as u64;
+    if late_ms > 0 {
+        gaps_ms.insert(0, (0, late_ms.min(length_ms)));
+    }
     Some(CamCut {
         frames: packets.len() as u32,
         packets,
@@ -414,6 +421,8 @@ pub(crate) mod tests {
         let ring = ring(12 * S, 0, 30 * 30, None);
         let cut = cam_cut(&ring, &window(105_000_000, 5.0)).unwrap();
         assert_eq!(cut.offset_us, 1_500_000);
+        // Facecam #4: until then the clip has no cam, in the editor too.
+        assert_eq!(cut.gaps_ms, vec![(0, 1500)]);
     }
 
     #[test]
@@ -462,6 +471,7 @@ pub(crate) mod tests {
         let cut = cam_cut(&ring, &window(4 * S, 4.0)).unwrap();
         assert_eq!(cut.packets[0].pts_us, 6_000_000);
         assert_eq!(cut.offset_us, 2_000_000);
+        assert_eq!(cut.gaps_ms, vec![(0, 2000)]);
     }
 
     #[test]
