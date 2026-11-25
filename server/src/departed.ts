@@ -5,7 +5,7 @@
 // limit over and drop the suspension. Kept for a week; a suspended account's
 // row is kept for as long as the suspension stands (`departedKept`), since a
 // suspended account may be deleted too and its suspension must not run out
-// with the week.
+// with the week — its link times still go after the week (the hourly cron).
 //
 // Imports nothing, so it can be tested under plain Node (`npm test`).
 

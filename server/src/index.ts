@@ -87,8 +87,15 @@ export default {
         // Yesterday's count stays readable a day; older ones are done.
         env.DB.prepare("DELETE FROM anon_budget WHERE day < ?").bind(utcDay(Date.now() - DAY_MS)).run(),
         // What a deleted account left behind is kept for seven days, a
-        // suspension for as long as it stands (`departedKept`).
+        // suspension for as long as it stands (`departedKept`) — but its link
+        // times only for the seven days, as the privacy page says. Only rows
+        // that still hold some are written.
         env.DB.prepare("DELETE FROM departed WHERE left_at <= ? AND banned_at IS NULL")
+          .bind(departedCutoff(Date.now()))
+          .run(),
+        env.DB.prepare(
+          "UPDATE departed SET link_times = '[]' WHERE left_at <= ? AND banned_at IS NOT NULL AND link_times != '[]'",
+        )
           .bind(departedCutoff(Date.now()))
           .run(),
         // Sessions unused for that long no longer sign anyone in; their rows go too.
@@ -876,6 +883,7 @@ async function requestTo(
       .bind(a, b)
       .first<{ ends_at: number }>(),
   ]);
+  const now = Date.now();
   const outcome = requestRule({
     me,
     target: { id: target.id, allowRequests: target.allow_requests === 1 },
@@ -885,8 +893,16 @@ async function requestTo(
     handedOut,
     pendingOut: waiting?.n ?? 0,
     cooldownUntil: cooldown?.ends_at ?? null,
-    now: Date.now(),
+    now,
   });
+  // A rest that is over goes as soon as it is seen, rather than with the
+  // hourly cron. Best effort: the cron takes what this leaves.
+  if (cooldown && cooldown.ends_at <= now) {
+    await env.DB.prepare("DELETE FROM request_cooldowns WHERE user_a = ? AND user_b = ? AND ends_at <= ?")
+      .bind(a, b, now)
+      .run()
+      .catch((err) => console.error("request cooldown", a, b, err));
+  }
   // Only a request that writes counts against the friend limit: a refusal
   // writes nothing, and a few mistyped names must not lock the field.
   if (outcome.kind !== "refuse") await spend(env, me, "friend");
