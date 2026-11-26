@@ -79,11 +79,9 @@ fn invoke_hits(source: &str) -> Vec<(usize, String)> {
     hits
 }
 
-/// The wrapper an `invoke` at `start` belongs to: `member: (…) => invoke…`
-/// inside the nearest `const object`.
-fn wrapper_at(source: &str, start: usize, command: &str) -> Option<Wrapper> {
-    let bytes = source.as_bytes();
-    let mut at = skip_space_back(bytes, start);
+/// Back from `end` over `(…) =>`: where the arrow's `(` stands.
+fn arrow_back(bytes: &[u8], end: usize) -> Option<usize> {
+    let mut at = skip_space_back(bytes, end);
     if at < 2 || &bytes[at - 2..at] != b"=>" {
         return None;
     }
@@ -102,13 +100,33 @@ fn wrapper_at(source: &str, start: usize, command: &str) -> Option<Wrapper> {
             b'(' => {
                 depth -= 1;
                 if depth == 0 {
-                    break;
+                    return Some(at);
                 }
             }
             _ => {}
         }
     }
-    at = skip_space_back(bytes, at);
+}
+
+/// The wrapper an `invoke` at `start` belongs to: `member: (…) => invoke…`
+/// inside the nearest `const object` — or `member: (…) => helper(() =>
+/// invoke…)`, the call handed to a helper that runs it (`friends.ts` marks a
+/// sign-out as asked for that way). Without the second form such an invoke
+/// read as bare, as run by every window importing the module.
+fn wrapper_at(source: &str, start: usize, command: &str) -> Option<Wrapper> {
+    let bytes = source.as_bytes();
+    let mut at = skip_space_back(bytes, arrow_back(bytes, start)?);
+    if at > 0 && bytes[at - 1] == b'(' {
+        let call = at - 1;
+        let mut name = call;
+        while name > 0 && is_ident(bytes[name - 1]) {
+            name -= 1;
+        }
+        if name == call {
+            return None;
+        }
+        at = skip_space_back(bytes, arrow_back(bytes, name)?);
+    }
     if at == 0 || bytes[at - 1] != b':' {
         return None;
     }
@@ -345,6 +363,24 @@ fn a_call_split_over_lines_is_still_seen() {
     assert_eq!(
         calls(page, &found),
         BTreeSet::from(["link_exists".to_string()])
+    );
+}
+
+#[test]
+fn a_call_handed_to_a_helper_still_belongs_to_its_wrapper() {
+    let ipc = "export const friendsApi = {\n  signOut: () => asked(() => invoke<void>(\"friends_sign_out\")),\n};\nlisten(\"x\", () => invoke(\"bare_one\"));\nrun((x) => invoke(\"bare_two\"));\n";
+    let found = wrappers(ipc);
+    assert_eq!(
+        found,
+        vec![Wrapper {
+            object: "friendsApi".into(),
+            member: "signOut".into(),
+            command: "friends_sign_out".into(),
+        }]
+    );
+    assert_eq!(
+        bare_invokes(ipc),
+        vec!["bare_one".to_string(), "bare_two".to_string()]
     );
 }
 
