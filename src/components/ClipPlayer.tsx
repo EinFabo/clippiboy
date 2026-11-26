@@ -172,6 +172,28 @@ export function ClipPlayer({
   };
   /** Trim, mix or camera set and not applied — what a share would leave out. */
   const unappliedRef = useRef(false);
+  /**
+   * Shares asked for while a save or an undo wrote the file — from the
+   * right-click menu, which stays open to them. They go on once it is through,
+   * with the file it wrote, and are dropped with a write that failed: its
+   * notice says why.
+   */
+  const afterWrite = useRef<Array<(ok: boolean) => void>>([]);
+  /**
+   * A write went through and the new file is still loading: until its length
+   * is in, trim and length are the old file's, and what is set would read as
+   * not applied — a share would cut the new file a second time.
+   */
+  const freshFile = useRef(false);
+  /** A write is over: the shares waiting on it go on, or not at all. */
+  const endWrite = (ok: boolean) => {
+    // Now, not at the next render: a share asked for in between would wait for nothing.
+    writing.current = false;
+    freshFile.current = ok;
+    const waiting = afterWrite.current;
+    afterWrite.current = [];
+    for (const go of waiting) go(ok);
+  };
   const links = useLinks((s) => s.links);
   const [exporting, setExporting] = useState(false);
   // Counts the video element's restarts. Serves as a `key`: after saving, the
@@ -259,7 +281,11 @@ export function ClipPlayer({
   // A file that never loads must not leave the veil standing over the stage
   // for good. Nothing else can end `settling` if no picture ever arrives.
   useEffect(() => {
-    if (!settling) return;
+    if (!settling) {
+      // The new file is in (or never came): the editor reads from it again.
+      freshFile.current = false;
+      return;
+    }
     const timer = window.setTimeout(() => setSettling(false), 4000);
     return () => clearTimeout(timer);
   }, [settling]);
@@ -363,6 +389,7 @@ export function ClipPlayer({
     setAskingDiscard(false);
     setAskingTrim(false);
     settleTrim(false);
+    freshFile.current = false;
   }, [clip?.id]);
 
   /** Delete and move on within the player — if the last clip is gone, there is
@@ -776,6 +803,9 @@ export function ClipPlayer({
    */
   async function save(): Promise<boolean> {
     if (!clip || saving || restoring) return false;
+    writing.current = true;
+    freshFile.current = false;
+    let ok = false;
     const element = video.current;
     // After a real cut the file is shorter and starts elsewhere — the same number
     // of seconds would then sit past the new end. The offset is exactly the start
@@ -828,6 +858,7 @@ export function ClipPlayer({
       if (kept && !sameEdit({ ...current, tracks: kept }, current, duration)) mix.adopt(kept);
       if (resumeAt.current) resumeAt.current.shift = trim.start;
       setJustSaved(true);
+      ok = true;
       return true;
     } catch {
       // The store has already raised the error as a notice. The file is
@@ -843,6 +874,7 @@ export function ClipPlayer({
       // does not depend on whatever state the old one is in.
       setBroken(false);
       setReload((n) => n + 1);
+      endWrite(ok);
     }
   }
 
@@ -855,12 +887,21 @@ export function ClipPlayer({
   function saveFirst(): Promise<boolean> {
     if (!clip) return Promise.resolve(false);
     const finalCut = asksBeforeTrim(clip, trim.start, trim.end, duration);
-    const verdict = beforeSharing(writing.current, unappliedRef.current, finalCut);
-    if (verdict === "wait") return Promise.resolve(false);
+    // Right after a write the file holds what was set, whatever the editor
+    // still reads from the old one.
+    const unapplied = unappliedRef.current && !freshFile.current;
+    const verdict = beforeSharing(writing.current, unapplied, finalCut);
+    if (verdict === "wait") {
+      return new Promise((resolve) => {
+        afterWrite.current.push(resolve);
+      });
+    }
     if (verdict === "go") return Promise.resolve(true);
     if (verdict === "save") return save();
     // A cut on a recording is final: its question first, the share after a yes.
     settleTrim(false);
+    // The question stands in the editor pane, and fullscreen hides that.
+    if (document.fullscreenElement) void document.exitFullscreen();
     setAskingTrim(true);
     return new Promise((resolve) => {
       afterTrim.current = resolve;
@@ -883,6 +924,9 @@ export function ClipPlayer({
    */
   async function restoreOriginal() {
     if (!clip || saving || restoring) return;
+    writing.current = true;
+    freshFile.current = false;
+    let ok = false;
     const element = video.current;
     // The position you stand at sits later in the original by the start that was
     // cut away.
@@ -901,6 +945,7 @@ export function ClipPlayer({
     element?.load();
     try {
       await restoreClipOriginal(clip.id);
+      ok = true;
     } catch {
       // The notice is already in the store.
     } finally {
@@ -909,6 +954,7 @@ export function ClipPlayer({
       setWriteProgress(null);
       setBroken(false);
       setReload((n) => n + 1);
+      endWrite(ok);
     }
   }
 

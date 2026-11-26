@@ -32,9 +32,9 @@ export function leaving(writing: boolean, dirty: boolean): "wait" | "ask" | "go"
 }
 
 /**
- * What sharing from the player does first: refuse while a write runs (the
- * file is being replaced), go with a file that holds what is set, save what
- * is not applied yet — or ask first, for a cut that is final.
+ * What sharing from the player does first: wait while a write runs (the file
+ * is being replaced; the share follows it), go with a file that holds what is
+ * set, save what is not applied yet — or ask first, for a cut that is final.
  */
 export function beforeSharing(writing: boolean, unapplied: boolean, finalCut: boolean): "wait" | "go" | "save" | "ask" {
   if (writing) return "wait";

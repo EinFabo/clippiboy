@@ -33,7 +33,7 @@ test("sharing saves what is set and not applied, and asks first for a final cut"
   assert.equal(beforeSharing(false, true, false), "save");
   assert.equal(beforeSharing(false, true, true), "ask");
 });
-test("sharing waits for nothing while the file is being written: it does not go", () => {
+test("sharing while the file is being written waits for the write, whatever is set", () => {
   assert.equal(beforeSharing(true, false, false), "wait");
   assert.equal(beforeSharing(true, true, true), "wait");
 });
