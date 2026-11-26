@@ -2,8 +2,8 @@ import type { Link, LinkProgress, LinkQuota } from "./links";
 
 /**
  * Whether a clip can be shared as a link right now, and if not, why — read
- * the same way by the clip's menu and by Send to a friend, where a click on
- * someone offline shares the clip as a link instead.
+ * the same way by the clip's menu and by Send to a friend, where someone
+ * offline has a button that shares the clip as a link instead.
  */
 export interface LinkReason {
   /** The clip's link while it lasts: a click copies it again, nothing goes up. */
@@ -56,6 +56,11 @@ export function linkReason(clipId: string, facts: LinkFacts, now: number, inApp:
 /** "Share as link (5 days)", or with why it can't be had: "Share as link · uploading…". */
 export function shareAsLinkLabel(reason: string | null): string {
   return reason ? `Share as link · ${reason}` : "Share as link (5 days)";
+}
+
+/** The button beside someone offline in Send to a friend: copy the live link, or make one. */
+export function linkActionLabel(link: LinkReason): string {
+  return link.live ? "Copy share link" : shareAsLinkLabel(link.reason);
 }
 
 /** The weekday a used-up week frees its next link, "Fri". */

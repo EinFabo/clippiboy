@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { freeOn, linkReason, shareAsLinkLabel, type LinkFacts } from "./linkReason.ts";
+import { freeOn, linkActionLabel, linkReason, shareAsLinkLabel, type LinkFacts } from "./linkReason.ts";
 import type { LinkProgress, LinkQuota } from "./links.ts";
 
 const NOW = 1_000_000;
@@ -59,4 +59,11 @@ test("link: a used-up week says until when, and may still be tried", () => {
 
 test("link: in the browser nothing goes up", () => {
   assert.deepEqual(linkReason("c", facts({ signedIn: false }), NOW, false), { live: null, reason: null, enabled: false });
+});
+
+test("link: the button beside someone offline copies a live link, or says what a new one costs", () => {
+  const live = { id: "l", url: "https://clippiboy.com/c/l", expiresAt: NOW + 1 };
+  assert.equal(linkActionLabel(linkReason("c", facts({ links: { c: live } }), NOW, true)), "Copy share link");
+  assert.equal(linkActionLabel(linkReason("c", facts(), NOW, true)), "Share as link (5 days)");
+  assert.equal(linkActionLabel(linkReason("c", facts({ uploads: upload("uploading") }), NOW, true)), "Share as link · uploading…");
 });

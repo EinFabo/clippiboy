@@ -13,7 +13,7 @@ import {
   useFriendsExtra,
 } from "@/lib/friends";
 import { useLinks } from "@/lib/links";
-import { linkReason, shareAsLinkLabel } from "@/lib/linkReason";
+import { linkActionLabel, linkReason } from "@/lib/linkReason";
 import { friendStatus } from "@/lib/friendsList";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
 import { fileUrl, inTauri } from "@/lib/ipc";
@@ -106,10 +106,11 @@ function PresenceLine({
 /**
  * "Send to a friend" from a clip: everyone, in the Friends page's order. The
  * busy and offline ones stand greyed, so nobody seems to have gone missing —
- * and for a clip, a click on one shares it as a link instead, as the label on
- * hover says. Clips only go across while both are online — like Quick Share,
- * there is no mailbox in between. Signed out or without friends, the way there
- * is right in the picker.
+ * their rows send nothing, and for a clip they carry a button of their own
+ * that shares it as a link instead: a public upload is chosen, never what a
+ * click on a name turns into. Clips only go across while both are online —
+ * like Quick Share, there is no mailbox in between. Signed out or without
+ * friends, the way there is right in the picker.
  */
 export function SharePicker() {
   const host = useFullscreenHost();
@@ -165,9 +166,9 @@ export function SharePicker() {
   };
 
   // Offline or busy: the clip can still go as a share link, copied — the
-  // card bottom right shows the upload, as from the clip's menu. The label on
-  // hover says so first, and why not when the menu would. Not a screenshot:
-  // the link's page is a player, and there is no link to it.
+  // card bottom right shows the upload, as from the clip's menu. The button
+  // says so, and why not when the menu would. Not a screenshot: the link's
+  // page is a player, and there is no link to it.
   const link = clip.screenshot
     ? null
     : linkReason(clip.id, { links, signedIn: linksSignedIn, quota, uploads }, now, inTauri);
@@ -176,53 +177,62 @@ export function SharePicker() {
     close();
   };
 
-  const row = (friend: FriendUser, reachable: boolean) => (
-    <button
-      key={friend.id}
-      disabled={sending !== null || (!reachable && !link?.enabled)}
-      onClick={() => (reachable ? send(friend.id) : shareLink())}
-      className={cn(
-        "group relative flex w-full items-center gap-3 rounded-inner px-2.5 py-2 text-left transition-colors",
-        "hover:bg-hover disabled:cursor-default disabled:hover:bg-transparent",
-        sending === friend.id && "bg-hover",
-      )}
-    >
-      <span className={cn("contents", !reachable && "[&>*]:opacity-45")}>
-        <Avatar user={friend} status={friendStatus(presence[friend.id])} />
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-            <span className="truncate">{friend.displayName}</span>
-            {favorites.includes(friend.id) && <IconHeart filled className="h-3.5 w-3.5 shrink-0 text-accent-bright" />}
-          </span>
-          <PresenceLine presence={presence[friend.id]} lastSeen={lastSeen[friend.id]} now={now} />
+  /** The avatar, the name and the presence line — the same in both kinds of row. */
+  const who = (friend: FriendUser) => (
+    <>
+      <Avatar user={friend} status={friendStatus(presence[friend.id])} />
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+          <span className="truncate">{friend.displayName}</span>
+          {favorites.includes(friend.id) && <IconHeart filled className="h-3.5 w-3.5 shrink-0 text-accent-bright" />}
         </span>
+        <PresenceLine presence={presence[friend.id]} lastSeen={lastSeen[friend.id]} now={now} />
       </span>
-      {sending === friend.id ? (
-        <span className="text-xs text-ink-muted">Asking…</span>
-      ) : reachable ? (
-        <span
-          aria-hidden
-          className="grid h-8 w-8 shrink-0 place-items-center rounded-pill bg-elevated text-ink opacity-0 transition-opacity
-            group-hover:opacity-100 group-focus-visible:opacity-100"
-        >
-          <IconSend className="h-[15px] w-[15px]" />
-        </span>
-      ) : (
-        link && (
-          // Over the row's right end rather than beside the name: a label
-          // with its reason would squeeze the name of everyone offline.
-          <span
-            className="absolute top-1/2 right-2.5 flex h-8 -translate-y-1/2 items-center gap-1.5 rounded-pill bg-elevated px-3
-              text-xs font-medium whitespace-nowrap text-ink opacity-0 transition-opacity group-hover:opacity-100
-              group-focus-visible:opacity-100"
-          >
-            <IconLink className="h-3.5 w-3.5" />
-            {link.live ? "Copy share link" : shareAsLinkLabel(link.reason)}
-          </span>
-        )
-      )}
-    </button>
+    </>
   );
+
+  const row = (friend: FriendUser, reachable: boolean) =>
+    reachable ? (
+      <button
+        key={friend.id}
+        disabled={sending !== null}
+        onClick={() => send(friend.id)}
+        className={cn(
+          "group flex w-full items-center gap-3 rounded-inner px-2.5 py-2 text-left transition-colors",
+          "hover:bg-hover disabled:cursor-default disabled:hover:bg-transparent",
+          sending === friend.id && "bg-hover",
+        )}
+      >
+        {who(friend)}
+        {sending === friend.id ? (
+          <span className="text-xs text-ink-muted">Asking…</span>
+        ) : (
+          <span
+            aria-hidden
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-pill bg-elevated text-ink opacity-0 transition-opacity
+              group-hover:opacity-100 group-focus-visible:opacity-100"
+          >
+            <IconSend className="h-[15px] w-[15px]" />
+          </span>
+        )}
+      </button>
+    ) : (
+      <div key={friend.id} className="flex w-full items-center gap-3 rounded-inner px-2.5 py-2">
+        <span className="contents [&>*]:opacity-45">{who(friend)}</span>
+        {link && (
+          <Button
+            size="sm"
+            variant="secondary"
+            className="shrink-0"
+            icon={<IconLink className="h-3.5 w-3.5" />}
+            disabled={sending !== null || !link.enabled}
+            onClick={shareLink}
+          >
+            {linkActionLabel(link)}
+          </Button>
+        )}
+      </div>
+    );
 
   return createPortal(
     <div className={DIM} onClick={close}>
