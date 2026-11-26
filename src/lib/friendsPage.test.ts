@@ -13,6 +13,7 @@ import {
   shortLink,
   SIGN_IN_REASON_MS,
   signInFailed,
+  signedOutUnasked,
   statusChoice,
   statusPatch,
   statusText,
@@ -126,4 +127,14 @@ test("status menu: the Requests row counts its switches, Off while requests are 
   // Requests from links do nothing without the name on them.
   assert.equal(requestsSummary(true, false, true), "1 of 3 on");
   assert.equal(requestsSummary(false, true, true), "Off");
+});
+
+test("a sign-out the server did is told apart from one pressed here", () => {
+  const before = { signedIn: true };
+  const after = { signedIn: false };
+  assert.equal(signedOutUnasked(before, after, false), true);
+  assert.equal(signedOutUnasked(before, after, true), false);
+  // Never signed in, or still signed in: nothing happened.
+  assert.equal(signedOutUnasked(after, after, false), false);
+  assert.equal(signedOutUnasked(before, before, false), false);
 });

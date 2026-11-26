@@ -175,6 +175,20 @@ export function signInFailed(
   return prev.signingIn && !next.signingIn && !next.signedIn && !cancelled;
 }
 
+/**
+ * Was this a sign-out nobody asked for? Signed in before, signed out now,
+ * and neither Sign out nor Delete account pressed: the server turned the
+ * session away (a 401, or the live connection's 4001), and the sign-in card
+ * that follows should say so rather than look like a first visit.
+ */
+export function signedOutUnasked(
+  prev: { signedIn: boolean },
+  next: { signedIn: boolean },
+  asked: boolean,
+): boolean {
+  return prev.signedIn && !next.signedIn && !asked;
+}
+
 /** How long after a failed sign-in the core's error notice is its reason. */
 export const SIGN_IN_REASON_MS = 3_000;
 

@@ -2,8 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { inTauri } from "./ipc";
-import { isSignInReason, nextDrop, signInFailed, type Drop } from "./friendsPage";
+import { isSignInReason, nextDrop, signInFailed, signedOutUnasked, type Drop } from "./friendsPage";
 import type { FriendPresence, FriendsView } from "./types";
+
+/**
+ * Sign out or Delete account was pressed here: the signed-out view that
+ * follows is no surprise. Taken back if the call fails; used up by the
+ * sign-out it announced, or by the next sign-in.
+ */
+let signOutAsked = false;
+
+function asked(call: () => Promise<void>): Promise<void> {
+  signOutAsked = true;
+  return call().catch((err) => {
+    signOutAsked = false;
+    throw err;
+  });
+}
 
 /**
  * The friends list as the core holds it. Account, lists, presence and the live
@@ -14,7 +29,7 @@ import type { FriendPresence, FriendsView } from "./types";
 export const friendsApi = {
   signIn: () => invoke<void>("friends_sign_in"),
   cancelSignIn: () => invoke<void>("friends_cancel_sign_in"),
-  signOut: () => invoke<void>("friends_sign_out"),
+  signOut: () => asked(() => invoke<void>("friends_sign_out")),
   refresh: () => invoke<void>("friends_refresh"),
   /** Dials the server again at once instead of after the wait. */
   reconnect: () => invoke<void>("friends_reconnect"),
@@ -26,7 +41,7 @@ export const friendsApi = {
   block: (id: string) => invoke<void>("friends_block", { id }),
   unblock: (id: string) => invoke<void>("friends_unblock", { id }),
   setAllowRequests: (allow: boolean) => invoke<void>("friends_set_allow_requests", { allow }),
-  deleteAccount: () => invoke<void>("friends_delete_account"),
+  deleteAccount: () => asked(() => invoke<void>("friends_delete_account")),
 };
 
 const empty: FriendsView = {
@@ -49,12 +64,13 @@ if (inTauri) {
 
 /**
  * What the page knows beyond the core's view: when the hub was lost and who
- * was online until then (the core clears presence at once), and why the last
- * sign-in failed.
+ * was online until then (the core clears presence at once), why the last
+ * sign-in failed, and whether the server signed this one out unasked.
  */
-export const useFriendsExtra = create<{ drop: Drop | null; signInError: string | null }>(() => ({
+export const useFriendsExtra = create<{ drop: Drop | null; signInError: string | null; signedOut: boolean }>(() => ({
   drop: null,
   signInError: null,
+  signedOut: false,
 }));
 
 /** Cancel was pressed — the waiting flag going away is then no failure. */
@@ -74,6 +90,9 @@ useFriends.subscribe((next, prev) => {
   }
   if (!next.signingIn) signInCancelled = false;
   if (next.signedIn && useFriendsExtra.getState().signInError) useFriendsExtra.setState({ signInError: null });
+  if (signedOutUnasked(prev, next, signOutAsked)) useFriendsExtra.setState({ signedOut: true });
+  if (prev.signedIn !== next.signedIn) signOutAsked = false;
+  if (next.signedIn && useFriendsExtra.getState().signedOut) useFriendsExtra.setState({ signedOut: false });
 });
 
 if (inTauri) {
@@ -109,7 +128,7 @@ export function signInCardSays(notice: { kind: string }): boolean {
 export function startSignIn(): void {
   signInCancelled = false;
   failedAt = 0;
-  useFriendsExtra.setState({ signInError: null });
+  useFriendsExtra.setState({ signInError: null, signedOut: false });
   friendsApi.signIn().catch((err) => useFriendsExtra.setState({ signInError: String(err) }));
 }
 

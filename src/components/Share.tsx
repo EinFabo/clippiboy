@@ -303,13 +303,18 @@ export function SharePicker() {
 function PickerSignIn() {
   const signingIn = useFriends((s) => s.signingIn);
   const error = useFriendsExtra((s) => s.signInError);
+  const signedOut = useFriendsExtra((s) => s.signedOut);
   // The line here says why a sign-in failed — no toast as well.
   useEffect(showSignInCard, []);
   return (
     <div className="rounded-inner bg-elevated py-2 pr-2 pl-4">
       <div className="flex items-center gap-3">
         <p className="flex-1 text-sm text-ink-muted">
-          {signingIn ? "Waiting for Discord…" : "Sign in to send clips to friends."}
+          {signingIn
+            ? "Waiting for Discord…"
+            : signedOut
+              ? "You were signed out."
+              : "Sign in to send clips to friends."}
         </p>
         {signingIn ? (
           <Button size="sm" variant="ghost" onClick={cancelSignIn}>
@@ -317,7 +322,7 @@ function PickerSignIn() {
           </Button>
         ) : (
           <Button size="sm" variant="primary" icon={error ? <IconRetry className="h-3.5 w-3.5" /> : undefined} onClick={startSignIn}>
-            {error ? "Try again" : "Sign in"}
+            {error ? "Try again" : signedOut ? "Sign in again" : "Sign in"}
           </Button>
         )}
       </div>

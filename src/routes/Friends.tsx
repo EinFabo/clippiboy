@@ -105,6 +105,8 @@ function Header({ children }: { children?: ReactNode }) {
 function SignedOut() {
   const signingIn = useFriends((s) => s.signingIn);
   const error = useFriendsExtra((s) => s.signInError);
+  // The server turned the session away: said, not shown as a first visit.
+  const signedOut = useFriendsExtra((s) => s.signedOut);
   // The red line below says why a sign-in failed — no toast as well.
   useEffect(showSignInCard, []);
 
@@ -135,16 +137,20 @@ function SignedOut() {
             </>
           ) : (
             <>
-              <div className="space-y-1">
-                <p className="text-lg font-semibold">See who is playing</p>
-                <p className="text-[13px] text-ink-muted">Send clips straight to friends</p>
-              </div>
+              {signedOut ? (
+                <p className="text-lg font-semibold">You were signed out</p>
+              ) : (
+                <div className="space-y-1">
+                  <p className="text-lg font-semibold">See who is playing</p>
+                  <p className="text-[13px] text-ink-muted">Send clips straight to friends</p>
+                </div>
+              )}
               <Button
                 variant="primary"
                 onClick={startSignIn}
                 icon={error ? <IconRetry className="h-4 w-4" /> : <DiscordGlyph className="h-4 w-4" />}
               >
-                {error ? "Try again" : "Sign in with Discord"}
+                {error ? "Try again" : signedOut ? "Sign in again" : "Sign in with Discord"}
               </Button>
               {error && <p className="text-[13px] text-live">{error}</p>}
               <p className="text-xs text-ink-faint">ClippiBoy only reads your Discord name and picture.</p>
