@@ -3,7 +3,11 @@ import { nearestStep } from "./videoPlan.ts";
 import type { Clip } from "./types.ts";
 
 
-export type BufferState = "protecting" | "waiting" | "recording" | "off";
+/**
+ * `armed`: off, but nothing is missed — it starts by itself with the next
+ * game. Only `off` is a warning.
+ */
+export type BufferState = "protecting" | "waiting" | "recording" | "armed" | "off";
 
 export interface BufferStatus {
   state: BufferState;
@@ -22,10 +26,19 @@ export function bufferStatus(input: {
   bufferSeconds: number;
   /** A recording is running: the buffer being off is then not "nothing saved". */
   recording?: boolean;
+  /**
+   * Automatic start, only in game: the buffer is meant to be off until a game
+   * is in the foreground, and starts by itself then. With a game there and the
+   * buffer still off, it was stopped by hand — that is "off" again.
+   */
+  startsWithGame?: boolean;
 }): BufferStatus {
-  const { bufferActive, game, bufferedSeconds, bufferSeconds, recording } = input;
+  const { bufferActive, game, bufferedSeconds, bufferSeconds, recording, startsWithGame } = input;
   if (!bufferActive && recording) {
     return { state: "recording", title: "Buffer is off · recording", sub: "", fill: 0 };
+  }
+  if (!bufferActive && startsWithGame && !game) {
+    return { state: "armed", title: "Starts with your next game", sub: "", fill: 0 };
   }
   if (!bufferActive) {
     return { state: "off", title: "Buffer is off — nothing is being saved", sub: "", fill: 0 };
@@ -70,6 +83,21 @@ export function videoSummary(
   return `${rec.height}p${rec.fps} · ${nearestStep(rec.quality).label} · ${encoder}${
     fixedBitrate ? " · fixed bitrate" : ""
   }`;
+}
+
+/**
+ * The status card's warning when clips would come out silent: no audio
+ * source, or none of them switched on. `null` when something is recorded.
+ */
+export function silentWarning(sources: ReadonlyArray<{ enabled: boolean }>): string | null {
+  if (sources.length === 0) return "No audio source — clips are silent";
+  if (!sources.some((source) => source.enabled)) return "All audio sources are off — clips are silent";
+  return null;
+}
+
+/** The empty state's steps: with the buffer starting by itself, a game is the first. */
+export function firstSteps(startsWithGame: boolean, saveKey: string | null): string[] {
+  return startsWithGame ? ["Start a game", saveStep(saveKey)] : ["Start the buffer", "Play", saveStep(saveKey)];
 }
 
 export function audioSummary(enabled: number): string {

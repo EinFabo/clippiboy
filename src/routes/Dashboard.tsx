@@ -18,9 +18,10 @@ import { ProgressBar } from "@/components/ui/ProgressBar";
 import {
   audioSummary,
   bufferStatus,
+  firstSteps,
   justNowLeft,
   latestItems,
-  saveStep,
+  silentWarning,
   videoSummary,
 } from "@/lib/overview";
 import { useDiscordCopies } from "@/lib/discordCopies";
@@ -79,16 +80,22 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   // Named as the pad last used goes, else the keyboard's.
   const saveKey = shownHotkey(config, "saveClip");
   const recordKey = shownHotkey(config, "record");
+  // Automatic start, only in game: off between games is how it is meant to be.
+  const startsWithGame = config.buffer.autoStart && config.onlyBufferInGame;
   const status = bufferStatus({
     bufferActive,
     game: detectedGame,
     bufferedSeconds,
     bufferSeconds: config.buffer.seconds,
     recording,
+    startsWithGame,
   });
-  // Warned only when nothing at all is being saved; a recording is saving.
+  // Warned only when nothing at all is being saved; a recording is saving, and
+  // a buffer waiting for the next game misses nothing.
   const off = status.state === "off";
+  const armed = status.state === "armed";
   const bufferOff = !bufferActive;
+  const silent = silentWarning(config.sources);
   // The resolution the capture really gets: the saved screen, else the primary one.
   const rec = config.recording;
   const source =
@@ -177,7 +184,12 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
       >
         <div className="flex min-w-0 items-center gap-3.5">
           {bufferOff ? (
-            <span className={cn("h-2.5 w-2.5 shrink-0 rounded-pill", off ? "bg-warn" : "bg-live")} />
+            <span
+              className={cn(
+                "h-2.5 w-2.5 shrink-0 rounded-pill",
+                off ? "bg-warn" : armed ? "bg-ink-faint" : "bg-live",
+              )}
+            />
           ) : (
             <LiveDot className="h-2.5 w-2.5" />
           )}
@@ -187,7 +199,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           </div>
         </div>
         <div className="flex gap-2.5">
-          {bufferOff ? (
+          {/* Waiting for a game, a start by hand is still there for one the
+              detection does not know — quietly: it runs until it is stopped. */}
+          {armed ? (
+            <Button onClick={toggleBuffer}>Start now</Button>
+          ) : bufferOff ? (
             <Button variant="primary" onClick={toggleBuffer}>
               Start buffer
             </Button>
@@ -205,6 +221,15 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
           )}
         </div>
         {!bufferOff && <ProgressBar share={status.fill} className="col-span-full h-1.5" />}
+        {silent && (
+          <div className="col-span-full flex items-center gap-3 rounded-inner border border-warn/40 bg-warn/10 py-2 pr-2 pl-3.5">
+            <span className="h-2 w-2 shrink-0 rounded-pill bg-warn" />
+            <p className="min-w-0 flex-1 truncate text-[13px] font-medium text-warn">{silent}</p>
+            <Button size="sm" className="shrink-0" onClick={() => onNavigate("audio")}>
+              Set up audio
+            </Button>
+          </div>
+        )}
       </Card>
 
       {/* Until now only the recording page said so, and nobody has that open
@@ -252,7 +277,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 !!rateControl && rateControl !== "quality")}
             </button>
             {" · "}
-            <button className="hover:text-ink" onClick={() => onNavigate("audio")}>
+            <button className={cn("hover:text-ink", silent && "text-warn")} onClick={() => onNavigate("audio")}>
               {audioSummary(config.sources.filter((src) => src.enabled).length)}
               <span className="ml-1 text-ink">›</span>
             </button>
@@ -287,7 +312,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         {recent.length === 0 ? (
           <Card className="p-6">
             <ol className="flex flex-wrap items-center gap-x-8 gap-y-3 text-sm">
-              {["Start the buffer", "Play", saveStep(saveKey.value ? hotkeyLabel(saveKey.value, saveKey.family) : null)].map(
+              {firstSteps(startsWithGame, saveKey.value ? hotkeyLabel(saveKey.value, saveKey.family) : null).map(
                 (step, i) => (
                   <li key={step} className="flex items-center gap-3">
                     <span className="grid h-6 w-6 place-items-center rounded-pill border border-line text-xs text-ink-muted">

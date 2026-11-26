@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import {
   audioSummary,
   bufferStatus,
+  firstSteps,
   isJustNow,
   justNowLeft,
   latestItems,
   saveStep,
+  silentWarning,
   videoSummary,
 } from "./overview.ts";
 import type { Clip } from "./types.ts";
@@ -36,6 +38,27 @@ test("a stopped buffer with a recording running is not 'nothing saved'", () => {
   const s = bufferStatus({ bufferActive: false, game: null, bufferedSeconds: 0, bufferSeconds: 120, recording: true });
   assert.equal(s.state, "recording");
   assert.equal(s.title, "Buffer is off · recording");
+});
+test("a buffer that starts with the next game is no warning while no game runs", () => {
+  const s = bufferStatus({ bufferActive: false, game: null, bufferedSeconds: 0, bufferSeconds: 120, startsWithGame: true });
+  assert.equal(s.state, "armed");
+  assert.equal(s.title, "Starts with your next game");
+  assert.equal(s.sub, "");
+});
+test("off by hand during a game, or without automatic start, it warns", () => {
+  const inGame = bufferStatus({ bufferActive: false, game: "Valorant", bufferedSeconds: 0, bufferSeconds: 120, startsWithGame: true });
+  assert.equal(inGame.state, "off");
+  const manual = bufferStatus({ bufferActive: false, game: null, bufferedSeconds: 0, bufferSeconds: 120, startsWithGame: false });
+  assert.equal(manual.state, "off");
+  assert.equal(manual.title, "Buffer is off — nothing is being saved");
+});
+test("a recording beats the wait for a game", () => {
+  const s = bufferStatus({ bufferActive: false, game: null, bufferedSeconds: 0, bufferSeconds: 120, recording: true, startsWithGame: true });
+  assert.equal(s.state, "recording");
+});
+test("a running buffer reads the same whether it started by itself or not", () => {
+  const s = bufferStatus({ bufferActive: true, game: null, bufferedSeconds: 30, bufferSeconds: 120, startsWithGame: true });
+  assert.equal(s.state, "waiting");
 });
 test("the fill stays between 0 and 1", () => {
   assert.equal(bufferStatus({ bufferActive: true, game: null, bufferedSeconds: 500, bufferSeconds: 120 }).fill, 1);
@@ -67,4 +90,14 @@ test("video and audio are summed up in words", () => {
   assert.equal(videoSummary({ height: 1080, fps: 60, quality: 50 }, "x264", false), "1080p60 · Smallest · x264");
   assert.equal(audioSummary(1), "1 audio source");
   assert.equal(audioSummary(3), "3 audio sources");
+});
+
+test("silent clips are a warning: no source, or none switched on", () => {
+  assert.equal(silentWarning([]), "No audio source — clips are silent");
+  assert.equal(silentWarning([{ enabled: false }, { enabled: false }]), "All audio sources are off — clips are silent");
+  assert.equal(silentWarning([{ enabled: false }, { enabled: true }]), null);
+});
+test("with the buffer starting by itself the first step is a game", () => {
+  assert.deepEqual(firstSteps(true, "F9"), ["Start a game", "Press F9"]);
+  assert.deepEqual(firstSteps(false, null), ["Start the buffer", "Play", "Save a clip"]);
 });
