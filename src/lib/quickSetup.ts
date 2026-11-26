@@ -67,3 +67,12 @@ export function quickAdds(facts: QuickFacts, picks: QuickPicks): Array<{ label: 
   }
   return adds;
 }
+
+/**
+ * Does "Skip setup" add Quick setup's sources? Only to an empty list, and
+ * only while the audio step has not been answered — a "Later" there, or
+ * switches turned off before "Next", are choices, not gaps to fill.
+ */
+export function skipAddsSources(audioDecided: boolean, sources: readonly AudioSource[]): boolean {
+  return !audioDecided && sources.length === 0;
+}

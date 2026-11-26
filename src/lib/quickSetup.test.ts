@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { QUICK_PICKS, quickAdds, quickOffer, type QuickFacts } from "./quickSetup.ts";
+import { QUICK_PICKS, quickAdds, quickOffer, skipAddsSources, type QuickFacts } from "./quickSetup.ts";
 import type { AudioDevice, AudioSource, SourceKind } from "./types.ts";
 
 const dev = (id: string, kind: "output" | "input", isDefault = true): AudioDevice => ({
@@ -70,4 +70,10 @@ test("without default devices there is nothing to offer", () => {
   const none = facts({ devices: [dev("x", "output", false)] });
   assert.deepEqual(quickOffer(none), {});
   assert.deepEqual(quickAdds(none, QUICK_PICKS), []);
+});
+
+test("Skip setup fills an empty list only while the audio step is unanswered", () => {
+  assert.equal(skipAddsSources(false, []), true);
+  assert.equal(skipAddsSources(true, []), false);
+  assert.equal(skipAddsSources(false, [src({ type: "inputDevice", deviceId: "mic" })]), false);
 });

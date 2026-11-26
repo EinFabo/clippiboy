@@ -11,7 +11,7 @@ import { rectOf } from "@/lib/monitorMap";
 import { api, inTauri } from "@/lib/ipc";
 import { TargetCard } from "@/routes/Recording";
 import { QuickSetup, addQuickSources } from "@/routes/AudioMixer";
-import { QUICK_PICKS, type QuickPicks } from "@/lib/quickSetup";
+import { QUICK_PICKS, skipAddsSources, type QuickPicks } from "@/lib/quickSetup";
 import { Hotkeys } from "@/routes/settings/Hotkeys";
 import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { Row, screenChoice, USAGE_HINT } from "@/routes/settings/shared";
@@ -86,6 +86,8 @@ export function Setup() {
   const [busy, setBusy] = useState(false);
   /** The audio step's switches; its "Next" adds what they say. */
   const [picks, setPicks] = useState<QuickPicks>(QUICK_PICKS);
+  /** The audio step was answered — with "Next" or with "Later". */
+  const [audioDecided, setAudioDecided] = useState(false);
   /** The clip length as it was on opening, to tell "left alone" from "changed". */
   const [keptLength, setKeptLength] = useState("");
   /** Starts off: a switch already on is no consent. */
@@ -120,6 +122,7 @@ export function Setup() {
     setHeardKey(null);
     setAskHeard(false);
     setPicks(QUICK_PICKS);
+    setAudioDecided(false);
     if (!config.setupDone && inTauri) {
       void api
         .usageSource()
@@ -155,14 +158,33 @@ export function Setup() {
       } finally {
         setBusy(false);
       }
+      setAudioDecided(true);
     }
     setStep((current) => current + 1);
   };
 
+  /**
+   * Skipped on first start, the setup still leaves a ClippiBoy that records:
+   * what its steps start with, taken unseen — the audio step's sources unless
+   * that step was answered already, and the buffer starting by itself. Run
+   * again from the settings, it only closes.
+   */
   const skip = async () => {
     setSetupOpen(false);
-    // The switch was on the last step, unseen — so the notice still asks.
-    if (!config.setupDone) await patchConfig({ setupDone: true });
+    if (config.setupDone) return;
+    setBusy(true);
+    try {
+      if (skipAddsSources(audioDecided, useEngine.getState().config.sources)) {
+        await addQuickSources(picks);
+      }
+      // The usage switch was on the last step, unseen — so the notice still asks.
+      await patchConfig({
+        setupDone: true,
+        buffer: { ...useEngine.getState().config.buffer, autoStart },
+      });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const finish = async () => {
@@ -232,7 +254,7 @@ export function Setup() {
             ))}
           </div>
           {!last && (
-            <Button size="sm" variant="ghost" onClick={() => void skip()}>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void skip()}>
               Skip setup
             </Button>
           )}
@@ -309,7 +331,10 @@ export function Setup() {
               <QuickSetup
                 picks={picks}
                 onPicks={setPicks}
-                onPick={() => setStep(step + 1)}
+                onPick={() => {
+                  setAudioDecided(true);
+                  setStep(step + 1);
+                }}
                 pickLabel="Later, on the Audio page"
               />
               {config.sources.length > 0 && (
