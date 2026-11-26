@@ -9,6 +9,8 @@ import {
   latestItems,
   saveStep,
   silentWarning,
+  STARTING_GRACE_MS,
+  startingLeft,
   videoSummary,
 } from "./overview.ts";
 import type { Clip } from "./types.ts";
@@ -51,6 +53,36 @@ test("off by hand during a game, or without automatic start, it warns", () => {
   const manual = bufferStatus({ bufferActive: false, game: null, bufferedSeconds: 0, bufferSeconds: 120, startsWithGame: false });
   assert.equal(manual.state, "off");
   assert.equal(manual.title, "Buffer is off — nothing is being saved");
+});
+test("a game just there and the buffer not up yet is starting, not a warning", () => {
+  const at = 1_000_000;
+  const base = { bufferActive: false, game: "Valorant", bufferedSeconds: 0, bufferSeconds: 120, startsWithGame: true, gameSince: at };
+  const s = bufferStatus({ ...base, now: at + 2_000 });
+  assert.equal(s.state, "starting");
+  assert.equal(s.title, "Starting for Valorant…");
+  assert.equal(s.sub, "");
+  // Still starting just before the grace is over, off once it is.
+  assert.equal(bufferStatus({ ...base, now: at + STARTING_GRACE_MS - 1 }).state, "starting");
+  const late = bufferStatus({ ...base, now: at + STARTING_GRACE_MS });
+  assert.equal(late.state, "off");
+  assert.equal(late.title, "Buffer is off — nothing is being saved");
+});
+test("no grace without automatic start, without a time for the game, or with a recording", () => {
+  const at = 1_000_000;
+  const base = { bufferActive: false, game: "Valorant", bufferedSeconds: 0, bufferSeconds: 120, gameSince: at, now: at + 1_000 };
+  assert.equal(bufferStatus({ ...base, startsWithGame: false }).state, "off");
+  assert.equal(bufferStatus({ ...base, startsWithGame: true, gameSince: null }).state, "off");
+  assert.equal(bufferStatus({ ...base, startsWithGame: true, now: undefined }).state, "off");
+  assert.equal(bufferStatus({ ...base, startsWithGame: true, recording: true }).state, "recording");
+  // Up already: buffering, whatever the grace.
+  assert.equal(bufferStatus({ ...base, startsWithGame: true, bufferActive: true }).state, "protecting");
+});
+test("the starting grace counts down from when the game was first seen", () => {
+  assert.equal(startingLeft(null, 5), null);
+  assert.equal(startingLeft(undefined, 5), null);
+  assert.equal(startingLeft(1_000, 1_000), STARTING_GRACE_MS);
+  assert.equal(startingLeft(1_000, 1_000 + STARTING_GRACE_MS - 1), 1);
+  assert.equal(startingLeft(1_000, 1_000 + STARTING_GRACE_MS), null);
 });
 test("a recording beats the wait for a game", () => {
   const s = bufferStatus({ bufferActive: false, game: null, bufferedSeconds: 0, bufferSeconds: 120, recording: true, startsWithGame: true });

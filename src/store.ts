@@ -109,6 +109,12 @@ export interface EngineState {
   rateControl: RateControl | null;
   /** Game detected in the foreground, reported by the core. */
   detectedGame: string | null;
+  /**
+   * When this window first saw `detectedGame`, ms since the epoch; `null`
+   * without one. The automatic start sets off then — the Overview gives it a
+   * moment before it calls an off buffer a warning.
+   */
+  detectedGameSince: number | null;
   /** A newer version the core has found and not yet installed. */
   update: UpdateInfo | null;
   /** The running download of `update`; `null` while none runs. */
@@ -339,6 +345,7 @@ export const useEngine = create<EngineState>((set, get) => ({
   bufferBytes: 0,
   rateControl: null,
   detectedGame: null,
+  detectedGameSince: null,
   update: null,
   updateProgress: null,
   ffmpeg: { state: "checking" },
@@ -477,7 +484,8 @@ export const useEngine = create<EngineState>((set, get) => ({
         const part = changedPart(get(), patch);
         if (part) set(part);
       };
-      await events.onStatus((s) =>
+      await events.onStatus((s) => {
+        const seen = get();
         setChanged({
           bufferActive: s.bufferActive,
           recording: s.recording,
@@ -490,8 +498,11 @@ export const useEngine = create<EngineState>((set, get) => ({
           bufferBytes: s.bufferBytes,
           rateControl: s.rateControl,
           detectedGame: s.game,
-        }),
-      );
+          // A new game, or the same one back after a tab away: its start is now.
+          detectedGameSince:
+            s.game === seen.detectedGame ? seen.detectedGameSince : s.game === null ? null : Date.now(),
+        });
+      });
       // Hotkey, tray and button all run through the same path in the core and
       // report back here — which is why the clip is only added at this one spot.
       await events.onRecordingProgress((share) =>

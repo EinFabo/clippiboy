@@ -5,9 +5,27 @@ import type { Clip } from "./types.ts";
 
 /**
  * `armed`: off, but nothing is missed — it starts by itself with the next
- * game. Only `off` is a warning.
+ * game. `starting`: that game is there and the start is on its way. Only
+ * `off` is a warning.
  */
-export type BufferState = "protecting" | "waiting" | "recording" | "armed" | "off";
+export type BufferState = "protecting" | "waiting" | "recording" | "armed" | "starting" | "off";
+
+/**
+ * How long a buffer that starts with the game may take to be up before the
+ * card warns that it is off. Bringing up capture and encoder takes a few
+ * seconds; without this the card flashed orange with Start buffer every time.
+ */
+export const STARTING_GRACE_MS = 15_000;
+
+/**
+ * What is left of that grace for a game this window first saw at `since`, in
+ * ms — or `null` when there is no game or the grace is over.
+ */
+export function startingLeft(since: number | null | undefined, now: number): number | null {
+  if (since == null) return null;
+  const left = since + STARTING_GRACE_MS - now;
+  return left > 0 ? left : null;
+}
 
 export interface BufferStatus {
   state: BufferState;
@@ -29,16 +47,28 @@ export function bufferStatus(input: {
   /**
    * Automatic start, only in game: the buffer is meant to be off until a game
    * is in the foreground, and starts by itself then. With a game there and the
-   * buffer still off, it was stopped by hand — that is "off" again.
+   * buffer still off, it was stopped by hand — that is "off" again, once the
+   * start has had its grace (see `gameSince`).
    */
   startsWithGame?: boolean;
+  /**
+   * When this window first saw `game`, ms since the epoch: the moment the
+   * automatic start set off. Until {@link STARTING_GRACE_MS} after it, an off
+   * buffer is still starting; without it, there is no grace.
+   */
+  gameSince?: number | null;
+  /** Now, ms since the epoch — for that grace. */
+  now?: number;
 }): BufferStatus {
-  const { bufferActive, game, bufferedSeconds, bufferSeconds, recording, startsWithGame } = input;
+  const { bufferActive, game, bufferedSeconds, bufferSeconds, recording, startsWithGame, gameSince, now } = input;
   if (!bufferActive && recording) {
     return { state: "recording", title: "Buffer is off · recording", sub: "", fill: 0 };
   }
   if (!bufferActive && startsWithGame && !game) {
     return { state: "armed", title: "Starts with your next game", sub: "", fill: 0 };
+  }
+  if (!bufferActive && startsWithGame && game && now !== undefined && startingLeft(gameSince, now) !== null) {
+    return { state: "starting", title: `Starting for ${game}…`, sub: "", fill: 0 };
   }
   if (!bufferActive) {
     return { state: "off", title: "Buffer is off — nothing is being saved", sub: "", fill: 0 };

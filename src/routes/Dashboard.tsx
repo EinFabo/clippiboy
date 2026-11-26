@@ -22,6 +22,7 @@ import {
   justNowLeft,
   latestItems,
   silentWarning,
+  startingLeft,
   videoSummary,
 } from "@/lib/overview";
 import { useDiscordCopies } from "@/lib/discordCopies";
@@ -38,6 +39,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     bufferedSeconds,
     rateControl,
     detectedGame,
+    detectedGameSince,
     toggleBuffer,
     saveClip,
     takeScreenshot,
@@ -60,6 +62,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
       bufferedSeconds: s.bufferedSeconds,
       rateControl: s.rateControl,
       detectedGame: s.detectedGame,
+      detectedGameSince: s.detectedGameSince,
       toggleBuffer: s.toggleBuffer,
       saveClip: s.saveClip,
       takeScreenshot: s.takeScreenshot,
@@ -80,6 +83,10 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   // Named as the pad last used goes, else the keyboard's.
   const saveKey = shownHotkey(config, "saveClip");
   const recordKey = shownHotkey(config, "record");
+  // "Just now" has to go by itself: a timer to the minute, and a slow tick so
+  // the "5m ago" texts do not stand still. The buffer's start has its grace by
+  // the same clock.
+  const [now, setNow] = useState(() => Date.now());
   // Automatic start, only in game: off between games is how it is meant to be.
   const startsWithGame = config.buffer.autoStart && config.onlyBufferInGame;
   const status = bufferStatus({
@@ -89,11 +96,22 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
     bufferSeconds: config.buffer.seconds,
     recording,
     startsWithGame,
+    gameSince: detectedGameSince,
+    now,
   });
-  // Warned only when nothing at all is being saved; a recording is saving, and
-  // a buffer waiting for the next game misses nothing.
+  // Warned only when nothing at all is being saved; a recording is saving, a
+  // buffer waiting for the next game misses nothing, and one starting with the
+  // game that just came is on its way.
   const off = status.state === "off";
   const armed = status.state === "armed";
+  const starting = status.state === "starting";
+  // The grace runs out by itself: a render then, with no status change to bring one.
+  useEffect(() => {
+    const left = startingLeft(detectedGameSince, Date.now());
+    if (left === null) return;
+    const id = setTimeout(() => setNow(Date.now()), left + 50);
+    return () => clearTimeout(id);
+  }, [detectedGameSince]);
   const bufferOff = !bufferActive;
   const silent = silentWarning(config.sources);
   // The resolution the capture really gets: the saved screen, else the primary one.
@@ -105,9 +123,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const shownHeight = source ? fit(rec.height, source).height : rec.height;
   // Of every kind: the Overview shows what just happened, not only clips.
   const recent = useMemo(() => latestItems(clips), [clips]);
-  // "Just now" has to go by itself: a timer to the minute, and a slow tick so
-  // the "5m ago" texts do not stand still.
-  const [now, setNow] = useState(() => Date.now());
   const newest = recent[0];
   const newestAt = newest?.createdAt;
   useEffect(() => {
@@ -187,7 +202,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
             <span
               className={cn(
                 "h-2.5 w-2.5 shrink-0 rounded-pill",
-                off ? "bg-warn" : armed ? "bg-ink-faint" : "bg-live",
+                off ? "bg-warn" : armed || starting ? "bg-ink-faint" : "bg-live",
               )}
             />
           ) : (
@@ -200,8 +215,10 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: Route) => void }) {
         </div>
         <div className="flex gap-2.5">
           {/* Waiting for a game, a start by hand is still there for one the
-              detection does not know — quietly: it runs until it is stopped. */}
-          {armed ? (
+              detection does not know — quietly: it runs until it is stopped.
+              Starting with the game that just came, nothing to press: a
+              second start would only race the one under way. */}
+          {starting ? null : armed ? (
             <Button onClick={toggleBuffer}>Start now</Button>
           ) : bufferOff ? (
             <Button variant="primary" onClick={toggleBuffer}>
