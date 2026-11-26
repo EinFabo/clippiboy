@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { freeOn, linkActionLabel, linkReason, shareAsLinkLabel, type LinkFacts } from "./linkReason.ts";
+import { freeOn, linkActionLabel, linkButtonLabel, linkReason, shareAsLinkLabel, type LinkFacts } from "./linkReason.ts";
 import type { LinkProgress, LinkQuota } from "./links.ts";
 
 const NOW = 1_000_000;
@@ -66,4 +66,14 @@ test("link: the button beside someone offline copies a live link, or says what a
   assert.equal(linkActionLabel(linkReason("c", facts({ links: { c: live } }), NOW, true)), "Copy share link");
   assert.equal(linkActionLabel(linkReason("c", facts(), NOW, true)), "Share as link (5 days)");
   assert.equal(linkActionLabel(linkReason("c", facts({ uploads: upload("uploading") }), NOW, true)), "Share as link · uploading…");
+});
+
+test("link: the button itself says it short, whatever the reason", () => {
+  const live = { id: "l", url: "https://clippiboy.com/c/l", expiresAt: NOW + 1 };
+  assert.equal(linkButtonLabel(linkReason("c", facts({ links: { c: live } }), NOW, true)), "Copy link");
+  assert.equal(linkButtonLabel(linkReason("c", facts(), NOW, true)), "Share link");
+  const out = linkReason("c", facts({ signedIn: false }), NOW, true);
+  assert.equal(linkButtonLabel(out), "Share link");
+  // The reason stays in the hover text.
+  assert.equal(linkActionLabel(out), "Share as link · sign in on Friends first");
 });

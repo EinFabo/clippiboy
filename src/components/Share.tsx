@@ -13,7 +13,7 @@ import {
   useFriendsExtra,
 } from "@/lib/friends";
 import { useLinks } from "@/lib/links";
-import { linkActionLabel, linkReason } from "@/lib/linkReason";
+import { linkActionLabel, linkButtonLabel, linkReason } from "@/lib/linkReason";
 import { friendStatus } from "@/lib/friendsList";
 import { clipName, formatDuration, formatSize } from "@/lib/format";
 import { fileUrl, inTauri } from "@/lib/ipc";
@@ -167,8 +167,8 @@ export function SharePicker() {
 
   // Offline or busy: the clip can still go as a share link, copied — the
   // card bottom right shows the upload, as from the clip's menu. The button
-  // says so, and why not when the menu would. Not a screenshot: the link's
-  // page is a player, and there is no link to it.
+  // says so; why not, where the menu would, is its hover text. Not a
+  // screenshot: the link's page is a player, and there is no link to it.
   const link = clip.screenshot
     ? null
     : linkReason(clip.id, { links, signedIn: linksSignedIn, quota, uploads }, now, inTauri);
@@ -220,16 +220,21 @@ export function SharePicker() {
       <div key={friend.id} className="flex w-full items-center gap-3 rounded-inner px-2.5 py-2">
         <span className="contents [&>*]:opacity-45">{who(friend)}</span>
         {link && (
-          <Button
-            size="sm"
-            variant="secondary"
-            className="shrink-0"
-            icon={<IconLink className="h-3.5 w-3.5" />}
-            disabled={sending !== null || !link.enabled}
-            onClick={shareLink}
-          >
-            {linkActionLabel(link)}
-          </Button>
+          // Short on every offline row, so the names keep their room; the
+          // whole of it, and why not, on hover — on the wrapper, since a
+          // disabled button takes no pointer and would show no hover text.
+          <span title={linkActionLabel(link)} className="flex shrink-0">
+            <Button
+              size="xs"
+              variant="secondary"
+              icon={<IconLink className="h-3.5 w-3.5" />}
+              aria-description={linkActionLabel(link)}
+              disabled={sending !== null || !link.enabled}
+              onClick={shareLink}
+            >
+              {linkButtonLabel(link)}
+            </Button>
+          </span>
         )}
       </div>
     );

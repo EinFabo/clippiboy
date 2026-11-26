@@ -58,9 +58,21 @@ export function shareAsLinkLabel(reason: string | null): string {
   return reason ? `Share as link · ${reason}` : "Share as link (5 days)";
 }
 
-/** The button beside someone offline in Send to a friend: copy the live link, or make one. */
+/**
+ * The button beside someone offline in Send to a friend, in full: copy the
+ * live link, or make one, and why not. Its hover text — the button itself
+ * says it short, see {@link linkButtonLabel}.
+ */
 export function linkActionLabel(link: LinkReason): string {
   return link.live ? "Copy share link" : shareAsLinkLabel(link.reason);
+}
+
+/**
+ * That button's own words, short: it stands on every offline row, and a
+ * label with its reason squeezed the names beside it.
+ */
+export function linkButtonLabel(link: LinkReason): string {
+  return link.live ? "Copy link" : "Share link";
 }
 
 /** The weekday a used-up week frees its next link, "Fri". */

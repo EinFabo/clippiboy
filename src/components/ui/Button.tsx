@@ -2,7 +2,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
-type Size = "sm" | "md";
+type Size = "xs" | "sm" | "md";
 
 interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
@@ -18,6 +18,8 @@ const variants: Record<Variant, string> = {
 };
 
 const sizes: Record<Size, string> = {
+  // Beside a name in a list row, where a full-size button would take its room.
+  xs: "h-7 px-2.5 text-xs gap-1",
   sm: "h-8 px-3.5 text-[13px] gap-1.5",
   md: "h-10 px-5 text-sm gap-2",
 };
