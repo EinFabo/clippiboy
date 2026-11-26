@@ -10,7 +10,8 @@ import { cn } from "@/lib/cn";
 import { rectOf } from "@/lib/monitorMap";
 import { api, inTauri } from "@/lib/ipc";
 import { TargetCard } from "@/routes/Recording";
-import { QuickSetup } from "@/routes/AudioMixer";
+import { QuickSetup, addQuickSources } from "@/routes/AudioMixer";
+import { QUICK_PICKS, type QuickPicks } from "@/lib/quickSetup";
 import { Hotkeys } from "@/routes/settings/Hotkeys";
 import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { Row, screenChoice, USAGE_HINT } from "@/routes/settings/shared";
@@ -58,7 +59,6 @@ export function Setup() {
     setupOpen,
     setSetupOpen,
     patchConfig,
-    upsertSource,
     refreshTargets,
     refreshSources,
     bufferActive,
@@ -71,7 +71,6 @@ export function Setup() {
       setupOpen: s.setupOpen,
       setSetupOpen: s.setSetupOpen,
       patchConfig: s.patchConfig,
-      upsertSource: s.upsertSource,
       refreshTargets: s.refreshTargets,
       refreshSources: s.refreshSources,
       bufferActive: s.bufferActive,
@@ -85,6 +84,8 @@ export function Setup() {
   const [autoStart, setAutoStart] = useState(true);
   const [withWindows, setWithWindows] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** The audio step's switches; its "Next" adds what they say. */
+  const [picks, setPicks] = useState<QuickPicks>(QUICK_PICKS);
   /** The clip length as it was on opening, to tell "left alone" from "changed". */
   const [keptLength, setKeptLength] = useState("");
   /** Starts off: a switch already on is no consent. */
@@ -118,6 +119,7 @@ export function Setup() {
     setUsageStats(config.usageStats && config.usageStatsAsked);
     setHeardKey(null);
     setAskHeard(false);
+    setPicks(QUICK_PICKS);
     if (!config.setupDone && inTauri) {
       void api
         .usageSource()
@@ -142,6 +144,19 @@ export function Setup() {
   const heard = (key: string) => {
     setHeardKey(key);
     setStep(step + 1);
+  };
+
+  // Functional: the "heard" step can slot in while an add is still running.
+  const next = async () => {
+    if (name === "audio") {
+      setBusy(true);
+      try {
+        await addQuickSources(picks);
+      } finally {
+        setBusy(false);
+      }
+    }
+    setStep((current) => current + 1);
   };
 
   const skip = async () => {
@@ -292,7 +307,8 @@ export function Setup() {
           {name === "audio" && (
             <Step title="What should your clips sound like?" hint="Without an audio source your clips are silent.">
               <QuickSetup
-                onAdd={upsertSource}
+                picks={picks}
+                onPicks={setPicks}
                 onPick={() => setStep(step + 1)}
                 pickLabel="Later, on the Audio page"
               />
@@ -376,6 +392,7 @@ export function Setup() {
           <Button
             variant="ghost"
             className={cn(step === 0 && "invisible")}
+            disabled={busy}
             onClick={() => setStep(step - 1)}
           >
             Back
@@ -385,7 +402,7 @@ export function Setup() {
               {busy ? "Starting…" : bufferActive ? "Finish" : "Finish and start buffer"}
             </Button>
           ) : (
-            <Button variant="primary" onClick={() => setStep(step + 1)}>
+            <Button variant="primary" disabled={busy} onClick={() => void next()}>
               {step === 0 ? "Set up" : "Next"}
             </Button>
           )}

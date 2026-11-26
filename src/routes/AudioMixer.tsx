@@ -32,7 +32,8 @@ import { labelToSave } from "@/lib/draft";
 import { useReorder } from "@/lib/useReorder";
 import { gainText, leftoversMode, sourceStatus } from "@/lib/audioRows";
 import { placeMenu } from "@/lib/menuPlace";
-import { discordKind, hasDiscordSource, runningDiscord } from "@/lib/discordSource";
+import { discordKind } from "@/lib/discordSource";
+import { QUICK_PICKS, quickAdds, quickOffer, type QuickPicks } from "@/lib/quickSetup";
 import type { AudioProcess, AudioSource, SourceKind } from "@/lib/types";
 import { announce } from "@/lib/announce";
 import { appRows, deviceAdded } from "@/lib/appPicker";
@@ -573,10 +574,23 @@ export function AudioMixer() {
       )}
 
       {config.sources.length === 0 && (
-        <QuickSetup onAdd={upsertSource} onPick={() => setAdding(true)} />
+        <QuickSetup onPick={() => setAdding(true)} />
       )}
     </div>
   );
+}
+
+/**
+ * Adds what Quick setup's switches say — the defaults unless given others.
+ * One after the other: each call writes the whole configuration. Read from
+ * the store at the moment of the click, so the setup's "Next" and "Skip
+ * setup" add exactly what the card shows.
+ */
+export async function addQuickSources(picks: QuickPicks = QUICK_PICKS): Promise<void> {
+  const { config, devices, processes, appCapture, upsertSource } = useEngine.getState();
+  for (const { label, kind } of quickAdds({ devices, sources: config.sources, processes, appCapture }, picks)) {
+    await upsertSource(newSource(label, kind));
+  }
 }
 
 /**
@@ -588,15 +602,21 @@ export function AudioMixer() {
  * a source whose name and device can drift apart, and a setup that raises a
  * warning the moment it is done is the wrong first impression. Game audio is
  * left out on purpose: the output already carries it.
+ *
+ * Given `picks`, the switches are the caller's and so is the adding: the
+ * setup's own "Next" adds them, and an "Add" here beside it would only be a
+ * second button for the same thing — the one people missed.
  */
 export function QuickSetup({
-  onAdd,
   onPick,
   pickLabel = "Pick sources myself",
+  picks,
+  onPicks,
 }: {
-  onAdd: (source: AudioSource) => Promise<void>;
   onPick: () => void;
   pickLabel?: string;
+  picks?: QuickPicks;
+  onPicks?: (picks: QuickPicks) => void;
 }) {
   const devices = useEngine((s) => s.devices);
   const sources = useEngine((s) => s.config.sources);
@@ -607,83 +627,59 @@ export function QuickSetup({
     void refreshSources();
   }, [refreshSources]);
   const appCapture = useEngine((s) => s.appCapture);
-  // Discord has its own track only through per-app capture.
-  const discord = appCapture !== false ? runningDiscord(processes) : undefined;
-  const discordAdded = hasDiscordSource(sources);
-  const output = devices.find((d) => d.kind === "output" && d.isDefault);
-  const input = devices.find((d) => d.kind === "input" && d.isDefault);
+  const [own, setOwn] = useState<QuickPicks>(QUICK_PICKS);
+  const shown = picks ?? own;
+  const setShown = onPicks ?? setOwn;
+  const [busy, setBusy] = useState(false);
+  const facts = { devices, sources, processes, appCapture };
   // The setup shows this with sources already there too: what is in the list
   // already is marked, not added a second time.
-  const has = (type: "outputDevice" | "inputDevice", id: string | undefined) =>
-    id !== undefined &&
-    sources.some((s) => s.kind.type === type && "deviceId" in s.kind && s.kind.deviceId === id);
-  const outputAdded = has("outputDevice", output?.id);
-  const inputAdded = has("inputDevice", input?.id);
-  const [withOutput, setWithOutput] = useState(true);
-  const [withInput, setWithInput] = useState(true);
-  const [withDiscord, setWithDiscord] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const offer = quickOffer(facts);
 
   const add = async () => {
     setBusy(true);
     try {
-      // One after the other: each call writes the whole configuration.
-      if (withOutput && output && !outputAdded) {
-        await onAdd(newSource(output.name, { type: "outputDevice", deviceId: output.id }));
-      }
-      if (withInput && input && !inputAdded) {
-        await onAdd(newSource(input.name, { type: "inputDevice", deviceId: input.id }));
-      }
-      if (withDiscord && discord && !discordAdded) {
-        await onAdd(discordSource(discord));
-      }
+      await addQuickSources(own);
     } finally {
       setBusy(false);
     }
   };
 
   const rows: Array<{
-    on: boolean;
-    set: (on: boolean) => void;
+    key: keyof QuickPicks;
     added: boolean;
     icon: ReactNode;
     title: string;
     device: string;
-  }> = [
-    {
-      on: withOutput,
-      set: setWithOutput,
-      added: outputAdded,
+  }> = [];
+  if (offer.output) {
+    rows.push({
+      key: "output",
+      added: offer.output.added,
       icon: <IconSpeaker className="h-4 w-4" />,
       title: "Desktop audio",
-      device: output ? output.name : "",
-    },
-  ];
-  if (!output) rows.pop();
-  if (input) {
-    rows.push({
-      on: withInput,
-      set: setWithInput,
-      added: inputAdded,
-      icon: <IconMic className="h-4 w-4" />,
-      title: "Microphone",
-      device: input.name,
+      device: offer.output.device.name,
     });
   }
-  if (appCapture !== false && (discord || discordAdded)) {
+  if (offer.input) {
     rows.push({
-      on: withDiscord,
-      set: setWithDiscord,
-      added: discordAdded,
+      key: "input",
+      added: offer.input.added,
+      icon: <IconMic className="h-4 w-4" />,
+      title: "Microphone",
+      device: offer.input.device.name,
+    });
+  }
+  if (offer.discord) {
+    rows.push({
+      key: "discord",
+      added: offer.discord.added,
       icon: <IconApp className="h-4 w-4" />,
       title: "Discord",
       device: "Friends' voices on their own track",
     });
   }
-  const nothing =
-    !(withOutput && output && !outputAdded) &&
-    !(withInput && input && !inputAdded) &&
-    !(withDiscord && discord && !discordAdded);
+  const nothing = quickAdds(facts, own).length === 0;
   const allAdded = rows.length > 0 && rows.every((row) => row.added);
 
   return (
@@ -714,7 +710,11 @@ export function QuickSetup({
                 Added
               </span>
             ) : (
-              <Toggle checked={row.on} onChange={row.set} />
+              <Toggle
+                label={row.title}
+                checked={shown[row.key]}
+                onChange={(on) => setShown({ ...shown, [row.key]: on })}
+              />
             )}
           </div>
         ))}
@@ -723,14 +723,15 @@ export function QuickSetup({
         <Button size="sm" variant="ghost" onClick={onPick}>
           {pickLabel}
         </Button>
-        <Button size="sm" variant="primary" disabled={busy || nothing} onClick={() => void add()}>
-          {busy ? "Adding…" : allAdded ? "All added" : "Add"}
-        </Button>
+        {!picks && (
+          <Button size="sm" variant="primary" disabled={busy || nothing} onClick={() => void add()}>
+            {busy ? "Adding…" : allAdded ? "All added" : "Add"}
+          </Button>
+        )}
       </div>
     </Card>
   );
 }
-
 
 /** Distance to the window edge, and the space between button and list. */
 const EDGE = 8;
