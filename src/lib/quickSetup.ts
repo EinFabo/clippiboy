@@ -76,3 +76,15 @@ export function quickAdds(facts: QuickFacts, picks: QuickPicks): Array<{ label: 
 export function skipAddsSources(audioDecided: boolean, sources: readonly AudioSource[]): boolean {
   return !audioDecided && sources.length === 0;
 }
+
+/** All switches off: Quick setup's "Next" then adds only what is turned on. */
+export const NO_PICKS: QuickPicks = { output: false, input: false, discord: false };
+
+/**
+ * What the setup's audio step starts with. On an empty list the defaults are
+ * on, as on first start. Run again over sources already set up, they start
+ * off: a "Next" there is going on, not asking for the defaults beside them.
+ */
+export function setupPicks(sources: readonly AudioSource[]): QuickPicks {
+  return sources.length === 0 ? QUICK_PICKS : NO_PICKS;
+}

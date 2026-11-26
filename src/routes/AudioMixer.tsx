@@ -612,11 +612,14 @@ export function QuickSetup({
   pickLabel = "Pick sources myself",
   picks,
   onPicks,
+  adding = false,
 }: {
   onPick: () => void;
   pickLabel?: string;
   picks?: QuickPicks;
   onPicks?: (picks: QuickPicks) => void;
+  /** The caller is adding what the switches say: the way past it waits for that. */
+  adding?: boolean;
 }) {
   const devices = useEngine((s) => s.devices);
   const sources = useEngine((s) => s.config.sources);
@@ -720,7 +723,7 @@ export function QuickSetup({
         ))}
       </div>
       <div className="mt-4 flex items-center justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onPick}>
+        <Button size="sm" variant="ghost" disabled={adding} onClick={onPick}>
           {pickLabel}
         </Button>
         {!picks && (

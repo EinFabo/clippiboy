@@ -11,7 +11,7 @@ import { rectOf } from "@/lib/monitorMap";
 import { api, inTauri } from "@/lib/ipc";
 import { TargetCard } from "@/routes/Recording";
 import { QuickSetup, addQuickSources } from "@/routes/AudioMixer";
-import { QUICK_PICKS, skipAddsSources, type QuickPicks } from "@/lib/quickSetup";
+import { QUICK_PICKS, setupPicks, skipAddsSources, type QuickPicks } from "@/lib/quickSetup";
 import { Hotkeys } from "@/routes/settings/Hotkeys";
 import { hotkeyLabel, shownHotkey } from "@/lib/hotkeyText";
 import { Row, screenChoice, USAGE_HINT } from "@/routes/settings/shared";
@@ -84,7 +84,10 @@ export function Setup() {
   const [autoStart, setAutoStart] = useState(true);
   const [withWindows, setWithWindows] = useState(false);
   const [busy, setBusy] = useState(false);
-  /** The audio step's switches; its "Next" adds what they say. */
+  /**
+   * The audio step's switches; its "Next" adds what they say. On, as on
+   * first start, only over an empty list — see `setupPicks`.
+   */
   const [picks, setPicks] = useState<QuickPicks>(QUICK_PICKS);
   /** The audio step was answered — with "Next" or with "Later". */
   const [audioDecided, setAudioDecided] = useState(false);
@@ -121,7 +124,9 @@ export function Setup() {
     setUsageStats(config.usageStats && config.usageStatsAsked);
     setHeardKey(null);
     setAskHeard(false);
-    setPicks(QUICK_PICKS);
+    // Read as the setup opens: run again from About over sources set up, a
+    // "Next" must not add the defaults beside them.
+    setPicks(setupPicks(config.sources));
     setAudioDecided(false);
     if (!config.setupDone && inTauri) {
       void api
@@ -331,9 +336,10 @@ export function Setup() {
               <QuickSetup
                 picks={picks}
                 onPicks={setPicks}
+                adding={busy}
                 onPick={() => {
                   setAudioDecided(true);
-                  setStep(step + 1);
+                  setStep((current) => current + 1);
                 }}
                 pickLabel="Later, on the Audio page"
               />

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { QUICK_PICKS, quickAdds, quickOffer, skipAddsSources, type QuickFacts } from "./quickSetup.ts";
+import { NO_PICKS, QUICK_PICKS, quickAdds, quickOffer, setupPicks, skipAddsSources, type QuickFacts } from "./quickSetup.ts";
 import type { AudioDevice, AudioSource, SourceKind } from "./types.ts";
 
 const dev = (id: string, kind: "output" | "input", isDefault = true): AudioDevice => ({
@@ -76,4 +76,17 @@ test("Skip setup fills an empty list only while the audio step is unanswered", (
   assert.equal(skipAddsSources(false, []), true);
   assert.equal(skipAddsSources(true, []), false);
   assert.equal(skipAddsSources(false, [src({ type: "inputDevice", deviceId: "mic" })]), false);
+});
+
+test("the setup's switches start on for an empty list and off over sources set up", () => {
+  assert.deepEqual(setupPicks([]), QUICK_PICKS);
+  const sources = [src({ type: "outputDevice", deviceId: "spk" })];
+  assert.deepEqual(setupPicks(sources), NO_PICKS);
+  // Run again with Discord running and not on a track: Next adds nothing unasked.
+  assert.deepEqual(quickAdds(facts({ sources, processes: [discord] }), setupPicks(sources)), []);
+  // A switch turned on there is still added.
+  assert.deepEqual(
+    quickAdds(facts({ sources, processes: [discord] }), { ...setupPicks(sources), discord: true }).map((a) => a.label),
+    ["Discord"],
+  );
 });
