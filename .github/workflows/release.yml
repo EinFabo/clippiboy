@@ -62,9 +62,11 @@ jobs:
           node-version: 22
           cache: npm
 
+      # The same Rust as ci.yml, so the release is built by the compiler the
+      # tests ran on, not by whatever was stable that day: raise both together.
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: stable
+          toolchain: 1.92.0
 
       # The Rust build is the long part; without a cache every run takes ~15 min.
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -119,7 +121,10 @@ jobs:
           prerelease: false
           # Additionally produces `latest.json`, which the updater queries.
           includeUpdaterJson: true
-          args: --config src-tauri/tauri.release.conf.json
+          # What follows `--` goes to cargo: `--locked` builds exactly the
+          # crates in Cargo.lock, and fails rather than resolve new ones when
+          # the lockfile no longer fits Cargo.toml.
+          args: --config src-tauri/tauri.release.conf.json -- --locked
 
       # The action above created the release; this hangs the plugin next to the
       # installer. Only on a real tag — a trial build made no release.
