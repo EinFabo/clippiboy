@@ -31,10 +31,14 @@ const HEARD = [
 
 const COUNT_WORDS: Record<number, string> = { 4: "Four", 5: "Five" };
 
-/** Buffer lengths offered in the last step, in seconds. */
-const LENGTHS = ["60", "90", "120", "180"] as const;
+/** The clip length a first run starts at, in seconds. */
+const FIRST_CLIP = "30";
+
+/** Clip lengths offered in the last step, in seconds. */
+const LENGTHS = ["30", "60", "90", "120", "180"] as const;
 type Length = (typeof LENGTHS)[number];
 const LENGTH_LABELS: Record<Length, string> = {
+  "30": "0:30",
   "60": "1:00",
   "90": "1:30",
   "120": "2:00",
@@ -117,10 +121,14 @@ export function Setup() {
       : Math.min(config.buffer.clipSeconds, config.buffer.seconds);
     const current = String(clip);
     // A length tuned in the settings stays as it is until a preset is picked.
-    setLength(current);
+    // A first run starts at half a minute: a whole two-minute buffer per clip
+    // came out at 480p in "Copy for Discord" and took ~280 MB on disk.
+    setLength(config.setupDone ? current : FIRST_CLIP);
     setKeptLength(current);
     setAutoStart(config.setupDone ? config.buffer.autoStart : true);
-    setWithWindows(config.autoStartWithWindows);
+    // On for a first run, where the switch is in plain sight on the last step —
+    // after a restart nothing was buffering until ClippiBoy was opened again.
+    setWithWindows(config.setupDone ? config.autoStartWithWindows : true);
     setUsageStats(config.usageStats && config.usageStatsAsked);
     setHeardKey(null);
     setAskHeard(false);
@@ -183,9 +191,12 @@ export function Setup() {
         await addQuickSources(picks);
       }
       // The usage switch was on the last step, unseen — so the notice still asks.
+      // Start with Windows was there too, so it stays as it is; the first clip
+      // length is only a default, so it applies.
+      const buffer = useEngine.getState().config.buffer;
       await patchConfig({
         setupDone: true,
-        buffer: { ...useEngine.getState().config.buffer, autoStart },
+        buffer: { ...buffer, autoStart, clipSeconds: buffer.clipSeconds === 0 ? Number(FIRST_CLIP) : buffer.clipSeconds },
       });
     } finally {
       setBusy(false);
