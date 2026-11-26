@@ -62,6 +62,29 @@ async function run(call: Promise<unknown>, done?: string) {
   }
 }
 
+/**
+ * Lets the calling site get the file ready before the clip goes out: the
+ * player applies a trim, mix or camera set and not saved yet. False leaves
+ * the action undone — the save failed, or its question was turned down.
+ */
+export type BeforeShare = () => Promise<boolean>;
+
+/**
+ * An entry's action behind `before`. The clip is read from the store again
+ * after it: a save has changed its length and size.
+ */
+function readied(clip: Clip, before: BeforeShare | undefined, act: (clip: Clip) => void): () => void {
+  if (!before) return () => act(clip);
+  return () => {
+    void before().then(
+      (ok) => {
+        if (ok) act(useEngine.getState().clips.find((c) => c.id === clip.id) ?? clip);
+      },
+      () => {},
+    );
+  };
+}
+
 /** What the calling site contributes on top. */
 interface Options {
   /** Gallery only: the player is still closed there. */
@@ -77,6 +100,8 @@ interface Options {
    * button in its editor pane already and passes nothing.
    */
   onDiscardOriginal?: () => void;
+  /** Runs before every entry that sends the file somewhere — see {@link BeforeShare}. */
+  before?: BeforeShare;
 }
 
 const icon = "h-4 w-4";
@@ -86,7 +111,7 @@ const icon = "h-4 w-4";
  * Read from the store when the menu opens — a menu is a moment, it need not
  * follow the store while open.
  */
-function linkEntries(clip: Clip): MenuEntry[] {
+function linkEntries(clip: Clip, before?: BeforeShare): MenuEntry[] {
   const store = useLinks.getState();
   const { create, remove, refresh } = store;
   // What the store knows may be old (see `linkReason`): every opening asks
@@ -110,13 +135,15 @@ function linkEntries(clip: Clip): MenuEntry[] {
     ];
   }
   // Why it cannot be had, right in the label: a menu has no room for a hint.
+  // A live link above is copied again as it is — nothing goes up, so nothing
+  // waits for a save; a new one uploads the file.
   return [
     {
       kind: "item",
       label: shareAsLinkLabel(reason),
       icon: <IconLink className={icon} />,
       disabled: !enabled,
-      onSelect: () => void create(clip.id, clip.title ?? "Clip"),
+      onSelect: readied(clip, before, (now) => void create(now.id, now.title ?? "Clip")),
     },
   ];
 }
@@ -125,7 +152,7 @@ function linkEntries(clip: Clip): MenuEntry[] {
  * The entries that put the clip on the clipboard — the top of the share menu,
  * and where the Overview takes its quickest copy action from.
  */
-export function copyEntries(clip: Clip): MenuEntry[] {
+export function copyEntries(clip: Clip, before?: BeforeShare): MenuEntry[] {
   const entries: MenuEntry[] = [];
   // The picture first: on a screenshot that is the one you actually want —
   // in a chat window a pasted file is an attachment, a pasted picture is a
@@ -146,7 +173,7 @@ export function copyEntries(clip: Clip): MenuEntry[] {
     // ready for Ctrl+V in Discord.
     icon: <IconCopy className={icon} />,
     disabled: !inTauri,
-    onSelect: () => void run(api.copyClipFile(clip.id), "Clip copied"),
+    onSelect: readied(clip, before, (now) => void run(api.copyClipFile(now.id), "Clip copied")),
   });
   if (!clip.screenshot) {
     const state = discordCopyState(clip);
@@ -161,7 +188,7 @@ export function copyEntries(clip: Clip): MenuEntry[] {
       shortcut: state === "ok" ? `Under ${discordTarget()} MB` : undefined,
       icon: <IconCopy className={icon} />,
       disabled: !inTauri || state !== "ok",
-      onSelect: () => void copyForDiscord(clip),
+      onSelect: readied(clip, before, (now) => void copyForDiscord(now)),
     });
   }
   if (clip.screenshot) {
@@ -189,24 +216,26 @@ export function shareEntries(
     onExport,
     onSend,
     dividerBeforeExport = false,
+    before,
   }: {
     onExport?: () => void;
     onSend: (clip: Clip) => void;
     /** The Share button sets the export apart; the right-click menu does not. */
     dividerBeforeExport?: boolean;
+    before?: BeforeShare;
   },
 ): MenuEntry[] {
-  const entries: MenuEntry[] = copyEntries(clip);
+  const entries: MenuEntry[] = copyEntries(clip, before);
   entries.push({
     kind: "item",
     label: "Send to a friend…",
     // Straight to their PC, full quality — see `share.rs`.
     icon: <IconFriends className={icon} />,
     disabled: !inTauri,
-    onSelect: () => onSend(clip),
+    onSelect: readied(clip, before, onSend),
   });
   // A link for anyone, five days long — clips only, the page is a player.
-  if (!clip.screenshot) entries.push(...linkEntries(clip));
+  if (!clip.screenshot) entries.push(...linkEntries(clip, before));
   // The Discord channel connected in Settings → Sharing.
   const webhook = useWebhook.getState();
   if (webhook.connected) {
@@ -215,7 +244,9 @@ export function shareEntries(
       label: postLabel(webhook, clip.id),
       icon: <IconSend className={icon} />,
       disabled: !inTauri || webhook.posting.includes(clip.id),
-      onSelect: () => void run(webhookApi.post(clip.id), `Posting to ${webhook.guild ?? "Discord"}…`),
+      onSelect: readied(clip, before, (now) =>
+        void run(webhookApi.post(now.id), `Posting to ${webhook.guild ?? "Discord"}…`),
+      ),
     });
   }
   // Recordings only: a still is small already, and the arithmetic here is all
@@ -227,7 +258,7 @@ export function shareEntries(
       label: "Export a copy…",
       icon: <IconExport className={icon} />,
       disabled: !inTauri,
-      onSelect: onExport,
+      onSelect: readied(clip, before, () => onExport()),
     });
   }
   return entries;
@@ -291,7 +322,9 @@ export function useClipMenu() {
     });
 
     entries.push({ kind: "separator" });
-    entries.push(...shareEntries(clip, { onExport: options.onExport, onSend: pickFriend }));
+    entries.push(
+      ...shareEntries(clip, { onExport: options.onExport, onSend: pickFriend, before: options.before }),
+    );
     if (clip.recording && clip.facecam?.state === "failed") {
       entries.push({
         kind: "item",
@@ -362,10 +395,13 @@ export function ShareMenuButton({
   variant = "primary",
   disabled,
   className,
+  before,
 }: {
   clip: Clip;
   /** Opens the export dialog; recordings only, see {@link shareEntries}. */
   onExport?: () => void;
+  /** Runs before every entry that sends the file somewhere — see {@link BeforeShare}. */
+  before?: BeforeShare;
   size?: "sm" | "md";
   variant?: "primary" | "secondary";
   disabled?: boolean;
@@ -389,6 +425,7 @@ export function ShareMenuButton({
           onExport,
           onSend: pickFriend,
           dividerBeforeExport: true,
+          before,
         });
         menu.open(
           {

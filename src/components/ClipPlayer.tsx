@@ -30,7 +30,7 @@ import { useClipMix } from "@/lib/useClipMix";
 import { isHidden, onHidden } from "@/lib/hidden";
 import { cn } from "@/lib/cn";
 import { asksBeforeTrim, sameCut, snapTrim } from "@/lib/editRules";
-import { leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
+import { beforeSharing, leaving as closing, sliderOwns, typesText } from "@/lib/viewer";
 import { guardViewer } from "@/lib/viewerGuard";
 import { useShare } from "@/lib/share";
 import { useGrants } from "@/lib/useGrants";
@@ -163,6 +163,15 @@ export function ClipPlayer({
    * own place.
    */
   const [askingTrim, setAskingTrim] = useState(false);
+  /** A share waiting on that question: a yes saves and it goes on, anything else drops it. */
+  const afterTrim = useRef<((ok: boolean) => void) | null>(null);
+  const settleTrim = (ok: boolean) => {
+    const go = afterTrim.current;
+    afterTrim.current = null;
+    go?.(ok);
+  };
+  /** Trim, mix or camera set and not applied — what a share would leave out. */
+  const unappliedRef = useRef(false);
   const links = useLinks((s) => s.links);
   const [exporting, setExporting] = useState(false);
   // Counts the video element's restarts. Serves as a `key`: after saving, the
@@ -353,6 +362,7 @@ export function ClipPlayer({
     setAskingDelete(false);
     setAskingDiscard(false);
     setAskingTrim(false);
+    settleTrim(false);
   }, [clip?.id]);
 
   /** Delete and move on within the player — if the last clip is gone, there is
@@ -687,16 +697,15 @@ export function ClipPlayer({
   // from the editor" its notice promises.
   // A recording's camera is tried again from the gallery's menu instead.
   const camMissing = clip?.facecam?.state === "failed" && !clip.recording;
-  const dirty =
-    duration > 0 &&
-    !mix.loading &&
-    !mix.failed &&
-    (camMissing ||
-      camChanged ||
-      (mix.tracks.length > 0
-        ? !sameEdit(current, saved, duration)
-        : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration)));
+  const editChanged =
+    mix.tracks.length > 0
+      ? !sameEdit(current, saved, duration)
+      : !sameEdit({ ...current, tracks: [] }, { ...saved, tracks: [] }, duration);
+  const dirty = duration > 0 && !mix.loading && !mix.failed && (camMissing || camChanged || editChanged);
   dirtyRef.current = dirty;
+  // A cam that failed to go in is no reason to hold a share back: the file
+  // is whole without it, and every share would retry it.
+  unappliedRef.current = dirty && (camChanged || editChanged);
   /** Where "Discard changes" leads: the mixer, a clip to either side, or out (0). */
   const leaveTo = (where: number | "mixer" | "away") => {
     if (where === "away") {
@@ -749,6 +758,9 @@ export function ClipPlayer({
     if (!dirty) {
       setAskingDiscard(false);
       setAskingTrim(false);
+      // Not during the save a yes started: that is what made it clean, and
+      // the share waiting on it goes ahead once it is done.
+      if (!writing.current) settleTrim(false);
       if (pendingStep === "away" && away.current && !writing.current && !awayAfterWrite.current) leaveTo("away");
     }
     // Only a change of `dirty` starts it; `leaveTo` is this render's.
@@ -762,8 +774,8 @@ export function ClipPlayer({
    * open file, and the core rewrites the clip. Position and playback are restored
    * afterwards.
    */
-  async function save() {
-    if (!clip || saving || restoring) return;
+  async function save(): Promise<boolean> {
+    if (!clip || saving || restoring) return false;
     const element = video.current;
     // After a real cut the file is shorter and starts elsewhere — the same number
     // of seconds would then sit past the new end. The offset is exactly the start
@@ -816,11 +828,13 @@ export function ClipPlayer({
       if (kept && !sameEdit({ ...current, tracks: kept }, current, duration)) mix.adopt(kept);
       if (resumeAt.current) resumeAt.current.shift = trim.start;
       setJustSaved(true);
+      return true;
     } catch {
       // The store has already raised the error as a notice. The file is
       // unchanged, so selection and playhead stay as they were; the player gets
       // a playable element back below.
       keepTrim.current = true;
+      return false;
     } finally {
       setSaving(false);
       setSettling(true);
@@ -831,6 +845,31 @@ export function ClipPlayer({
       setReload((n) => n + 1);
     }
   }
+
+  /**
+   * Before the clip leaves the player — copied, sent, linked, exported — what
+   * is set and not applied goes into the file first, as the screenshot viewer
+   * does with its marks; until now the old file went out. False when it did
+   * not get there: then nothing is shared.
+   */
+  function saveFirst(): Promise<boolean> {
+    if (!clip) return Promise.resolve(false);
+    const finalCut = asksBeforeTrim(clip, trim.start, trim.end, duration);
+    const verdict = beforeSharing(writing.current, unappliedRef.current, finalCut);
+    if (verdict === "wait") return Promise.resolve(false);
+    if (verdict === "go") return Promise.resolve(true);
+    if (verdict === "save") return save();
+    // A cut on a recording is final: its question first, the share after a yes.
+    settleTrim(false);
+    setAskingTrim(true);
+    return new Promise((resolve) => {
+      afterTrim.current = resolve;
+    });
+  }
+  // The menus call the one of the latest render: the trim may have moved since they opened.
+  const saveFirstRef = useRef(saveFirst);
+  saveFirstRef.current = saveFirst;
+  const beforeShare = useCallback(() => saveFirstRef.current(), []);
 
   /** Save — but a cut on a recording is final, so that asks first. */
   function requestSave() {
@@ -995,7 +1034,12 @@ export function ClipPlayer({
           />
         ) : (
           <div className="flex shrink-0 items-center gap-3">
-            <ShareMenuButton clip={clip} onExport={() => setExporting(true)} />
+            <ShareMenuButton
+              clip={clip}
+              disabled={saving || restoring}
+              before={beforeShare}
+              onExport={() => setExporting(true)}
+            />
             <button
               aria-label="Close player"
               onClick={requestClose}
@@ -1023,6 +1067,7 @@ export function ClipPlayer({
               // No `onDiscardOriginal`: the editor pane beside the picture has
               // that button already, with its question in place.
               onExport: () => setExporting(true),
+              before: beforeShare,
             })
           }
           onMouseMove={isFull ? wake : undefined}
@@ -1288,9 +1333,12 @@ export function ClipPlayer({
           askingTrim={askingTrim}
           onConfirmTrim={() => {
             setAskingTrim(false);
-            void save();
+            void save().then(settleTrim);
           }}
-          onCancelTrim={() => setAskingTrim(false)}
+          onCancelTrim={() => {
+            setAskingTrim(false);
+            settleTrim(false);
+          }}
           onOpenMixer={requestMixer}
           cam={editorCam}
         />

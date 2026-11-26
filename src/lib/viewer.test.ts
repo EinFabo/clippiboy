@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { leaving, menuOwns, seekTarget, sliderOwns, typesText } from "./viewer.ts";
+import { beforeSharing, leaving, menuOwns, seekTarget, sliderOwns, typesText } from "./viewer.ts";
 
 test("Escape and the arrows belong to an open menu", () =>
   assert.deepEqual(["Escape", "ArrowUp", "ArrowDown"].map((k) => menuOwns(k, -1)), [true, true, true]));
@@ -28,6 +28,15 @@ test("a focused slider keeps the keys that move it", () => {
 test("unapplied edits are asked about before the player closes", () => assert.equal(leaving(false, true), "ask"));
 test("a running write keeps the player open", () => assert.equal(leaving(true, false), "wait"));
 test("with nothing changed it just closes", () => assert.equal(leaving(false, false), "go"));
+test("sharing saves what is set and not applied, and asks first for a final cut", () => {
+  assert.equal(beforeSharing(false, false, false), "go");
+  assert.equal(beforeSharing(false, true, false), "save");
+  assert.equal(beforeSharing(false, true, true), "ask");
+});
+test("sharing waits for nothing while the file is being written: it does not go", () => {
+  assert.equal(beforeSharing(true, false, false), "wait");
+  assert.equal(beforeSharing(true, true, true), "wait");
+});
 
 test("a jump stays inside the file, and waits for its length", () => {
   assert.equal(seekTarget(12, 30), 12);
